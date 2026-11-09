@@ -209,6 +209,15 @@ impl AppState {
             let _ = request.reply.try_send(Err("Unknown thread.".into()));
             return;
         };
+        if self
+            .turn_policy(&meta.id)
+            .is_some_and(|policy| !policy.git_remote)
+        {
+            let _ = request.reply.try_send(Err(
+                "This space does not allow pull requests in its members' turns.".into(),
+            ));
+            return;
+        }
         if !self.mcp.pull_request_registrations.contains_key(&meta.id) {
             let _ = request.reply.try_send(Err(
                 "Pull request tools are unavailable for this thread.".into(),

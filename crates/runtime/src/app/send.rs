@@ -49,6 +49,7 @@ impl AppState {
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();
+            message.space = cx.space.clone();
             message.origin = cx.origin.unwrap_or(message.origin);
         }
         let should_start = matches!(active.runtime, Runtime::Idle)
@@ -127,10 +128,12 @@ impl AppState {
                 continue;
             };
             let author = std::mem::replace(&mut cx.author, message.author);
+            let space = std::mem::replace(&mut cx.space, message.space);
             let origin = cx.origin.replace(message.origin);
             let key = std::mem::replace(&mut cx.delivery_key, message.delivery_key);
             self.send_turn_assembled(&session_id, message.text, message.attachments, cx);
             cx.author = author;
+            cx.space = space;
             cx.origin = origin;
             cx.delivery_key = key;
         }
@@ -237,6 +240,7 @@ impl AppState {
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();
+            message.space = cx.space.clone();
             message.origin = cx.origin.unwrap_or(message.origin);
         }
         // The first message after a rewind goes ahead of the messages the
@@ -440,6 +444,7 @@ impl AppState {
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();
+            message.space = cx.space.clone();
             message.origin = cx.origin.unwrap_or(message.origin);
         }
         if let Some(message) = active.queue.last_mut() {
@@ -577,6 +582,7 @@ impl AppState {
         target_id: &str,
         cx: &mut HostCx,
     ) -> Result<bool, ()> {
+        self.refresh_policy_holds(target_id);
         let Some(active) = self.resident(target_id) else {
             return Ok(false);
         };
@@ -591,9 +597,15 @@ impl AppState {
         if !self.hand_off_conversation(target_id, cx) {
             return Ok(false);
         }
-        self.resident_mut(target_id)
+        let sent = self
+            .resident_mut(target_id)
             .ok_or(())?
-            .dispatch_next_pending()
+            .dispatch_next_pending()?;
+        if sent {
+            let space = self.turn_space_of(target_id);
+            self.enter_turn_space(target_id, space);
+        }
+        Ok(sent)
     }
 
     /// Finalize one submitted queue entry. Queue-id correlation makes duplicate
@@ -790,6 +802,7 @@ impl AppState {
                     text: text.clone(),
                     attachments: attachments.clone(),
                     author: cx.author.clone(),
+                    space: cx.space.clone(),
                     origin: cx.origin,
                     reports: Vec::new(),
                 };
@@ -816,11 +829,15 @@ impl AppState {
         };
         let request_id = steer.request_id.clone();
         let attachments = steer.attachments.clone();
+        let space = steer.space.clone();
         active.pending_steers.push(steer);
         if active
             .steer_now(request_id.clone(), wire_text, attachments)
             .is_ok()
         {
+            if space.is_some() {
+                self.enter_turn_space(target_id, space);
+            }
             return true;
         }
         active.pending_steers.pop();
@@ -852,6 +869,16 @@ impl AppState {
     /// Queue strip: convert an already-queued message into a steering message —
     /// pull it out of the queue and inject it into the running turn.
     pub fn steer_queued(&mut self, target_id: &str, id: u64, cx: &mut HostCx) {
+        // A message its space is holding must not reach the running turn
+        // either.
+        if self.resident(target_id).is_some_and(|active| {
+            active
+                .queue
+                .iter()
+                .any(|message| message.id == id && self.queued_held(active, message))
+        }) {
+            return;
+        }
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };
@@ -860,10 +887,12 @@ impl AppState {
         };
         let command_key = std::mem::replace(&mut cx.delivery_key, message.delivery_key);
         let author = std::mem::replace(&mut cx.author, message.author);
+        let space = std::mem::replace(&mut cx.space, message.space);
         let origin = cx.origin.replace(message.origin);
         self.steer_assembled(target_id, message.text, message.attachments, cx);
         cx.delivery_key = command_key;
         cx.author = author;
+        cx.space = space;
         cx.origin = origin;
         self.reschedule_scheduled_wake(cx);
     }
@@ -895,6 +924,7 @@ impl AppState {
         &mut self,
         target_id: &str,
         turn_id: String,
+        cx: &mut HostCx,
     ) -> Result<(), tcode_protocol::ProtocolError> {
         let active = self
             .resident_mut(target_id)
@@ -917,7 +947,17 @@ impl AppState {
             .try_send(SessionCommand::RetryTurn { turn_id })
             .map_err(provider_command_error)?;
         active.turn_in_flight = true;
+        self.enter_member_turn(target_id, cx);
         Ok(())
+    }
+
+    /// A turn a member's request starts without the queue (a retry, a
+    /// compaction, a goal change) runs under the member's space, as a queued
+    /// message from them would.
+    fn enter_member_turn(&mut self, target_id: &str, cx: &HostCx) {
+        if cx.space.is_some() {
+            self.enter_turn_space(target_id, cx.space.clone());
+        }
     }
 
     pub fn interrupt(
@@ -1051,13 +1091,14 @@ impl AppState {
         match &active.runtime {
             Runtime::Live(commands) => commands
                 .try_send(SessionCommand::Compact)
-                .map_err(provider_command_error),
+                .map_err(provider_command_error)?,
             Runtime::Idle | Runtime::Starting { .. } => {
                 active.requested_command = Some(SessionCommand::Compact);
                 self.ensure_started(target_id, cx);
-                Ok(())
             }
         }
+        self.enter_member_turn(target_id, cx);
+        Ok(())
     }
 
     /// A goal change ([`SessionCommand::SetGoal`] or
@@ -1083,14 +1124,20 @@ impl AppState {
         {
             return Err(provider_command_error("A turn is still running."));
         }
+        let turn = !control.live;
         match &active.runtime {
-            Runtime::Live(commands) => commands.try_send(command).map_err(provider_command_error),
+            Runtime::Live(commands) => {
+                commands.try_send(command).map_err(provider_command_error)?
+            }
             Runtime::Idle | Runtime::Starting { .. } => {
                 active.requested_command = Some(command);
                 self.ensure_started(target_id, cx);
-                Ok(())
             }
         }
+        if turn {
+            self.enter_member_turn(target_id, cx);
+        }
+        Ok(())
     }
 
     pub fn respond_approval(

@@ -1211,6 +1211,7 @@ approval:
   blocked_path: "ブロックされたパス: %{path}"
   pending: "承認待ち"
   cancel_turn: "ターンをキャンセル"
+  space_reviewed_only: "この共有スペースでは agent のハーネスが承認を判断します。この承認に答えられるのはマシンの所有者だけです。"
 diff:
   binary: "バイナリファイルのため、内容は表示されません。"
   empty_file: "空のファイルです。"
@@ -1768,6 +1769,47 @@ spaces:
     hide_qr: "QR コードを非表示"
     resume: "リンクをオンにする"
 
+space_policy:
+  permission_unavailable: "この共有スペースでは使えません"
+  queued_held: "待機中: この共有スペースではスレッドの現在の agent、モデル、権限モードを使えません"
+  acp_agents: "ACP agent"
+  agents:
+    title: "メンバーが使える agent"
+    every: "すべての agent とモデル（今後追加されるものを含む）。"
+    choose: "agent を選ぶ"
+    none_available: "このマシンには許可できる有効な agent がありません。"
+    blocked: "この権限モードの設定では使えません: 許可されたモードがありません。"
+  models:
+    every: "すべてのモデル"
+    some: "%{count} 個のモデル"
+  acp:
+    some: "%{count} 個の agent"
+  approval:
+    section: "承認"
+    title: "権限モード"
+    any: "すべてのモード"
+    no_unrestricted: "無制限モードを除く"
+    reviewed_only: "自動レビューのみ"
+    any_description: "メンバーはどの権限モードも選べ、承認にも自分で答えます。"
+    no_unrestricted_description: "確認なしですべてを実行するモードは使えません。承認にはメンバーが自分で答えます。"
+    reviewed_only_description: "agent のハーネスが自分で操作をレビューするモードだけを使えます。メンバーのターン中にそれでも求められた承認は拒否されます。"
+  reach:
+    title: "スレッド以外"
+  terminals:
+    title: "ターミナル"
+    description: "ターミナルはこのマシンのアカウントのシェルです。有効にすると、上の agent と承認の制限を回避できます。"
+  git_remote:
+    title: "プッシュ、プル、プルリクエスト"
+    description: "このマシン自身の git とフォージの認証情報を使います。"
+  preview:
+    title: "プレビュー"
+    description: "メンバーがこのマシンのローカルサービスにアクセスでき、メンバーのために動く agent がプレビューブラウザーを操作できます。"
+  computer_use:
+    title: "メンバーのターンでのコンピューター操作"
+    description: "メンバーのために動く agent がこのマシンのデスクトップを操作できるようにします。"
+  editor:
+    title: "エディターで開く"
+    description: "エディターのリモート接続は、共有スペースのプロジェクトに限られないこのマシンのアカウントのシェルです。有効にすると、ここにある他の制限を回避できます。"
 group:
   section: "ホストグループ"
   intro: "ホストグループはお使いのホストどうしをつなぎ、どれか 1 台とペアリングしたデバイスからすべてのホストを開けるようにします。"

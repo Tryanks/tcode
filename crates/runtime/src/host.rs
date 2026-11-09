@@ -43,6 +43,9 @@ pub struct HostCx {
     events: smol::channel::Sender<String>,
     pub(crate) principal: Principal,
     pub(crate) author: Option<tcode_core::session::Author>,
+    /// The space whose policy governs work admitted now: a member's own
+    /// request, or a `tcode_control` call made during a member's turn.
+    pub(crate) space: Option<String>,
     /// Who a message admitted now comes from; `None` for what a provider
     /// reports on its own.
     pub(crate) origin: Option<tcode_core::session::MessageOrigin>,
@@ -62,6 +65,7 @@ impl HostCx {
             delivery_key: None,
             principal: Principal::Full,
             author: None,
+            space: None,
             origin: None,
         }
     }

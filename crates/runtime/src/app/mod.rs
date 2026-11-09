@@ -274,6 +274,7 @@ mod sessions;
 mod settlement;
 mod snapshots;
 mod source_control;
+mod space_policy;
 mod store_write;
 mod subagents;
 mod terminals;
@@ -382,6 +383,7 @@ pub struct AppState {
     decision_revisions: HashMap<String, u64>,
     thread_activity: Revisioned<HashMap<String, tcode_core::settlement::ThreadActivity>>,
     space_scopes: HashMap<String, BTreeSet<String>>,
+    space_policies: HashMap<String, tcode_protocol::SpacePolicy>,
     space_policy_revisions: HashMap<String, u64>,
     space_archives_revision: Option<u64>,
     space_archives: HashMap<String, ArchivedSessions>,
@@ -617,6 +619,7 @@ impl AppState {
             decision_revisions: HashMap::new(),
             thread_activity: thread_activity.into(),
             space_scopes: HashMap::new(),
+            space_policies: HashMap::new(),
             space_policy_revisions: HashMap::new(),
             space_archives_revision: None,
             space_archives: HashMap::new(),

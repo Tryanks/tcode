@@ -1904,6 +1904,7 @@ impl AppState {
         let target_id = target_id.to_string();
         let delivery_key = cx.delivery_key.clone();
         let author = cx.author.clone();
+        let space = cx.space.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let result = host_cx
@@ -1948,9 +1949,11 @@ impl AppState {
                         // Now that the worktree exists, run the deferred send.
                         let previous_key = std::mem::replace(&mut cx.delivery_key, delivery_key);
                         let previous_author = std::mem::replace(&mut cx.author, author);
+                        let previous_space = std::mem::replace(&mut cx.space, space);
                         state.send_turn_assembled(&target_id, text, attachments, cx);
                         cx.delivery_key = previous_key;
                         cx.author = previous_author;
+                        cx.space = previous_space;
                     }
                     Err(err) => {
                         active.draft_workspace = WorkspaceMode::LocalCheckout;

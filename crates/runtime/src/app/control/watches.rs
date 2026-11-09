@@ -139,6 +139,7 @@ impl AppState {
             thread_ids,
             events: params.events.into_iter().collect(),
             once: params.once.unwrap_or(false),
+            space: cx.space.clone(),
         };
         let answer = serde_json::json!(WatchAnswer {
             skipped,
@@ -231,13 +232,20 @@ impl AppState {
             if !self.target_reachable(&caller, &caller.grant.scope, &target, true) {
                 continue;
             }
+            let space = meta
+                .control_watches
+                .iter()
+                .filter(|watch| fires(watch))
+                .find_map(|watch| watch.space.clone());
             let before = meta.control_watches.len();
             meta.control_watches
                 .retain(|watch| !(watch.once && fires(watch)));
             if meta.control_watches.len() != before {
                 self.store_meta(meta, cx);
             }
-            self.deliver_orchestrate_callback_to_parent(&watcher, text.clone(), cx);
+            let mut watch_cx = cx.clone();
+            watch_cx.space = space;
+            self.deliver_orchestrate_callback_to_parent(&watcher, text.clone(), &mut watch_cx);
         }
     }
 

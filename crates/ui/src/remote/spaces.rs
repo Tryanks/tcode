@@ -72,6 +72,27 @@ pub(crate) struct ToggleShare {
 #[action(namespace = tcode_spaces, no_json)]
 pub(crate) struct NewSpaceAndShare(pub HostKey, pub String);
 
+/// One account profile, or the ACP agents, a space's policy may allow.
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentChoice {
+    pub profile_id: String,
+    pub provider: agent::ProviderKind,
+    pub name: String,
+    /// Model id and display name.
+    pub models: Vec<(String, String)>,
+    /// For the ACP profile: agent id and name.
+    pub acp_agents: Vec<(String, String)>,
+}
+
+/// Replace a space's policy.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_spaces, no_json)]
+pub(crate) struct SetSpacePolicy {
+    pub space_id: String,
+    pub policy: tcode_protocol::SpacePolicy,
+}
+
 /// Which machine a [`Spaces`] manages.
 enum SpacesHost {
     #[cfg(feature = "remote-hosting")]
@@ -95,6 +116,9 @@ pub(crate) struct Spaces {
     local_projects: Option<Vec<Project>>,
     #[cfg(feature = "remote-hosting")]
     projects_from: Option<(EntityId, Subscription)>,
+    /// The local window's store, for this machine's agents.
+    #[cfg(feature = "remote-hosting")]
+    local_store: Option<WeakEntity<WorkspaceStore>>,
     /// Members come and go and other clients change spaces too: the machine
     /// tells this client of every change while this is held.
     _follow: Option<Subscription>,
@@ -159,6 +183,8 @@ impl Spaces {
             local_projects: None,
             #[cfg(feature = "remote-hosting")]
             projects_from: None,
+            #[cfg(feature = "remote-hosting")]
+            local_store: None,
             _follow: follow,
         }
     }
@@ -232,6 +258,54 @@ impl Spaces {
         }
     }
 
+    /// The managed machine's agents a space may allow: every enabled account
+    /// profile with its models, and its ACP agents.
+    #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+    pub(crate) fn agent_choices(&self, cx: &App) -> Vec<AgentChoice> {
+        let store = match &self.host {
+            #[cfg(feature = "remote-hosting")]
+            SpacesHost::Local => self.local_store.as_ref().and_then(WeakEntity::upgrade),
+            SpacesHost::Remote(store) => store.upgrade(),
+        };
+        let Some(store) = store else {
+            return Vec::new();
+        };
+        let store = store.read(cx);
+        let settings = store.settings();
+        let mut choices: Vec<AgentChoice> = store
+            .enabled_profiles()
+            .into_iter()
+            .map(|profile| AgentChoice {
+                provider: profile.kind,
+                name: settings.profile_display_name(&profile.id),
+                models: store
+                    .profile_catalog(&profile.id)
+                    .into_iter()
+                    .map(|model| (model.id, model.display_name))
+                    .collect(),
+                acp_agents: Vec::new(),
+                profile_id: profile.id,
+            })
+            .collect();
+        let acp = store.settings_installed_acp_agents();
+        if !acp.is_empty() {
+            choices.push(AgentChoice {
+                profile_id: tcode_core::settings::Settings::builtin_profile_id(
+                    agent::ProviderKind::Acp,
+                )
+                .to_owned(),
+                provider: agent::ProviderKind::Acp,
+                name: crate::tr!("space_policy.acp_agents").into_owned(),
+                models: Vec::new(),
+                acp_agents: acp
+                    .into_iter()
+                    .map(|agent| (agent.id, agent.name))
+                    .collect(),
+            });
+        }
+        choices
+    }
+
     #[cfg(feature = "remote-hosting")]
     fn follow_projects(&mut self, store: &Entity<WorkspaceStore>, cx: &mut Context<Self>) {
         if self
@@ -250,6 +324,7 @@ impl Spaces {
             }
         });
         self.projects_from = Some((store.entity_id(), subscription));
+        self.local_store = Some(store.downgrade());
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -1307,6 +1382,387 @@ mod section {
             toggle_share(&self.spaces, action, window, cx);
         }
 
+        fn on_set_policy(
+            &mut self,
+            action: &SetSpacePolicy,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.act(
+                SpaceAction::SetPolicy {
+                    id: action.space_id.clone(),
+                    policy: action.policy.clone(),
+                },
+                window,
+                cx,
+            );
+        }
+
+        /// What the space's members may do: which agents and models, how
+        /// approvals are settled, and what beyond threads they reach. A
+        /// change reconnects the members; a running turn finishes as it began.
+        fn permissions_section(
+            &self,
+            space: &SpaceInfo,
+            agents: &[AgentChoice],
+            compact: bool,
+            cx: &mut Context<Self>,
+        ) -> AnyElement {
+            use tcode_protocol::{AgentGrant, ModelGrant, SpaceAgents, SpaceApproval, SpacePolicy};
+            let space_id = space.id.clone();
+            let policy = space.policy.clone();
+            let set = {
+                let space_id = space_id.clone();
+                move |policy: SpacePolicy| SetSpacePolicy {
+                    space_id: space_id.clone(),
+                    policy,
+                }
+            };
+            let mut agent_rows: Vec<AnyElement> = Vec::new();
+            match &policy.agents {
+                SpaceAgents::Every => {
+                    // A space from before policies keeps every agent until
+                    // its owner chooses; choosing starts from all of today's.
+                    let chosen = SpacePolicy {
+                        agents: SpaceAgents::Only(
+                            agents
+                                .iter()
+                                .map(|choice| AgentGrant {
+                                    profile_id: choice.profile_id.clone(),
+                                    models: ModelGrant::Every,
+                                    acp_agents: choice
+                                        .acp_agents
+                                        .iter()
+                                        .map(|(id, _)| id.clone())
+                                        .collect(),
+                                })
+                                .collect(),
+                        ),
+                        ..policy.clone()
+                    };
+                    let action = set(chosen);
+                    agent_rows.push(
+                        row_frame(compact, cx)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_secondary(compact, cx)
+                                    .child(crate::tr!("space_policy.agents.every")),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "space-agents-choose-{space_id}"
+                                )))
+                                .ghost()
+                                .outline()
+                                .compact()
+                                .label(crate::tr!("space_policy.agents.choose"))
+                                .on_click(
+                                    move |_, window, cx| {
+                                        window.dispatch_action(Box::new(action.clone()), cx)
+                                    },
+                                ),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                SpaceAgents::Only(grants) => {
+                    if agents.is_empty() {
+                        agent_rows.push(
+                            row_frame(compact, cx)
+                                .text_secondary(compact, cx)
+                                .child(crate::tr!("space_policy.agents.none_available"))
+                                .into_any_element(),
+                        );
+                    }
+                    for choice in agents {
+                        let grant = grants
+                            .iter()
+                            .find(|grant| grant.profile_id == choice.profile_id)
+                            .cloned();
+                        let with = |grant: Option<AgentGrant>| {
+                            let mut grants: Vec<AgentGrant> = grants
+                                .iter()
+                                .filter(|other| other.profile_id != choice.profile_id)
+                                .cloned()
+                                .collect();
+                            grants.extend(grant);
+                            SpacePolicy {
+                                agents: SpaceAgents::Only(grants),
+                                ..policy.clone()
+                            }
+                        };
+                        let on = with(Some(AgentGrant {
+                            profile_id: choice.profile_id.clone(),
+                            models: ModelGrant::Every,
+                            acp_agents: choice
+                                .acp_agents
+                                .iter()
+                                .map(|(id, _)| id.clone())
+                                .collect(),
+                        }));
+                        let off = with(None);
+                        let accessory = grant.as_ref().map(|grant| {
+                            let (label, items): (String, Vec<(String, bool, SetSpacePolicy)>) =
+                                if choice.acp_agents.is_empty() {
+                                    let label = match &grant.models {
+                                        ModelGrant::Every => {
+                                            crate::tr!("space_policy.models.every").into_owned()
+                                        }
+                                        ModelGrant::Only(models) => crate::tr!(
+                                            "space_policy.models.some",
+                                            count = models.len().to_string()
+                                        )
+                                        .into_owned(),
+                                    };
+                                    let every = AgentGrant {
+                                        models: ModelGrant::Every,
+                                        ..grant.clone()
+                                    };
+                                    let mut items = vec![(
+                                        crate::tr!("space_policy.models.every").into_owned(),
+                                        grant.models == ModelGrant::Every,
+                                        set(with(Some(every))),
+                                    )];
+                                    for (id, name) in &choice.models {
+                                        let chosen = match &grant.models {
+                                            ModelGrant::Every => false,
+                                            ModelGrant::Only(models) => models.contains(id),
+                                        };
+                                        let mut models = match &grant.models {
+                                            ModelGrant::Every => Vec::new(),
+                                            ModelGrant::Only(models) => models.clone(),
+                                        };
+                                        if chosen {
+                                            models.retain(|model| model != id);
+                                        } else {
+                                            models.push(id.clone());
+                                        }
+                                        items.push((
+                                            name.clone(),
+                                            chosen,
+                                            set(with(Some(AgentGrant {
+                                                models: ModelGrant::Only(models),
+                                                ..grant.clone()
+                                            }))),
+                                        ));
+                                    }
+                                    (label, items)
+                                } else {
+                                    let label = crate::tr!(
+                                        "space_policy.acp.some",
+                                        count = grant.acp_agents.len().to_string()
+                                    )
+                                    .into_owned();
+                                    let items = choice
+                                        .acp_agents
+                                        .iter()
+                                        .map(|(id, name)| {
+                                            let chosen = grant.acp_agents.contains(id);
+                                            let mut acp_agents = grant.acp_agents.clone();
+                                            if chosen {
+                                                acp_agents.retain(|agent| agent != id);
+                                            } else {
+                                                acp_agents.push(id.clone());
+                                            }
+                                            (
+                                                name.clone(),
+                                                chosen,
+                                                set(with(Some(AgentGrant {
+                                                    acp_agents,
+                                                    ..grant.clone()
+                                                }))),
+                                            )
+                                        })
+                                        .collect();
+                                    (label, items)
+                                };
+                            Button::new(SharedString::from(format!(
+                                "space-models-{space_id}-{}",
+                                choice.profile_id
+                            )))
+                            .ghost()
+                            .xsmall()
+                            .label(label)
+                            .dropdown_menu(move |mut menu, _, _| {
+                                for (label, checked, action) in &items {
+                                    menu = menu.menu_with_check(
+                                        label.clone(),
+                                        *checked,
+                                        Box::new(action.clone()),
+                                    );
+                                }
+                                menu
+                            })
+                            .into_any_element()
+                        });
+                        let (on, off) = (set(on), set(off));
+                        agent_rows.push(
+                            ToggleRow::new(
+                                SharedString::from(format!(
+                                    "space-agent-{space_id}-{}",
+                                    choice.profile_id
+                                )),
+                                choice.name.clone(),
+                                grant.is_some(),
+                                compact,
+                                move |checked: &bool, window, cx| {
+                                    let action = if *checked { on.clone() } else { off.clone() };
+                                    window.dispatch_action(Box::new(action), cx);
+                                },
+                            )
+                            .accessory(accessory)
+                            .when(!policy.allows_provider(choice.provider), |row| {
+                                row.description(crate::tr!("space_policy.agents.blocked"))
+                            })
+                            .into_any_element(),
+                        );
+                    }
+                }
+            }
+
+            let approvals = [
+                SpaceApproval::Any,
+                SpaceApproval::NoUnrestricted,
+                SpaceApproval::ReviewedOnly,
+            ];
+            let approval_key = |approval: SpaceApproval| match approval {
+                SpaceApproval::Any => "space_policy.approval.any",
+                SpaceApproval::NoUnrestricted => "space_policy.approval.no_unrestricted",
+                SpaceApproval::ReviewedOnly => "space_policy.approval.reviewed_only",
+            };
+            let items: Vec<(String, bool, SetSpacePolicy)> = approvals
+                .into_iter()
+                .map(|approval| {
+                    (
+                        crate::tr!(approval_key(approval)).into_owned(),
+                        policy.approval == approval,
+                        set(SpacePolicy {
+                            approval,
+                            ..policy.clone()
+                        }),
+                    )
+                })
+                .collect();
+            let approval_row = row_frame(compact, cx)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().child(crate::tr!("space_policy.approval.title")))
+                        .child(div().text_secondary(compact, cx).child(crate::tr!(
+                            match policy.approval {
+                                SpaceApproval::Any => "space_policy.approval.any_description",
+                                SpaceApproval::NoUnrestricted => {
+                                    "space_policy.approval.no_unrestricted_description"
+                                }
+                                SpaceApproval::ReviewedOnly => {
+                                    "space_policy.approval.reviewed_only_description"
+                                }
+                            }
+                        ))),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("space-approval-{space_id}")))
+                        .ghost()
+                        .outline()
+                        .compact()
+                        .label(crate::tr!(approval_key(policy.approval)))
+                        .dropdown_menu(move |mut menu, _, _| {
+                            for (label, checked, action) in &items {
+                                menu = menu.menu_with_check(
+                                    label.clone(),
+                                    *checked,
+                                    Box::new(action.clone()),
+                                );
+                            }
+                            menu
+                        }),
+                )
+                .into_any_element();
+
+            type Field = fn(&mut SpacePolicy) -> &mut bool;
+            let switches: [(&str, &str, Option<&str>, Field); 5] = [
+                (
+                    "terminals",
+                    "space_policy.terminals.title",
+                    Some("space_policy.terminals.description"),
+                    |policy| &mut policy.terminals,
+                ),
+                (
+                    "git-remote",
+                    "space_policy.git_remote.title",
+                    Some("space_policy.git_remote.description"),
+                    |policy| &mut policy.git_remote,
+                ),
+                (
+                    "preview",
+                    "space_policy.preview.title",
+                    Some("space_policy.preview.description"),
+                    |policy| &mut policy.preview,
+                ),
+                (
+                    "computer-use",
+                    "space_policy.computer_use.title",
+                    Some("space_policy.computer_use.description"),
+                    |policy| &mut policy.computer_use,
+                ),
+                (
+                    "editor",
+                    "space_policy.editor.title",
+                    Some("space_policy.editor.description"),
+                    |policy| &mut policy.editor,
+                ),
+            ];
+            let switch_rows = switches
+                .into_iter()
+                .map(|(key, title, description, field)| {
+                    let mut current = policy.clone();
+                    let checked = *field(&mut current);
+                    let action = {
+                        let mut next = policy.clone();
+                        *field(&mut next) = !checked;
+                        set(next)
+                    };
+                    let row = ToggleRow::new(
+                        SharedString::from(format!("space-{key}-{space_id}")),
+                        crate::tr!(title),
+                        checked,
+                        compact,
+                        move |_: &bool, window, cx| {
+                            window.dispatch_action(Box::new(action.clone()), cx)
+                        },
+                    );
+                    match description {
+                        Some(description) => row.description(crate::tr!(description)),
+                        None => row,
+                    }
+                    .into_any_element()
+                })
+                .collect();
+
+            v_flex()
+                .w_full()
+                .gap(crate::material::section_gap(cx))
+                .child(settings_group(
+                    crate::tr!("space_policy.agents.title"),
+                    agent_rows,
+                    cx,
+                ))
+                .child(settings_group(
+                    crate::tr!("space_policy.approval.section"),
+                    vec![approval_row],
+                    cx,
+                ))
+                .child(settings_group(
+                    crate::tr!("space_policy.reach.title"),
+                    switch_rows,
+                    cx,
+                ))
+                .into_any_element()
+        }
+
         fn on_move_member(
             &mut self,
             action: &MoveMember,
@@ -1676,6 +2132,7 @@ mod section {
             };
             let accepting = model.accepting();
             let projects = model.projects(cx);
+            let agents = model.agent_choices(cx);
             let others: Vec<(String, String)> = model
                 .spaces()
                 .iter()
@@ -1688,6 +2145,7 @@ mod section {
                 .overflow_y_scroll_area()
                 .on_action(cx.listener(Self::on_toggle_share))
                 .on_action(cx.listener(Self::on_move_member))
+                .on_action(cx.listener(Self::on_set_policy))
                 .child(
                     v_flex()
                         .w_full()
@@ -1701,7 +2159,8 @@ mod section {
                             window,
                             cx,
                         ))
-                        .child(self.members_section(&space, &others, compact, window, cx)),
+                        .child(self.members_section(&space, &others, compact, window, cx))
+                        .child(self.permissions_section(&space, &agents, compact, cx)),
                 )
                 .into_any_element()
         }

@@ -1,5 +1,6 @@
 use std::path::Component;
 
+use super::space_policy::policy_error;
 use super::*;
 use tcode_protocol::{ClientPayload, Command, Principal, Query};
 
@@ -8,11 +9,15 @@ fn refusal(kind: &str) -> ProtocolError {
 }
 
 impl AppState {
-    pub(crate) fn observe_principal(&mut self, principal: &Principal) {
+    /// Take in a space's scope and policy as `principal` shows them, when
+    /// newer than what the host has. `true` when the policy changed.
+    pub(crate) fn observe_principal(&mut self, principal: &Principal) -> bool {
+        let mut changed = false;
         if let Principal::Space {
             space_id,
             project_ids,
             policy_revision,
+            policy,
             ..
         } = principal
         {
@@ -21,9 +26,13 @@ impl AppState {
                 .entry(space_id.clone())
                 .or_default();
             if *policy_revision < *revision {
-                return;
+                return false;
             }
             *revision = *policy_revision;
+            if self.space_policies.get(space_id) != Some(policy) {
+                self.space_policies.insert(space_id.clone(), policy.clone());
+                changed = true;
+            }
             let projects = project_ids.iter().cloned().collect();
             if self.space_scopes.get(space_id) != Some(&projects) {
                 self.space_scopes.insert(space_id.clone(), projects);
@@ -31,6 +40,7 @@ impl AppState {
             }
             self.refresh_space_archives();
         }
+        changed
     }
 
     pub(crate) fn session_in_scope(&self, id: &str, principal: &Principal) -> bool {
@@ -89,10 +99,31 @@ impl AppState {
         let Principal::Space {
             project_ids,
             space_id,
+            policy,
             ..
         } = principal
         else {
             return Ok(());
+        };
+        // The newest policy the host has seen: a line from a connection made
+        // before a change can still arrive while the machine closes it.
+        let policy = self.space_policies.get(space_id).unwrap_or(policy);
+        let terminals = || {
+            policy
+                .terminals
+                .then_some(())
+                .ok_or_else(|| policy_error("this space does not allow terminals"))
+        };
+        let git_remote = || {
+            policy.git_remote.then_some(()).ok_or_else(|| {
+                policy_error("this space does not allow pushing, pulling or pull requests")
+            })
+        };
+        let setup = |id: &str| self.session_setup_allowed(policy, id);
+        let provider_of = |id: &str| {
+            self.current_meta(id)
+                .map(|meta| meta.provider)
+                .ok_or_else(|| refusal("session"))
         };
         let session = |id: &str| {
             self.session_in_scope(id, principal)
@@ -114,7 +145,11 @@ impl AppState {
                 | Topic::SessionPlan { session_id }
                 | Topic::GitStatus { session_id }
                 | Topic::CommandOutput { session_id, .. } => session(session_id),
-                Topic::Terminal { terminal_id } => terminal(*terminal_id).map(|_| ()),
+                Topic::Terminal { terminal_id } => {
+                    terminals()?;
+                    terminal(*terminal_id).map(|_| ())
+                }
+                Topic::DevServers { session_id } if policy.preview => session(session_id),
                 Topic::Index
                 | Topic::SpaceIndex { .. }
                 | Topic::Settings
@@ -150,7 +185,10 @@ impl AppState {
                 Command::ClearRelaunchMarker => Ok(()),
                 Command::TerminalInput { terminal_id, .. }
                 | Command::ResizeTerminal { terminal_id, .. }
-                | Command::ClearTerminal { terminal_id } => terminal(*terminal_id).map(|_| ()),
+                | Command::ClearTerminal { terminal_id } => {
+                    terminals()?;
+                    terminal(*terminal_id).map(|_| ())
+                }
                 Command::ActivateTerminal {
                     session_id,
                     terminal_id,
@@ -164,6 +202,7 @@ impl AppState {
                     terminal_id,
                     ..
                 } => {
+                    terminals()?;
                     session(session_id)?;
                     if terminal(*terminal_id)? == session_id {
                         Ok(())
@@ -177,11 +216,19 @@ impl AppState {
                     ..
                 } => {
                     session(session_id)?;
-                    self.approval_requests(session_id)
+                    let request = self
+                        .approval_requests(session_id)
                         .iter()
-                        .any(|request| &request.id == request_id)
-                        .then_some(())
-                        .ok_or_else(|| refusal("approval request"))
+                        .find(|request| &request.id == request_id)
+                        .ok_or_else(|| refusal("approval request"))?;
+                    if policy.approval == tcode_protocol::SpaceApproval::ReviewedOnly
+                        && !matches!(request.kind, agent::ApprovalKind::Plan { .. })
+                    {
+                        return Err(policy_error(
+                            "in this space the agent's harness settles approvals itself",
+                        ));
+                    }
+                    Ok(())
                 }
                 Command::RespondUserInput {
                     session_id,
@@ -195,8 +242,25 @@ impl AppState {
                         .then_some(())
                         .ok_or_else(|| refusal("input request"))
                 }
-                Command::SteerQueued { session_id, id }
-                | Command::DropQueued { session_id, id } => {
+                Command::SteerQueued { session_id, id } => {
+                    session(session_id)?;
+                    setup(session_id)?;
+                    let active = self
+                        .resident(session_id)
+                        .ok_or_else(|| refusal("queued message"))?;
+                    let message = active
+                        .queue
+                        .iter()
+                        .find(|message| message.id == *id)
+                        .ok_or_else(|| refusal("queued message"))?;
+                    if self.queued_held(active, message) {
+                        return Err(policy_error(
+                            "this space does not allow the thread as it is now",
+                        ));
+                    }
+                    Ok(())
+                }
+                Command::DropQueued { session_id, id } => {
                     session(session_id)?;
                     self.resident(session_id)
                         .is_some_and(|s| s.queue.iter().any(|message| message.id == *id))
@@ -255,9 +319,54 @@ impl AppState {
                     ..
                 } => {
                     session(session_id)?;
+                    setup(session_id)?;
                     attachment_paths
                         .iter()
                         .try_for_each(|path| self.authorize_attachment(path, project_ids, cx))
+                }
+                // Each of these runs the thread's model for the member.
+                Command::RetryTurn { session_id, .. }
+                | Command::CompactContext { session_id }
+                | Command::SetGoal { session_id, .. }
+                | Command::ClearGoal { session_id }
+                | Command::RegenerateSessionTitle { session_id } => {
+                    session(session_id)?;
+                    setup(session_id)
+                }
+                Command::SetActiveModel {
+                    session_id,
+                    provider,
+                    model,
+                    profile_id,
+                } => {
+                    session(session_id)?;
+                    self.model_allowed(policy, *provider, profile_id.as_deref(), model.as_deref())
+                }
+                Command::SetActiveOption {
+                    session_id,
+                    id,
+                    value,
+                    ..
+                } => {
+                    session(session_id)?;
+                    self.option_allowed(policy, provider_of(session_id)?, id, value.as_ref())
+                }
+                Command::SetActiveAcpAgent { session_id, id } => {
+                    session(session_id)?;
+                    policy
+                        .agent(Settings::builtin_profile_id(ProviderKind::Acp))
+                        .is_some_and(|access| access.allows_acp_agent(Some(id)))
+                        .then_some(())
+                        .ok_or_else(|| policy_error("this space does not allow that ACP agent"))
+                }
+                Command::RunGitAction {
+                    session_id, action, ..
+                } => {
+                    session(session_id)?;
+                    if action.remote() {
+                        git_remote()?;
+                    }
+                    Ok(())
                 }
                 Command::LinkPullRequest { session_id, .. }
                 | Command::UnlinkPullRequest { session_id, .. }
@@ -266,20 +375,24 @@ impl AppState {
                 | Command::RunPullRequestAction { session_id, .. }
                 | Command::EditPullRequestReviewDraft { session_id, .. }
                 | Command::WatchPullRequest { session_id, .. }
-                | Command::SetPullRequestWatchesPaused { session_id, .. }
-                | Command::RetryTurn { session_id, .. }
-                | Command::Interrupt { session_id }
+                | Command::SetPullRequestWatchesPaused { session_id, .. } => {
+                    git_remote()?;
+                    session(session_id)
+                }
+                Command::SetTerminalHeight { session_id, .. }
+                | Command::ToggleTerminalPanel { session_id }
+                | Command::CloseTerminalPanel { session_id }
+                | Command::RestartTerminal { session_id }
+                | Command::NewTerminal { session_id }
+                | Command::SplitTerminal { session_id, .. } => {
+                    terminals()?;
+                    session(session_id)
+                }
+                Command::Interrupt { session_id }
                 | Command::StopBackgroundTask { session_id, .. }
                 | Command::MoveToBackground { session_id, .. }
                 | Command::ForceTerminate { session_id }
-                | Command::CompactContext { session_id }
-                | Command::SetGoal { session_id, .. }
-                | Command::ClearGoal { session_id }
-                | Command::SetActiveModel { session_id, .. }
-                | Command::SetActiveOption { session_id, .. }
-                | Command::SetActiveAcpAgent { session_id, .. }
                 | Command::RenameSession { session_id, .. }
-                | Command::RegenerateSessionTitle { session_id }
                 | Command::ArchiveSession { session_id }
                 | Command::UnarchiveSession { session_id }
                 | Command::SettleChildren { session_id }
@@ -302,13 +415,6 @@ impl AppState {
                 | Command::OpenRewoundBranch { session_id, .. }
                 | Command::AddReviewComment { session_id, .. }
                 | Command::RemoveReviewComment { session_id, .. }
-                | Command::SetTerminalHeight { session_id, .. }
-                | Command::ToggleTerminalPanel { session_id }
-                | Command::CloseTerminalPanel { session_id }
-                | Command::RestartTerminal { session_id }
-                | Command::NewTerminal { session_id }
-                | Command::SplitTerminal { session_id, .. }
-                | Command::RunGitAction { session_id, .. }
                 | Command::LoadBranches { session_id }
                 | Command::CheckoutBranch { session_id, .. }
                 | Command::MergeWorktree { session_id }
@@ -399,7 +505,6 @@ impl AppState {
                 }
                 Query::SessionHistoryPage { session_id, .. }
                 | Query::ListActiveWorkspace { session_id }
-                | Query::GenerateCommitMessage { session_id, .. }
                 | Query::RenderThreadExport { session_id, .. }
                 | Query::ReadItemOutput { session_id, .. }
                 | Query::ThreadAnchorTurn { session_id, .. }
@@ -407,8 +512,15 @@ impl AppState {
                 | Query::ReadItemImagePreview { session_id, .. }
                 | Query::BeginUpload { session_id, .. }
                 | Query::WriteUpload { session_id, .. }
-                | Query::DiscardUpload { session_id, .. }
-                | Query::PullRequest { session_id, .. } => session(session_id),
+                | Query::DiscardUpload { session_id, .. } => session(session_id),
+                Query::GenerateCommitMessage { session_id, .. } => {
+                    session(session_id)?;
+                    setup(session_id)
+                }
+                Query::PullRequest { session_id, .. } => {
+                    git_remote()?;
+                    session(session_id)
+                }
                 Query::ReadProjectIcon { project_id, .. } => self
                     .projects
                     .iter()

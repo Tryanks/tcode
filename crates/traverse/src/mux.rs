@@ -40,6 +40,7 @@ enum Ingress {
     Add(u64, Box<Attachment>),
     Line(u64, String),
     Closed(u64),
+    Observe(serde_json::Value),
 }
 
 impl HostMux {
@@ -106,6 +107,16 @@ impl HostMux {
             source,
             _permit: permit,
         })
+    }
+
+    /// Show the host `principal` as it stands now, without a request of its
+    /// own: a space's members' turns follow its scope and policy from then
+    /// on, whether or not a member is connected.
+    pub fn observe(&self, principal: Principal) {
+        let _ = self
+            .inner
+            .ingress
+            .try_send(Ingress::Observe(serde_json::to_value(principal).unwrap()));
     }
 
     pub fn attach(&self, principal: Principal, policy: AttachmentPolicy) -> Connection {
@@ -202,6 +213,24 @@ async fn pump(
             Input::Client(Ok(Ingress::Add(id, attachment))) => {
                 clients.insert(id, attachment);
                 subscriptions.insert(id, HashSet::new());
+            }
+            Input::Client(Ok(Ingress::Observe(principal))) => {
+                // Id 0 has no route, so the host's answer goes nowhere.
+                let line = encode_line(&serde_json::json!({
+                    "id": 0, "principal": principal,
+                    "payload": {"type": "query", "content": {"type": "ping"}},
+                }))
+                .unwrap();
+                if to_host
+                    .send(AttachmentMessage {
+                        line,
+                        policy: AttachmentPolicy::LOCAL,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
             }
             Input::Client(Ok(Ingress::Closed(id))) => {
                 let Some(attachment) = clients.remove(&id) else {
@@ -905,6 +934,7 @@ mod tests {
                     project_ids: vec!["project".into()],
                     device_id: "device".into(),
                     device_name: "Phone".into(),
+                    policy: tcode_protocol::SpacePolicy::unrestricted(),
                 },
             ];
             let clients = principals.clone().map(|principal| {

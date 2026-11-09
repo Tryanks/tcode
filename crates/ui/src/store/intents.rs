@@ -1102,6 +1102,9 @@ impl WorkspaceStore {
 
 impl WorkspaceStore {
     pub fn toggle_terminal_panel_for(&mut self, session_id: String, cx: &mut Context<Self>) {
+        if !self.space_allows(|policy| policy.terminals) {
+            return;
+        }
         let opening = !self
             .thread_conversation_ui(Some(&session_id))
             .is_some_and(|ui| ui.terminal_open);

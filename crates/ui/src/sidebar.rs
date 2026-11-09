@@ -8896,6 +8896,7 @@ mod tests {
                             link_enabled: true,
                             link_dead: false,
                             members: vec![],
+                            policy: tcode_protocol::SpacePolicy::unrestricted(),
                         }],
                         enabled: true,
                         expires_in_secs: 0,

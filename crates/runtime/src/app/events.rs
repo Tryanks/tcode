@@ -432,11 +432,17 @@ impl AppState {
                     );
                     return;
                 }
-                let previous = (cx.author.take(), cx.origin.take(), cx.delivery_key.take());
+                let previous = (
+                    cx.author.take(),
+                    cx.space.take(),
+                    cx.origin.take(),
+                    cx.delivery_key.take(),
+                );
                 cx.author = steer.author;
+                cx.space = steer.space;
                 cx.origin = steer.origin;
                 self.send_turn_assembled(session_id, steer.text, steer.attachments, cx);
-                (cx.author, cx.origin, cx.delivery_key) = previous;
+                (cx.author, cx.space, cx.origin, cx.delivery_key) = previous;
                 return;
             }
             AgentEvent::Warning { message } => {
@@ -508,7 +514,9 @@ impl AppState {
         if matches!(event, AgentEvent::TurnCompleted { .. }) {
             self.cancel_computer_use_feedback(session_id);
         }
-        if let AgentEvent::ApprovalRequested(request) = &event {
+        if let AgentEvent::ApprovalRequested(request) = &event
+            && !self.decline_for_space(session_id, request)
+        {
             self.deliver_child_approval_callback(session_id, &request.id, cx);
             self.fire_control_watches(session_id, WatchEvent::NeedsApproval, cx);
         }

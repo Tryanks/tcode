@@ -180,6 +180,15 @@ impl TokenRegistry {
             session.cancel();
         }
     }
+    /// Refuse the session's calls until [`Self::resume`].
+    pub fn suspend(&self, session_id: &str) {
+        self.services.suspend(session_id);
+    }
+
+    pub fn resume(&self, session_id: &str) {
+        self.services.resume(session_id);
+    }
+
     pub fn revoke(&self, session_id: &str, token: &str) {
         if let Some(session) = self
             .sessions
