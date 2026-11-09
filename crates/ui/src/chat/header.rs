@@ -24,6 +24,12 @@ pub(super) enum TogglePanel {
     PullRequests,
 }
 
+/// Open the thread's directory, as its host writes it, in Zed: on this
+/// client, or on the thread's machine over Tcode's connection to it.
+#[derive(Action, Clone, Debug, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_chat, no_json)]
+pub(super) struct OpenThreadInZed(pub String);
+
 /// Whether each panel the header toggles is showing; `None` for one this
 /// thread does not offer.
 #[derive(Clone, Copy)]
@@ -768,6 +774,34 @@ impl ChatView {
         }
     }
 
+    /// The label of the entry that opens this thread's directory in Zed,
+    /// when the thread may be opened there: its own wording for a machine
+    /// reached over Tcode, and none where the space's policy or this client
+    /// does not allow it.
+    fn zed_entry(&self, cx: &App) -> Option<&'static str> {
+        let store = self.workspace_store.read(cx);
+        if !store.space_allows(|policy| policy.editor) {
+            return None;
+        }
+        if !store.is_remote() {
+            return Some("chat.open_zed");
+        }
+        crate::remote::offers_machine_editor(cx).then_some("chat.open_zed_remote")
+    }
+
+    pub(super) fn on_open_thread_in_zed(
+        &mut self,
+        action: &OpenThreadInZed,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.zed_entry(cx).is_none() {
+            return;
+        }
+        let store = self.workspace_store.clone();
+        crate::remote::open_host_path_in_zed(&store, Path::new(&action.0), window, cx);
+    }
+
     pub(super) fn on_show_agent_tools(
         &mut self,
         _: &crate::pull_requests::ShowAgentTools,
@@ -1009,6 +1043,7 @@ impl ChatView {
                 .and_then(|id| self.workspace_store.read(cx).thread_meta(id))
                 .is_some_and(|meta| meta.worktree.is_none())
         };
+        let zed = self.zed_entry(cx);
         let title_menu = {
             let title = title.clone();
             let cwd = cwd.clone();
@@ -1044,7 +1079,30 @@ impl ChatView {
                         )
                     });
                 match &cwd {
-                    Some(cwd) => menu.separator().path_items(&cwd.to_string_lossy(), None),
+                    Some(cwd) => {
+                        use crate::widgets::menu::{CopyText, OpenPath, RevealPath};
+                        let cwd = cwd.to_string_lossy().into_owned();
+                        menu.separator()
+                            .menu(
+                                crate::tr!("chat.open").into_owned(),
+                                Box::new(OpenPath(cwd.clone())),
+                            )
+                            .when_some(zed, |menu, label| {
+                                menu.menu(
+                                    crate::tr!(label).into_owned(),
+                                    Box::new(OpenThreadInZed(cwd.clone())),
+                                )
+                            })
+                            .menu(
+                                crate::tr!("chat.reveal_in_file_manager").into_owned(),
+                                Box::new(RevealPath(cwd.clone())),
+                            )
+                            .separator()
+                            .menu(
+                                crate::tr!("chat.copy_path").into_owned(),
+                                Box::new(CopyText(cwd)),
+                            )
+                    }
                     None => menu,
                 }
             }
@@ -1122,19 +1180,20 @@ impl ChatView {
                         },
                         agents_cue_dot(agents_cue.flatten(), &motion, window, cx),
                         cwd.clone(),
+                        zed,
                     ),
                 ));
             }
             if swap.shows(0) {
                 let mut cue = agents_cue_dot(agents_cue.flatten(), &motion, window, cx);
-                let open = cwd.clone().and_then(|cwd| {
+                let open = cwd.clone().zip(zed).and_then(|(cwd, zed)| {
                     self.labelled_swap(
                         "open-labels",
                         labelled,
                         window,
                         cx,
                         move |this, labelled, cx| {
-                            Some(this.render_open_button(cwd.clone(), labelled, cx))
+                            Some(this.render_open_button(cwd.clone(), zed, labelled, cx))
                         },
                     )
                 });
@@ -1348,8 +1407,9 @@ impl ChatView {
         panels: HeaderPanels,
         agents_cue: Option<AnyElement>,
         cwd: Option<PathBuf>,
+        zed: Option<&'static str>,
     ) -> AnyElement {
-        use crate::widgets::menu::{CopyText, OpenPathInZed, RevealPath};
+        use crate::widgets::menu::{CopyText, RevealPath};
         let panes = self.pane_controls;
         let cwd = cwd.map(|cwd| cwd.to_string_lossy().into_owned());
         // The panels every thread has come first, so their rows keep their
@@ -1396,11 +1456,13 @@ impl ChatView {
                         let menu = match &cwd {
                             Some(cwd) => menu
                                 .separator()
-                                .menu_with_icon(
-                                    crate::tr!("chat.open_zed").into_owned(),
-                                    IconName::ExternalLink,
-                                    Box::new(OpenPathInZed(cwd.clone())),
-                                )
+                                .when_some(zed, |menu, label| {
+                                    menu.menu_with_icon(
+                                        crate::tr!(label).into_owned(),
+                                        IconName::ExternalLink,
+                                        Box::new(OpenThreadInZed(cwd.clone())),
+                                    )
+                                })
                                 .menu_with_icon(
                                     crate::tr!("chat.reveal_in_file_manager").into_owned(),
                                     IconName::FolderOpen,
@@ -1597,12 +1659,14 @@ impl ChatView {
     fn render_open_button(
         &self,
         cwd: PathBuf,
+        zed: &'static str,
         labelled: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let border = cx.theme().border;
         let main_cwd = cwd.clone();
         let menu_cwd = cwd;
+        let store = self.workspace_store.clone();
 
         let chevron = crate::material::overlay_popover("open-menu", cx)
             .anchor(Anchor::TopRight)
@@ -1616,6 +1680,7 @@ impl ChatView {
             )
             .content(move |_state, _window, cx| {
                 let zed_cwd = menu_cwd.clone();
+                let zed_store = store.clone();
                 let reveal_cwd = menu_cwd.clone();
                 let copy_cwd = menu_cwd.clone();
                 let popover = cx.entity();
@@ -1650,10 +1715,10 @@ impl ChatView {
                         menu_item(
                             "open-zed",
                             IconName::ExternalLink,
-                            crate::tr!("chat.open_zed").into_owned().into(),
+                            crate::tr!(zed).into_owned().into(),
                         )
                         .on_click(move |_, window, cx| {
-                            open_in_zed(&zed_cwd, window, cx);
+                            crate::remote::open_host_path_in_zed(&zed_store, &zed_cwd, window, cx);
                             p1.update(cx, |st, cx| st.dismiss(window, cx));
                         }),
                     )
@@ -1711,8 +1776,9 @@ impl ChatView {
                             main.tooltip(crate::tr!("chat.open"))
                         }
                     })
-                    .on_click(cx.listener(move |_, _, window, cx| {
-                        open_in_zed(&main_cwd, window, cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let store = this.workspace_store.clone();
+                        crate::remote::open_host_path_in_zed(&store, &main_cwd, window, cx);
                     })),
             )
             .child(div().w_px().h(px(16.)).bg(border))

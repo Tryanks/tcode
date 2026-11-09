@@ -9,10 +9,15 @@ use std::path::Path;
 const ZED_CLI_CANDIDATES: &[&str] = &["zed", "zeditor", "zed-cli", "zedit"];
 
 pub fn open_in_zed(cwd: &Path) -> io::Result<()> {
-    open_with_candidates(ZED_CLI_CANDIDATES, cwd)
+    open_with_candidates(ZED_CLI_CANDIDATES, cwd.as_os_str())
 }
 
-fn open_with_candidates(candidates: &[&str], cwd: &Path) -> io::Result<()> {
+/// Hand Zed a URL it opens itself, such as `ssh://host/path`.
+pub fn open_url_in_zed(url: &str) -> io::Result<()> {
+    open_with_candidates(ZED_CLI_CANDIDATES, std::ffi::OsStr::new(url))
+}
+
+fn open_with_candidates(candidates: &[&str], cwd: &std::ffi::OsStr) -> io::Result<()> {
     let mut not_found = None;
     for cmd in candidates {
         match crate::process::command(cmd).arg(cwd).spawn() {

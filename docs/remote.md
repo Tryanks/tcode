@@ -841,6 +841,34 @@ attachment's Preview.
 
 The browser client cannot override its browser's proxy.
 
+## Open in Zed on a machine
+
+On the desktop, **Open in Zed** for a thread on another machine opens that
+directory with Zed's own SSH remote development, carried by the desktop's
+existing connection to the machine: the machine needs no SSH server and no
+open port, and Zed installs and runs its remote server there as it does over
+any SSH connection. A space member sees the entry only when the space's policy
+allows the editor.
+
+The machine runs an SSH server inside Tcode for each such connection. It
+accepts the device without a password or key, because the connection is
+already the paired device's; commands run through the user's shell in the
+home directory (`$SHELL -c`; on Windows `%COMSPEC%`, normally cmd.exe, with
+`/c`, as Win32-OpenSSH does), SFTP is served, and port, X11 and agent
+forwarding are refused. Its host key lives in the machine's data directory.
+
+The first time, Tcode asks before it adds one `ssh_connections` entry per
+machine to Zed's `settings.json`, keeping everything else in the file. The
+entry points Zed's ssh at `ssh/config` in Tcode's data directory, whose
+`tcode-<id>` hosts run `tcode ssh-proxy`, so plain `ssh` never sees them.
+The proxy hands its bytes to the running Tcode, which admits only the Zed it
+launched: the proxy must be started by `ssh`, itself started directly by
+Zed's main process as identified by its code signature (on Linux, its
+installation), within a minute of Open in Zed; that Zed then keeps the
+machine until it quits. Anything else gets a one-line refusal that Zed shows.
+Each connection counts towards the 56 tunnels of an attachment but is not
+closed when idle.
+
 ## Security
 
 ### What is encrypted, and what a relay sees
@@ -1018,8 +1046,8 @@ with **Pair again**; protocol mismatches stop with **Update the app**.
   externally, copy, type the value). Prepare projects and provider installations
   on the machine.
 - One machine holds at most 64 open streams per device connection, of which
-  56 may be Preview tunnels; a device that opens more is refused with **too
-  many tunnels** until one closes.
+  56 may be Preview tunnels or editor connections; a device that opens more is
+  refused with **too many tunnels** until one closes.
 - The Android arm64 APK is signed with the project's release key, so each
   release installs over the previous one. Android rejects an update signed with
   a different key: uninstall first when switching between a release and a

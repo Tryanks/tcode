@@ -258,6 +258,24 @@ impl DevicePreferences {
         });
     }
 
+    /// Whether this device asked not to see the note before Open in Zed
+    /// reaches a machine over Tcode again.
+    pub(crate) fn remote_zed_note_dismissed(cx: &App) -> bool {
+        Self::saved(cx)
+            .and_then(|saved| saved.navigation.as_ref())
+            .and_then(|navigation| navigation["remote_zed_note_dismissed"].as_bool())
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn dismiss_remote_zed_note(cx: &mut App) {
+        Self::update(cx, |saved| {
+            saved
+                .navigation
+                .get_or_insert_with(|| serde_json::json!({}))["remote_zed_note_dismissed"] =
+                serde_json::json!(true);
+        });
+    }
+
     /// The window's navigation as last saved; the shell owns its schema.
     pub(crate) fn navigation(cx: &App) -> Option<serde_json::Value> {
         Self::saved(cx)?.navigation.clone()
@@ -267,7 +285,11 @@ impl DevicePreferences {
     pub(crate) fn save_navigation(snapshot: serde_json::Value, cx: &mut App) {
         Self::update(cx, |saved| {
             let mut navigation = snapshot;
-            for kept in ["member_settings", "stack_note_collapsed"] {
+            for kept in [
+                "member_settings",
+                "stack_note_collapsed",
+                "remote_zed_note_dismissed",
+            ] {
                 if let Some(value) = saved
                     .navigation
                     .as_ref()

@@ -200,6 +200,145 @@ pub(crate) fn open_in_editor(path: &std::path::Path, cx: &App) -> Option<Result<
         .open_in_editor(path)
 }
 
+/// Whether this client opens a paired machine's directories in an editor.
+pub(crate) fn offers_machine_editor(cx: &App) -> bool {
+    cx.try_global::<ClientAttachment>()
+        .is_some_and(|attachment| attachment.host.machine_editor().is_some())
+}
+
+/// Open `path`, a directory of `store`'s host, in Zed: on this client
+/// directly when the host is the one in this process, otherwise on its
+/// machine over Tcode's connection to it, after a note on what that does
+/// which is also the user's agreement to Tcode's entry in Zed's settings.
+pub(crate) fn open_host_path_in_zed(
+    store: &Entity<WorkspaceStore>,
+    path: &std::path::Path,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !store.read(cx).is_remote() {
+        crate::widgets::menu::open_in_zed(path, window, cx);
+        return;
+    }
+    let Some(editor) = cx
+        .try_global::<ClientAttachment>()
+        .and_then(|attachment| attachment.host.machine_editor())
+    else {
+        return;
+    };
+    let Some((machine, tunnels)) = store.read(cx).machine_tunnels() else {
+        window.push_notification(
+            Notification::error(crate::tr!(
+                "editor.zed.pipe_not_connected",
+                machine = store.read(cx).host_title()
+            )),
+            cx,
+        );
+        return;
+    };
+    let target = tcode_client::host::MachinePath {
+        host_id: machine.host_id.clone(),
+        path: path.to_string_lossy().into_owned(),
+        tunnels,
+    };
+    if crate::device::DevicePreferences::remote_zed_note_dismissed(cx) {
+        open_on_machine(editor.as_ref(), target, window, cx);
+        return;
+    }
+    let settings_file = editor.settings_file().map_or_else(
+        || "settings.json".to_owned(),
+        |path| path.display().to_string(),
+    );
+    let machine_name = machine.name;
+    let dismiss = Rc::new(std::cell::Cell::new(false));
+    window.open_dialog(cx, move |dialog, _, _| {
+        let checked = dismiss.get();
+        let toggle = dismiss.clone();
+        let confirm = dismiss.clone();
+        let editor = editor.clone();
+        let target = target.clone();
+        let machine_name = machine_name.clone();
+        let settings_file = settings_file.clone();
+        dialog
+            .close_button(false)
+            .title(crate::tr!("editor.zed.remote_title").into_owned())
+            .content(move |content, window, cx| {
+                let compact = crate::window_seam::window_is_compact(window, cx);
+                let line = |text: gpui::SharedString| div().text_secondary(compact, cx).child(text);
+                content.child(
+                    v_flex()
+                        .gap_3()
+                        .debug_selector(|| "remote-zed-note".into())
+                        .child(line(
+                            crate::tr!("editor.zed.remote_channel", machine = machine_name.clone())
+                                .into_owned()
+                                .into(),
+                        ))
+                        .child(line(
+                            crate::tr!("editor.zed.remote_server", machine = machine_name.clone())
+                                .into_owned()
+                                .into(),
+                        ))
+                        .child(line(
+                            crate::tr!("editor.zed.remote_only_zed").into_owned().into(),
+                        ))
+                        .child(line(
+                            crate::tr!("editor.zed.remote_settings", file = settings_file.clone())
+                                .into_owned()
+                                .into(),
+                        ))
+                        .child(
+                            crate::widgets::checkbox::Checkbox::new("remote-zed-note-dismiss")
+                                .label(crate::tr!("editor.zed.remote_dont_show"))
+                                .checked(checked)
+                                .on_click({
+                                    let toggle = toggle.clone();
+                                    move |checked: &bool, window, _| {
+                                        toggle.set(*checked);
+                                        window.refresh();
+                                    }
+                                }),
+                        ),
+                )
+            })
+            .footer(
+                crate::overlay::DialogActions::new()
+                    .child(
+                        Button::new("remote-zed-note-cancel")
+                            .label(crate::tr!("settings.cancel"))
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("remote-zed-note-open")
+                            .debug_selector(|| "remote-zed-note-open".into())
+                            .primary()
+                            .label(crate::tr!("editor.zed.remote_open"))
+                            .on_click(move |_, window, cx| {
+                                if confirm.get() {
+                                    crate::device::DevicePreferences::dismiss_remote_zed_note(cx);
+                                }
+                                window.close_dialog(cx);
+                                open_on_machine(editor.as_ref(), target.clone(), window, cx);
+                            }),
+                    ),
+            )
+    });
+}
+
+fn open_on_machine(
+    editor: &dyn tcode_client::host::MachineEditor,
+    target: tcode_client::host::MachinePath,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if let Err(error) = editor.open(target) {
+        window.push_notification(
+            Notification::error(crate::tr!("editor.zed.open_failed", error = error)),
+            cx,
+        );
+    }
+}
+
 /// Tell the user why a change did not happen; a change that did shows itself.
 /// `failed` is the message key, given the error as `error`.
 fn report<T: 'static>(

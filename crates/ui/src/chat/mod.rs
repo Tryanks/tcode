@@ -50,7 +50,7 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::copy::CopiedMark;
-use crate::widgets::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, open_in_zed};
+use crate::widgets::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu};
 use crate::widgets::scrollbar::{Scrollbar, TRACK};
 use crate::widgets::tooltip::Tooltip;
 use crate::{
@@ -783,6 +783,7 @@ impl Render for ChatView {
             .on_action(cx.listener(Self::on_move_thread_dialog))
             .on_action(cx.listener(Self::on_revoke_self_settle))
             .on_action(cx.listener(Self::on_show_agent_tools))
+            .on_action(cx.listener(Self::on_open_thread_in_zed))
             .on_action(cx.listener(Self::on_toggle_panel));
 
         if self.held {
