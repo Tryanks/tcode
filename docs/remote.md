@@ -857,8 +857,11 @@ home directory (`$SHELL -c`; on Windows `%COMSPEC%`, normally cmd.exe, with
 `/c`, as Win32-OpenSSH does), SFTP is served, and port, X11 and agent
 forwarding are refused. Its host key lives in the machine's data directory.
 
-The first time, Tcode asks before it adds one `ssh_connections` entry per
-machine to Zed's `settings.json`, keeping everything else in the file. The
+The entry is labelled **Open in Zed over Tcode (remote)** and first shows
+what it does; opening from there agrees to Tcode adding one
+`ssh_connections` entry per machine to Zed's `settings.json`, keeping
+everything else in the file, and **Don't show this again** skips the note on
+this device from then on. The
 entry points Zed's ssh at `ssh/config` in Tcode's data directory, whose
 `tcode-<id>` hosts run `tcode ssh-proxy`, so plain `ssh` never sees them.
 The proxy hands its bytes to the running Tcode, which admits only the Zed it
