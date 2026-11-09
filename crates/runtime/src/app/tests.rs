@@ -9710,13 +9710,19 @@ fn a_worktree_draft_starts_from_the_picked_base() {
 }
 
 /// A thread may move into a worktree of its project's repository that lives outside the
-/// project's directory; a directory of no checkout of that repository is still refused.
+/// project's directory; a directory of no checkout of that repository is still refused. A
+/// project rooted in a subdirectory of its repository reaches only that subdirectory of
+/// each checkout.
 #[test]
 fn a_thread_moves_into_a_worktree_of_its_projects_repository() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-move-into-worktree");
     let repo = test_store.root().join("repo");
     init_git_repo(&repo);
+    std::fs::create_dir(repo.join("sub")).unwrap();
+    std::fs::write(repo.join("sub/tracked.txt"), "sub\n").unwrap();
+    run_git(&repo, &["add", "sub"]).unwrap();
+    run_git(&repo, &["commit", "-m", "sub"]).unwrap();
     let outside = test_store.root().join("outside-worktree");
     run_git(
         &repo,
@@ -9730,26 +9736,58 @@ fn a_thread_moves_into_a_worktree_of_its_projects_repository() {
     )
     .unwrap();
     std::fs::create_dir(outside.join("app")).unwrap();
+    std::fs::create_dir(outside.join("other")).unwrap();
     let unrelated = test_store.root().join("unrelated");
     std::fs::create_dir_all(&unrelated).unwrap();
     let project = Project::from_root(repo.clone());
     test_store.upsert_project(&project).unwrap();
-    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, repo.clone(), None);
-    meta.id = "thread".into();
-    meta.project_id = Some(project.id.clone());
-    test_store.upsert_meta(&meta).unwrap();
+    let sub_project = Project::from_root(repo.join("sub"));
+    test_store.upsert_project(&sub_project).unwrap();
+    for (id, project, cwd) in [
+        ("thread", &project, &repo),
+        ("sub-thread", &sub_project, &repo.join("sub")),
+    ] {
+        let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, cwd.clone(), None);
+        meta.id = id.into();
+        meta.project_id = Some(project.id.clone());
+        test_store.upsert_meta(&meta).unwrap();
+    }
     let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let move_to = |cwd: &Path| Command::MoveSession {
-        session_id: "thread".into(),
+    let move_to = |thread: &str, project: &Project, cwd: &Path| Command::MoveSession {
+        session_id: thread.into(),
         project_id: project.id.clone(),
         cwd: Some(cwd.to_path_buf()),
     };
 
-    let refusal = acked(&state, cx, 1, move_to(&unrelated)).unwrap_err();
+    let refusal = acked(&state, cx, 1, move_to("thread", &project, &unrelated)).unwrap_err();
     assert_eq!(refusal.code, "cwd_outside_project");
-    acked(&state, cx, 2, move_to(&outside.join("app"))).unwrap();
+    acked(
+        &state,
+        cx,
+        2,
+        move_to("thread", &project, &outside.join("app")),
+    )
+    .unwrap();
     state.read(|state| {
         assert_eq!(state.find_meta("thread").unwrap().cwd, outside.join("app"));
+    });
+
+    for (id, cwd) in [(3, outside.join("other")), (4, repo.clone())] {
+        let refusal = acked(&state, cx, id, move_to("sub-thread", &sub_project, &cwd)).unwrap_err();
+        assert_eq!(refusal.code, "cwd_outside_project", "{}", cwd.display());
+    }
+    acked(
+        &state,
+        cx,
+        5,
+        move_to("sub-thread", &sub_project, &outside.join("sub")),
+    )
+    .unwrap();
+    state.read(|state| {
+        assert_eq!(
+            state.find_meta("sub-thread").unwrap().cwd,
+            outside.join("sub")
+        );
     });
 }
 

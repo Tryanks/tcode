@@ -351,18 +351,23 @@ fn registered_worktree(
         .find(|registered| same_path(&registered.path, path)))
 }
 
-/// Whether `dir` lies inside a checkout of `root`'s repository: its main
-/// checkout or any worktree registered with it, wherever that lives.
+/// Whether `dir` lies inside `root`'s place in some checkout of its
+/// repository: the same subdirectory of the main checkout or of any worktree
+/// registered with it, wherever that worktree lives.
 pub fn within_repository_worktree(root: &Path, dir: &Path) -> bool {
     let Ok(dir) = dir.canonicalize() else {
         return false;
     };
+    let Ok(prefix) = run_git(root, &["rev-parse", "--show-prefix"]) else {
+        return false;
+    };
+    let prefix = prefix.trim();
     registered_worktrees(root).is_ok_and(|worktrees| {
         worktrees.iter().any(|worktree| {
             worktree
                 .path
                 .canonicalize()
-                .is_ok_and(|path| dir.starts_with(path))
+                .is_ok_and(|path| dir.starts_with(path.join(prefix)))
         })
     })
 }
