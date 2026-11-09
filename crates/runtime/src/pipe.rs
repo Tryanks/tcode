@@ -131,7 +131,8 @@ impl SpawnedHost {
     }
 
     /// Stop the host for an application that is quitting: its loop ends once
-    /// its inbox closes, stopping every harness this process started. A quit
+    /// its inbox closes, which, as the process's last host, stops every harness
+    /// this process started (see [`RunningHost`]). A quit
     /// that stops waiting first drops this future — gpui gives its quit
     /// handlers a fixed budget, then exits — and the drop stops every harness
     /// still running at once, on the quitting thread, since the host may not
@@ -190,6 +191,29 @@ fn transport_error(error: impl std::fmt::Display) -> ProtocolError {
     }
 }
 
+/// A host running in this process. When the last one goes, every harness this
+/// process started is stopped, since the process may exit before their actors
+/// run again. A host that goes while another runs leaves its harnesses to their
+/// actors, which it asked to stop and which the running process still runs.
+struct RunningHost;
+
+static RUNNING_HOSTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl RunningHost {
+    fn enter() -> Self {
+        RUNNING_HOSTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for RunningHost {
+    fn drop(&mut self) {
+        if RUNNING_HOSTS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            agent::stop_every_tree();
+        }
+    }
+}
+
 /// Spawn the dedicated host thread and return its serialized transport and local affordances.
 pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::Result<SpawnedHost> {
     fn assert_send<T: Send>() {}
@@ -218,6 +242,8 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     std::thread::Builder::new()
         .name("tcode-host".into())
         .spawn(move || {
+            // Entered before the host answers that it is ready.
+            let running = RunningHost::enter();
             let mut state = match AppState::with_ai_titles(
                 store,
                 services.ai_title_generation,
@@ -260,9 +286,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             let _ = ready_tx.send(Ok(()));
             let mut state =
                 smol::block_on(host_loop(state, cx, attachment_rx, mailbox_rx, original_rx));
-            // The host owns every harness this process started; their actors
-            // were asked to stop, but the process may exit before they run.
-            agent::stop_every_tree();
+            drop(running);
             if let Err(error) = state.close_store() {
                 log::error!("could not close the session store cleanly: {error}");
             }
