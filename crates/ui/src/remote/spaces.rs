@@ -73,6 +73,7 @@ pub(crate) struct ToggleShare {
 pub(crate) struct NewSpaceAndShare(pub HostKey, pub String);
 
 /// One account profile, or the ACP agents, a space's policy may allow.
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentChoice {
     pub profile_id: String,
