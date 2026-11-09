@@ -101,21 +101,29 @@ impl SpeechStatus {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DictationEvent {
     Started,
-    Partial(String),
-    Final(String),
+    Revised(Revision),
+    /// The recognizer is done: the last revision's hypothesis is final.
+    Final,
     Cancelled,
     Error(SpeechError),
 }
 
-/// One client-local transcript. Each session has a distinct identity so queued
+/// What the recognizer changed since the previous revision: `settled`
+/// replaces the hypothesis the previous revision left, and `hypothesis`
+/// follows it until a later revision replaces it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Revision {
+    pub settled: String,
+    pub hypothesis: String,
+}
+
+/// One client-local dictation. Each session has a distinct identity so queued
 /// platform callbacks cannot write into a replacement session.
 #[derive(Default)]
 pub struct Dictation {
     next_session: u64,
     session: Option<u64>,
     status: SpeechStatus,
-    committed: String,
-    hypothesis: String,
     level: f32,
 }
 
@@ -124,8 +132,6 @@ impl Dictation {
         self.next_session += 1;
         self.session = Some(self.next_session);
         self.status = SpeechStatus::Connecting;
-        self.committed.clear();
-        self.hypothesis.clear();
         self.level = 0.;
         self.next_session
     }
@@ -138,9 +144,6 @@ impl Dictation {
     }
     pub fn is_session(&self, id: u64) -> bool {
         self.session == Some(id)
-    }
-    pub fn transcript(&self) -> String {
-        format!("{}{}", self.committed, self.hypothesis)
     }
 
     pub fn stop(&mut self) -> bool {
@@ -157,54 +160,58 @@ impl Dictation {
 
     pub fn cancel(&mut self) -> Option<DictationEvent> {
         self.session?;
-        self.committed.clear();
-        self.hypothesis.clear();
         self.end();
         Some(DictationEvent::Cancelled)
     }
 
-    pub fn apply(&mut self, id: u64, event: SpeechEvent) -> Option<DictationEvent> {
-        if !self.is_session(id) {
-            return None;
-        }
-        let event = match event {
-            SpeechEvent::Ready => {
-                if self.status == SpeechStatus::Connecting {
-                    self.status = SpeechStatus::Recording;
+    /// Applies platform events that arrived together, in order. Their text
+    /// becomes one revision, ahead of the event that ends the session, so
+    /// a backlog costs the draft one edit however long it grew.
+    pub fn apply(
+        &mut self,
+        id: u64,
+        events: impl IntoIterator<Item = SpeechEvent>,
+    ) -> Vec<DictationEvent> {
+        let mut revision = None::<Revision>;
+        let mut applied = Vec::new();
+        for event in events {
+            if !self.is_session(id) {
+                break;
+            }
+            let end = match event {
+                SpeechEvent::Ready => {
+                    if self.status == SpeechStatus::Connecting {
+                        self.status = SpeechStatus::Recording;
+                    }
+                    continue;
                 }
-                return None;
-            }
-            SpeechEvent::Level(level) => {
-                self.level = level;
-                return None;
-            }
-            SpeechEvent::Hypothesis(text) => {
-                self.hypothesis = text;
-                DictationEvent::Partial(self.transcript())
-            }
-            SpeechEvent::Phrase(text) => {
-                self.committed.push_str(&text);
-                self.hypothesis.clear();
-                DictationEvent::Partial(self.transcript())
-            }
-            SpeechEvent::Finished => {
-                self.end();
-                DictationEvent::Final(self.transcript())
-            }
-            SpeechEvent::PermissionDenied => {
-                self.end();
-                DictationEvent::Error(SpeechError::PermissionDenied)
-            }
-            SpeechEvent::Unsupported => {
-                self.end();
-                DictationEvent::Error(SpeechError::Unsupported)
-            }
-            SpeechEvent::Error(error) => {
-                self.end();
-                DictationEvent::Error(error)
-            }
-        };
-        Some(event)
+                SpeechEvent::Level(level) => {
+                    self.level = level;
+                    continue;
+                }
+                SpeechEvent::Hypothesis(text) => {
+                    revision.get_or_insert_default().hypothesis = text;
+                    continue;
+                }
+                SpeechEvent::Phrase(text) => {
+                    let revision = revision.get_or_insert_default();
+                    revision.settled.push_str(&text);
+                    revision.hypothesis.clear();
+                    continue;
+                }
+                SpeechEvent::Finished => DictationEvent::Final,
+                SpeechEvent::PermissionDenied => {
+                    DictationEvent::Error(SpeechError::PermissionDenied)
+                }
+                SpeechEvent::Unsupported => DictationEvent::Error(SpeechError::Unsupported),
+                SpeechEvent::Error(error) => DictationEvent::Error(error),
+            };
+            self.end();
+            applied.extend(revision.take().map(DictationEvent::Revised));
+            applied.push(end);
+        }
+        applied.extend(revision.map(DictationEvent::Revised));
+        applied
     }
 
     fn end(&mut self) {
@@ -218,44 +225,69 @@ impl Dictation {
 mod tests {
     use super::*;
 
+    fn revised(settled: &str, hypothesis: &str) -> DictationEvent {
+        DictationEvent::Revised(Revision {
+            settled: settled.into(),
+            hypothesis: hypothesis.into(),
+        })
+    }
+
     #[test]
-    fn transcript_revisions_phrases_and_terminal_events_are_session_local() {
+    fn revisions_coalesce_queued_results_and_terminal_events_are_session_local() {
         let mut state = Dictation::default();
         let id = state.start();
-        state.apply(id, SpeechEvent::Ready);
+        assert_eq!(state.apply(id, [SpeechEvent::Ready]), []);
         assert_eq!(state.status(), SpeechStatus::Recording);
-        for (event, text) in [
-            (SpeechEvent::Hypothesis("hello word".into()), "hello word"),
-            (SpeechEvent::Hypothesis("hello world".into()), "hello world"),
-            (SpeechEvent::Phrase("Hello world.".into()), "Hello world."),
-            (SpeechEvent::Hypothesis(" How".into()), "Hello world. How"),
+        for (event, revision) in [
             (
-                SpeechEvent::Phrase(" How are you?".into()),
-                "Hello world. How are you?",
+                SpeechEvent::Hypothesis("hello word".into()),
+                revised("", "hello word"),
+            ),
+            (
+                SpeechEvent::Phrase("Hello world.".into()),
+                revised("Hello world.", ""),
             ),
         ] {
-            assert_eq!(
-                state.apply(id, event),
-                Some(DictationEvent::Partial(text.into()))
-            );
+            assert_eq!(state.apply(id, [event]), [revision]);
         }
+        // Results that queued together are one revision: every settled
+        // phrase in order, then the latest hypothesis.
+        assert_eq!(
+            state.apply(
+                id,
+                [
+                    SpeechEvent::Hypothesis(" How".into()),
+                    SpeechEvent::Phrase(" How are you?".into()),
+                    SpeechEvent::Level(0.5),
+                    SpeechEvent::Hypothesis(" I am".into()),
+                    SpeechEvent::Hypothesis(" I'm fine".into()),
+                ]
+            ),
+            [revised(" How are you?", " I'm fine")]
+        );
         assert!(state.stop());
-        state.apply(id, SpeechEvent::Ready);
+        state.apply(id, [SpeechEvent::Ready]);
         assert_eq!(state.status(), SpeechStatus::Stopping);
         assert_eq!(
-            state.apply(id, SpeechEvent::Finished),
-            Some(DictationEvent::Final("Hello world. How are you?".into()))
+            state.apply(
+                id,
+                [
+                    SpeechEvent::Phrase(" I'm fine.".into()),
+                    SpeechEvent::Finished,
+                    SpeechEvent::Hypothesis("late".into()),
+                ]
+            ),
+            [revised(" I'm fine.", ""), DictationEvent::Final]
         );
         assert_eq!(state.status(), SpeechStatus::Idle);
         assert_eq!(
-            state.apply(id, SpeechEvent::Hypothesis("late".into())),
-            None
+            state.apply(id, [SpeechEvent::Hypothesis("late".into())]),
+            []
         );
 
         let cancelled = state.start();
-        state.apply(cancelled, SpeechEvent::Hypothesis("discard".into()));
+        state.apply(cancelled, [SpeechEvent::Hypothesis("discard".into())]);
         assert_eq!(state.cancel(), Some(DictationEvent::Cancelled));
-        assert_eq!(state.transcript(), "");
         for terminal in [
             SpeechEvent::PermissionDenied,
             SpeechEvent::Unsupported,
@@ -263,15 +295,15 @@ mod tests {
         ] {
             let current = state.start();
             assert_eq!(
-                state.apply(cancelled, SpeechEvent::Phrase("late".into())),
-                None
+                state.apply(cancelled, [SpeechEvent::Phrase("late".into())]),
+                []
             );
             assert!(matches!(
-                state.apply(current, terminal),
-                Some(DictationEvent::Error(_))
+                state.apply(current, [terminal]).as_slice(),
+                [DictationEvent::Error(_)]
             ));
             assert_eq!(state.status(), SpeechStatus::Idle);
-            assert_eq!(state.apply(current, SpeechEvent::Finished), None);
+            assert_eq!(state.apply(current, [SpeechEvent::Finished]), []);
         }
     }
 }

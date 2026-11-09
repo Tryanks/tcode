@@ -543,10 +543,6 @@ impl Composer {
             }
             InputEvent::Change => {
                 self.queued_refill = None;
-                // An edit that did not come from the transcript writer
-                // ends dictation (see `components::voice`).
-                #[cfg(feature = "voice")]
-                self.stop_dictation_on_user_edit(cx);
                 self.recompute_trigger(cx);
                 cx.notify();
             }
