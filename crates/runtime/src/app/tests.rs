@@ -1179,7 +1179,9 @@ fn loading_a_mirror_with_an_open_turn_and_no_live_parent_ends_it() {
         assert_eq!(state.native_subagent_turns.get("mirror"), Some(&false));
     });
 
-    // Reloading the repaired mirror leaves the closed turn alone.
+    // Reloading the repaired mirror leaves the closed turn alone, in a host
+    // started again, which nothing the first one left running reaches.
+    let cx = &mut TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*test_store).clone()));
     state.update(cx, |state, cx| state.select_session("mirror", cx));
     cx.run_until(|state| {
@@ -2141,18 +2143,22 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
         })
     });
 
-    let outgoing = cx.drain_outgoing();
-    assert!(outgoing.iter().any(|message| matches!(
-        message,
-        HostMessage::Event(EventEnvelope { request_id: None,
-            topic: Topic::SessionEvents { .. },
-            event: ServerEvent::SessionEvent(SessionEventRecord {
-                event: AgentEvent::TurnStarted { turn_id },
+    // The subscriber hears of the turn once the log its subscription waits
+    // on is read, which happens off the host.
+    cx.run_until_sent(|message| {
+        matches!(
+            message,
+            HostMessage::Event(EventEnvelope { request_id: None,
+                topic: Topic::SessionEvents { .. },
+                event: ServerEvent::SessionEvent(SessionEventRecord {
+                    event: AgentEvent::TurnStarted { turn_id },
+                    ..
+                }),
                 ..
-            }),
-            ..
-        }) if turn_id == "scripted-turn"
-    )));
+            }) if turn_id == "scripted-turn"
+        )
+        .then_some(())
+    });
     state.read(|state| {
         let session = state.selected_session().unwrap();
         assert!(session.turn_in_flight);
@@ -2960,8 +2966,8 @@ fn a_new_profile_never_takes_over_a_directory_left_in_profile_homes() {
     assert!(home.join(".claude.json").is_file());
 
     state.update(cx, |state, cx| state.delete_profile(&id, cx));
-    cx.run_until_parked();
-    assert!(!home.exists());
+    // The directory is removed off the host.
+    cx.run_until(|_| !home.exists());
     assert_eq!(
         std::fs::read_to_string(left.join(".claude.json")).unwrap(),
         account
@@ -5768,6 +5774,8 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
     drop(state);
 
     // A host restarted after the move keeps the thread where it went, with its transcript.
+    // It is another process, which nothing the stopped host left running reaches.
+    let cx = &mut TestAppContext::default();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
         state.set_provider_launcher_for_test(launcher);
@@ -7816,21 +7824,11 @@ fn background_work_no_process_can_finish_ends_as_interrupted_on_load() {
             .resident("cold")
             .is_some_and(|cold| !cold.timeline.entries.is_empty())
     });
-    state.update(&mut cx, |state, cx| {
-        assert_eq!(status(state, "cold"), ItemStatus::Interrupted);
-        state.park_active(cx);
-        state.select_session("live", cx);
-    });
-    cx.run_until_parked();
-    state.update(&mut cx, |state, cx| {
-        assert_eq!(status(state, "live"), ItemStatus::InProgress);
-        state.park_active(cx);
-        state.select_session("mirror", cx);
-    });
-    cx.run_until_parked();
-    state.update(&mut cx, |state, _| {
-        assert_eq!(status(state, "mirror"), ItemStatus::InProgress);
-    });
+    state.read(|state| assert_eq!(status(state, "cold"), ItemStatus::Interrupted));
+    state.reopen(&mut cx, "live");
+    state.read(|state| assert_eq!(status(state, "live"), ItemStatus::InProgress));
+    state.reopen(&mut cx, "mirror");
+    state.read(|state| assert_eq!(status(state, "mirror"), ItemStatus::InProgress));
     let log = test_store.read_events("cold").unwrap();
     assert!(matches!(
         &log.last().unwrap().event,
@@ -11363,19 +11361,6 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
 /// appends did, an open one included, through the store writer.
 #[test]
 fn the_storage_pass_drops_superseded_diffs_of_every_stored_thread() {
-    struct CleanupLog(std::sync::Mutex<Vec<String>>);
-    impl log::Log for CleanupLog {
-        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
-            true
-        }
-        fn log(&self, record: &log::Record<'_>) {
-            self.0.lock().unwrap().push(record.args().to_string());
-        }
-        fn flush(&self) {}
-    }
-    static LOG: CleanupLog = CleanupLog(std::sync::Mutex::new(Vec::new()));
-    log::set_logger(&LOG).unwrap();
-    log::set_max_level(log::LevelFilter::Info);
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("diff-pass");
     let started = "{\"ts\":1,\"event\":{\"type\":\"turn_started\",\"turn_id\":\"t\"}}\n";
@@ -11416,17 +11401,15 @@ fn the_storage_pass_drops_superseded_diffs_of_every_stored_thread() {
         );
     }
     drop(state);
-    LOG.0.lock().unwrap().clear();
+    let logged = captured_log().len();
     let cx = &mut TestAppContext::default();
     let restarted = cx.new_entity(TestClientState::new((*store).clone()));
     restarted.update(cx, |state, cx| state.start_storage_pass(cx));
     cx.run_until(|state| state.storage_pass.is_none());
     assert!(
-        LOG.0
-            .lock()
-            .unwrap()
+        captured_log()[logged..]
             .iter()
-            .any(|line| line == "storage pass complete: no work")
+            .any(|line| line.text == "storage pass complete: no work")
     );
 }
 
@@ -14642,26 +14625,7 @@ fn settle_all_children_delivers_finished_results_and_skips_running_children() {
 #[test]
 #[ignore = "drives the storage pass over a copy of a real data dir named by TCODE_STORAGE_DATA; run deliberately"]
 fn storage_pass_over_a_real_data_dir() {
-    struct PassLog(std::sync::atomic::AtomicBool);
-    impl log::Log for PassLog {
-        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-            metadata.level() <= log::Level::Info
-        }
-        fn log(&self, record: &log::Record<'_>) {
-            if !record.target().starts_with("tcode") {
-                return;
-            }
-            let line = record.args().to_string();
-            eprintln!("{} {}", record.level(), line);
-            if line.starts_with("storage pass ") {
-                self.0.store(true, std::sync::atomic::Ordering::Release);
-            }
-        }
-        fn flush(&self) {}
-    }
-    static LOG: PassLog = PassLog(std::sync::atomic::AtomicBool::new(false));
-    log::set_logger(&LOG).unwrap();
-    log::set_max_level(log::LevelFilter::Info);
+    let mut printed = captured_log().len();
     let root = PathBuf::from(std::env::var_os("TCODE_STORAGE_DATA").unwrap());
     let started = Instant::now();
     let host = crate::pipe::spawn_host(
@@ -14670,7 +14634,21 @@ fn storage_pass_over_a_real_data_dir() {
     )
     .unwrap();
     eprintln!("host up in {:.1?}", started.elapsed());
-    while !LOG.0.load(std::sync::atomic::Ordering::Acquire) {
+    loop {
+        let log = captured_log();
+        let mut ended = false;
+        for line in log[printed..]
+            .iter()
+            .filter(|line| line.target.starts_with("tcode"))
+        {
+            eprintln!("{} {}", line.level, line.text);
+            ended |= line.text.starts_with("storage pass ");
+        }
+        printed = log.len();
+        drop(log);
+        if ended {
+            break;
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
     eprintln!("pass ended after {:.1?}", started.elapsed());
@@ -14761,7 +14739,9 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
                 .resident("thread")
                 .is_some_and(|session| !session.timeline.turns.is_empty())
     });
-    let send = |cx: &mut TestAppContext, id, text: &str| {
+    // The host runs the turn the message opened once the provider's events,
+    // which reach it off the host, have.
+    let send = |cx: &mut TestAppContext, id, text: &str, turn: usize| {
         state.dispatch_command(
             cx,
             id,
@@ -14771,8 +14751,7 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
                 attachment_paths: Vec::new(),
             },
         );
-        cx.run_until(|_| !commands.is_empty());
-        let Ok(SessionCommand::SendTurn { delivery_id, .. }) = commands.try_recv() else {
+        let SessionCommand::SendTurn { delivery_id, .. } = cx.run_until_command(&commands) else {
             panic!("expected the message to reach the provider")
         };
         // What the Claude Code client emits once the message is written.
@@ -14784,10 +14763,16 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
         ] {
             scripted.events.try_send(event).unwrap();
         }
-        cx.run_until_parked();
+        cx.run_until(|state| {
+            state.resident("thread").is_some_and(|session| {
+                session.timeline.turns.get(turn).is_some_and(|turn| {
+                    turn.running && turn.provider_turn_id.as_deref() == Some("turn-1")
+                })
+            })
+        });
     };
     if !restarted {
-        send(&mut cx, 1, "Do the task");
+        send(&mut cx, 1, "Do the task", 0);
         for event in [
             work[1].clone(),
             AgentEvent::SessionClosed {
@@ -14802,7 +14787,7 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
                 .is_some_and(|session| matches!(session.runtime, Runtime::Idle))
         });
     }
-    send(&mut cx, 2, "continue");
+    send(&mut cx, 2, "continue", 1);
 
     // The turns a client folds from the log, and the one the host runs.
     let turns = |state: &TestEntity| {
@@ -14843,11 +14828,8 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
             "the abandoned turn ends when its work stopped, not when it was reopened"
         );
     }
-    state.update(&mut cx, |state, cx| {
-        state.park_active(cx);
-        state.select_session("thread", cx);
-    });
-    cx.run_until_parked();
+    state.update(&mut cx, |state, cx| state.park_active(cx));
+    state.reopen(&mut cx, "thread");
     assert_eq!(turns(&state), running, "coming back ended the turn");
 
     scripted
@@ -14858,7 +14840,11 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
             usage: None,
         })
         .unwrap();
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        state
+            .resident("thread")
+            .is_some_and(|session| !session.turn_in_flight)
+    });
     assert_eq!(
         turns(&state),
         (

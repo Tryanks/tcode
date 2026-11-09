@@ -325,21 +325,22 @@ fn a_fork_offers_none_of_its_parents_restore_points() {
             at: None,
         },
     );
-    cx.run_until(|state| state.residents.live.keys().any(|id| id != "rewound-thread"));
-    cx.run_until_parked();
-    state.read(|state| {
-        let (_, fork) = state
+    fn fork(state: &TestClientState) -> Option<&tcode_core::session::Timeline> {
+        state
             .residents
             .live
             .iter()
             .find(|(id, _)| *id != "rewound-thread")
-            .unwrap();
+            .map(|(_, fork)| &fork.timeline)
+    }
+    // The fork opens empty and carries the turns once its log, read off the
+    // host, is folded.
+    cx.run_until(|state| fork(state).is_some_and(|fork| !fork.turns.is_empty()));
+    cx.run_until_parked();
+    state.read(|state| {
         assert!(
-            !fork.timeline.turns.is_empty(),
-            "the fork carries the turns"
-        );
-        assert!(
-            fork.timeline
+            fork(state)
+                .unwrap()
                 .turns
                 .iter()
                 .all(|turn| turn.provider_checkpoint_id.is_none())
@@ -406,7 +407,8 @@ fn a_control_rewind_answers_with_the_harness_outcome() {
             cx,
         );
     });
-    cx.run_until_parked();
+    // The answer goes out from a task off the host that waits for the harness's.
+    cx.run_until(|_| !answer.is_empty());
     let outcome = answer.try_recv().unwrap().unwrap();
     assert_eq!(outcome["status"], "failed");
     assert_eq!(outcome["reason"], "turn_running");
@@ -630,7 +632,10 @@ fn a_history_window_never_begins_inside_turns_a_rewind_took_out() {
         }
         state.record_event("rewound-thread", &rewind, cx);
     });
-    cx.run_until_parked();
+    // The host holds the thread's log once it is read off the host; a
+    // subscription made before then is answered with the log as it was read,
+    // and the records after it follow the window.
+    cx.run_until(|state| state.event_records.contains_key("rewound-thread"));
     cx.drain_outgoing();
     state.deliver(
         cx,
