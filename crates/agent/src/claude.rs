@@ -5511,10 +5511,10 @@ mod tests {
                  *'\"type\":\"user\"'*) uuid=$(printf '%s' \"$line\" | sed -n 's/.*\"uuid\":\"\\([^\"]*\\)\".*/\\1/p'); \
                  printf '{{\"type\":\"user\",\"uuid\":\"%s\",\"isReplay\":true,\"session_id\":\"native\",\"parent_tool_use_id\":null,\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"also this\"}}]}}}}\\n' \"$uuid\";;\n\
                  esac; done\n",
-                answer(r#"{\"canRewind\":true,\"filesChanged\":[\"src/lib.rs\"],\"insertions\":3,\"deletions\":1}"#),
-                answer(r#"{\"canRewind\":true,\"skippedLinks\":0}"#),
+                answer(r#"{"canRewind":true,"filesChanged":["src/lib.rs"],"insertions":3,"deletions":1}"#),
+                answer(r#"{"canRewind":true,"skippedLinks":0}"#),
                 answer(
-                    r#"{\"rewound\":false,\"reason\":\"stale_target\",\"error\":\"The conversation changed since this message was chosen.\",\"precedingAssistantUuid\":null}"#
+                    r#"{"rewound":false,"reason":"stale_target","error":"The conversation changed since this message was chosen.","precedingAssistantUuid":null}"#
                 ),
             ),
         )
