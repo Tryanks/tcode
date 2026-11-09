@@ -38,8 +38,12 @@ use wayland_nest::{
 use webkit2gtk::{HitTestResultExt as _, WebViewExt as _};
 use wry::{WebViewBuilderExtUnix as _, WebViewExtUnix as _};
 
-/// How often GTK's pending events are dispatched.
-const GTK_POLL_INTERVAL: Duration = Duration::from_millis(8);
+/// How often GTK's pending events are dispatched while a preview exists, as
+/// gpui-webview pumps GTK on X11.
+const GTK_POLL_INTERVAL: Duration = Duration::from_millis(16);
+/// How long GTK is still pumped after the last preview is released, so the
+/// webview's teardown (its web process, its windows on the nest) completes.
+const GTK_WIND_DOWN: Duration = Duration::from_secs(5);
 /// The shortest time between two frames of one view. The nest's client draws
 /// its next frame when the last one is answered, and answering at once would
 /// let an animating page redraw as fast as it can.
@@ -72,6 +76,8 @@ struct Host {
     /// Set once the app quits, from when the host is leaked (see [`start`]):
     /// a webview destroyed after that releases nothing.
     quitting: Cell<bool>,
+    /// Whether GTK's events are being dispatched (see [`pump_gtk`]).
+    pumping: Cell<bool>,
 }
 
 thread_local! {
@@ -101,6 +107,7 @@ fn start(window: &Window, cx: &mut App) -> Result<Rc<Host>, String> {
         slots: RefCell::new(HashMap::new()),
         next_view: Cell::new(0),
         quitting: Cell::new(false),
+        pumping: Cell::new(false),
     });
 
     let quitting = Rc::downgrade(&host);
@@ -116,16 +123,6 @@ fn start(window: &Window, cx: &mut App) -> Result<Rc<Host>, String> {
             std::mem::forget(host);
         }
         async {}
-    })
-    .detach();
-
-    cx.spawn(async move |cx| {
-        loop {
-            while gtk::events_pending() {
-                gtk::main_iteration_do(false);
-            }
-            cx.background_executor().timer(GTK_POLL_INTERVAL).await;
-        }
     })
     .detach();
 
@@ -160,6 +157,37 @@ fn start(window: &Window, cx: &mut App) -> Result<Rc<Host>, String> {
     })
     .detach();
     Ok(host)
+}
+
+/// Dispatches GTK's events while a preview exists, and for
+/// [`GTK_WIND_DOWN`] after the last is released.
+fn pump_gtk(host: &Rc<Host>, cx: &App) {
+    if host.pumping.replace(true) {
+        return;
+    }
+    log::debug!("preview: pumping GTK");
+    let weak = Rc::downgrade(host);
+    cx.spawn(async move |cx| {
+        let mut idle_since = None;
+        loop {
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
+            let Some(host) = weak.upgrade() else {
+                return;
+            };
+            if !host.slots.borrow().is_empty() {
+                idle_since = None;
+            } else if idle_since.get_or_insert_with(Instant::now).elapsed() >= GTK_WIND_DOWN {
+                host.pumping.set(false);
+                log::debug!("preview: no preview left; GTK is no longer pumped");
+                return;
+            }
+            drop(host);
+            cx.background_executor().timer(GTK_POLL_INTERVAL).await;
+        }
+    })
+    .detach();
 }
 
 /// Starts GTK on the nest's socket. GTK reads the display from its arguments
@@ -288,6 +316,7 @@ pub(super) fn build(
         .map_err(|e| error(e.to_string()))?;
     connect_webkit(&webkit, &slot);
     host.slots.borrow_mut().insert(id, slot);
+    pump_gtk(&host, cx);
     Ok(view)
 }
 
