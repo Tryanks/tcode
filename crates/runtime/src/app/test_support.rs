@@ -18,6 +18,48 @@ pub(super) mod github_fixture;
 /// Windows runner.
 pub(super) const HOST_DEADLINE: Duration = Duration::from_secs(30);
 
+/// A log line the test process emitted.
+pub(super) struct LogLine {
+    pub(super) level: log::Level,
+    pub(super) target: String,
+    pub(super) text: String,
+}
+
+/// Every line at info or above the test process logs from the first call on.
+/// A process has one logger, so every test that reads the log shares this
+/// capture; the tests a process runs alongside log into it too.
+pub(super) fn captured_log() -> std::sync::MutexGuard<'static, Vec<LogLine>> {
+    struct Capture(std::sync::Mutex<Vec<LogLine>>);
+    impl log::Log for Capture {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::Level::Info
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(LogLine {
+                        level: record.level(),
+                        target: record.target().to_owned(),
+                        text: record.args().to_string(),
+                    });
+            }
+        }
+        fn flush(&self) {}
+    }
+    static CAPTURE: Capture = Capture(std::sync::Mutex::new(Vec::new()));
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        log::set_logger(&CAPTURE).expect("the capture is the test process's only logger");
+        log::set_max_level(log::LevelFilter::Info);
+    });
+    CAPTURE
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub(super) struct TestStore(SessionStore);
 
 impl TestStore {
@@ -73,7 +115,14 @@ impl Default for TestAppContext {
 }
 
 impl TestAppContext {
+    /// Start the host this context drives. A host started again over the same
+    /// store takes a context of its own: it is another process, and work the
+    /// earlier host left running would otherwise land in it.
     pub(super) fn new_entity(&mut self, state: TestClientState) -> TestEntity {
+        assert!(
+            self.state.is_none(),
+            "a TestAppContext drives one host; start another with a new context"
+        );
         let state = Rc::new(RefCell::new(state));
         self.domain_diff = Some(DomainDiff::new(&state.borrow()));
         self.state = Some(Rc::downgrade(&state));
@@ -183,6 +232,21 @@ impl TestAppContext {
         }
     }
 
+    /// Run until the provider behind `commands` is sent a command a test
+    /// scripts and return it, answering usage reads on the way as
+    /// [`next_command`] does.
+    pub(super) fn run_until_command(
+        &mut self,
+        commands: &smol::channel::Receiver<SessionCommand>,
+    ) -> SessionCommand {
+        let mut command = None;
+        self.run_until(|_| {
+            command = next_command(commands).ok();
+            command.is_some()
+        });
+        command.expect("run_until returned")
+    }
+
     /// Wait for background work to queue a message on the mailbox and run
     /// that one message alone, keeping what it emitted for
     /// [`TestAppContext::drain_outgoing`].
@@ -279,6 +343,29 @@ impl TestEntity {
 
     pub(super) fn read<R>(&self, read: impl FnOnce(&TestClientState) -> R) -> R {
         read(&self.0.borrow())
+    }
+
+    /// Open the parked thread `id` again, as a client selecting it does, and
+    /// run until the timeline that reopening rebuilds from its log off the
+    /// host has landed. The parked timeline is emptied first so the rebuild
+    /// can be seen landing; the rebuild replaces it whole, so this changes
+    /// nothing it holds.
+    pub(super) fn reopen(&self, cx: &mut TestAppContext, id: &str) {
+        self.update(cx, |state, cx| {
+            state
+                .host
+                .residents
+                .parked
+                .get_mut(id)
+                .expect("the thread is parked")
+                .timeline = Timeline::default();
+            state.select_session(id, cx);
+        });
+        cx.run_until(|state| {
+            state
+                .resident(id)
+                .is_some_and(|thread| !thread.timeline.entries.is_empty())
+        });
     }
 }
 

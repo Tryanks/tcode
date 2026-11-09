@@ -826,6 +826,8 @@ fn watches_survive_a_restart_fire_once_and_cancel() {
     });
     cx.run_until_parked();
 
+    // A restarted host is another process, which nothing the stopped host left running reaches.
+    let cx = &mut TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(cx, |state, cx| {
         assert_eq!(state.find_meta("caller").unwrap().control_watches.len(), 2);

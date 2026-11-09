@@ -197,7 +197,13 @@ fn thread_in_moved_project(
         state
     });
     state.update(cx, |state, cx| state.select_session("thread", cx));
-    cx.run_until_parked();
+    // Opened as a reader opens it, who writes once its history is on screen;
+    // the log is read and folded off the host.
+    cx.run_until(|state| {
+        state
+            .resident("thread")
+            .is_some_and(|thread| !thread.timeline.entries.is_empty())
+    });
     (state, project)
 }
 
@@ -269,17 +275,15 @@ fn a_changed_root_delivers_what_a_missing_directory_left_queued() {
 
     let (changed, _) = acked(&state, cx, 3, change(moved_to.clone()));
     assert_eq!(changed, Ok(CommandResponse::Unit));
-    cx.run_until(|_| !scripted.commands.is_empty());
-
+    let SessionCommand::SendTurn { text, .. } = cx.run_until_command(&scripted.commands) else {
+        panic!("the queued message goes out on the new provider");
+    };
     let options = launched.try_recv().unwrap();
     assert_eq!(options.cwd, moved_to);
     assert_eq!(
         options.resume, None,
         "the native session stayed behind in the old directory"
     );
-    let Ok(SessionCommand::SendTurn { text, .. }) = scripted.commands.try_recv() else {
-        panic!("the queued message goes out on the new provider");
-    };
     assert!(text.contains("do not lose me"), "{text}");
     assert!(
         text.contains("the earlier answer"),

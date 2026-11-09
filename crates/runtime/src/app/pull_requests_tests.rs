@@ -1112,6 +1112,9 @@ fn a_review_draft_is_the_hosts_across_a_restart_and_a_moved_head_keeps_it_until_
         ),
         (OLD, "Two things", vec![3, 8])
     );
+    // The restarted host is another process, which nothing the stopped host
+    // left running reaches.
+    let mut cx = TestAppContext::default();
     let state = cx.new_entity(TestClientState::new(store.clone()));
     state.update(&mut cx, |state, _| {
         state.pull_requests = PullRequestRuntime::new(api);
