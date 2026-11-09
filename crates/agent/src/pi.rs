@@ -589,6 +589,7 @@ impl SessionActor for PiActor {
             | SessionCommand::StopBackgroundTask { .. }
             | SessionCommand::MoveToBackground { .. }
             | SessionCommand::MoveTo { .. }
+            | SessionCommand::RespondWorktree { .. }
             | SessionCommand::SetGoal { .. }
             | SessionCommand::ClearGoal
             | SessionCommand::ReadAccountUsage { .. }

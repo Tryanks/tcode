@@ -347,6 +347,7 @@ impl TurnBoundaries {
             | AgentEvent::ContextWindowChanged { .. }
             | AgentEvent::SettingsKept
             | AgentEvent::SessionMoved { .. }
+            | AgentEvent::WorktreeResolved { .. }
             | AgentEvent::ControlAction(_) => self.is_empty(),
             AgentEvent::ContextCompacted(compaction) => {
                 !(compaction.in_progress && self.compacting) && self.is_empty()
@@ -377,6 +378,7 @@ impl TurnBoundaries {
             | AgentEvent::RewindUndoClosed
             | AgentEvent::ApprovalRequested(_)
             | AgentEvent::ApprovalResolved { .. }
+            | AgentEvent::WorktreeRequested { .. }
             | AgentEvent::UserInputRequested { .. }
             | AgentEvent::UserInputResolved { .. }
             | AgentEvent::Warning { .. }

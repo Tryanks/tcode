@@ -4300,9 +4300,11 @@ impl WorkspaceStore {
                 &archived.worktree_shared,
             )
         };
+        // Worktrees it owns elsewhere are checked for other users when it is deleted.
         (!shared.contains(session_id))
             .then(|| meta.worktree.clone())
             .flatten()
+            .or_else(|| meta.other_worktrees.first().map(|owned| owned.info.clone()))
     }
 }
 

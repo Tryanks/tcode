@@ -6063,6 +6063,7 @@ fn a_moved_thread_keeps_a_native_session_that_can_move() {
         AgentEvent::SessionMoved {
             from: demo.clone(),
             to: quick.clone(),
+            parent_item_id: None,
         },
         AgentEvent::TurnAccepted { delivery_id },
         AgentEvent::TurnStarted {
@@ -6071,6 +6072,7 @@ fn a_moved_thread_keeps_a_native_session_that_can_move() {
         AgentEvent::SessionMoved {
             from: quick.clone(),
             to: elsewhere.clone(),
+            parent_item_id: None,
         },
         AgentEvent::TurnCompleted {
             turn_id: "turn-3".into(),
@@ -6118,6 +6120,333 @@ fn a_moved_thread_keeps_a_native_session_that_can_move() {
             ]
         );
     });
+}
+
+/// The next command the provider of `launch` is sent that is not a turn.
+fn next_worktree_answer(
+    cx: &mut TestAppContext,
+    launches: &Launches,
+    launch: usize,
+) -> (String, agent::WorktreeAnswer) {
+    loop {
+        cx.run_until(|_| !launches.lock().unwrap()[launch].1.is_empty());
+        match next_command(&launches.lock().unwrap()[launch].1) {
+            Ok(SessionCommand::RespondWorktree { request_id, answer }) => {
+                return (request_id, answer);
+            }
+            Err(smol::channel::TryRecvError::Empty) => {}
+            other => panic!("expected RespondWorktree, got {other:?}"),
+        }
+    }
+}
+
+/// A worktree Claude Code asks for comes from Tcode's worktree module, in the data
+/// directory's bucket for the repository, and belongs to the thread; asked for by the
+/// same name again it is the same worktree. The thread follows the native session into
+/// it and out of it with the same provider process and no handoff, and Claude's removal
+/// removes it and its untouched branch.
+#[test]
+fn a_claude_worktree_comes_from_tcode_and_the_thread_follows_its_session() {
+    use agent::{WorktreeAnswer, WorktreeRequest};
+    let test_store = TestStore::new("tcode-claude-worktree");
+    let repo = test_store.root().join("repo");
+    init_git_repo(&repo);
+    let project = Project::from_root(repo.clone());
+    test_store.upsert_project(&project).unwrap();
+    let native = agent::ResumeCursor(serde_json::json!({"session_id": "native-1"}));
+    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, repo.clone(), None);
+    meta.id = "thread".into();
+    meta.project_id = Some(project.id.clone());
+    meta.resume_cursor = Some(native.clone());
+    test_store.upsert_meta(&meta).unwrap();
+    let cx = &mut TestAppContext::default();
+    let (launcher, launches) = recording_launcher();
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*test_store).clone());
+        state.set_provider_launcher_for_test(launcher);
+        state
+    });
+    state.update(cx, |state, cx| state.select_session("thread", cx));
+    let send = |text: &str| Command::SendTurn {
+        session_id: "thread".into(),
+        text: text.into(),
+        attachment_paths: Vec::new(),
+    };
+    acked(&state, cx, 1, send("work in a worktree")).unwrap();
+    let (delivery_id, _, events) = next_turn(cx, &launches, 0);
+    for event in [
+        AgentEvent::TurnAccepted { delivery_id },
+        AgentEvent::TurnStarted {
+            turn_id: "turn-1".into(),
+        },
+    ] {
+        events.try_send(event).unwrap();
+    }
+    let create = WorktreeRequest::Create {
+        cwd: repo.clone(),
+        name: "feat".into(),
+    };
+    events
+        .try_send(AgentEvent::WorktreeRequested {
+            request_id: "hook-1".into(),
+            request: create.clone(),
+        })
+        .unwrap();
+    let (request_id, answer) = next_worktree_answer(cx, &launches, 0);
+    assert_eq!(request_id, "hook-1");
+    let WorktreeAnswer::Ready {
+        path: worktree,
+        reused: false,
+    } = answer.clone()
+    else {
+        panic!("{answer:?}")
+    };
+    let bucket = tcode_services::worktree::worktrees_root(test_store.root())
+        .canonicalize()
+        .unwrap();
+    assert_eq!(worktree.parent().unwrap().parent().unwrap(), bucket);
+    assert_eq!(worktree.file_name().unwrap(), "feat");
+    assert_eq!(
+        run_git(&worktree, &["branch", "--show-current"])
+            .unwrap()
+            .trim(),
+        "tcode/feat"
+    );
+    state.read(|state| {
+        let meta = state.find_meta("thread").unwrap();
+        assert_eq!(meta.cwd, repo);
+        assert_eq!(
+            meta.other_worktrees
+                .iter()
+                .map(|owned| (&owned.path, owned.info.branch.as_str()))
+                .collect::<Vec<_>>(),
+            [(&worktree, "tcode/feat")]
+        );
+    });
+    for event in [
+        AgentEvent::WorktreeResolved {
+            request_id: "hook-1".into(),
+            request: create.clone(),
+            answer,
+        },
+        AgentEvent::SessionMoved {
+            from: repo.clone(),
+            to: worktree.clone(),
+            parent_item_id: None,
+        },
+        AgentEvent::TurnCompleted {
+            turn_id: "turn-1".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        },
+    ] {
+        events.try_send(event).unwrap();
+    }
+    cx.run_until(|state| {
+        state
+            .resident("thread")
+            .is_some_and(|session| session.meta.cwd == worktree && !session.has_work())
+    });
+    state.read(|state| {
+        let session = state.resident("thread").unwrap();
+        assert_eq!(session.live_cwd, worktree);
+        assert_eq!(
+            session.meta.worktree.as_ref().map(|w| w.branch.as_str()),
+            Some("tcode/feat")
+        );
+        assert_eq!(session.meta.other_worktrees, []);
+        assert_eq!(session.meta.moved_from, None);
+        assert_eq!(session.meta.resume_cursor, Some(native.clone()));
+        let shown: Vec<_> = session
+            .timeline
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.content {
+                EntryContent::Worktree { request, answer } => {
+                    Some(format!("{request:?} {answer:?}"))
+                }
+                EntryContent::SessionMoved { from, to } => Some(format!("{from:?} -> {to:?}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                format!(
+                    "{create:?} {:?}",
+                    WorktreeAnswer::Ready {
+                        path: worktree.clone(),
+                        reused: false
+                    }
+                ),
+                format!("{repo:?} -> {worktree:?}"),
+            ]
+        );
+    });
+
+    acked(&state, cx, 2, send("go on")).unwrap();
+    let (delivery_id, text, events) = next_turn(cx, &launches, 0);
+    assert_eq!(text, "go on");
+    assert_eq!(
+        launches.lock().unwrap().len(),
+        1,
+        "the same provider process"
+    );
+    state.read(|state| {
+        let session = state.resident("thread").unwrap();
+        assert!(
+            !session
+                .timeline
+                .entries
+                .iter()
+                .any(|entry| matches!(entry.content, EntryContent::ProviderRelay { .. }))
+        );
+    });
+    events
+        .try_send(AgentEvent::TurnAccepted { delivery_id })
+        .unwrap();
+    events
+        .try_send(AgentEvent::WorktreeRequested {
+            request_id: "hook-2".into(),
+            request: create,
+        })
+        .unwrap();
+    assert_eq!(
+        next_worktree_answer(cx, &launches, 0),
+        (
+            "hook-2".into(),
+            WorktreeAnswer::Ready {
+                path: worktree.clone(),
+                reused: true
+            }
+        )
+    );
+
+    events
+        .try_send(AgentEvent::SessionMoved {
+            from: worktree.clone(),
+            to: repo.clone(),
+            parent_item_id: None,
+        })
+        .unwrap();
+    events
+        .try_send(AgentEvent::WorktreeRequested {
+            request_id: "hook-3".into(),
+            request: WorktreeRequest::Remove {
+                path: worktree.clone(),
+            },
+        })
+        .unwrap();
+    assert_eq!(
+        next_worktree_answer(cx, &launches, 0),
+        ("hook-3".into(), WorktreeAnswer::Removed)
+    );
+    assert!(!worktree.exists());
+    assert_eq!(
+        run_git(&repo, &["branch", "--list", "tcode/feat"]).unwrap(),
+        ""
+    );
+    state.read(|state| {
+        let meta = state.find_meta("thread").unwrap();
+        assert_eq!(meta.cwd, repo);
+        assert_eq!(meta.worktree, None);
+        assert_eq!(meta.other_worktrees, []);
+    });
+}
+
+/// A worktree made for a native subagent is where that subagent's mirror works, and the
+/// thread that asked owns it: deleting the thread removes it.
+#[test]
+fn a_subagents_claude_worktree_belongs_to_the_thread_and_goes_with_it() {
+    use agent::{WorktreeAnswer, WorktreeRequest};
+    let test_store = TestStore::new("tcode-claude-subagent-worktree");
+    let repo = test_store.root().join("repo");
+    init_git_repo(&repo);
+    let project = Project::from_root(repo.clone());
+    test_store.upsert_project(&project).unwrap();
+    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, repo.clone(), None);
+    meta.id = "thread".into();
+    meta.project_id = Some(project.id.clone());
+    test_store.upsert_meta(&meta).unwrap();
+    let cx = &mut TestAppContext::default();
+    let (launcher, launches) = recording_launcher();
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*test_store).clone());
+        state.set_provider_launcher_for_test(launcher);
+        state
+    });
+    state.update(cx, |state, cx| state.select_session("thread", cx));
+    acked(
+        &state,
+        cx,
+        1,
+        Command::SendTurn {
+            session_id: "thread".into(),
+            text: "isolate a subagent".into(),
+            attachment_paths: Vec::new(),
+        },
+    )
+    .unwrap();
+    let (delivery_id, _, events) = next_turn(cx, &launches, 0);
+    for event in [
+        AgentEvent::TurnAccepted { delivery_id },
+        AgentEvent::TurnStarted {
+            turn_id: "turn-1".into(),
+        },
+        AgentEvent::ItemStarted(ThreadItem {
+            id: "toolu_agent".into(),
+            parent_item_id: None,
+            content: ItemContent::Subagent {
+                agent_type: "general-purpose".into(),
+                description: "Print working directory".into(),
+                status: ItemStatus::InProgress,
+                summary: None,
+                model: None,
+                effort: None,
+            },
+        }),
+        AgentEvent::WorktreeRequested {
+            request_id: "hook-1".into(),
+            request: WorktreeRequest::Create {
+                cwd: repo.clone(),
+                name: "agent-a955ec08a6e37c75e".into(),
+            },
+        },
+    ] {
+        events.try_send(event).unwrap();
+    }
+    let (_, answer) = next_worktree_answer(cx, &launches, 0);
+    let WorktreeAnswer::Ready { path: worktree, .. } = answer else {
+        panic!("{answer:?}")
+    };
+    events
+        .try_send(AgentEvent::SessionMoved {
+            from: repo.clone(),
+            to: worktree.clone(),
+            parent_item_id: Some("toolu_agent".into()),
+        })
+        .unwrap();
+    cx.run_until(|state| {
+        state
+            .sessions
+            .iter()
+            .any(|meta| meta.native_subagent.is_some() && meta.cwd == worktree)
+    });
+    state.read(|state| {
+        let thread = state.find_meta("thread").unwrap();
+        assert_eq!(thread.cwd, repo, "the session stays where it was");
+        assert_eq!(thread.other_worktrees.len(), 1);
+    });
+
+    state.dispatch_command(
+        cx,
+        2,
+        Command::DeleteSession {
+            session_id: "thread".into(),
+            remove_worktree: true,
+        },
+    );
+    cx.run_until(|_| !worktree.exists());
 }
 
 /// Two Claude accounts, each signed in through its own config directory, an
@@ -10064,7 +10393,17 @@ fn orphan_sweep_leaves_worktrees_a_thread_works_in_or_the_user_kept() {
     let orphan = owner("orphan").cwd;
     let mut fork = SessionMeta::new(ProviderKind::Codex, source.cwd.clone(), None);
     fork.id = "fork".into();
-    for meta in [&source, &kept, &fork] {
+    // A thread that owns a worktree it does not work in now.
+    let away = owner("away");
+    let mut elsewhere = SessionMeta::new(ProviderKind::ClaudeCode, repo.clone(), None);
+    elsewhere.id = "elsewhere".into();
+    elsewhere
+        .other_worktrees
+        .push(tcode_core::project::OwnedWorktree {
+            path: away.cwd.clone(),
+            info: away.worktree.clone().unwrap(),
+        });
+    for meta in [&source, &kept, &fork, &elsewhere] {
         store.upsert_meta(meta).unwrap();
     }
     let state = cx.new_entity(TestClientState::new(store.clone()));
@@ -10091,7 +10430,7 @@ fn orphan_sweep_leaves_worktrees_a_thread_works_in_or_the_user_kept() {
     let abandoned = filetime::FileTime::from_system_time(
         std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60),
     );
-    for path in [&source.cwd, &kept.cwd, &orphan] {
+    for path in [&source.cwd, &kept.cwd, &orphan, &away.cwd] {
         filetime::set_file_mtime(path, abandoned).unwrap();
     }
 
@@ -10101,6 +10440,7 @@ fn orphan_sweep_leaves_worktrees_a_thread_works_in_or_the_user_kept() {
     assert!(!orphan.exists());
     assert!(source.cwd.join("tracked.txt").exists());
     assert!(kept.cwd.join("tracked.txt").exists());
+    assert!(away.cwd.join("tracked.txt").exists());
 }
 
 #[test]
