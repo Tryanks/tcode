@@ -593,6 +593,19 @@ async fn run_probe(
                     .await
                     .ok();
             }
+            // Worktrees are the host's to make; the probe has none to give.
+            AgentEvent::WorktreeRequested { request_id, .. } => {
+                handle
+                    .commands
+                    .send(SessionCommand::RespondWorktree {
+                        request_id: request_id.clone(),
+                        answer: agent::WorktreeAnswer::Refused {
+                            error: "the probe makes no worktrees".into(),
+                        },
+                    })
+                    .await
+                    .ok();
+            }
             AgentEvent::UserInputRequested { questions, .. } if resumption.leave_questions => {
                 eprintln!("probe: leaving {} question(s) unanswered", questions.len());
             }

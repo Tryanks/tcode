@@ -164,6 +164,18 @@ pub fn provision(
     .map_err(Into::into)
 }
 
+/// Where [`provision`] puts a worktree called `name` for the repository
+/// `checkout` belongs to.
+pub fn worktree_path(
+    checkout: &Path,
+    name: &str,
+    data_dir: &Path,
+) -> Result<PathBuf, ProvisionError> {
+    Ok(worktrees_root(data_dir)
+        .join(repository_key(checkout)?)
+        .join(path_safe(name)))
+}
+
 /// One directory per repository: its directory name for people, and a hash of
 /// its common Git dir so that every checkout of one repository shares it and
 /// two repositories with the same name do not.
@@ -583,7 +595,10 @@ pub fn cleanup_orphans(store: &SessionStore) -> CleanupSummary {
     let known_ids = sessions.iter().map(|meta| meta.id.clone()).collect();
     let in_use: Vec<_> = sessions
         .into_iter()
-        .map(|meta| meta.cwd)
+        .flat_map(|meta| {
+            std::iter::once(meta.cwd)
+                .chain(meta.other_worktrees.into_iter().map(|owned| owned.path))
+        })
         .chain(kept)
         .collect();
     cleanup_orphans_at(
@@ -595,8 +610,8 @@ pub fn cleanup_orphans(store: &SessionStore) -> CleanupSummary {
     )
 }
 
-/// `in_use` holds paths that keep the worktree containing them: thread cwds
-/// and kept worktrees. A worktree sits either in a repository's directory
+/// `in_use` holds paths that keep the worktree containing them: thread cwds,
+/// the other worktrees threads own, and kept worktrees. A worktree sits either in a repository's directory
 /// (`<worktrees>/<repository>/<name>`) or, provisioned before those existed,
 /// directly in `worktrees` under its thread's id.
 fn cleanup_orphans_at(

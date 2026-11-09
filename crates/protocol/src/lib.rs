@@ -305,6 +305,13 @@ pub use wire::{
 // went along. ApprovalRequest carries reason, why the harness asks a person,
 // which moves off the exec_command and file_change kinds, and blocked_path;
 // the exec_command kind carries description.
+//
+// Unreleased: session_moved gains an optional parent_item_id (a native
+// subagent's own directory); the agent event stream gains worktree_requested
+// and worktree_resolved (request: create {cwd, name} | remove {path}; answer:
+// ready {path, reused} | removed | refused {error}), the timeline the
+// worktree entry, and SessionMeta other_worktrees ({path, root_project_path,
+// base, branch}).
 pub const PROTOCOL_VERSION: u32 = 26;
 
 #[cfg(test)]

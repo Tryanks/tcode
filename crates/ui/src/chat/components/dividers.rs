@@ -228,6 +228,60 @@ pub(crate) fn session_moved_divider(
     )
 }
 
+/// What Tcode did with a worktree the harness asked it for.
+pub(crate) fn worktree_divider(
+    id: &str,
+    request: &agent::WorktreeRequest,
+    answer: &agent::WorktreeAnswer,
+    cx: &App,
+) -> AnyElement {
+    use agent::{WorktreeAnswer, WorktreeRequest};
+    let (label, tint) = match (request, answer) {
+        (WorktreeRequest::Create { name, .. }, WorktreeAnswer::Ready { path, reused }) => (
+            if *reused {
+                crate::tr!(
+                    "chat.worktree_reused",
+                    name = name,
+                    path = path.to_string_lossy()
+                )
+            } else {
+                crate::tr!(
+                    "chat.worktree_created",
+                    name = name,
+                    path = path.to_string_lossy()
+                )
+            },
+            cx.theme().muted_foreground,
+        ),
+        (WorktreeRequest::Create { name, .. }, WorktreeAnswer::Refused { error }) => (
+            crate::tr!("chat.worktree_create_refused", name = name, error = error),
+            cx.theme().warning,
+        ),
+        (WorktreeRequest::Remove { path }, WorktreeAnswer::Refused { error }) => (
+            crate::tr!(
+                "chat.worktree_remove_refused",
+                path = path.to_string_lossy(),
+                error = error
+            ),
+            cx.theme().warning,
+        ),
+        (WorktreeRequest::Remove { path }, _) => (
+            crate::tr!("chat.worktree_removed", path = path.to_string_lossy()),
+            cx.theme().muted_foreground,
+        ),
+        (WorktreeRequest::Create { name, .. }, WorktreeAnswer::Removed) => (
+            crate::tr!("chat.worktree_removed", path = name),
+            cx.theme().muted_foreground,
+        ),
+    };
+    divider(
+        SharedString::from(format!("worktree-{id}")),
+        label.into_owned(),
+        tint,
+        cx,
+    )
+}
+
 /// Why a harness did not rewind, in the user's words.
 pub(crate) fn rewind_reason(reason: agent::RewindFailureReason, harness: &str) -> String {
     use agent::RewindFailureReason as Reason;

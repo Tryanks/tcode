@@ -358,8 +358,14 @@ impl AppState {
         let worktrees = self
             .sessions
             .iter()
-            .filter(|meta| meta.worktree.is_some() && in_project(meta))
-            .map(|meta| meta.cwd.clone())
+            .filter(|meta| in_project(meta))
+            .flat_map(|meta| {
+                meta.worktree
+                    .as_ref()
+                    .map(|_| meta.cwd.clone())
+                    .into_iter()
+                    .chain(meta.other_worktrees.iter().map(|owned| owned.path.clone()))
+            })
             .collect();
         Ok((old_root, worktrees))
     }
@@ -411,10 +417,14 @@ impl AppState {
                     stranded.push(meta.clone());
                 }
             }
-            if let Some(worktree) = &mut meta.worktree
-                && let Some(path) = rebase_path(&worktree.root_project_path, &old_root, &root)
+            for worktree in meta
+                .worktree
+                .iter_mut()
+                .chain(meta.other_worktrees.iter_mut().map(|owned| &mut owned.info))
             {
-                worktree.root_project_path = path;
+                if let Some(path) = rebase_path(&worktree.root_project_path, &old_root, &root) {
+                    worktree.root_project_path = path;
+                }
             }
             if let Some(target) = &absorbing
                 && meta.project_id.as_deref() == Some(project_id)
@@ -424,6 +434,7 @@ impl AppState {
             if let Some(resident) = self.resident_mut(&meta.id) {
                 resident.meta.cwd = meta.cwd.clone();
                 resident.meta.worktree = meta.worktree.clone();
+                resident.meta.other_worktrees = meta.other_worktrees.clone();
                 resident.meta.project_id = meta.project_id.clone();
                 resident.meta.moved_from = meta.moved_from.clone();
                 resident.meta.resume_cursor = meta.resume_cursor.clone();
@@ -608,8 +619,10 @@ impl AppState {
     }
 
     /// Take a thread to `cwd`, where its provider reports the native session moved: on its
-    /// own (the model moved it) or as a move of the thread asked, which [`move_meta`] has
-    /// already recorded. `false` when the thread is already there.
+    /// own (the model moved it, or entered or left a worktree) or as a move of the thread
+    /// asked, which [`move_meta`] has already recorded. A worktree the thread owns there
+    /// becomes the one it works in, and the one it leaves stays owned. `false` when the
+    /// thread is already there.
     pub(super) fn follow_native_move(
         &mut self,
         session_id: &str,
@@ -622,8 +635,23 @@ impl AppState {
         else {
             return false;
         };
-        session.meta.cwd = cwd.to_path_buf();
-        session.meta.updated_at = now_secs();
+        let meta = &mut session.meta;
+        if let Some(own) = meta.worktree.take() {
+            meta.other_worktrees
+                .push(tcode_core::project::OwnedWorktree {
+                    path: meta.cwd.clone(),
+                    info: own,
+                });
+        }
+        if let Some(index) = meta
+            .other_worktrees
+            .iter()
+            .position(|owned| owned.path == cwd)
+        {
+            meta.worktree = Some(meta.other_worktrees.remove(index).info);
+        }
+        meta.cwd = cwd.to_path_buf();
+        meta.updated_at = now_secs();
         session.live_cwd = cwd.to_path_buf();
         session.git_branch = None;
         session.branches.clear();
@@ -1654,22 +1682,30 @@ impl AppState {
         let mut worktree_removals = Vec::new();
         let sharing = self.worktree_sharing();
         for meta in &metas {
-            let Some(worktree) = &meta.worktree else {
-                continue;
-            };
-            if !remove_worktree {
-                kept_worktrees.push(meta.cwd.clone());
-            } else if sharing.is_shared(meta) {
-                log::info!(
-                    "keeping worktree {} in use by another thread",
-                    meta.cwd.display()
+            let owned = meta
+                .worktree
+                .iter()
+                .map(|worktree| (worktree, &meta.cwd))
+                .chain(
+                    meta.other_worktrees
+                        .iter()
+                        .map(|owned| (&owned.info, &owned.path)),
                 );
-            } else {
-                worktree_removals.push((
-                    meta.id.clone(),
-                    worktree.root_project_path.clone(),
-                    meta.cwd.clone(),
-                ));
+            for (worktree, path) in owned {
+                if !remove_worktree {
+                    kept_worktrees.push(path.clone());
+                } else if sharing.is_used_elsewhere(meta, path, &worktree.branch) {
+                    log::info!(
+                        "keeping worktree {} in use by another thread",
+                        path.display()
+                    );
+                } else {
+                    worktree_removals.push((
+                        meta.id.clone(),
+                        worktree.root_project_path.clone(),
+                        path.clone(),
+                    ));
+                }
             }
         }
         self.enqueue_store_write(
@@ -2429,6 +2465,7 @@ fn move_meta(meta: &mut SessionMeta, cwd: PathBuf) -> Option<AgentEvent> {
         return Some(AgentEvent::SessionMoved {
             from,
             to: meta.cwd.clone(),
+            parent_item_id: None,
         });
     }
     meta.moved_from.get_or_insert(from);

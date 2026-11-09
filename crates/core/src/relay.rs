@@ -48,6 +48,7 @@ fn is_provider_work(content: &EntryContent) -> bool {
         | EntryContent::ContextWindowChanged { .. }
         | EntryContent::SettingsKept
         | EntryContent::SessionMoved { .. }
+        | EntryContent::Worktree { .. }
         | EntryContent::ControlAction(_)
         | EntryContent::Rewound(_)
         | EntryContent::RewindFailed { .. }
@@ -323,6 +324,12 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
                 "move",
                 "thread",
                 &format!("moved from `{}` to `{}`", from.display(), to.display()),
+            ),
+            EntryContent::Worktree { request, answer } => activity(
+                &mut body,
+                "worktree",
+                "tcode",
+                &crate::session::worktree_summary(request, answer),
             ),
             // The removed turns are no longer the harness's conversation.
             EntryContent::ModelChanged { .. }

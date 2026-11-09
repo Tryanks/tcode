@@ -543,6 +543,10 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             from.hash(hash);
             to.hash(hash);
         }
+        EntryContent::Worktree { request, answer } => {
+            request.hash(hash);
+            answer.hash(hash);
+        }
         EntryContent::ControlAction(action) => {
             action.actor_thread_id.hash(hash);
             action.action.hash(hash);

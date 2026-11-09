@@ -37,6 +37,7 @@ pub(crate) enum Segment<'a> {
     ContextWindowChanged(&'a TimelineEntry),
     SettingsKept(&'a TimelineEntry),
     SessionMoved(&'a TimelineEntry),
+    Worktree(&'a TimelineEntry),
     ControlAction(&'a TimelineEntry),
     /// A rewind's divider, or a rewind the harness did not make.
     Rewind(&'a TimelineEntry),
@@ -267,6 +268,9 @@ pub(crate) fn segment_entries<'a>(
             }
             EntryContent::SessionMoved { .. } => {
                 single(&mut segments, &mut ranges, Segment::SessionMoved(entry));
+            }
+            EntryContent::Worktree { .. } => {
+                single(&mut segments, &mut ranges, Segment::Worktree(entry));
             }
             EntryContent::ControlAction(_) => {
                 single(&mut segments, &mut ranges, Segment::ControlAction(entry));

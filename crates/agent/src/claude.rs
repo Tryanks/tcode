@@ -14,9 +14,10 @@
 //! which we surface as [`AgentEvent::ApprovalRequested`] and answer with a
 //! `control_response`. This flag set (and the control shapes) is lifted from the
 //! `@anthropic-ai/claude-agent-sdk` `Query` implementation, which spawns the same
-//! CLI. We intentionally do NOT send an `initialize` control_request: the CLI
-//! streams `can_use_tool` prompts without it (verified against v2.1.206), so the
-//! handshake is unnecessary for our reduced feature set.
+//! CLI. Before the first message an `initialize` control_request registers hook
+//! callbacks for `WorktreeCreate` and `WorktreeRemove`, so that every worktree the
+//! session or its subagents work in is asked of the host
+//! ([`AgentEvent::WorktreeRequested`]); nothing else rides on the handshake.
 //!
 //! Everything is normalized into the canonical [`AgentEvent`] stream. An actor
 //! task owns the child: it reads stdout lines, receives [`SessionCommand`]s, and
@@ -44,8 +45,18 @@ use crate::{
     ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
     PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode,
     SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, ToolOutput, TurnStatus,
-    UserInputDelivery, UserInputOption, UserInputQuestion, selection_bool, selection_str,
+    UserInputDelivery, UserInputOption, UserInputQuestion, WorktreeAnswer, WorktreeRequest,
+    selection_bool, selection_str,
 };
+
+/// The hook callbacks `initialize` registers. With `onFailure: "block"` an error
+/// answer fails the worktree tool instead of counting as an empty success, which
+/// for `WorktreeRemove` would report a removal that did not happen.
+const WORKTREE_CREATE_CALLBACK: &str = "tcode-worktree-create";
+const WORKTREE_REMOVE_CALLBACK: &str = "tcode-worktree-remove";
+/// The prefix of the worktree name Claude Code asks for an `isolation: "worktree"`
+/// subagent, before its agent id (the `task_started` `task_id`).
+const SUBAGENT_WORKTREE_PREFIX: &str = "agent-";
 
 /// First Claude Code build whose headless control protocol is verified to
 /// expose `rewind_conversation` alongside the SDK's `rewind_files` request.
@@ -494,6 +505,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     });
 
     let session_config = SessionConfig {
+        cwd: opts.cwd.clone(),
         claude_dir: config_dir(&opts.launch_env),
         launch,
         resumed: opts.resume.is_some(),
@@ -823,6 +835,8 @@ const LIVE_SETTINGS_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 
 /// Per-session config threaded into the actor loop / mapper.
 struct SessionConfig {
+    /// The directory the process was started in.
+    cwd: PathBuf,
     claude_dir: Option<PathBuf>,
     launch: ClaudeLaunchOptions,
     /// The transcript already holds history this process did not write.
@@ -912,7 +926,14 @@ async fn actor_loop(
     let mut mapper = Mapper::new_configured(applied_permission_mode, native_rewind);
     mapper.rewind_preview = rewind_preview;
     mapper.applied_settings = config.launch.clone();
+    mapper.launch_cwd = Some(config.cwd.clone());
+    mapper.cwd = Some(config.cwd.clone());
     let claude_dir = config.claude_dir.clone();
+    // Before any user message, so no worktree is made without the host.
+    let initialize = mapper.initialize_request();
+    if let Err(error) = write_line(&mut stdin, &initialize).await {
+        log::warn!("claude: could not register the worktree hooks: {error}");
+    }
     let mut tailers = HashMap::new();
     let (tail_tx, tail_rx) = smol::channel::unbounded::<SubagentTailNotice>();
     let mut goal: Option<GoalTranscript> = None;
@@ -1537,6 +1558,23 @@ async fn handle_command(
         SessionCommand::RetryTurn { .. } | SessionCommand::MoveTo { .. } => {
             ControlFlow::Continue(())
         }
+        SessionCommand::RespondWorktree { request_id, answer } => {
+            match mapper.worktree_response(&request_id, &answer) {
+                Some((response, request)) => {
+                    if write_line(stdin, &response).await.is_ok() {
+                        let _ = event_tx
+                            .send(AgentEvent::WorktreeResolved {
+                                request_id,
+                                request,
+                                answer,
+                            })
+                            .await;
+                    }
+                }
+                None => log::debug!("claude: worktree answer for unknown request {request_id}"),
+            }
+            ControlFlow::Continue(())
+        }
         // The same `get_usage` control request [`read_usage`] sends, asked
         // of the running CLI instead of a process started for it.
         SessionCommand::ReadAccountUsage { reply } => {
@@ -1585,6 +1623,15 @@ async fn resolve_response<T>(
     } else {
         log::debug!("claude: response for unknown request {request_id}");
     }
+}
+
+/// Whether `left` and `right` name one directory, however each is spelled.
+fn same_directory(left: &Path, right: &Path) -> bool {
+    left == right
+        || matches!(
+            (left.canonicalize(), right.canonicalize()),
+            (Ok(left), Ok(right)) if left == right
+        )
 }
 
 fn control_response(request_id: &str, body: Value) -> Value {
@@ -2001,6 +2048,18 @@ pub(crate) struct Mapper {
     pending_background_moves: HashSet<String>,
     /// [`SessionCommand::ReadAccountUsage`] askers by control request_id.
     pending_usage_reads: HashMap<String, smol::channel::Sender<Result<Value, String>>>,
+    /// The `initialize` request awaiting Claude's answer.
+    pending_initialize: Option<String>,
+    /// Worktree hook callbacks awaiting the host, by control request_id.
+    pending_worktrees: HashMap<String, WorktreeRequest>,
+    /// Worktrees given to `isolation: "worktree"` subagents whose
+    /// `task_started` has not come yet, by agent id: (the directory that
+    /// asked, the worktree).
+    subagent_worktrees: HashMap<String, (PathBuf, PathBuf)>,
+    /// The directory the process was started in, and the one the session works
+    /// in now, as far as Claude has said. `None` in fixtures that start nowhere.
+    launch_cwd: Option<PathBuf>,
+    cwd: Option<PathBuf>,
     outgoing: Vec<Value>,
     request_usage: Value,
     latest_usage: TokenUsage,
@@ -2074,6 +2133,11 @@ impl Mapper {
             pending_permission_modes: HashMap::new(),
             pending_background_moves: HashSet::new(),
             pending_usage_reads: HashMap::new(),
+            pending_initialize: None,
+            pending_worktrees: HashMap::new(),
+            subagent_worktrees: HashMap::new(),
+            launch_cwd: None,
+            cwd: None,
             outgoing: Vec::new(),
             request_usage: json!({}),
             latest_usage: TokenUsage::default(),
@@ -2409,6 +2473,117 @@ impl Mapper {
             .collect()
     }
 
+    /// The `initialize` control request registering the worktree hooks.
+    fn initialize_request(&mut self) -> Value {
+        let message = self.control_request(json!({
+            "subtype": "initialize",
+            "hooks": {
+                "WorktreeCreate": [
+                    { "hookCallbackIds": [WORKTREE_CREATE_CALLBACK], "onFailure": "block" }
+                ],
+                "WorktreeRemove": [
+                    { "hookCallbackIds": [WORKTREE_REMOVE_CALLBACK], "onFailure": "block" }
+                ],
+            },
+        }));
+        self.pending_initialize = message["request_id"].as_str().map(str::to_owned);
+        message
+    }
+
+    /// A `hook_callback` control request: a worktree hook becomes a request to
+    /// the host; any other is answered with no opinion.
+    fn on_hook_callback(&mut self, request_id: String, request: &Value) -> Vec<AgentEvent> {
+        let input = request.get("input").unwrap_or(&Value::Null);
+        let field = |key: &str| input.get(key).and_then(Value::as_str);
+        let worktree = match field("hook_event_name") {
+            Some("WorktreeCreate") => {
+                field("cwd")
+                    .zip(field("name"))
+                    .map(|(cwd, name)| WorktreeRequest::Create {
+                        cwd: PathBuf::from(cwd),
+                        name: name.to_owned(),
+                    })
+            }
+            Some("WorktreeRemove") => field("worktree_path").map(|path| WorktreeRequest::Remove {
+                path: PathBuf::from(path),
+            }),
+            _ => None,
+        };
+        let Some(worktree) = worktree else {
+            log::debug!("claude: answering hook_callback {request} with no opinion");
+            self.outgoing.push(control_response(&request_id, json!({})));
+            return Vec::new();
+        };
+        self.pending_worktrees
+            .insert(request_id.clone(), worktree.clone());
+        vec![AgentEvent::WorktreeRequested {
+            request_id,
+            request: worktree,
+        }]
+    }
+
+    /// The `control_response` giving a pending worktree hook the host's
+    /// `answer`, and the request it answers; `None` for an unknown request id.
+    fn worktree_response(
+        &mut self,
+        request_id: &str,
+        answer: &WorktreeAnswer,
+    ) -> Option<(Value, WorktreeRequest)> {
+        let request = self.pending_worktrees.remove(request_id)?;
+        let refusal = |error: &str| {
+            json!({
+                "type": "control_response",
+                "response": { "subtype": "error", "request_id": request_id, "error": error },
+            })
+        };
+        let response = match (&request, answer) {
+            (WorktreeRequest::Create { cwd, name }, WorktreeAnswer::Ready { path, .. }) => {
+                if let Some(agent_id) = name.strip_prefix(SUBAGENT_WORKTREE_PREFIX) {
+                    self.subagent_worktrees
+                        .insert(agent_id.to_owned(), (cwd.clone(), path.clone()));
+                }
+                control_response(
+                    request_id,
+                    json!({ "hookSpecificOutput": {
+                        "hookEventName": "WorktreeCreate",
+                        "worktreePath": path,
+                    }}),
+                )
+            }
+            (WorktreeRequest::Remove { .. }, WorktreeAnswer::Removed) => {
+                control_response(request_id, json!({}))
+            }
+            (_, WorktreeAnswer::Refused { error }) => refusal(error),
+            (_, mismatched) => {
+                log::warn!("claude: {mismatched:?} does not answer {request:?}");
+                refusal("the host answered another kind of worktree request")
+            }
+        };
+        Some((response, request))
+    }
+
+    /// The session works in `to` from now on, as Claude reported it: a move, unless
+    /// that is where it works already.
+    fn move_session(&mut self, to: &str) -> Option<AgentEvent> {
+        let to = PathBuf::from(to);
+        let from = self.cwd.as_ref()?;
+        if same_directory(from, &to) {
+            return None;
+        }
+        // Claude reports directories resolved; the one Tcode started it in keeps
+        // Tcode's spelling.
+        let to = match &self.launch_cwd {
+            Some(launch) if same_directory(launch, &to) => launch.clone(),
+            _ => to,
+        };
+        let from = self.cwd.replace(to.clone())?;
+        Some(AgentEvent::SessionMoved {
+            from,
+            to,
+            parent_item_id: None,
+        })
+    }
+
     async fn on_wire_message(&mut self, msg: Value, claude_dir: Option<&Path>) -> Vec<AgentEvent> {
         let resumed = msg
             .pointer("/tool_use_result/resumedAgentId")
@@ -2633,8 +2808,17 @@ impl Mapper {
             }
             self.applied_permission_mode = mode.to_owned();
         }
+        // A resumed session goes on where it last worked, which Claude restores
+        // itself: a worktree it had entered rather than the directory it was
+        // started in.
+        let moved = msg
+            .get("cwd")
+            .and_then(Value::as_str)
+            .and_then(|cwd| self.move_session(cwd));
         if self.session_id.is_some() {
-            return vec![self.permission_options()];
+            let mut events = vec![self.permission_options()];
+            events.extend(moved);
+            return events;
         }
         let session_id = match msg.get("session_id").and_then(Value::as_str) {
             Some(id) => id.to_string(),
@@ -2660,6 +2844,7 @@ impl Mapper {
         if !commands.is_empty() {
             events.push(AgentEvent::ProviderCommands { commands });
         }
+        events.extend(moved);
         events
     }
 
@@ -2728,6 +2913,17 @@ impl Mapper {
             }
         }
         let mut events = self.update_subagent(&parent_id, ItemStatus::InProgress, None);
+        if let Some((from, to)) = msg
+            .get("task_id")
+            .and_then(Value::as_str)
+            .and_then(|task_id| self.subagent_worktrees.remove(task_id))
+        {
+            events.push(AgentEvent::SessionMoved {
+                from,
+                to,
+                parent_item_id: Some(parent_id.clone()),
+            });
+        }
         // The launch acknowledgement that returns the call is only in the
         // subagent's transcript, which both feeds replay; this comes once.
         if spawner.is_some() && msg.get("is_backgrounded").and_then(Value::as_bool) == Some(true) {
@@ -3482,6 +3678,17 @@ impl Mapper {
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            // Where the session works after it entered or left a worktree.
+            let moved_to = match &item {
+                ToolItem::Tool { name, .. } if !is_error => match name.as_str() {
+                    "EnterWorktree" => msg.pointer("/tool_use_result/worktreePath"),
+                    "ExitWorktree" => msg.pointer("/tool_use_result/restoredCwd"),
+                    _ => None,
+                },
+                _ => None,
+            }
+            .and_then(Value::as_str)
+            .map(str::to_owned);
             let output =
                 ToolOutput::from_content(block.get("content").unwrap_or(&Value::Null)).text;
             let status = if is_error {
@@ -3576,6 +3783,7 @@ impl Mapper {
                     parent_item_id: None,
                 });
             }
+            out.extend(moved_to.and_then(|to| self.move_session(&to)));
         }
         out
     }
@@ -3589,6 +3797,13 @@ impl Mapper {
         };
         if let Some(reply) = self.pending_usage_reads.remove(request_id) {
             let _ = reply.try_send(usage_response(response).map_err(|error| error.to_string()));
+            return Vec::new();
+        }
+        if self.pending_initialize.as_deref() == Some(request_id) {
+            self.pending_initialize = None;
+            if response.get("subtype").and_then(Value::as_str) != Some("success") {
+                log::warn!("claude: the worktree hooks were not registered: {response}");
+            }
             return Vec::new();
         }
         if self.pending_background_moves.remove(request_id) {
@@ -3798,6 +4013,11 @@ impl Mapper {
             Some(r) => r,
             None => return Vec::new(),
         };
+        if request.get("subtype").and_then(Value::as_str) == Some("hook_callback")
+            && let Some(request_id) = msg.get("request_id").and_then(Value::as_str)
+        {
+            return self.on_hook_callback(request_id.to_owned(), request);
+        }
         if request.get("subtype").and_then(Value::as_str) != Some("can_use_tool") {
             log::debug!(
                 "claude: ignoring control_request/{:?}",
@@ -4984,6 +5204,274 @@ mod tests {
             shut_down(handle).await;
             let _ = std::fs::remove_dir_all(directory);
         });
+    }
+
+    /// Every worktree goes through the host: the hooks are registered before
+    /// any message, Claude's `WorktreeCreate` callback becomes a request to the
+    /// host, and the host's answer reaches Claude as the hook's output. Frames
+    /// as Claude Code 2.1.319 sends and accepts them.
+    #[cfg(unix)]
+    #[test]
+    fn the_host_answers_claudes_worktree_hooks() {
+        use std::os::unix::fs::PermissionsExt as _;
+        smol::block_on(async {
+            let directory = std::env::temp_dir()
+                .join(format!("agent-claude-worktree-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let binary = directory.join("claude");
+            std::fs::write(
+                &binary,
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.319\\n'; exit 0; fi\n\
+                 while IFS= read -r line; do printf '%s\\n' \"$line\" >> stdin; case \"$line\" in *initialize*)\n\
+                 printf '%s\\n' '{\"type\":\"control_request\",\"request_id\":\"hook-1\",\"request\":{\"subtype\":\"hook_callback\",\"callback_id\":\"tcode-worktree-create\",\"input\":{\"session_id\":\"native\",\"transcript_path\":\"/home/me/.claude/projects/-work-repo/native.jsonl\",\"cwd\":\"/work/repo\",\"prompt_id\":\"prompt-1\",\"hook_event_name\":\"WorktreeCreate\",\"name\":\"feat\"},\"tool_use_id\":\"446fc413-fa9e-45ab-b701-854b8177c9a9\"}}';;\n\
+                 *hookSpecificOutput*) printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\"}';;\n\
+                 esac; done\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let handle = start(SessionOptions {
+                cwd: directory.clone(),
+                model: None,
+                resume: None,
+                fork: None,
+                binary_path: Some(binary),
+                option_selections: Vec::new(),
+                mcp_servers: Vec::new(),
+                launch_env: LaunchEnv::default(),
+                extra_args: Vec::new(),
+                acp: None,
+                instructions: None,
+            })
+            .await
+            .unwrap();
+            let request = loop {
+                if let AgentEvent::WorktreeRequested {
+                    request_id,
+                    request,
+                } = handle.events.recv().await.unwrap()
+                {
+                    break (request_id, request);
+                }
+            };
+            assert_eq!(
+                request,
+                (
+                    "hook-1".to_owned(),
+                    WorktreeRequest::Create {
+                        cwd: PathBuf::from("/work/repo"),
+                        name: "feat".into(),
+                    }
+                )
+            );
+            let answer = WorktreeAnswer::Ready {
+                path: PathBuf::from("/data/worktrees/repo-1a2b3c4d/feat"),
+                reused: false,
+            };
+            handle
+                .commands
+                .send(SessionCommand::RespondWorktree {
+                    request_id: "hook-1".into(),
+                    answer: answer.clone(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                handle.events.recv().await.unwrap(),
+                AgentEvent::WorktreeResolved {
+                    request_id: "hook-1".into(),
+                    request: request.1,
+                    answer,
+                }
+            );
+            // The stand-in answers the reply it read, so it has recorded it.
+            while !matches!(
+                handle.events.recv().await.unwrap(),
+                AgentEvent::TurnCompleted { .. }
+            ) {}
+            let stdin: Vec<Value> = std::fs::read_to_string(directory.join("stdin"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(
+                stdin,
+                [
+                    json!({"type":"control_request","request_id":"tcode-ctrl-1","request":{
+                        "subtype":"initialize",
+                        "hooks":{
+                            "WorktreeCreate":[{"hookCallbackIds":["tcode-worktree-create"],"onFailure":"block"}],
+                            "WorktreeRemove":[{"hookCallbackIds":["tcode-worktree-remove"],"onFailure":"block"}]
+                        }
+                    }}),
+                    json!({"type":"control_response","response":{
+                        "subtype":"success","request_id":"hook-1",
+                        "response":{"hookSpecificOutput":{
+                            "hookEventName":"WorktreeCreate",
+                            "worktreePath":"/data/worktrees/repo-1a2b3c4d/feat"
+                        }}
+                    }}),
+                ]
+            );
+            shut_down(handle).await;
+            let _ = std::fs::remove_dir_all(directory);
+        });
+    }
+
+    /// An `isolation: "worktree"` subagent asks for `agent-<agent id>` before
+    /// its `task_started`; the worktree it is given is where that subagent
+    /// works, while the session stays where it is. Removal and a refusal answer
+    /// in the shapes Claude Code 2.1.319 accepts.
+    #[test]
+    fn a_subagent_works_in_the_worktree_its_hook_was_given() {
+        let mut mapper = Mapper::new();
+        mapper.cwd = Some(PathBuf::from("/work/repo"));
+        feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg-1","role":"assistant","content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"description":"Print working directory","prompt":"Run pwd","subagent_type":"general-purpose","isolation":"worktree"}}]},"parent_tool_use_id":null,"session_id":"native"}"#,
+        );
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"control_request","request_id":"hook-1","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-create","input":{"session_id":"native","transcript_path":"/home/me/.claude/projects/-work-repo/native.jsonl","cwd":"/work/repo","prompt_id":"prompt-1","hook_event_name":"WorktreeCreate","name":"agent-a955ec08a6e37c75e"},"tool_use_id":"745e37e8-5bb4-421f-935d-909749721cb4"}}"#,
+        );
+        assert_eq!(
+            events,
+            [AgentEvent::WorktreeRequested {
+                request_id: "hook-1".into(),
+                request: WorktreeRequest::Create {
+                    cwd: PathBuf::from("/work/repo"),
+                    name: "agent-a955ec08a6e37c75e".into(),
+                },
+            }]
+        );
+        let worktree = PathBuf::from("/data/worktrees/repo-1a2b3c4d/agent-a955ec08a6e37c75e");
+        mapper
+            .worktree_response(
+                "hook-1",
+                &WorktreeAnswer::Ready {
+                    path: worktree.clone(),
+                    reused: false,
+                },
+            )
+            .unwrap();
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"system","subtype":"task_started","task_id":"a955ec08a6e37c75e","tool_use_id":"toolu_agent","description":"Print working directory","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","prompt":"Run pwd","session_id":"native"}"#,
+        );
+        assert!(
+            events.contains(&AgentEvent::SessionMoved {
+                from: PathBuf::from("/work/repo"),
+                to: worktree.clone(),
+                parent_item_id: Some("toolu_agent".into()),
+            }),
+            "{events:?}"
+        );
+        assert_eq!(mapper.cwd, Some(PathBuf::from("/work/repo")));
+
+        feed(
+            &mut mapper,
+            r#"{"type":"control_request","request_id":"hook-2","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-remove","input":{"session_id":"native","cwd":"/work/repo","hook_event_name":"WorktreeRemove","worktree_path":"/data/worktrees/repo-1a2b3c4d/agent-a955ec08a6e37c75e"}}}"#,
+        );
+        let (removed, _) = mapper
+            .worktree_response("hook-2", &WorktreeAnswer::Removed)
+            .unwrap();
+        assert_eq!(
+            removed,
+            json!({"type":"control_response","response":{"subtype":"success","request_id":"hook-2","response":{}}})
+        );
+        feed(
+            &mut mapper,
+            r#"{"type":"control_request","request_id":"hook-3","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-create","input":{"session_id":"native","cwd":"/work/repo","hook_event_name":"WorktreeCreate","name":"feat"}}}"#,
+        );
+        let (refused, request) = mapper
+            .worktree_response(
+                "hook-3",
+                &WorktreeAnswer::Refused {
+                    error: "/work/repo is not a Git repository root".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            refused,
+            json!({"type":"control_response","response":{"subtype":"error","request_id":"hook-3","error":"/work/repo is not a Git repository root"}})
+        );
+        assert!(matches!(request, WorktreeRequest::Create { name, .. } if name == "feat"));
+        assert!(
+            mapper
+                .worktree_response("hook-3", &WorktreeAnswer::Removed)
+                .is_none()
+        );
+    }
+
+    /// The session's directory follows Claude: into the worktree `EnterWorktree`
+    /// made, back to the one `ExitWorktree` restored (in the spelling Tcode
+    /// started it with, though Claude reports it resolved), and, on resume, to
+    /// the worktree `system/init` says Claude restored. A subagent's own
+    /// `EnterWorktree` moves only that subagent.
+    #[cfg(unix)]
+    #[test]
+    fn the_session_directory_follows_claude_in_and_out_of_worktrees() {
+        let directory =
+            std::env::temp_dir().join(format!("agent-claude-cwd-{}", uuid::Uuid::new_v4()));
+        let checkout = directory.join("repo");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let link = directory.join("link");
+        std::os::unix::fs::symlink(&checkout, &link).unwrap();
+        let resolved = checkout.canonicalize().unwrap();
+        let worktree = PathBuf::from("/data/worktrees/repo-1a2b3c4d/feat");
+        let started = |cwd: &Path| {
+            let mut mapper = Mapper::new();
+            mapper.launch_cwd = Some(link.clone());
+            mapper.cwd = Some(link.clone());
+            let events = mapper.on_message(json!({"type":"system","subtype":"init","cwd":cwd,"session_id":"native","permissionMode":"default"}));
+            (mapper, events)
+        };
+        let moved = |events: &[AgentEvent]| -> Vec<(PathBuf, PathBuf)> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::SessionMoved {
+                        from,
+                        to,
+                        parent_item_id: None,
+                    } => Some((from.clone(), to.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let (mut mapper, events) = started(&resolved);
+        assert_eq!(moved(&events), []);
+        let tool = |id: &str, name: &str, result: Value| {
+            [
+                json!({"type":"assistant","message":{"id":format!("msg-{id}"),"role":"assistant","content":[{"type":"tool_use","id":id,"name":name,"input":{}}]},"parent_tool_use_id":null,"session_id":"native"}),
+                json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":"done"}]},"parent_tool_use_id":null,"session_id":"native","tool_use_result":result}),
+            ]
+        };
+        let mut events = Vec::new();
+        for frame in tool(
+            "toolu_enter",
+            "EnterWorktree",
+            json!({"worktreePath":worktree,"message":"Created worktree. The session is now working in the worktree."}),
+        ) {
+            events.extend(mapper.on_message(frame));
+        }
+        assert_eq!(moved(&events), [(link.clone(), worktree.clone())]);
+        // A subagent's call reaches the session as that subagent's.
+        let events = mapper.on_message(json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_child_enter","content":"done"}]},"parent_tool_use_id":"toolu_agent","session_id":"native","tool_use_result":{"worktreePath":"/data/worktrees/repo-1a2b3c4d/child"}}));
+        assert_eq!(moved(&events), []);
+        let mut events = Vec::new();
+        for frame in tool(
+            "toolu_exit",
+            "ExitWorktree",
+            json!({"action":"keep","originalCwd":resolved,"worktreePath":worktree,"restoredCwd":resolved,"originalCwdMissing":false}),
+        ) {
+            events.extend(mapper.on_message(frame));
+        }
+        assert_eq!(moved(&events), [(worktree.clone(), link.clone())]);
+
+        let (_, events) = started(&worktree);
+        assert_eq!(moved(&events), [(link.clone(), worktree.clone())]);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[cfg(unix)]

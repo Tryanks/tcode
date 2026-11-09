@@ -488,6 +488,36 @@ pub struct TurnChangeSet {
     pub completeness: ChangeCompleteness,
 }
 
+/// [`EntryContent::Worktree`] in plain words, for text that is not the timeline.
+pub fn worktree_summary(
+    request: &agent::WorktreeRequest,
+    answer: &agent::WorktreeAnswer,
+) -> String {
+    use agent::{WorktreeAnswer, WorktreeRequest};
+    match (request, answer) {
+        (WorktreeRequest::Create { name, .. }, WorktreeAnswer::Ready { path, reused }) => format!(
+            "{} worktree `{name}` at `{}`",
+            if *reused { "reused" } else { "created" },
+            path.display()
+        ),
+        (WorktreeRequest::Create { name, .. }, WorktreeAnswer::Refused { error }) => {
+            format!("could not create worktree `{name}`: {error}")
+        }
+        (WorktreeRequest::Remove { path }, WorktreeAnswer::Refused { error }) => {
+            format!(
+                "could not remove the worktree at `{}`: {error}",
+                path.display()
+            )
+        }
+        (WorktreeRequest::Create { name, .. }, WorktreeAnswer::Removed) => {
+            format!("removed worktree `{name}`")
+        }
+        (WorktreeRequest::Remove { path }, _) => {
+            format!("removed the worktree at `{}`", path.display())
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum EntryContent {
     Item(ItemContent),
@@ -546,10 +576,16 @@ pub enum EntryContent {
     },
     /// The message before this ran on the live process's old settings.
     SettingsKept,
-    /// The thread moved to another directory, its native session along with it.
+    /// The native session goes on in another directory: the thread moved and its
+    /// session went along, or the session changed directory on its own.
     SessionMoved {
         from: std::path::PathBuf,
         to: std::path::PathBuf,
+    },
+    /// What Tcode did with a git worktree the harness asked it for.
+    Worktree {
+        request: agent::WorktreeRequest,
+        answer: agent::WorktreeAnswer,
     },
     /// Another thread's model acted on this thread through `tcode_control`
     /// (a system row naming the actor and the action).
@@ -1204,6 +1240,7 @@ impl Timeline {
                 self.last_turn_status = None;
             }
             AgentEvent::TurnAccepted { .. }
+            | AgentEvent::WorktreeRequested { .. }
             | AgentEvent::McpServersNotAttached
             | AgentEvent::BackgroundTasksChanged { .. }
             | AgentEvent::SettingsApplied { .. }
@@ -1663,7 +1700,7 @@ impl Timeline {
                     turn,
                 }));
             }
-            AgentEvent::SessionMoved { from, to } => {
+            AgentEvent::SessionMoved { from, to, .. } => {
                 let turn = self.ensure_turn();
                 let id = self.synthetic_id("moved", ts);
                 self.entries.push(Arc::new(TimelineEntry {
@@ -1671,6 +1708,23 @@ impl Timeline {
                     content: EntryContent::SessionMoved {
                         from: from.clone(),
                         to: to.clone(),
+                    },
+                    ts,
+                    finished_ts: None,
+                    background: false,
+                    turn,
+                }));
+            }
+            AgentEvent::WorktreeResolved {
+                request, answer, ..
+            } => {
+                let turn = self.ensure_turn();
+                let id = self.synthetic_id("worktree", ts);
+                self.entries.push(Arc::new(TimelineEntry {
+                    id,
+                    content: EntryContent::Worktree {
+                        request: request.clone(),
+                        answer: answer.clone(),
                     },
                     ts,
                     finished_ts: None,
