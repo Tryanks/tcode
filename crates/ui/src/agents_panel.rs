@@ -757,9 +757,9 @@ enum BadgeStyle {
 
 pub(crate) fn execution_color(execution: AgentExecution, cx: &App) -> Hsla {
     match execution {
-        AgentExecution::Working => cx.theme().primary,
+        // Running in the background is running: it reads as Working does.
+        AgentExecution::Working | AgentExecution::Background => cx.theme().primary,
         AgentExecution::Waiting => cx.theme().warning,
-        AgentExecution::Background => cx.theme().muted_foreground,
         AgentExecution::Finished => cx.theme().success,
         AgentExecution::Failed => cx.theme().danger,
         AgentExecution::Cancelled | AgentExecution::Interrupted => cx.theme().muted_foreground,
@@ -788,7 +788,10 @@ pub(crate) fn status_mark(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let working = execution == Some(AgentExecution::Working);
+    let working = matches!(
+        execution,
+        Some(AgentExecution::Working | AgentExecution::Background)
+    );
     let color = gpui_base::motion::transition(
         SharedString::from(format!("agent-status-color-{key}")),
         execution
