@@ -9,6 +9,7 @@ chat:
   history_record_too_large: "履歴レコードが 8 MiB の応答サイズの上限を超えています。"
   relayed: "%{from} から %{to} に引き継ぎました"
   moved: "%{from} からここに移動しました。%{to} は新しいセッションで続行します"
+  session_moved: "%{from} から %{to} に移動しました。同じセッションがそこで続行します"
   relay_handoff: "%{to} に送信した引き継ぎ内容"
   model_changed: "モデルを変更しました：%{from} → %{to}"
   model_changed_to: "モデルを %{to} に変更しました"

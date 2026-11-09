@@ -132,6 +132,14 @@ impl TimelineView {
                     column =
                         column.child(components::dividers::settings_kept_divider(&entry.id, cx));
                 }
+                Segment::SessionMoved(entry) => {
+                    let EntryContent::SessionMoved { from, to } = &entry.content else {
+                        unreachable!();
+                    };
+                    column = column.child(components::dividers::session_moved_divider(
+                        &entry.id, from, to, cx,
+                    ));
+                }
                 Segment::ControlAction(entry) => {
                     let EntryContent::ControlAction(action) = &entry.content else {
                         unreachable!();

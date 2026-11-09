@@ -9,6 +9,7 @@ chat:
   history_record_too_large: A history record exceeds the 8 MiB response limit.
   relayed: "Relayed from %{from} to %{to}"
   moved: "Moved here from %{from}; %{to} continues in a new session"
+  session_moved: "Moved from %{from} to %{to}; the same session continues there"
   relay_handoff: "Handoff sent to %{to}"
   model_changed: "Model changed: %{from} → %{to}"
   model_changed_to: "Model changed to %{to}"

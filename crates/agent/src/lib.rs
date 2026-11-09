@@ -177,6 +177,10 @@ pub struct Caps {
     /// A session resumes under another account profile of this provider once
     /// [`transfer_session`] has copied its native files into that profile's home.
     pub session_transfer: bool,
+    /// The same native session goes on in another working directory: resumed
+    /// there ([`SessionOptions::cwd`]), or sent there while it runs
+    /// ([`SessionCommand::MoveTo`]).
+    pub session_move: bool,
 }
 
 /// Where a session started from [`SessionOptions::resume`] goes on instead of
@@ -394,6 +398,7 @@ impl ProviderKind {
                 instruction_channel: InstructionChannel::SessionAppend,
                 account_login: true,
                 session_transfer: true,
+                session_move: false,
             },
             ProviderKind::Codex => Caps {
                 supports_steering: true,
@@ -449,6 +454,9 @@ impl ProviderKind {
                 instruction_channel: InstructionChannel::DeveloperContext,
                 account_login: true,
                 session_transfer: false,
+                // `thread/resume {cwd}`, and `turn/start {cwd}` for the turn
+                // after a move and those after it (0.167.0).
+                session_move: true,
             },
             ProviderKind::Acp => Caps {
                 supports_steering: false,
@@ -474,6 +482,7 @@ impl ProviderKind {
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
                 account_login: false,
                 session_transfer: false,
+                session_move: false,
             },
             ProviderKind::Pi => Caps {
                 supports_steering: true,
@@ -519,6 +528,7 @@ impl ProviderKind {
                 instruction_channel: InstructionChannel::None,
                 account_login: false,
                 session_transfer: false,
+                session_move: false,
             },
             ProviderKind::OpenCode => Caps {
                 supports_steering: true,
@@ -565,6 +575,7 @@ impl ProviderKind {
                 instruction_channel: InstructionChannel::SessionAppend,
                 account_login: false,
                 session_transfer: false,
+                session_move: false,
             },
             ProviderKind::Cursor => Caps {
                 supports_steering: false,
@@ -593,6 +604,7 @@ impl ProviderKind {
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
                 account_login: false,
                 session_transfer: false,
+                session_move: false,
             },
             ProviderKind::Grok => Caps {
                 supports_steering: true,
@@ -646,6 +658,7 @@ impl ProviderKind {
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
                 account_login: false,
                 session_transfer: false,
+                session_move: false,
             },
         }
     }
@@ -2047,6 +2060,13 @@ pub enum SessionCommand {
     StopBackgroundTask {
         task_id: Option<String>,
     },
+    /// Go on in `cwd`, the directory the thread moved to, keeping the native
+    /// session, on a harness whose [`Caps::session_move`] says it can. Each
+    /// harness moves its own way, by the turn after this at the latest; the
+    /// others ignore it.
+    MoveTo {
+        cwd: PathBuf,
+    },
     /// Move the running call `item_id` into the background, on a harness
     /// whose [`Caps::background`] can: the call returns to the model and its
     /// work goes on ([`AgentEvent::ItemBackgrounded`]).
@@ -2486,6 +2506,13 @@ pub enum AgentEvent {
     /// background work. Never emitted by an adapter; the runtime persists it
     /// after the user message it describes.
     SettingsKept,
+    /// The thread moved from `from` to `to` and its native session went along
+    /// ([`Caps::session_move`]). Never emitted by an adapter; the runtime
+    /// records it when the thread moves.
+    SessionMoved {
+        from: PathBuf,
+        to: PathBuf,
+    },
     /// Another thread's model acted on this thread through `tcode_control`. This is
     /// never emitted by an adapter; the runtime records it in the target thread.
     ControlAction(ControlAction),

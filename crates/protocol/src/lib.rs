@@ -299,6 +299,10 @@ pub use wire::{
 // undelivered; and BrowseDirectories (DirectoryListing), Settings'
 // new_project_dir, project_start and project_start_custom with their
 // patches, and CreateNewProject's parent.
+//
+// Unreleased: the agent event stream gains session_moved and the timeline
+// the session_moved entry (from, to), a moved thread whose native session
+// went along.
 pub const PROTOCOL_VERSION: u32 = 26;
 
 #[cfg(test)]
