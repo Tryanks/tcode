@@ -1203,6 +1203,7 @@ approval:
   tool_requested: "承認をリクエストしています"
   plan_requested: "計画の承認をリクエストしています"
   in_directory: "%{cwd} で実行"
+  blocked_path: "ブロックされたパス: %{path}"
   pending: "承認待ち"
   cancel_turn: "ターンをキャンセル"
 diff:

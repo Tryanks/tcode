@@ -1090,28 +1090,35 @@ impl PiActor {
             .unwrap_or("unknown")
             .to_owned();
         self.pending_approvals.insert(id.to_owned());
+        let kind = if payload.is_null() {
+            ApprovalKind::ToolUse {
+                name: message
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Confirmation")
+                    .to_owned(),
+                input: Value::Null,
+                detail: message
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            }
+        } else {
+            approval_kind(&tool_name, &payload)
+        };
         self.events
             .emit(AgentEvent::ApprovalRequested(ApprovalRequest {
                 id: id.to_owned(),
                 parent_item_id: None,
                 turn_id: self.mapper.current_turn.clone(),
-                kind: if payload.is_null() {
-                    ApprovalKind::ToolUse {
-                        name: message
-                            .get("title")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Confirmation")
-                            .to_owned(),
-                        input: Value::Null,
-                        detail: message
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned(),
-                    }
-                } else {
-                    approval_kind(&tool_name, &payload)
-                },
+                // A tool's reason is already its detail.
+                reason: (!matches!(kind, ApprovalKind::ToolUse { .. }))
+                    .then(|| payload.get("reason").and_then(Value::as_str))
+                    .flatten()
+                    .map(str::to_owned),
+                blocked_path: None,
+                kind,
                 options: vec![
                     ApprovalOption {
                         id: "confirm".into(),
@@ -1742,7 +1749,7 @@ fn approval_kind(tool_name: &str, payload: &Value) -> ApprovalKind {
                 .get("cwd")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
-            reason,
+            description: None,
         },
         "edit" | "write" => ApprovalKind::FileChange {
             changes: input
@@ -1760,7 +1767,6 @@ fn approval_kind(tool_name: &str, payload: &Value) -> ApprovalKind {
                     }]
                 })
                 .unwrap_or_default(),
-            reason,
         },
         _ => ApprovalKind::ToolUse {
             name: tool_name.to_owned(),

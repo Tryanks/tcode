@@ -1735,6 +1735,26 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
     )
 }
 
+/// Text without its terminal escape sequences (`ESC [ … letter`).
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if chars.next() == Some('[') {
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// The executable extensions to try for a bare name: `PATHEXT` on Windows
 /// (falling back to its documented default), and nothing anywhere else.
 fn path_extensions() -> Vec<String> {
@@ -3021,6 +3041,15 @@ pub struct ApprovalRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_item_id: Option<String>,
     pub kind: ApprovalKind,
+    /// Why the harness asks a person rather than deciding itself, in its own
+    /// words: Claude Code's consent line (a safety check it cannot bypass, a
+    /// rule, a hook), Codex's justification, OpenCode's or pi's message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The path a harness's path check stopped at, which may not appear in
+    /// the request itself (where a symlink or redirection lands).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_path: Option<String>,
     /// The provider's native choices for this request, in provider order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<ApprovalOption>,
@@ -3051,14 +3080,17 @@ pub enum ApprovalKind {
     ExecCommand {
         command: String,
         cwd: Option<String>,
-        reason: Option<String>,
+        /// What the command does, in the agent's words.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
     },
     /// A read-only file/search operation (Claude's `file_read_approval` family:
     /// Read/View/Grep/Glob/…/WebSearch). `detail` is the pre-rendered summary.
-    FileRead { detail: String },
+    FileRead {
+        detail: String,
+    },
     FileChange {
         changes: Vec<FileChange>,
-        reason: Option<String>,
     },
     /// Dynamic fallback for any tool that doesn't classify as command / file
     /// read / file change (agent, mcp, image, …). `detail` is the pre-rendered
@@ -3071,7 +3103,10 @@ pub enum ApprovalKind {
     /// Leave the harness's plan mode on the plan in [`ItemContent::Plan`]
     /// item `item_id`. A reply in the user's own words is
     /// [`ApprovalDecision::Feedback`]: the harness keeps planning from it.
-    Plan { item_id: String, markdown: String },
+    Plan {
+        item_id: String,
+        markdown: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3501,6 +3536,42 @@ mod thread_item_serde_tests {
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
             r#"{"type":"user_input_requested","request_id":"q","questions":[],"delivery":"async"}"#
+        );
+    }
+
+    #[test]
+    fn an_approval_carries_its_reason_and_older_rows_still_read() {
+        let legacy = r#"{"type":"approval_requested","id":"r","turn_id":null,"kind":{"kind":"exec_command","command":"ls","cwd":null,"reason":"why"}}"#;
+        let AgentEvent::ApprovalRequested(request) = serde_json::from_str(legacy).unwrap() else {
+            panic!("an older approval row reads as an approval");
+        };
+        assert_eq!(
+            request.kind,
+            ApprovalKind::ExecCommand {
+                command: "ls".into(),
+                cwd: None,
+                description: None,
+            }
+        );
+        let legacy = r#"{"type":"approval_requested","id":"r","turn_id":null,"kind":{"kind":"file_change","changes":[],"reason":null}}"#;
+        assert!(serde_json::from_str::<AgentEvent>(legacy).is_ok());
+
+        let event = AgentEvent::ApprovalRequested(ApprovalRequest {
+            id: "r".into(),
+            turn_id: None,
+            parent_item_id: None,
+            kind: ApprovalKind::ExecCommand {
+                command: "rm -rf $F/*".into(),
+                cwd: None,
+                description: Some("Clear the scratch directory".into()),
+            },
+            reason: Some("Dangerous rm operation detected".into()),
+            blocked_path: Some("/tmp/scratch".into()),
+            options: Vec::new(),
+        });
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"approval_requested","id":"r","turn_id":null,"kind":{"kind":"exec_command","command":"rm -rf $F/*","cwd":null,"description":"Clear the scratch directory"},"reason":"Dangerous rm operation detected","blocked_path":"/tmp/scratch"}"#
         );
     }
 

@@ -2861,6 +2861,8 @@ mod tests {
                         item_id: id.into(),
                         markdown,
                     },
+                    reason: None,
+                    blocked_path: None,
                     options: vec![
                         agent::ApprovalOption {
                             id: "allow".into(),

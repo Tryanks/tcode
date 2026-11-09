@@ -1900,6 +1900,8 @@ impl Actor {
                     input: params.get("action").cloned().unwrap_or(Value::Null),
                     detail: rationale.into(),
                 },
+                reason: None,
+                blocked_path: None,
                 options: vec![ApprovalOption {
                     id: "thread/approveGuardianDeniedAction".into(),
                     label: "Approve this action".into(),
@@ -2398,10 +2400,7 @@ impl Actor {
                 ApprovalKind::ExecCommand {
                     command: shell_script(&string_field(params, "command")),
                     cwd: params.get("cwd").and_then(Value::as_str).map(str::to_owned),
-                    reason: params
-                        .get("reason")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
+                    description: None,
                 }
             }
             "item/fileChange/requestApproval" | "applyPatchApproval" => ApprovalKind::FileChange {
@@ -2413,10 +2412,6 @@ impl Actor {
                         _ => None,
                     })
                     .unwrap_or_default(),
-                reason: params
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
             },
             "item/permissions/requestApproval" => ApprovalKind::ToolUse {
                 name: "request_permissions".into(),
@@ -2457,6 +2452,12 @@ impl Actor {
                 id: key,
                 parent_item_id: None,
                 turn_id,
+                // A permissions request's reason is already its detail.
+                reason: (!matches!(kind, ApprovalKind::ToolUse { .. }))
+                    .then(|| params.get("reason").and_then(Value::as_str))
+                    .flatten()
+                    .map(str::to_owned),
+                blocked_path: None,
                 kind,
                 options,
             }))
@@ -2553,6 +2554,8 @@ impl Actor {
                             .unwrap_or("MCP approval")
                             .into(),
                     },
+                    reason: None,
+                    blocked_path: None,
                     options,
                 }))
                 .await;
