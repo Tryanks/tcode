@@ -1560,14 +1560,7 @@ impl AppShell {
             self.rehost(pane, &store, &preview, window, cx);
             self.fill_empty_column(&store, cx);
         }
-        if let Some(column) = self.column.as_mut() {
-            let panes = column.panes(cx);
-            if !panes.contains(&column.current_pane)
-                && let Some(first) = panes.first()
-            {
-                column.current_pane = first.clone();
-            }
-        }
+        self.replace_current_pane(cx);
         if on_page {
             self.window_state
                 .update(cx, |state, cx| state.drop_thread_pages(cx));
@@ -1837,12 +1830,6 @@ impl AppShell {
             return;
         };
         let (store, preview) = (link.store.clone(), link.preview.clone());
-        if let Some(client) = &self.setup.client_host {
-            client.set_last_host_id(match &host {
-                HostKey::Local => None,
-                HostKey::Remote(host_id) => Some(host_id),
-            });
-        }
         let sidebar_width = self.column.as_ref().map_or_else(
             || Rc::new(Cell::new(px(SIDEBAR_WIDTH))),
             |column| column.sidebar_width.clone(),
@@ -1906,6 +1893,36 @@ impl AppShell {
             sidebar_overlay_visible: false,
             _subscriptions: subscriptions,
         });
+        self.remember_host(cx);
+    }
+
+    /// The host a relaunch returns to is the current pane's, whichever
+    /// host that pane came to show.
+    fn remember_host(&self, cx: &App) {
+        let (Some(client), Some(column)) = (&self.setup.client_host, &self.column) else {
+            return;
+        };
+        let host_id = match column.current_pane.read(cx).host(cx) {
+            HostKey::Local => None,
+            HostKey::Remote(host_id) => Some(host_id),
+        };
+        if client.last_host_id() != host_id {
+            client.set_last_host_id(host_id.as_deref());
+        }
+    }
+
+    /// The current pane left the column: the first pane is current.
+    fn replace_current_pane(&mut self, cx: &mut Context<Self>) {
+        let Some(column) = self.column.as_mut() else {
+            return;
+        };
+        let panes = column.panes(cx);
+        if !panes.contains(&column.current_pane)
+            && let Some(first) = panes.first()
+        {
+            column.current_pane = first.clone();
+            self.remember_host(cx);
+        }
     }
 
     /// A pane over `store`'s host, waiting for a thread.
@@ -1967,6 +1984,7 @@ impl AppShell {
             pane.replace_chat(chat, None, cx);
             pane.set_drawer(drawer, cx);
         });
+        self.remember_host(cx);
     }
 
     /// A pane whose thread `store` closed leaves the column, and the last
@@ -2018,14 +2036,7 @@ impl AppShell {
                 remaining -= 1;
             }
         }
-        if let Some(column) = self.column.as_mut() {
-            let panes = column.panes(cx);
-            if !panes.contains(&column.current_pane)
-                && let Some(first) = panes.first()
-            {
-                column.current_pane = first.clone();
-            }
-        }
+        self.replace_current_pane(cx);
     }
 
     /// The pointer pressed in `pane` or the keyboard entered it, its drawer
@@ -2050,6 +2061,7 @@ impl AppShell {
         };
         if column.current_pane != *pane {
             column.current_pane = pane.clone();
+            self.remember_host(cx);
             self.moved_on(cx);
         }
     }
@@ -7602,6 +7614,52 @@ pub(crate) mod tests {
             turns_sent(&hosts[&key_b]),
             [("thread-1".to_owned(), "to b".to_owned())]
         );
+    }
+
+    /// A relaunch returns to the host of the current pane, wherever the
+    /// window moved it: to a pane opened beside over another host, back to
+    /// a pane the keyboard enters, and to the host of a thread the current
+    /// pane comes to show.
+    #[gpui::test]
+    fn a_relaunch_returns_to_the_current_panes_host(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1600.);
+        let (key_a, key_b) = (
+            HostKey::Remote("host-a".into()),
+            HostKey::Remote("host-b".into()),
+        );
+        let returns_to = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let client = cx.global::<crate::remote::ClientAttachment>().host();
+                crate::last_host_target(client.as_ref()).map(|target| target.key())
+            })
+        };
+        assert_eq!(returns_to(cx), Some(key_a.clone()));
+
+        let b = store_on(&shell, "host-b", cx);
+        let on_b = b.read_with(cx, |store, _| store.thread_key("thread-1"));
+        cx.update(|window, cx| window.dispatch_action(Box::new(OpenInNewPane(on_b)), cx));
+        serve_thread(&hosts[&key_b].host, "thread-1");
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-1"), cx)
+        });
+        settle_panes(cx);
+        assert_eq!(pane_hosts(&shell, cx), [key_a.clone(), key_b.clone()]);
+        assert_eq!(returns_to(cx), Some(key_b.clone()), "the pane beside");
+
+        let panes = shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().panes(cx));
+        type_into(&panes[0], cx);
+        assert_eq!(store_of(&shell, cx), store_on(&shell, "host-a", cx));
+        assert_eq!(returns_to(cx), Some(key_a.clone()), "the pane entered");
+
+        b.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
+        serve_thread(&hosts[&key_b].host, "thread-2");
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
+        });
+        settle_panes(cx);
+        assert_eq!(pane_hosts(&shell, cx), [key_b.clone(), key_b.clone()]);
+        assert_eq!(returns_to(cx), Some(key_b), "the thread the pane shows");
     }
 
     /// A row of host B's dropped on the edge of host A's pane opens beside
