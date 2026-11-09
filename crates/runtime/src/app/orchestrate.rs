@@ -493,7 +493,6 @@ impl AppState {
         !self.settle_thread_busy(id)
             && self.resident(id).is_none_or(|session| {
                 session.queue.is_empty()
-                    && session.background_task_count == 0
                     && matches!(session.runtime, Runtime::Idle | Runtime::Live(_))
             })
     }

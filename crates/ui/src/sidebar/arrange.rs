@@ -352,7 +352,10 @@ impl SessionsSidebar {
             title: meta.title.clone().into(),
             can_settle: !store.turn_running_for(&meta.id)
                 && !store.pending_approval_for(&meta.id)
-                && !store.pending_user_input_for(&meta.id),
+                && !store.pending_user_input_for(&meta.id)
+                && store
+                    .activity(&meta.id)
+                    .is_none_or(|activity| activity.background.tasks == 0),
             compact: self.compact(cx),
         })
     }
