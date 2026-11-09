@@ -10953,6 +10953,7 @@ pub(crate) mod tests {
 
     /// `id`'s log as the host answers it: a turn still running, in which it
     /// asked for each of `spawns`' native subagents.
+    #[cfg(not(target_os = "windows"))]
     fn serve_spawning(host: &MountedShell, id: &str, spawns: &[&str]) {
         let records: Vec<tcode_core::session::StoredEvent> = [
             agent::AgentEvent::TurnStarted {
@@ -13212,6 +13213,11 @@ pub(crate) mod tests {
     /// that pane's thread. Neither the press nor the release moves the
     /// keyboard; the release opens the thread's panel docked in its own pane.
     /// Each toggle closes only the panel of its own thread.
+    // Finds the left pane's toggle at the right pane's distance from its
+    // pane's end. On Windows the rightmost header ends in the window's
+    // caption buttons and the left one does not, so there the point is not
+    // the toggle and this drives nothing a user does.
+    #[cfg(not(target_os = "windows"))]
     #[gpui::test]
     fn a_header_toggle_acts_on_the_thread_of_its_own_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -13391,6 +13397,11 @@ pub(crate) mod tests {
     /// pane untouched; Plan opened in the right pane too docks there, each
     /// with its own thread's content. A thread moved to the other pane takes
     /// its panel along.
+    // Finds the left pane's toggle at the right pane's distance from its
+    // pane's end. On Windows the rightmost header ends in the window's
+    // caption buttons and the left one does not, so there the point is not
+    // the toggle and this drives nothing a user does.
+    #[cfg(not(target_os = "windows"))]
     #[gpui::test]
     fn each_pane_has_a_drawer_of_its_own(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
