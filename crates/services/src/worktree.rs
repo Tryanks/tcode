@@ -15,6 +15,9 @@ use crate::store::SessionStore;
 
 const WORKTREE_SEED_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 
+/// How much of a repository's directory name its worktrees' directory keeps.
+const REPOSITORY_NAME_CHARS: usize = 24;
+
 /// Removal deletes only branches in this namespace: Tcode created them.
 const BRANCH_PREFIX: &str = "tcode/";
 
@@ -198,7 +201,12 @@ fn repository_key(checkout: &Path) -> Result<String, WorktreeError> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    Ok(format!("{}-{hash}", path_safe(directory)))
+    // Git refuses a worktree whose `<path>/.git` is longer than its PATH_MAX
+    // less 40, 220 characters on Windows: the readable part stays short and
+    // the hash keeps repositories apart.
+    let mut readable = path_safe(directory);
+    readable.truncate(REPOSITORY_NAME_CHARS);
+    Ok(format!("{}-{hash}", readable.trim_end_matches('-')))
 }
 
 /// `name` as one path segment that is also a valid branch-name component.
