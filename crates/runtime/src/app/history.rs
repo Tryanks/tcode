@@ -950,7 +950,12 @@ impl AppState {
                 for query in hydration.queries {
                     query(Err(&error));
                 }
-                if hydration.timeline.is_some() {
+                // A message whose handoff waited for this log waits on.
+                let handoff_waits = self
+                    .resident(&session_id)
+                    .and_then(ActiveSession::handoff_message)
+                    .is_some();
+                if hydration.timeline.is_some() || handoff_waits {
                     self.report_error(
                         RuntimeError::External(format!(
                             "could not load thread {session_id}: {error}"
@@ -1002,7 +1007,16 @@ impl AppState {
         });
         self.event_records.insert(session_id.clone(), log);
         if let Some((load, cursor, fold)) = folded {
-            self.fold_timeline(session_id, load, cursor, fold, cx);
+            self.fold_timeline(session_id.clone(), load, cursor, fold, cx);
+        }
+        // A message whose handoff waited for this log goes now.
+        if self
+            .resident(&session_id)
+            .and_then(ActiveSession::handoff_message)
+            .is_some()
+            && self.dispatch_next_queued(&session_id, cx).is_err()
+        {
+            self.report_error(RuntimeError::ProcessGone, cx);
         }
     }
 
