@@ -10,13 +10,15 @@
 //! `wl_surface` of the host's own connection. Input goes the other way through
 //! [`Nest::pointer`] and [`Nest::key`], in the view's window-geometry
 //! coordinates, and text an input method composes through
-//! [`Nest::compose_text`] and [`Nest::commit_text`].
+//! [`Nest::compose_text`] and [`Nest::commit_text`]. [`Nest::start_gtk`]
+//! makes GTK in this process that client.
 #![cfg(target_os = "linux")]
 
 mod compose;
 mod keys;
 mod present;
 mod server;
+mod toolkit;
 
 pub use keys::{evdev_key, modifier};
 pub use present::{Crop, Presenter, Target};

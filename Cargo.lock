@@ -13049,7 +13049,6 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "calloop",
- "gdk",
  "gtk",
  "log",
  "memmap2",

@@ -105,6 +105,7 @@ enum Command {
         code: u32,
         pressed: bool,
     },
+    Type(char),
     Focus(Option<ViewId>),
     Presented(ViewId),
     Clipboard(String),
@@ -184,6 +185,14 @@ impl Nest {
         self.send(Command::Key { code, pressed });
     }
 
+    /// Types `c` on the view with keyboard focus as a key press, for a
+    /// character the nest's US layout ([`evdev_key`](crate::evdev_key))
+    /// cannot type. Unlike [`Nest::commit_text`], it reaches the client in
+    /// order with the keys around it.
+    pub fn type_char(&self, c: char) {
+        self.send(Command::Type(c));
+    }
+
     /// Gives the keyboard to `view`, or takes it away.
     pub fn focus(&self, view: Option<ViewId>) {
         self.send(Command::Focus(view));
@@ -219,6 +228,29 @@ impl Nest {
             log::debug!("wayland nest is not running");
         }
     }
+}
+
+/// The evdev code of the key [`State::type_char`] rebinds: F24, which the
+/// host never sends since no key of a US layout types it.
+const SPARE_KEY: u32 = 194;
+
+/// The nest's keymap: US on an evdev PC keyboard, as the host's keys are
+/// translated to ([`crate::evdev_key`]), with `<FK24>` ([`SPARE_KEY`]) typing
+/// `spare`. Spelled out rather than taken from XKB_DEFAULT_* in the
+/// environment, which applies to the user's own keyboard, not to the codes
+/// the host sends.
+fn keymap(spare: Option<char>) -> String {
+    let spare = spare
+        .map(|c| format!("key <FK24> {{ [ U{:04X} ] }};", u32::from(c)))
+        .unwrap_or_default();
+    format!(
+        "xkb_keymap {{
+            xkb_keycodes {{ include \"evdev+aliases(qwerty)\" }};
+            xkb_types {{ include \"complete\" }};
+            xkb_compat {{ include \"complete\" }};
+            xkb_symbols {{ include \"pc+us+inet(evdev)\" {spare} }};
+        }};"
+    )
 }
 
 /// Removes the sockets of this user's earlier runs whose process is gone. A
@@ -264,6 +296,10 @@ fn run(
     let mut event_loop: EventLoop<State> = EventLoop::try_new().map_err(io::Error::other)?;
     let display: Display<State> = Display::new().map_err(io::Error::other)?;
     let mut state = State::new(display.handle(), events)?;
+    let keyboard = state.keyboard.clone();
+    keyboard
+        .set_keymap_from_string(&mut state, keymap(None))
+        .map_err(|error| io::Error::other(format!("the nest's keymap: {error:?}")))?;
     let handle = event_loop.handle();
     handle
         .insert_source(
@@ -418,6 +454,8 @@ struct State {
     requested: HashMap<ViewId, Size<i32, Logical>>,
     images: HashMap<ObjectId, (WlSurface, Image)>,
     keyboard_view: Option<ViewId>,
+    /// The character [`SPARE_KEY`] types, if it was rebound.
+    spare: Option<char>,
     text_inputs: text_input::TextInputs,
     /// The clipboard text the host last offered, while it is the selection.
     clipboard: Option<Arc<str>>,
@@ -492,6 +530,7 @@ impl State {
             requested: HashMap::new(),
             images: HashMap::new(),
             keyboard_view: None,
+            spare: None,
             text_inputs: text_input::TextInputs::default(),
             clipboard: None,
             copied: None,
@@ -518,24 +557,8 @@ impl State {
                 }
             },
             Command::Pointer { view, event } => self.pointer_event(view, event),
-            Command::Key { code, pressed } => {
-                let serial = SERIAL_COUNTER.next_serial();
-                let time = self.time();
-                let state = if pressed {
-                    KeyState::Pressed
-                } else {
-                    KeyState::Released
-                };
-                let keyboard = self.keyboard.clone();
-                keyboard.input::<(), _>(
-                    self,
-                    Keycode::new(code + 8),
-                    state,
-                    serial,
-                    time,
-                    |_, _, _| FilterResult::Forward,
-                );
-            }
+            Command::Key { code, pressed } => self.key(code, pressed),
+            Command::Type(c) => self.type_char(c),
             Command::Focus(view) => {
                 self.keyboard_view = view;
                 self.refocus();
@@ -560,6 +583,45 @@ impl State {
                 }
             }
         }
+    }
+
+    fn key(&mut self, code: u32, pressed: bool) {
+        let serial = SERIAL_COUNTER.next_serial();
+        let time = self.time();
+        let state = if pressed {
+            KeyState::Pressed
+        } else {
+            KeyState::Released
+        };
+        let keyboard = self.keyboard.clone();
+        keyboard.input::<(), _>(
+            self,
+            Keycode::new(code + 8),
+            state,
+            serial,
+            time,
+            |_, _, _| FilterResult::Forward,
+        );
+    }
+
+    /// Binds [`SPARE_KEY`] to `c` and presses it.
+    ///
+    /// GTK 3 applies text-input-v3 text while it reads the Wayland
+    /// connection, ahead of the key events GDK has queued from the same
+    /// read, so a character committed that way could land before keys typed
+    /// just before it. Key events stay in order, and GDK reads a keymap
+    /// change in the same stream as the keys.
+    fn type_char(&mut self, c: char) {
+        if self.spare != Some(c) {
+            let keyboard = self.keyboard.clone();
+            if let Err(error) = keyboard.set_keymap_from_string(self, keymap(Some(c))) {
+                log::warn!("wayland nest: no keymap types {c:?}: {error:?}");
+                return;
+            }
+            self.spare = Some(c);
+        }
+        self.key(SPARE_KEY, true);
+        self.key(SPARE_KEY, false);
     }
 
     fn on_commit(&mut self, surface: &WlSurface) {

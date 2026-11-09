@@ -14,7 +14,6 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
-use std::ffi::{CString, c_char, c_int};
 use std::ops::Range;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
@@ -104,7 +103,7 @@ fn start(window: &Window, cx: &mut App) -> Result<Rc<Host>, String> {
         _ => return Err("the window is not on Wayland".into()),
     };
     let nest = Nest::start().map_err(|error| format!("nested compositor: {error}"))?;
-    init_gtk(nest.socket_name())?;
+    nest.start_gtk()?;
     // SAFETY: GPUI's Wayland connection lives as long as the process.
     let presenter = unsafe { Presenter::new(display) }?;
     let host = Rc::new(Host {
@@ -248,51 +247,6 @@ fn pump_gtk(host: &Rc<Host>, cx: &App) {
         }
     })
     .detach();
-}
-
-/// Starts GTK on the nest's socket. GTK reads the display from its arguments
-/// at initialization only.
-fn init_gtk(socket: &str) -> Result<(), String> {
-    if gtk::is_initialized() {
-        return Err("GTK is already running on another display".into());
-    }
-    gdk::set_allowed_backends("wayland");
-    let args = ["tcode", "--display", socket].map(|arg| CString::new(arg).expect("no NUL"));
-    let mut pointers: Vec<*mut c_char> = args.iter().map(|arg| arg.as_ptr().cast_mut()).collect();
-    let mut argc = pointers.len() as c_int;
-    let mut argv = pointers.as_mut_ptr();
-    // SAFETY: argv points at `argc` NUL-terminated strings that outlive the
-    // call; GTK only reorders the pointer array.
-    let started = unsafe { gtk::ffi::gtk_init_check(&mut argc, &mut argv) } != 0;
-    if !started {
-        return Err(format!(
-            "GTK could not connect to the nested compositor ({socket})"
-        ));
-    }
-    // Marks GTK initialized for gtk-rs; GTK itself is already up.
-    gtk::init().map_err(|error| error.to_string())?;
-    // The nest hands the host's input method text to GTK through
-    // text-input-v3, which only GTK's "wayland" IM module speaks, and GTK 3
-    // picks that module only when asked. GTK_IM_MODULE in the environment
-    // still wins (`_gtk_im_module_get_default_context_id`, gtk/gtkimmodule.c
-    // in GTK 3.24), and a module it names never sees that text.
-    if let Some(settings) = gtk::Settings::default() {
-        settings.set_gtk_im_module(Some("wayland"));
-    }
-    if let Some(module) = std::env::var_os("GTK_IM_MODULE").filter(|module| module != "wayland") {
-        log::warn!(
-            "preview: GTK_IM_MODULE={module:?} keeps input method text from the page; \
-             only keys a US layout types reach it"
-        );
-    }
-    let display = gdk::Display::default().ok_or("GTK has no display")?;
-    if display.type_().name() != "GdkWaylandDisplay" {
-        return Err(format!(
-            "GTK chose {} instead of the nested compositor",
-            display.type_().name()
-        ));
-    }
-    Ok(())
 }
 
 /// Builds a preview webview hosted through the nest.
@@ -832,9 +786,8 @@ impl Slot {
             .detach();
     }
 
-    /// Forwards a key the nest's US layout can type; returns whether it was.
-    /// A character it cannot type (é on a French layout, or a dead key's
-    /// result) is left to GPUI, which hands it to [`PageInput`] as text.
+    /// Forwards a key, or the character it types; returns whether it did.
+    /// Text an input method commits reaches [`PageInput`] instead.
     fn key(&self, keystroke: &Keystroke, pressed: bool, repeat: bool, cx: &App) -> bool {
         let Some(host) = self.nest() else {
             return false;
@@ -859,7 +812,20 @@ impl Slot {
             _ => &keystroke.key,
         };
         let Some((code, shift)) = wayland_nest::evdev_key(typed) else {
-            return false;
+            // A character the US layout lacks is typed through a key the
+            // nest binds to it, so it reaches the page in order with the
+            // keys around it.
+            let Some(text) = keystroke.key_char.as_deref().filter(|_| !shortcut) else {
+                return false;
+            };
+            if self.composing.take().is_some() {
+                host.nest.compose_text(String::new(), None);
+            }
+            self.sync_modifiers(&host, modifiers, false);
+            for c in text.chars() {
+                host.nest.type_char(c);
+            }
+            return true;
         };
         self.sync_modifiers(&host, modifiers, shift);
         // A repeat, or a key GPUI made from an input method's commit (which

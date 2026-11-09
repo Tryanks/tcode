@@ -2,6 +2,8 @@
 //! waiting for the nest's events.
 #![allow(dead_code)]
 
+pub mod page;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
