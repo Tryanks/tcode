@@ -4460,6 +4460,8 @@ fn child_native_approval_callback_and_respond_approval_preserve_options_and_scop
                 parent_item_id: None,
                 id: request_id.clone(), turn_id: None,
                 kind: agent::ApprovalKind::ToolUse { name: "mcp__tcode_control__report_result".into(), input: serde_json::json!({}), detail: "Native MCP consent".into() },
+                reason: None,
+                blocked_path: None,
                 options: options.clone(),
             }), cx);
             assert!(child_receiver.try_recv().is_err(), "requests without automatic allow must remain pending");
@@ -4510,7 +4512,9 @@ fn child_native_approval_callback_and_respond_approval_preserve_options_and_scop
             state.on_event("child", AgentEvent::ApprovalRequested(agent::ApprovalRequest {
                 parent_item_id: None,
                 id: request_id.clone(), turn_id: None,
-                kind: agent::ApprovalKind::ExecCommand { command: "cargo check".into(), cwd: None, reason: None },
+                kind: agent::ApprovalKind::ExecCommand { command: "cargo check".into(), cwd: None, description: None },
+                reason: None,
+                blocked_path: None,
                 options: kinds.into_iter().enumerate().map(|(i, kind)| agent::ApprovalOption { id: format!("native-{i}"), label: "Native choice".into(), kind }).collect(),
             }), cx);
             assert!(matches!(child_receiver.try_recv(), Ok(SessionCommand::RespondApproval { request_id: delivered, decision: ApprovalDecision::Option(option) }) if delivered == request_id && option == expected));
@@ -11089,8 +11093,10 @@ fn status_carries_the_running_turn_while_in_flight_and_open_requests_while_live(
         kind: agent::ApprovalKind::ExecCommand {
             command: "cp a b".into(),
             cwd: None,
-            reason: None,
+            description: None,
         },
+        reason: None,
+        blocked_path: None,
         options: Vec::new(),
     };
     for request in [
@@ -13499,6 +13505,8 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
                     input: serde_json::json!({}),
                     detail: "Needs consent".into(),
                 },
+                reason: None,
+                blocked_path: None,
                 options: vec![],
             }),
             AgentEvent::ApprovalResolved {

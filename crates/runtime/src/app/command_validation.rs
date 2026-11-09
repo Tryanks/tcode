@@ -747,11 +747,13 @@ mod tests {
                 id: "approval".into(),
                 parent_item_id: None,
                 turn_id: None,
+                reason: None,
+                blocked_path: None,
                 options: Vec::new(),
                 kind: agent::ApprovalKind::ExecCommand {
                     command: "echo fixture".into(),
                     cwd: None,
-                    reason: None,
+                    description: None,
                 },
             }),
         );

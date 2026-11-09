@@ -2504,6 +2504,8 @@ mod tests {
                     item_id: "plan-1".into(),
                     markdown: "# Plan\n\n1. Step".into(),
                 },
+                reason: None,
+                blocked_path: None,
                 options: Vec::new(),
             }),
         ] {
@@ -3494,8 +3496,9 @@ mod tests {
                 turn_id: Some("turn-1".into()),
                 kind: ApprovalKind::FileChange {
                     changes: changes.clone(),
-                    reason: None,
                 },
+                reason: None,
+                blocked_path: None,
                 options: Vec::new(),
             }),
         );
@@ -3804,8 +3807,10 @@ mod tests {
                 kind: ApprovalKind::ExecCommand {
                     command: "rm -rf /".into(),
                     cwd: None,
-                    reason: None,
+                    description: None,
                 },
+                reason: None,
+                blocked_path: None,
                 options: Vec::new(),
             }),
         );

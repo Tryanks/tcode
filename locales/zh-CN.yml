@@ -1196,6 +1196,7 @@ approval:
   tool_requested: "请求批准"
   plan_requested: "请求批准计划"
   in_directory: "位于 %{cwd}"
+  blocked_path: "被拦截的路径：%{path}"
   pending: "等待批准"
   cancel_turn: "取消本轮"
 diff:

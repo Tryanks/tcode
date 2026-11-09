@@ -86,8 +86,10 @@ mod tests {
             kind: agent::ApprovalKind::ExecCommand {
                 command: "cargo test".into(),
                 cwd: None,
-                reason: None,
+                description: None,
             },
+            reason: None,
+            blocked_path: None,
             options: Vec::new(),
         }
     }
