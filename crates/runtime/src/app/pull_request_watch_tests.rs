@@ -710,6 +710,57 @@ fn checks_pass_only_once_every_check_main_requires_has_reported() {
     );
 }
 
+/// CI skips every job on a draft. Marking the pull request ready starts a new run of the same
+/// workflow on the same head, and its aggregate jobs wait on the others, so until they finish the
+/// only report of those required checks is the draft run's skip.
+#[test]
+fn a_required_check_skipped_by_a_superseded_run_waits_for_the_new_run() {
+    let in_run = |mut check: Value, number: u64| {
+        check["checkSuite"] = json!({"workflowRun": {"runNumber": number, "workflow": {"databaseId": 1, "name": "CI"}}});
+        check
+    };
+    let mut harness = Harness::new("tcode-watch-superseded");
+    harness.host().protected = vec!["Linux x64", "macOS arm64"];
+    harness.host().checks = vec![
+        in_run(check("Linux x64 / tests", "SKIPPED"), 7),
+        in_run(required("Linux x64", "SKIPPED"), 7),
+        in_run(check("macOS arm64 / tests", "SKIPPED"), 7),
+        in_run(required("macOS arm64", "SKIPPED"), 7),
+        in_run(check("Linux x64 / tests", "PENDING"), 8),
+        in_run(check("macOS arm64 / tests", "PENDING"), 8),
+    ];
+    harness.watch_thread("thread", START);
+    harness.pass();
+    assert!(
+        next_command(&harness.commands).is_err(),
+        "the new run's jobs are pending"
+    );
+    harness.host().checks[4] = in_run(check("Linux x64 / tests", "SUCCESS"), 8);
+    harness.host().checks[5] = in_run(check("macOS arm64 / tests", "SUCCESS"), 8);
+    harness.pass();
+    assert!(
+        next_command(&harness.commands).is_err(),
+        "the new run has not created its required aggregates yet"
+    );
+
+    harness.host().checks.extend([
+        in_run(required("Linux x64", "SUCCESS"), 8),
+        in_run(required("macOS arm64", "SUCCESS"), 8),
+    ]);
+    harness.pass();
+    let (delivery, text) = harness.delivered();
+    assert!(
+        text.contains("- All 2 required checks passed on 1111111."),
+        "{text}"
+    );
+    harness.accept(delivery);
+    harness.pass();
+    assert!(
+        next_command(&harness.commands).is_err(),
+        "the pass is told once"
+    );
+}
+
 #[test]
 fn two_threads_share_one_read_with_separate_watermarks() {
     let mut harness = Harness::new("tcode-watch-shared");
