@@ -363,9 +363,8 @@ impl AppState {
     /// clients' running indicators. Record that close here so the next turn
     /// opens on its own instead of joining the abandoned one.
     pub(super) fn close_abandoned_turn(&mut self, session_id: &str, cx: &mut HostCx) {
-        let Some(turn_id) = self.resident(session_id).and_then(|active| {
-            active
-                .timeline
+        let Some(turn_id) = self.conversation(session_id).and_then(|conversation| {
+            conversation
                 .turns
                 .last()
                 .filter(|turn| turn.status.is_none() && turn.end_ts.is_none())
@@ -465,16 +464,21 @@ impl AppState {
         text: &str,
         cx: &mut HostCx,
     ) -> Option<String> {
-        let active = self.resident_mut(target_id)?;
-        let moved_from = active.meta.moved_from.take();
-        active.meta.session_transfer_from = None;
+        let active = self.resident(target_id)?;
         let mut transcript = render_relay_transcript(
-            &active.timeline,
-            moved_from.as_deref().unwrap_or(&active.meta.cwd),
+            self.conversation(target_id)?,
+            active
+                .meta
+                .moved_from
+                .as_deref()
+                .unwrap_or(&active.meta.cwd),
             from.from_provider,
             from.from_model.as_deref(),
             RELAY_TRANSCRIPT_MAX_CHARS,
         );
+        let active = self.resident_mut(target_id)?;
+        let moved_from = active.meta.moved_from.take();
+        active.meta.session_transfer_from = None;
         if let Some(from_dir) = &moved_from {
             transcript.push_str(&format!(
                 "The thread has since moved from `{}` to `{}`, the directory you now run in.\n",
@@ -498,33 +502,51 @@ impl AppState {
         Some(transcript)
     }
 
+    /// The conversation as the host holds it: the thread's log once it is read, its
+    /// timeline until then.
+    fn conversation(&self, id: &str) -> Option<&Timeline> {
+        self.event_records
+            .get(id)
+            .map(SessionLog::fold)
+            .or_else(|| self.resident(id).map(|active| &active.timeline))
+    }
+
     /// Give the first turn of a fresh provider session the conversation so far, when the
     /// thread moved or its native session could not be carried to its new account; a
-    /// thread with nothing worth handing over just starts over there.
-    fn hand_off_conversation(&mut self, target_id: &str, cx: &mut HostCx) {
+    /// thread with nothing worth handing over just starts over there. The handoff is
+    /// made from the thread's log, so while the log is still being read this returns
+    /// false and the message waits; [`Self::finish_hydration`] sends it.
+    fn hand_off_conversation(&mut self, target_id: &str, cx: &mut HostCx) -> bool {
         if self
             .resident(target_id)
             .and_then(ActiveSession::handoff_message)
             .is_none()
         {
-            return;
+            return true;
+        }
+        if !self.event_records.contains_key(target_id) {
+            self.hydrate_log(target_id, None, cx);
+            return false;
         }
         // The turn a provider that died left open is closed first, since closing it
         // dispatches the next message, which then carries the handoff itself.
         self.close_abandoned_turn(target_id, cx);
         let Some(active) = self.resident(target_id) else {
-            return;
+            return true;
         };
         let Some((message_id, text)) = active.handoff_message() else {
-            return;
+            return true;
         };
-        if !has_meaningful_history(&active.timeline) {
+        if !self
+            .conversation(target_id)
+            .is_some_and(has_meaningful_history)
+        {
             let active = self.resident_mut(target_id).unwrap();
             active.meta.moved_from = None;
             active.meta.session_transfer_from = None;
             let meta = active.meta.clone();
             self.persist_meta(&meta, cx);
-            return;
+            return true;
         }
         let from_profile = match &active.meta.session_transfer_from {
             Some(home) if active.meta.moved_from.is_none() => {
@@ -544,6 +566,7 @@ impl AppState {
         {
             message.relay_transcript = transcript;
         }
+        true
     }
 
     /// Submit the first eligible queue entry when the live provider can accept
@@ -565,7 +588,9 @@ impl AppState {
         {
             return Ok(false);
         }
-        self.hand_off_conversation(target_id, cx);
+        if !self.hand_off_conversation(target_id, cx) {
+            return Ok(false);
+        }
         self.resident_mut(target_id)
             .ok_or(())?
             .dispatch_next_pending()

@@ -5845,6 +5845,99 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
     });
 }
 
+/// A moved thread's first message hands the provider the conversation in the host's
+/// log even when the provider is up before the host has read that log: the message
+/// waits for the read, and the thread forgets where it moved from only once the
+/// handoff went out.
+#[test]
+fn a_moved_threads_handoff_waits_for_its_log() {
+    let test_store = TestStore::new("tcode-handoff-waits-for-log");
+    let quick = test_store.root().join("quick");
+    let demo = test_store.root().join("demo");
+    std::fs::create_dir_all(&quick).unwrap();
+    std::fs::create_dir_all(&demo).unwrap();
+    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, demo.clone(), None);
+    meta.id = "thread".into();
+    meta.moved_from = Some(quick.clone());
+    test_store.upsert_meta(&meta).unwrap();
+    for (ts, event) in [
+        AgentEvent::TurnStarted {
+            turn_id: "turn-1".into(),
+        },
+        AgentEvent::ItemCompleted(ThreadItem {
+            id: "assistant-1".into(),
+            parent_item_id: None,
+            content: ItemContent::AssistantMessage {
+                text: "The demo will be a static site.".into(),
+                summarized: false,
+            },
+        }),
+        AgentEvent::TurnCompleted {
+            turn_id: "turn-1".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        },
+    ]
+    .iter()
+    .enumerate()
+    {
+        test_store.append_event("thread", ts as u64, event).unwrap();
+    }
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (commands, provider) = smol::channel::unbounded();
+    // Nothing the host hands off its own thread lands before the test runs the host,
+    // so the thread's log is still being read while its provider is up and the
+    // message is sent.
+    state.update(cx, |state, cx| {
+        state.select_session("thread", cx);
+        let thread = state.selected_session_mut().unwrap();
+        thread.runtime = Runtime::Live(commands);
+        thread.live_cwd = thread.meta.cwd.clone();
+    });
+    state.dispatch_command(
+        cx,
+        1,
+        Command::SendTurn {
+            session_id: "thread".into(),
+            text: "what did we decide?".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    assert!(
+        next_command(&provider).is_err(),
+        "the message waits for the log"
+    );
+    state.read(|state| {
+        assert_eq!(
+            state.find_meta("thread").unwrap().moved_from,
+            Some(quick.clone())
+        );
+    });
+
+    let SessionCommand::SendTurn { text, .. } = cx.run_until_command(&provider) else {
+        panic!("the message goes out once the log is read");
+    };
+    assert!(
+        text.starts_with(tcode_core::relay::RELAY_PREAMBLE),
+        "{text}"
+    );
+    assert!(text.contains("The demo will be a static site."), "{text}");
+    assert!(
+        text.contains(&format!(
+            "moved from `{}` to `{}`",
+            quick.display(),
+            demo.display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("what did we decide?\n</new-user-message>"),
+        "{text}"
+    );
+    state.read(|state| assert!(state.find_meta("thread").unwrap().moved_from.is_none()));
+}
+
 /// Two Claude accounts, each signed in through its own config directory, an
 /// Anthropic-compatible endpoint profile, and a thread whose first turn ran on the built-in
 /// account under the native session `native-1`.
