@@ -7810,7 +7810,12 @@ fn background_work_no_process_can_finish_ends_as_interrupted_on_load() {
         state.park_active(cx);
         state.select_session("cold", cx);
     });
-    cx.run_until_parked();
+    // The reopened thread's log is read and folded off the host.
+    cx.run_until(|state| {
+        state
+            .resident("cold")
+            .is_some_and(|cold| !cold.timeline.entries.is_empty())
+    });
     state.update(&mut cx, |state, cx| {
         assert_eq!(status(state, "cold"), ItemStatus::Interrupted);
         state.park_active(cx);
@@ -11415,14 +11420,14 @@ fn the_storage_pass_drops_superseded_diffs_of_every_stored_thread() {
     let cx = &mut TestAppContext::default();
     let restarted = cx.new_entity(TestClientState::new((*store).clone()));
     restarted.update(cx, |state, cx| state.start_storage_pass(cx));
-    cx.run_until(|_| {
+    cx.run_until(|state| state.storage_pass.is_none());
+    assert!(
         LOG.0
             .lock()
             .unwrap()
             .iter()
             .any(|line| line == "storage pass complete: no work")
-    });
-    restarted.read(|state| assert!(state.storage_pass.is_none()));
+    );
 }
 
 /// A full device subscribed to the storage migration hears nothing while no
