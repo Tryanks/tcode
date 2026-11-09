@@ -724,11 +724,7 @@ impl Slot {
             self.sync_modifiers(&host, modifiers, false);
             return true;
         }
-        if !repeat
-            && (modifiers.control
-                || modifiers.platform
-                || (modifiers.shift && keystroke.key == "insert"))
-        {
+        if !repeat && pastes(keystroke) {
             offer_clipboard(cx);
         }
         // A shortcut is the key under the US layout GPUI guesses for it, and
@@ -811,9 +807,24 @@ impl Slot {
     }
 }
 
+/// Whether `keystroke` pastes in GTK: Ctrl+V, Ctrl+Shift+V or Shift+Insert.
+fn pastes(keystroke: &Keystroke) -> bool {
+    let modifiers = keystroke.modifiers;
+    if modifiers.alt || modifiers.platform {
+        return false;
+    }
+    match keystroke.key.as_str() {
+        "v" => modifiers.control,
+        "insert" => modifiers.shift && !modifiers.control,
+        _ => false,
+    }
+}
+
 /// Offers the system clipboard to the page before something that may paste
 /// it. The nest cannot watch the system clipboard, so it is synced on the
-/// inputs that paste: shortcuts and the context menu.
+/// inputs that paste: the paste keys and the context menu. A read blocks
+/// this thread until the clipboard's owner answers (up to 4 s in
+/// gpui-fast-linux 0.1.13's `PIPE_READ_TIMEOUT`), so nothing else reads it.
 fn offer_clipboard(cx: &App) {
     if let Some(host) = current_host()
         && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
