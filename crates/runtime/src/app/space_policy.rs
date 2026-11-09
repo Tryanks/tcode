@@ -2,7 +2,7 @@
 //! sends are checked as they arrive ([`AppState::authorize`]); a turn that
 //! leaves the queue later, or that a `tcode_control` call or the host starts
 //! during a member's turn, is checked here against the policy as it stands
-//! then.
+//! then. A turn keeps the policy it started under until it ends.
 use super::*;
 use tcode_protocol::{SpaceApproval, SpacePolicy};
 
@@ -15,27 +15,13 @@ pub(crate) fn policy_error(message: impl Into<String>) -> ProtocolError {
 }
 
 impl AppState {
-    /// The policy of `space_id` as last shown to the host.
-    pub(crate) fn space_policy(&self, space_id: &str) -> Option<&SpacePolicy> {
-        self.space_policies.get(space_id)
-    }
-
     /// The thread's current setup: the resident copy, which a live change
-    /// reaches first, or the stored one.
+    /// reaches first, or the stored one ([`Self::find_meta`] prefers the
+    /// stored copy).
     pub(super) fn current_meta(&self, session_id: &str) -> Option<&SessionMeta> {
         self.resident(session_id)
             .map(|session| &session.meta)
             .or_else(|| self.sessions.by_id(session_id))
-    }
-
-    /// The model a thread runs: its own choice, or its profile's default.
-    pub(super) fn effective_model(&self, meta: &SessionMeta) -> Option<String> {
-        meta.model.clone().or_else(|| {
-            self.models_for(meta.provider)
-                .iter()
-                .find(|model| model.is_default)
-                .map(|model| model.id.clone())
-        })
     }
 
     /// Whether `policy` lets a turn run on `meta`'s account profile, model,
@@ -45,25 +31,20 @@ impl AppState {
         policy: &SpacePolicy,
         meta: &SessionMeta,
     ) -> Result<(), ProtocolError> {
+        self.model_allowed(
+            policy,
+            meta.provider,
+            meta.profile_id.as_deref(),
+            meta.model.as_deref(),
+        )?;
         let profile = meta
             .profile_id
             .as_deref()
             .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider));
-        let access = policy.agent(profile).ok_or_else(|| {
-            policy_error(format!(
-                "this space does not allow {}",
-                self.profile_display_name(profile)
-            ))
-        })?;
-        let model = self.effective_model(meta);
-        if !access.allows_model(model.as_deref()) {
-            return Err(policy_error(format!(
-                "this space does not allow the model {}",
-                model.as_deref().unwrap_or("the profile's default")
-            )));
-        }
         if meta.provider == ProviderKind::Acp
-            && !access.allows_acp_agent(meta.acp_agent_id.as_deref())
+            && !policy
+                .agent(profile)
+                .is_some_and(|access| access.allows_acp_agent(meta.acp_agent_id.as_deref()))
         {
             return Err(policy_error("this space does not allow that ACP agent"));
         }
@@ -74,19 +55,45 @@ impl AppState {
         Ok(())
     }
 
-    /// [`Self::setup_allowed`] for one thread, by id.
+    /// Whether `policy` lets a turn go out on `session` now: its setup, and
+    /// while a restart waits (on background work or a rewind), the setup its
+    /// live process still runs, which a message sent meanwhile would get.
+    pub(super) fn session_runs_under(
+        &self,
+        policy: &SpacePolicy,
+        session: &ActiveSession,
+    ) -> Result<(), ProtocolError> {
+        self.setup_allowed(policy, &session.meta)?;
+        if matches!(session.runtime, Runtime::Live(_)) && session.restart_required() {
+            let mut live = session.meta.clone();
+            live.model = session.live_model.clone();
+            live.profile_id = session.live_profile_id.clone();
+            live.option_selections = session.live_option_selections.clone();
+            self.setup_allowed(policy, &live)?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::session_runs_under`] for one thread, by id; a thread that is
+    /// not resident runs on its stored setup.
     pub(super) fn session_setup_allowed(
         &self,
         policy: &SpacePolicy,
         session_id: &str,
     ) -> Result<(), ProtocolError> {
-        let meta = self
-            .current_meta(session_id)
-            .ok_or_else(|| policy_error("unknown thread"))?;
-        self.setup_allowed(policy, meta)
+        match self.resident(session_id) {
+            Some(session) => self.session_runs_under(policy, session),
+            None => self.setup_allowed(
+                policy,
+                self.sessions
+                    .by_id(session_id)
+                    .ok_or_else(|| policy_error("unknown thread"))?,
+            ),
+        }
     }
 
-    /// Whether a member may switch a thread to `provider`/`profile_id`/`model`.
+    /// Whether `policy` lets members run `provider`'s `profile_id` on `model`
+    /// (the provider's default model when `None`).
     pub(super) fn model_allowed(
         &self,
         policy: &SpacePolicy,
@@ -147,8 +154,8 @@ impl AppState {
     }
 
     /// Hold every queued message of `session_id` whose space's policy refuses
-    /// the thread's setup as it stands, and release the rest. A held message
-    /// keeps its place and goes once the thread or the space allows it.
+    /// the thread as it stands, and release the rest. A held message keeps its
+    /// place and goes once the thread or the space allows it.
     pub(super) fn refresh_policy_holds(&mut self, session_id: &str) {
         let Some(session) = self.resident(session_id) else {
             return;
@@ -167,8 +174,8 @@ impl AppState {
         }
     }
 
-    /// After a space's policy changed: hold or release every queued message
-    /// under it and send what may go now.
+    /// After a space's policy, or anything a thread's setup is judged by,
+    /// changed: hold or release every queued message and send what may go.
     pub(crate) fn space_policy_changed(&mut self, cx: &mut HostCx) {
         let ids: Vec<String> = self
             .residents
@@ -186,19 +193,27 @@ impl AppState {
         }
     }
 
-    /// Whether `message` must wait: the space it goes under (its own, or for
-    /// one the host or an agent wrote, the thread's latest turn's) refuses the
-    /// thread's setup, or is not known to this host.
-    pub(super) fn queued_held(&self, session: &ActiveSession, message: &QueuedMessage) -> bool {
-        let space = match message.origin {
+    /// The space `message` goes under: its own, or for one the host or an
+    /// agent wrote without one, the thread's latest turn's.
+    fn message_space<'a>(
+        session: &'a ActiveSession,
+        message: &'a QueuedMessage,
+    ) -> Option<&'a str> {
+        match message.origin {
             MessageOrigin::Human => message.space.as_deref(),
             MessageOrigin::Agent | MessageOrigin::Server => {
                 message.space.as_deref().or(session.turn_space.as_deref())
             }
-        };
-        space.is_some_and(|space| {
-            self.space_policy(space)
-                .is_none_or(|policy| self.setup_allowed(policy, &session.meta).is_err())
+        }
+    }
+
+    /// Whether `message` must wait: the space it goes under refuses the
+    /// thread as it stands, or is not known to this host.
+    pub(super) fn queued_held(&self, session: &ActiveSession, message: &QueuedMessage) -> bool {
+        Self::message_space(session, message).is_some_and(|space| {
+            self.space_policies
+                .get(space)
+                .is_none_or(|policy| self.session_runs_under(policy, session).is_err())
         })
     }
 
@@ -213,27 +228,50 @@ impl AppState {
         }
     }
 
-    /// Let the thread's computer use answer only when the space its turn runs
-    /// under allows it: a member's turn must not operate the machine's desktop
-    /// unless the owner said so.
-    pub(super) fn apply_turn_tools(&self, session_id: &str) {
-        let Some(tokens) = &self.mcp.computer_use_tokens else {
+    /// Put the thread's turn under `space` (a member's, or `None` for the
+    /// machine's own user), with that space's policy as it stands now, which
+    /// the turn keeps until the next one starts.
+    pub(super) fn enter_turn_space(&mut self, session_id: &str, space: Option<String>) {
+        let policy = space.as_deref().map(|id| {
+            self.space_policies
+                .get(id)
+                .cloned()
+                .unwrap_or_else(SpacePolicy::new_space)
+        });
+        let Some(session) = self.resident_mut(session_id) else {
             return;
         };
-        if self
-            .turn_policy(session_id)
-            .is_some_and(|policy| !policy.computer_use)
-        {
-            tokens.suspend(session_id);
-        } else {
-            tokens.resume(session_id);
+        session.turn_space = space;
+        session.turn_policy = policy;
+        self.apply_turn_tools(session_id);
+    }
+
+    /// Let the thread's computer use and preview tools answer only when the
+    /// policy its turn runs under allows them: a member's turn operates the
+    /// machine's desktop or drives its preview browser only if the owner
+    /// said so.
+    fn apply_turn_tools(&self, session_id: &str) {
+        let policy = self.turn_policy(session_id);
+        if let Some(tokens) = &self.mcp.computer_use_tokens {
+            if policy.is_some_and(|policy| !policy.computer_use) {
+                tokens.suspend(session_id);
+            } else {
+                tokens.resume(session_id);
+            }
+        }
+        if let Some(tokens) = &self.mcp.preview_tokens {
+            if policy.is_some_and(|policy| !policy.preview) {
+                tokens.suspend(session_id);
+            } else {
+                tokens.resume(session_id);
+            }
         }
     }
 
-    /// The policy the thread's current turn runs under, when a member's.
+    /// The policy the thread's current turn runs under, when a member's: the
+    /// space's policy as it stood when the turn started.
     pub(super) fn turn_policy(&self, session_id: &str) -> Option<&SpacePolicy> {
-        let space = self.resident(session_id)?.turn_space.as_deref()?;
-        self.space_policy(space)
+        self.resident(session_id)?.turn_policy.as_ref()
     }
 
     /// Decline at once an approval the harness asks during a turn whose space
@@ -267,21 +305,14 @@ impl AppState {
         }
     }
 
-    /// The space whose policy a `tcode_control` call made by `thread_id` runs
-    /// under: that of the turn making it.
-    pub(super) fn control_space(&self, thread_id: &str) -> Option<String> {
+    /// The space whose member's turn `thread_id` is working in, if any.
+    pub(super) fn turn_space_of(&self, thread_id: &str) -> Option<String> {
         self.resident(thread_id)?.turn_space.clone()
-    }
-
-    /// The projects of `space_id` as last shown to the host.
-    pub(super) fn space_projects_of(&self, space_id: &str) -> Option<&BTreeSet<String>> {
-        self.space_scopes.get(space_id)
     }
 
     /// Whether `policy` lets members start a thread on this setup, choosing
     /// for it a permission value the policy allows when the one it was given
-    /// is not: the provider's recommended value, then its default, then the
-    /// first it lists that is allowed.
+    /// is not ([`allowed_permission`]).
     pub(super) fn fit_to_policy(
         &self,
         policy: &SpacePolicy,
@@ -305,7 +336,7 @@ impl AppState {
         let Some(policy) = cx
             .space
             .as_deref()
-            .and_then(|space| self.space_policy(space))
+            .and_then(|space| self.space_policies.get(space))
             .cloned()
         else {
             return;
@@ -316,16 +347,16 @@ impl AppState {
         if self.setup_allowed(&policy, &meta).is_ok() {
             return;
         }
-        let profile = meta
-            .profile_id
-            .as_deref()
-            .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider));
-        let model_allowed = policy
-            .agent(profile)
-            .is_some_and(|access| access.allows_model(self.effective_model(&meta).as_deref()));
-        if !model_allowed
-            && let Some(choice) = self.scoped_provider_choices(&policy).into_iter().next()
-        {
+        let runs = self
+            .model_allowed(
+                &policy,
+                meta.provider,
+                meta.profile_id.as_deref(),
+                meta.model.as_deref(),
+            )
+            .is_ok()
+            && policy.allows_provider(meta.provider);
+        if !runs && let Some(choice) = self.scoped_provider_choices(&policy).into_iter().next() {
             let model = choice
                 .models
                 .iter()

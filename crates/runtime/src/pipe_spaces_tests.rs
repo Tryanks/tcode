@@ -1027,7 +1027,7 @@ fn a_queued_message_waits_for_its_space_to_allow_the_thread() {
     host.command(host.member_under("two", 1, open.clone()), send("queued"));
     // The owner narrows the space: the thread's default permission mode,
     // which asks a person, is no longer one its members may run.
-    host.query(host.member_under("three", 2, reviewed), Query::Ping);
+    host.query(host.member_under("three", 2, reviewed.clone()), Query::Ping);
     host.provider
         .events
         .send_blocking(AgentEvent::TurnCompleted {
@@ -1036,12 +1036,23 @@ fn a_queued_message_waits_for_its_space_to_allow_the_thread() {
             usage: None,
         })
         .unwrap();
-    host.event(|event| {
+    let held = host.event(|event| {
         matches!(&event.event, ServerEvent::SessionStatusReplaced(status)
             if status.running_turn.is_none()
                 && status.queued_messages.len() == 1
                 && status.queued_messages[0].space_held)
     });
+    let ServerEvent::SessionStatusReplaced(status) = held.event else {
+        unreachable!()
+    };
+    // Nor can it be steered into a turn instead.
+    refused_by_policy(host.request(
+        host.member_under("two", 2, reviewed.clone()),
+        ClientPayload::Command(Command::SteerQueued {
+            session_id: "a".into(),
+            id: status.queued_messages[0].id,
+        }),
+    ));
     assert!(
         !std::iter::from_fn(|| host.provider.commands.try_recv().ok())
             .any(|command| matches!(command, SessionCommand::SendTurn { .. })),

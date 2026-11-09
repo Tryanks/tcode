@@ -977,6 +977,7 @@ impl Shared {
         let previous = state.identity.clone();
         let mut affected = Vec::new();
         let mut created = None;
+        let mut deleted = None;
         match action {
             SpaceAction::Create { name } => {
                 let name = space_name(name)?;
@@ -1076,6 +1077,7 @@ impl Shared {
                         state.identity.spaces[index].name = space_name(name)?
                     }
                     SpaceAction::Delete { id } => {
+                        deleted = Some(id.clone());
                         state.identity.spaces.remove(index);
                         state.identity.devices.retain_mut(|device| {
                             if let DeviceGrant::Spaces(ids) = &mut device.access {
@@ -1119,6 +1121,19 @@ impl Shared {
             close_device(&mut state, &id, code, b"space changed");
         }
         self.observe_spaces(&state);
+        // What its former members left queued must not go on under the policy
+        // the space had: the host holds it under one that allows nothing.
+        if let Some(id) = deleted {
+            self.mux.observe(Principal::Space {
+                policy_revision: state.identity.policy_revision,
+                space_id: id,
+                space_name: String::new(),
+                project_ids: Vec::new(),
+                device_id: String::new(),
+                device_name: String::new(),
+                policy: tcode_protocol::SpacePolicy::new_space(),
+            });
+        }
         Ok(created)
     }
 

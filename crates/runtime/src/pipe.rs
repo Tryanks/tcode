@@ -923,7 +923,12 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::ToggleProjectCollapsed { project_id } => {
             app.toggle_project_collapsed(&project_id, cx)
         }
-        Command::PatchSettings { patch } => app.patch_settings(patch, cx),
+        Command::PatchSettings { patch } => {
+            app.patch_settings(patch, cx);
+            // A default model or an enabled profile is part of what a held
+            // message waits on.
+            app.space_policy_changed(cx);
+        }
         Command::SettleChildren { session_id } => {
             response = CommandResponse::ChildrenSettled(app.settle_children(&session_id, cx));
         }
@@ -1068,7 +1073,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             turn_id,
         } => {
             return CommandOutcome::Immediate(
-                app.retry_turn(&session_id, turn_id)
+                app.retry_turn(&session_id, turn_id, cx)
                     .map(|()| CommandResponse::Unit),
             );
         }

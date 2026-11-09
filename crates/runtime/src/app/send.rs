@@ -602,7 +602,8 @@ impl AppState {
             .ok_or(())?
             .dispatch_next_pending()?;
         if sent {
-            self.apply_turn_tools(target_id);
+            let space = self.turn_space_of(target_id);
+            self.enter_turn_space(target_id, space);
         }
         Ok(sent)
     }
@@ -835,8 +836,7 @@ impl AppState {
             .is_ok()
         {
             if space.is_some() {
-                active.turn_space = space;
-                self.apply_turn_tools(target_id);
+                self.enter_turn_space(target_id, space);
             }
             return true;
         }
@@ -869,6 +869,16 @@ impl AppState {
     /// Queue strip: convert an already-queued message into a steering message —
     /// pull it out of the queue and inject it into the running turn.
     pub fn steer_queued(&mut self, target_id: &str, id: u64, cx: &mut HostCx) {
+        // A message its space is holding must not reach the running turn
+        // either.
+        if self.resident(target_id).is_some_and(|active| {
+            active
+                .queue
+                .iter()
+                .any(|message| message.id == id && self.queued_held(active, message))
+        }) {
+            return;
+        }
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };
@@ -914,6 +924,7 @@ impl AppState {
         &mut self,
         target_id: &str,
         turn_id: String,
+        cx: &mut HostCx,
     ) -> Result<(), tcode_protocol::ProtocolError> {
         let active = self
             .resident_mut(target_id)
@@ -936,7 +947,17 @@ impl AppState {
             .try_send(SessionCommand::RetryTurn { turn_id })
             .map_err(provider_command_error)?;
         active.turn_in_flight = true;
+        self.enter_member_turn(target_id, cx);
         Ok(())
+    }
+
+    /// A turn a member's request starts without the queue (a retry, a
+    /// compaction, a goal change) runs under the member's space, as a queued
+    /// message from them would.
+    fn enter_member_turn(&mut self, target_id: &str, cx: &HostCx) {
+        if cx.space.is_some() {
+            self.enter_turn_space(target_id, cx.space.clone());
+        }
     }
 
     pub fn interrupt(
@@ -1070,13 +1091,14 @@ impl AppState {
         match &active.runtime {
             Runtime::Live(commands) => commands
                 .try_send(SessionCommand::Compact)
-                .map_err(provider_command_error),
+                .map_err(provider_command_error)?,
             Runtime::Idle | Runtime::Starting { .. } => {
                 active.requested_command = Some(SessionCommand::Compact);
                 self.ensure_started(target_id, cx);
-                Ok(())
             }
         }
+        self.enter_member_turn(target_id, cx);
+        Ok(())
     }
 
     /// A goal change ([`SessionCommand::SetGoal`] or
@@ -1102,14 +1124,20 @@ impl AppState {
         {
             return Err(provider_command_error("A turn is still running."));
         }
+        let turn = !control.live;
         match &active.runtime {
-            Runtime::Live(commands) => commands.try_send(command).map_err(provider_command_error),
+            Runtime::Live(commands) => {
+                commands.try_send(command).map_err(provider_command_error)?
+            }
             Runtime::Idle | Runtime::Starting { .. } => {
                 active.requested_command = Some(command);
                 self.ensure_started(target_id, cx);
-                Ok(())
             }
         }
+        if turn {
+            self.enter_member_turn(target_id, cx);
+        }
+        Ok(())
     }
 
     pub fn respond_approval(

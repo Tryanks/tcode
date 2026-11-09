@@ -105,6 +105,9 @@ impl AppState {
         else {
             return Ok(());
         };
+        // The newest policy the host has seen: a line from a connection made
+        // before a change can still arrive while the machine closes it.
+        let policy = self.space_policies.get(space_id).unwrap_or(policy);
         let terminals = || {
             policy
                 .terminals
@@ -146,6 +149,7 @@ impl AppState {
                     terminals()?;
                     terminal(*terminal_id).map(|_| ())
                 }
+                Topic::DevServers { session_id } if policy.preview => session(session_id),
                 Topic::Index
                 | Topic::SpaceIndex { .. }
                 | Topic::Settings
@@ -238,8 +242,25 @@ impl AppState {
                         .then_some(())
                         .ok_or_else(|| refusal("input request"))
                 }
-                Command::SteerQueued { session_id, id }
-                | Command::DropQueued { session_id, id } => {
+                Command::SteerQueued { session_id, id } => {
+                    session(session_id)?;
+                    setup(session_id)?;
+                    let active = self
+                        .resident(session_id)
+                        .ok_or_else(|| refusal("queued message"))?;
+                    let message = active
+                        .queue
+                        .iter()
+                        .find(|message| message.id == *id)
+                        .ok_or_else(|| refusal("queued message"))?;
+                    if self.queued_held(active, message) {
+                        return Err(policy_error(
+                            "this space does not allow the thread as it is now",
+                        ));
+                    }
+                    Ok(())
+                }
+                Command::DropQueued { session_id, id } => {
                     session(session_id)?;
                     self.resident(session_id)
                         .is_some_and(|s| s.queue.iter().any(|message| message.id == *id))
@@ -303,7 +324,12 @@ impl AppState {
                         .iter()
                         .try_for_each(|path| self.authorize_attachment(path, project_ids, cx))
                 }
-                Command::RetryTurn { session_id, .. } => {
+                // Each of these runs the thread's model for the member.
+                Command::RetryTurn { session_id, .. }
+                | Command::CompactContext { session_id }
+                | Command::SetGoal { session_id, .. }
+                | Command::ClearGoal { session_id }
+                | Command::RegenerateSessionTitle { session_id } => {
                     session(session_id)?;
                     setup(session_id)
                 }
@@ -366,11 +392,7 @@ impl AppState {
                 | Command::StopBackgroundTask { session_id, .. }
                 | Command::MoveToBackground { session_id, .. }
                 | Command::ForceTerminate { session_id }
-                | Command::CompactContext { session_id }
-                | Command::SetGoal { session_id, .. }
-                | Command::ClearGoal { session_id }
                 | Command::RenameSession { session_id, .. }
-                | Command::RegenerateSessionTitle { session_id }
                 | Command::ArchiveSession { session_id }
                 | Command::UnarchiveSession { session_id }
                 | Command::SettleChildren { session_id }
@@ -483,7 +505,6 @@ impl AppState {
                 }
                 Query::SessionHistoryPage { session_id, .. }
                 | Query::ListActiveWorkspace { session_id }
-                | Query::GenerateCommitMessage { session_id, .. }
                 | Query::RenderThreadExport { session_id, .. }
                 | Query::ReadItemOutput { session_id, .. }
                 | Query::ThreadAnchorTurn { session_id, .. }
@@ -492,6 +513,10 @@ impl AppState {
                 | Query::BeginUpload { session_id, .. }
                 | Query::WriteUpload { session_id, .. }
                 | Query::DiscardUpload { session_id, .. } => session(session_id),
+                Query::GenerateCommitMessage { session_id, .. } => {
+                    session(session_id)?;
+                    setup(session_id)
+                }
                 Query::PullRequest { session_id, .. } => {
                     git_remote()?;
                     session(session_id)

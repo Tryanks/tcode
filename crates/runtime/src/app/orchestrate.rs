@@ -285,7 +285,9 @@ impl AppState {
         session.meta = meta;
         session.draft = false;
         session.push_queued(first_message, attachments);
-        session.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
+        let first = session.queue.last_mut().unwrap();
+        first.origin = MessageOrigin::Agent;
+        first.space = cx.space.clone();
         self.residents.parked.insert(id.clone(), session);
         self.reactivate_session(&id, cx);
         self.ensure_session_started(&id, cx);
@@ -442,7 +444,9 @@ impl AppState {
             let child = self.resident_mut(thread_id).unwrap();
             child.push_queued(message, Vec::new());
             child.stamp_context_window_change(default_window);
-            child.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
+            let queued = child.queue.last_mut().unwrap();
+            queued.origin = MessageOrigin::Agent;
+            queued.space = cx.space.clone();
             let idle = matches!(child.runtime, Runtime::Idle);
             if self.dispatch_next_queued(thread_id, cx).is_err() {
                 return Err("child provider is unavailable".into());
@@ -455,7 +459,9 @@ impl AppState {
         self.ensure_child_loaded(thread_id, cx)?;
         let child = self.resident_mut(thread_id).unwrap();
         child.push_queued(message, Vec::new());
-        child.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
+        let queued = child.queue.last_mut().unwrap();
+        queued.origin = MessageOrigin::Agent;
+        queued.space = cx.space.clone();
         let idle = matches!(child.runtime, Runtime::Idle);
         if !idle && !child.turn_in_flight {
             self.on_background_turn_completed(thread_id, cx);
@@ -702,7 +708,9 @@ impl AppState {
             serde_json::to_string(&options).expect("approval options serialize"),
             instruction,
         );
-        self.deliver_orchestrate_callback_to_parent(parent_id, text, cx);
+        let mut child_cx = cx.clone();
+        child_cx.space = self.turn_space_of(child_id).or(child_cx.space);
+        self.deliver_orchestrate_callback_to_parent(parent_id, text, &mut child_cx);
     }
 
     /// A child's question goes to its lead, as an approval does; in Manual
@@ -753,7 +761,9 @@ impl AppState {
             pending.request_id,
             serde_json::to_string(&pending.questions).expect("questions serialize"),
         );
-        self.deliver_orchestrate_callback_to_parent(parent_id, text, cx);
+        let mut child_cx = cx.clone();
+        child_cx.space = self.turn_space_of(child_id).or(child_cx.space);
+        self.deliver_orchestrate_callback_to_parent(parent_id, text, &mut child_cx);
     }
 
     /// Deliver a child result into the orchestrator's current reasoning turn.
@@ -851,7 +861,13 @@ impl AppState {
         let mut callback_cx = cx.clone();
         callback_cx.origin = Some(MessageOrigin::Agent);
         callback_cx.author = None;
+        // A report is the work of the turn that made it: the lead takes it up
+        // under the space that turn ran for.
+        callback_cx.space = report
+            .and_then(|child| self.turn_space_of(child))
+            .or(callback_cx.space);
         let cx = &mut callback_cx;
+        let space = cx.space.clone();
         let can_steer = self
             .resident(parent_id)
             .is_some_and(|parent| parent.turn_in_flight && parent.can_steer());
@@ -876,6 +892,7 @@ impl AppState {
                 let id = parent.push_or_merge_orchestrate_callback(text);
                 if let Some(message) = parent.queue.iter_mut().find(|message| message.id == id) {
                     message.reports.extend(reports);
+                    message.space = space.or(message.space.take());
                 }
             },
             cx,

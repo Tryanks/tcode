@@ -558,16 +558,7 @@ impl AppState {
         let projects: Vec<serde_json::Value> = self
             .projects
             .iter()
-            .filter(|project| {
-                caller
-                    .grant
-                    .scope
-                    .reaches(caller.project_id.as_deref(), Some(&project.id))
-                    && caller
-                        .space
-                        .as_ref()
-                        .is_none_or(|space| space.holds(Some(&project.id)))
-            })
+            .filter(|project| caller.reaches_project(&caller.grant.scope, &project.id))
             .map(|project| {
                 let (mut active, mut settled, mut archived) = (0, 0, 0);
                 for meta in self
@@ -1049,11 +1040,7 @@ impl AppState {
             }
             (None, Some(project_id)) => {
                 answer.project_id = Some(project_id.clone());
-                if caller
-                    .grant
-                    .scope
-                    .reaches(caller.project_id.as_deref(), Some(project_id))
-                {
+                if caller.reaches_project(&caller.grant.scope, project_id) {
                     self.projects
                         .iter()
                         .find(|project| &project.id == project_id)
@@ -1371,10 +1358,7 @@ impl AppState {
         let projects: Vec<(String, PathBuf)> = self
             .projects
             .iter()
-            .filter(|project| {
-                !project.quick_chat
-                    && scope.reaches(caller.project_id.as_deref(), Some(&project.id))
-            })
+            .filter(|project| !project.quick_chat && caller.reaches_project(&scope, &project.id))
             .map(|project| (project.id.clone(), project.root.clone()))
             .collect();
         let thread_cwds: HashSet<PathBuf> =

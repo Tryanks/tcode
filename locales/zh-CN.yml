@@ -1771,6 +1771,7 @@ space_policy:
     every: "所有 agent 和模型，包括以后新增的。"
     choose: "选择 agent"
     none_available: "本机没有可允许的已启用 agent。"
+    blocked: "在当前权限模式设置下不可用：它没有被允许的模式。"
   models:
     every: "所有模型"
     some: "%{count} 个模型"
@@ -1794,7 +1795,8 @@ space_policy:
     title: "推送、拉取和拉取请求"
     description: "使用本机自己的 git 和代码托管平台凭据。"
   preview:
-    title: "预览本机的本地服务"
+    title: "预览"
+    description: "成员可以访问本机的本地服务，为成员工作的 agent 可以操控预览浏览器。"
   computer_use:
     title: "成员轮次中的电脑操控"
     description: "允许为成员工作的 agent 操控本机的桌面。"

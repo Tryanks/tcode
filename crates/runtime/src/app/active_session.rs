@@ -212,6 +212,9 @@ pub struct ActiveSession {
     /// turn before had for one the host or an agent wrote. A member steering
     /// a turn puts it under their space too.
     pub(super) turn_space: Option<String>,
+    /// `turn_space`'s policy as it stood when the turn started, which the
+    /// turn keeps however the space changes meanwhile.
+    pub(super) turn_policy: Option<tcode_protocol::SpacePolicy>,
     pub(super) turn_in_flight: bool,
     /// The running turn's only input so far is a `tcode_control` watch callback. Such a turn
     /// fires no `turn_completed` or `idle` watch, so two threads watching each other cannot
@@ -316,6 +319,7 @@ impl ActiveSession {
             delivery_in_flight: None,
             pending_steers: Vec::new(),
             turn_space: None,
+            turn_policy: None,
             turn_in_flight: false,
             turn_woken_by_control: false,
             interrupt_requested: false,

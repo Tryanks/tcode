@@ -606,6 +606,22 @@ impl SpacePolicy {
         }
     }
 
+    /// Whether `provider` can run under this policy at all: it has a
+    /// permission mode the policy allows. pi and ACP agents have none Tcode
+    /// can tell apart from running everything.
+    pub fn allows_provider(&self, provider: agent::ProviderKind) -> bool {
+        self.allows_class(agent::ApprovalClass::Unrestricted)
+            || match agent::permission_control(provider) {
+                Some(agent::OptionDescriptor::Select { id, options, .. }) => {
+                    options.iter().any(|option| {
+                        agent::approval_class(provider, &id, &option.value)
+                            .is_some_and(|class| self.allows_class(class))
+                    })
+                }
+                _ => false,
+            }
+    }
+
     /// Whether a turn may run under a permission value of `class`.
     pub fn allows_class(&self, class: agent::ApprovalClass) -> bool {
         match self.approval {

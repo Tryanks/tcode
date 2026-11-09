@@ -384,6 +384,10 @@ pub struct ControlWatch {
     pub events: BTreeSet<WatchEvent>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub once: bool,
+    /// The space whose member's turn asked for it: what it wakes runs under
+    /// that space's policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<String>,
 }
 
 /// The semantic keys a [`ControlAction`] records, shared by the host that writes them and the

@@ -286,11 +286,7 @@ impl AppState {
             .find(|project| project.id == project_id)
             .cloned()
             .ok_or_else(|| format!("unknown project: {project_id}"))?;
-        if !caller
-            .grant
-            .scope
-            .reaches(caller.project_id.as_deref(), Some(project.id.as_str()))
-        {
+        if !caller.reaches_project(&caller.grant.scope, &project.id) {
             return Err(format!(
                 "refused: project {} is outside your grant's scope ({})",
                 project.id,
@@ -528,6 +524,19 @@ impl AppState {
         if let Err(error) = self.validate_command_target(&command) {
             return batch(target, Outcome::Skipped, error.message);
         }
+        // A steer joins the running turn at once, so it must not go into one
+        // the caller's space would not let a message start; a queued message
+        // waits instead ([`Self::queued_held`]).
+        if matches!(mode, SendMode::Steer)
+            && let Some(space) = &caller.space
+            && let Err(error) = self.session_setup_allowed(&space.policy, target)
+        {
+            return batch(
+                target,
+                Outcome::Skipped,
+                format!("refused: {}", error.message),
+            );
+        }
         let mut side_effects = Vec::new();
         if self.find_meta(target).is_some_and(|meta| meta.is_settled()) {
             side_effects.push("unsettled: a message reopens a settled thread".to_owned());
@@ -615,12 +624,15 @@ impl AppState {
     ) {
         self.reactivate_session(target, cx);
         let default_window = self.default_context_window(target);
+        let space = cx.space.clone();
         self.queue_automatic_turn(
             target,
             |session| {
                 session.push_queued(text, attachments);
                 session.stamp_context_window_change(default_window);
-                session.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
+                let queued = session.queue.last_mut().unwrap();
+                queued.origin = MessageOrigin::Agent;
+                queued.space = space;
             },
             cx,
         );
@@ -640,7 +652,9 @@ impl AppState {
         };
         session.push_scheduled(text, attachments, UNIX_EPOCH + Duration::from_secs(at));
         session.stamp_context_window_change(default_window);
-        session.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
+        let queued = session.queue.last_mut().unwrap();
+        queued.origin = MessageOrigin::Agent;
+        queued.space = cx.space.clone();
         let idle = matches!(session.runtime, Runtime::Idle);
         self.reactivate_session(target, cx);
         if idle {
@@ -867,7 +881,7 @@ impl AppState {
                 }
             }
             Command::RetryTurn { turn_id, .. } => {
-                self.retry_turn(target, turn_id)
+                self.retry_turn(target, turn_id, cx)
                     .map_err(|error| failed(error.message))?;
                 "retrying"
             }
@@ -883,10 +897,12 @@ impl AppState {
                 ..
             } => {
                 self.set_active_model(target, provider, model, profile_id, cx);
+                self.release_policy_holds(target, cx);
                 "model set; it takes effect from the next turn"
             }
             Command::SetActiveOption { id, value, .. } => {
                 self.set_active_option(target, &id, value, cx);
+                self.release_policy_holds(target, cx);
                 "option set"
             }
             Command::ForkThread { at, .. } => {

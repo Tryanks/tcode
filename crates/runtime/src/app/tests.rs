@@ -4540,8 +4540,15 @@ fn control_calls_in_a_members_turn_stay_inside_the_space() {
             meta.project_id = Some(project.into());
             meta
         };
+        let root = store.root().join("project-a");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut project = tcode_core::project::Project::from_root(root.clone());
+        project.id = "a".into();
+        state.projects.push(project);
         let mut caller = live_session(ProviderKind::Codex, commands);
         caller.meta.id = "caller".into();
+        caller.meta.cwd = root.clone();
+        caller.live_cwd = root;
         caller.meta.project_id = Some("a".into());
         caller.meta.control_grant = Some(ControlGrant {
             scope: ControlScope::Host,
@@ -4597,6 +4604,64 @@ fn control_calls_in_a_members_turn_stay_inside_the_space() {
         assert!(refused.contains("pushing and pulling"), "{refused}");
         let refused = control_call(state, cx, "caller", settings()).unwrap_err();
         assert!(refused.contains("in this space"), "{refused}");
+
+        // What the member's turn sets going works for the member too: a
+        // subagent it starts and a message it queues in another thread wait
+        // once the space allows nothing.
+        let started = control_call(
+            state,
+            cx,
+            "caller",
+            control_mcp::ControlOp::StartThread(control_mcp::StartThreadParams {
+                project_id: None,
+                cwd: None,
+                workspace: None,
+                subagent: Some(true),
+                provider: "codex".into(),
+                model: None,
+                profile: None,
+                options: None,
+                title: None,
+                message: "work".into(),
+                attachments: None,
+                request_id: "child".into(),
+            }),
+        )
+        .unwrap();
+        let child = started["thread_id"].as_str().unwrap().to_owned();
+        control_call(
+            state,
+            cx,
+            "caller",
+            control_mcp::ControlOp::SendMessage(control_mcp::SendMessageParams {
+                thread_ids: vec!["same".into()],
+                text: "more".into(),
+                mode: control_mcp::SendMode::Queue,
+                attachments: None,
+                request_id: None,
+            }),
+        )
+        .unwrap();
+        state.observe_principal(&tcode_protocol::Principal::Space {
+            policy_revision: 2,
+            space_id: "s".into(),
+            space_name: "Shared".into(),
+            project_ids: vec!["a".into()],
+            device_id: "phone".into(),
+            device_name: "Phone".into(),
+            policy: tcode_protocol::SpacePolicy::new_space(),
+        });
+        for id in [child.as_str(), "same"] {
+            let status = state.session_status_snapshot(id).unwrap();
+            assert!(
+                status
+                    .queued_messages
+                    .iter()
+                    .any(|message| message.space_held),
+                "{id}: {:?}",
+                status.queued_messages
+            );
+        }
     });
 }
 
@@ -5396,7 +5461,7 @@ fn native_retry_keeps_queue_waiting_and_cancellation_releases_it() {
             let status = state.session_status_snapshot("retry").unwrap();
             assert!(status.turn_retry.is_none());
             assert!(!status.activity.working);
-            assert!(state.retry_turn("retry", "failed".into()).is_err());
+            assert!(state.retry_turn("retry", "failed".into(), cx).is_err());
         });
     }
 }

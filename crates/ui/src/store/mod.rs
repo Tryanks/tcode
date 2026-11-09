@@ -1255,12 +1255,16 @@ impl WorkspaceStore {
                     | Topic::RuntimeEvents
                     | Topic::Preview { .. }
                     | Topic::PreviewSession { .. }
-                    | Topic::DevServers { .. }
                     | Topic::ExternalImport { .. }
                     | Topic::Hosting
                     | Topic::StorageMigration
                     | Topic::DiskUsage
             )
+        {
+            return Reach::Store;
+        }
+        if matches!(envelope.topic, Topic::DevServers { .. })
+            && !self.space_allows(|policy| policy.preview)
         {
             return Reach::Store;
         }

@@ -939,6 +939,8 @@ impl AppState {
     }
 
     /// The profiles and models `policy` lets a space's members run.
+    /// A provider none of whose permission modes the policy allows is not
+    /// offered, nor is a profile the policy leaves no model of.
     pub(super) fn scoped_provider_choices(
         &self,
         policy: &tcode_protocol::SpacePolicy,
@@ -946,6 +948,7 @@ impl AppState {
         ProviderKind::NATIVE
             .into_iter()
             .chain([ProviderKind::Acp])
+            .filter(|kind| policy.allows_provider(*kind))
             .flat_map(|kind| {
                 self.settings
                     .profiles_for_kind(kind)
@@ -972,6 +975,11 @@ impl AppState {
                             }
                         }
                         models.retain(|model| access.allows_model(Some(&model.id)));
+                        // A catalog not read yet still leaves a profile
+                        // granted with every model.
+                        if models.is_empty() && !access.allows_model(None) {
+                            return None;
+                        }
                         Some(tcode_protocol::ScopedProviderChoice {
                             provider: kind,
                             name: self.profile_display_name(&profile.id),

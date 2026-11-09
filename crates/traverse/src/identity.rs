@@ -75,9 +75,12 @@ struct HostFile {
 }
 
 /// A machine outside any group writes version 3, which an older build still
-/// reads; version 4 adds the group.
+/// reads; version 4 adds the group, and version 5 a space policy other than
+/// the access every space had before policies, which a build that would drop
+/// it on saving must not read.
 const VERSION_WITHOUT_GROUP: u32 = 3;
-const VERSION: u32 = 4;
+const VERSION_WITH_GROUP: u32 = 4;
+const VERSION: u32 = 5;
 
 fn enabled() -> bool {
     true
@@ -108,7 +111,7 @@ impl HostIdentity {
                     value["v"] = 3.into();
                 }
                 let file: HostFile = serde_json::from_value(value).map_err(io::Error::other)?;
-                if file.v != VERSION && file.v != VERSION_WITHOUT_GROUP {
+                if ![VERSION_WITHOUT_GROUP, VERSION_WITH_GROUP, VERSION].contains(&file.v) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("{HOST_FILE} has unsupported version {}", file.v),
@@ -161,8 +164,14 @@ impl HostIdentity {
 
     pub fn save(&self) -> io::Result<()> {
         let file = HostFile {
-            v: if self.group.is_some() {
+            v: if self
+                .spaces
+                .iter()
+                .any(|space| space.policy != tcode_protocol::SpacePolicy::unrestricted())
+            {
                 VERSION
+            } else if self.group.is_some() {
+                VERSION_WITH_GROUP
             } else {
                 VERSION_WITHOUT_GROUP
             },

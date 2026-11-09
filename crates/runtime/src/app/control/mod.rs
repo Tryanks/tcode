@@ -105,6 +105,18 @@ impl CallerSpace {
     }
 }
 
+impl Caller {
+    /// Whether a call naming `project_id` reaches it: inside `scope`, and
+    /// inside the caller's space when a member's turn makes the call.
+    pub(super) fn reaches_project(&self, scope: &ControlScope, project_id: &str) -> bool {
+        scope.reaches(self.project_id.as_deref(), Some(project_id))
+            && self
+                .space
+                .as_ref()
+                .is_none_or(|space| space.holds(Some(project_id)))
+    }
+}
+
 impl AppState {
     pub fn attach_control_mcp(&mut self, server: control_mcp::ControlMcpServer) {
         self.mcp.control_url = Some(server.url);
@@ -262,10 +274,10 @@ impl AppState {
                 .and_then(|parent| parent.parent_session_id);
             ancestors.push(id);
         }
-        let space = self.control_space(&meta.id).map(|id| CallerSpace {
-            projects: self.space_projects_of(&id).cloned().unwrap_or_default(),
+        let space = self.turn_space_of(&meta.id).map(|id| CallerSpace {
+            projects: self.space_scopes.get(&id).cloned().unwrap_or_default(),
             policy: self
-                .space_policy(&id)
+                .turn_policy(&meta.id)
                 .cloned()
                 .unwrap_or_else(tcode_protocol::SpacePolicy::new_space),
         });
@@ -331,7 +343,7 @@ impl AppState {
         let mut authored_cx = cx.clone();
         authored_cx.origin = Some(MessageOrigin::Agent);
         authored_cx.author = None;
-        authored_cx.space = self.control_space(&thread_id);
+        authored_cx.space = self.turn_space_of(&thread_id);
         let cx = &mut authored_cx;
         let answer = match self.find_meta(&thread_id) {
             _ if !self.settings.control.enabled => Answer::Now(Err(
@@ -703,7 +715,9 @@ impl AppState {
             ControlOp::PullRequest(_) | ControlOp::GetPullRequest(_) if !policy.git_remote => {
                 refused("needs pull requests, which the space does not allow")
             }
-            ControlOp::Git(params) if params.op.remote() && !policy.git_remote => {
+            ControlOp::Git(params)
+                if git_action(&params.op).is_some_and(GitAction::remote) && !policy.git_remote =>
+            {
                 refused("needs pushing and pulling, which the space does not allow")
             }
             ControlOp::MoveThread(params) if !space.holds(Some(&params.project_id)) => {
@@ -746,22 +760,44 @@ impl AppState {
                 }
             }
             ControlOp::ControlThread(params) => {
+                use control_mcp::params::RunOp;
                 for change in &params.changes {
-                    if let control_mcp::params::RunOp::SetModel { model } = &change.op
-                        && let Some(meta) = self.current_meta(&change.thread_id)
-                    {
-                        self.model_allowed(
-                            policy,
-                            meta.provider,
-                            meta.profile_id.as_deref(),
-                            Some(model),
-                        )
-                        .map_err(|error| format!("refused: {}", error.message))?;
+                    let refusal = |error: ProtocolError| format!("refused: {}", error.message);
+                    match &change.op {
+                        RunOp::SetModel { model } => {
+                            if let Some(meta) = self.current_meta(&change.thread_id) {
+                                self.model_allowed(
+                                    policy,
+                                    meta.provider,
+                                    meta.profile_id.as_deref(),
+                                    Some(model),
+                                )
+                                .map_err(refusal)?;
+                            }
+                        }
+                        // Each runs the thread's model, as a message would.
+                        RunOp::Retry { .. } | RunOp::Compact | RunOp::SteerQueued { .. } => self
+                            .session_setup_allowed(policy, &change.thread_id)
+                            .map_err(refusal)?,
+                        _ => {}
                     }
                 }
                 Ok(())
             }
             _ => Ok(()),
         }
+    }
+}
+
+/// The git quick action a control `git` op runs, for the ops that are one.
+fn git_action(op: &control_mcp::GitOp) -> Option<GitAction> {
+    use control_mcp::GitOp;
+    match op {
+        GitOp::Commit { .. } => Some(GitAction::Commit),
+        GitOp::CommitPush { .. } => Some(GitAction::CommitPush),
+        GitOp::Push => Some(GitAction::Push),
+        GitOp::Pull => Some(GitAction::Pull),
+        GitOp::PublishBranch => Some(GitAction::PublishBranch),
+        GitOp::CheckoutBranch { .. } | GitOp::MergeWorktree => None,
     }
 }

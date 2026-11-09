@@ -1778,6 +1778,7 @@ space_policy:
     every: "Every agent and model, including ones added later."
     choose: "Choose agents"
     none_available: "This machine has no enabled agent to allow."
+    blocked: "Unavailable under these permission modes: it has no mode they allow."
   models:
     every: "All models"
     some: "%{count} models"
@@ -1801,7 +1802,8 @@ space_policy:
     title: "Push, pull and pull requests"
     description: "Uses this machine's own git and forge credentials."
   preview:
-    title: "Preview this machine's local services"
+    title: "Preview"
+    description: "Members reach this machine's local services, and an agent working for a member drives the preview browser."
   computer_use:
     title: "Computer use in members' turns"
     description: "Lets an agent working for a member operate this machine's desktop."

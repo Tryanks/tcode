@@ -1778,6 +1778,7 @@ space_policy:
     every: "すべての agent とモデル（今後追加されるものを含む）。"
     choose: "agent を選ぶ"
     none_available: "このマシンには許可できる有効な agent がありません。"
+    blocked: "この権限モードの設定では使えません: 許可されたモードがありません。"
   models:
     every: "すべてのモデル"
     some: "%{count} 個のモデル"
@@ -1801,7 +1802,8 @@ space_policy:
     title: "プッシュ、プル、プルリクエスト"
     description: "このマシン自身の git とフォージの認証情報を使います。"
   preview:
-    title: "このマシンのローカルサービスをプレビュー"
+    title: "プレビュー"
+    description: "メンバーがこのマシンのローカルサービスにアクセスでき、メンバーのために動く agent がプレビューブラウザーを操作できます。"
   computer_use:
     title: "メンバーのターンでのコンピューター操作"
     description: "メンバーのために動く agent がこのマシンのデスクトップを操作できるようにします。"

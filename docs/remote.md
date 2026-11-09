@@ -125,9 +125,11 @@ joins. Existing members keep access until the owner removes them, deletes the
 space or revokes their device. A removed member can join again with the old
 link if it remains enabled and valid.
 
-`traverse.json` uses version 3 to store spaces and device access, and version
-4 once the machine is in a group, which adds the group; an older build reads
-only version 3. Loading a version 2 file migrates existing paired devices to
+`traverse.json` uses version 3 to store spaces and device access, version
+4 once the machine is in a group, which adds the group, and version 5 once a
+space has permissions other than those every space had before permissions
+existed; an older build reads only the versions it knows, so it refuses a file
+whose permissions it would drop. Loading a version 2 file migrates existing paired devices to
 explicit full access and starts with no spaces. Existing devices do not become
 space members as part of the migration.
 
