@@ -281,6 +281,12 @@ impl AppState {
                 return;
             }
 
+            AgentEvent::SessionMoved { to, .. } => {
+                if !self.follow_native_move(session_id, to, cx) {
+                    return;
+                }
+            }
+
             // Session bookkeeping side effects.
             AgentEvent::TurnStarted { .. } => {
                 if let Some(resident) = self.resident_mut(session_id) {
@@ -461,7 +467,6 @@ impl AppState {
             | AgentEvent::ContextCompacted(_)
             | AgentEvent::ContextWindowChanged { .. }
             | AgentEvent::SettingsKept
-            | AgentEvent::SessionMoved { .. }
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::GoalUpdated { .. }
             | AgentEvent::ControlAction(_)
