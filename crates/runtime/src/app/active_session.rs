@@ -172,8 +172,8 @@ pub struct ActiveSession {
     /// a different model we compare against this to decide whether it has to
     /// change before the next turn.
     pub(super) live_model: Option<String>,
-    /// The directory the live provider process was started in; a move to another
-    /// directory restarts it before the next turn.
+    /// The directory the live provider process runs in; a move to another directory
+    /// sends it there or restarts it before the next turn.
     pub(super) live_cwd: PathBuf,
     /// The profile the live provider process was started with; a switch to
     /// another account restarts it before the next turn.
@@ -490,10 +490,22 @@ impl ActiveSession {
             && self.live_profile_id != self.meta.profile_id
     }
 
-    /// Whether the live provider runs in another directory than `meta.cwd`: the thread
-    /// moved while it was live.
+    /// Whether the live provider runs in another directory than `meta.cwd` and has to
+    /// restart to leave it: the thread moved while it was live, and its native session
+    /// stays behind.
     pub(super) fn cwd_changed_while_live(&self) -> bool {
-        matches!(self.runtime, Runtime::Live(_)) && self.live_cwd != self.meta.cwd
+        matches!(self.runtime, Runtime::Live(_))
+            && self.live_cwd != self.meta.cwd
+            && !self.native_move_due()
+    }
+
+    /// Whether the live provider is to be sent to `meta.cwd` before its next turn: the
+    /// thread moved while it was live and its native session goes along.
+    fn native_move_due(&self) -> bool {
+        matches!(self.runtime, Runtime::Live(_))
+            && self.live_cwd != self.meta.cwd
+            && self.meta.provider.caps().session_move
+            && self.meta.moved_from.is_none()
     }
 
     /// A settings restart must not kill a running turn (a `/compact` included),
@@ -832,6 +844,14 @@ impl ActiveSession {
                 .map_err(|_| ())?;
             self.settings_apply_in_flight = Some(settings);
             return Ok(false);
+        }
+        if self.native_move_due() {
+            commands
+                .try_send(SessionCommand::MoveTo {
+                    cwd: self.meta.cwd.clone(),
+                })
+                .map_err(|_| ())?;
+            self.live_cwd = self.meta.cwd.clone();
         }
         let text = send.wire_text(&self.provider_commands);
         commands

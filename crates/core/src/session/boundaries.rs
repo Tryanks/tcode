@@ -346,6 +346,7 @@ impl TurnBoundaries {
             | AgentEvent::ProposedPlan { .. }
             | AgentEvent::ContextWindowChanged { .. }
             | AgentEvent::SettingsKept
+            | AgentEvent::SessionMoved { .. }
             | AgentEvent::ControlAction(_) => self.is_empty(),
             AgentEvent::ContextCompacted(compaction) => {
                 !(compaction.in_progress && self.compacting) && self.is_empty()

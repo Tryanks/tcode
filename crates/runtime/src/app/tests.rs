@@ -5938,6 +5938,145 @@ fn a_moved_threads_handoff_waits_for_its_log() {
     state.read(|state| assert!(state.find_meta("thread").unwrap().moved_from.is_none()));
 }
 
+/// A thread on a harness whose native session goes along to another directory keeps that
+/// session through a move: moved while its provider is down, the provider resumes it in the
+/// new directory; moved while its provider runs, that provider is sent there before the next
+/// turn. Neither turn is a handoff, and the thread shows each move.
+#[test]
+fn a_moved_thread_keeps_a_native_session_that_can_move() {
+    let test_store = TestStore::new("tcode-native-move");
+    let quick = test_store.root().join("quick");
+    let demo = test_store.root().join("demo");
+    std::fs::create_dir_all(&quick).unwrap();
+    std::fs::create_dir_all(&demo).unwrap();
+    let quick_project = Project::from_root(quick.clone());
+    let demo_project = Project::from_root(demo.clone());
+    test_store.upsert_project(&quick_project).unwrap();
+    test_store.upsert_project(&demo_project).unwrap();
+    let native = agent::ResumeCursor(serde_json::json!({"thread_id": "native-1"}));
+    let mut meta = SessionMeta::new(ProviderKind::Codex, quick.clone(), None);
+    meta.id = "thread".into();
+    meta.project_id = Some(quick_project.id.clone());
+    meta.resume_cursor = Some(native.clone());
+    test_store.upsert_meta(&meta).unwrap();
+    for (ts, event) in [
+        AgentEvent::TurnStarted {
+            turn_id: "turn-1".into(),
+        },
+        AgentEvent::ItemCompleted(ThreadItem {
+            id: "assistant-1".into(),
+            parent_item_id: None,
+            content: ItemContent::AssistantMessage {
+                text: "The demo will be a static site.".into(),
+                summarized: false,
+            },
+        }),
+        AgentEvent::TurnCompleted {
+            turn_id: "turn-1".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        },
+    ]
+    .iter()
+    .enumerate()
+    {
+        test_store.append_event("thread", ts as u64, event).unwrap();
+    }
+    let cx = &mut TestAppContext::default();
+    let (launcher, launches) = recording_launcher();
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*test_store).clone());
+        state.set_provider_launcher_for_test(launcher);
+        state
+    });
+    let move_to = |project: &Project| Command::MoveSession {
+        session_id: "thread".into(),
+        project_id: project.id.clone(),
+        cwd: None,
+    };
+    let send = |text: &str| Command::SendTurn {
+        session_id: "thread".into(),
+        text: text.into(),
+        attachment_paths: Vec::new(),
+    };
+
+    acked(&state, cx, 1, move_to(&demo_project)).unwrap();
+    state.read(|state| {
+        assert_eq!(
+            state.find_meta("thread").unwrap().resume_cursor,
+            Some(native.clone())
+        );
+    });
+    state.update(cx, |state, cx| state.select_session("thread", cx));
+    acked(&state, cx, 2, send("what did we decide?")).unwrap();
+    let (delivery_id, text, events) = next_turn(cx, &launches, 0);
+    {
+        let launches = launches.lock().unwrap();
+        assert_eq!(launches[0].0.cwd, demo);
+        assert_eq!(launches[0].0.resume, Some(native.clone()));
+    }
+    assert_eq!(text, "what did we decide?");
+    for event in [
+        AgentEvent::SessionStarted {
+            provider_session_id: "native-1".into(),
+            resume: native.clone(),
+            model: None,
+        },
+        AgentEvent::TurnAccepted { delivery_id },
+        AgentEvent::TurnStarted {
+            turn_id: "turn-2".into(),
+        },
+        AgentEvent::TurnCompleted {
+            turn_id: "turn-2".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        },
+    ] {
+        events.try_send(event).unwrap();
+    }
+    cx.run_until(|state| {
+        state
+            .resident("thread")
+            .is_some_and(|session| session.timeline.turns.len() == 2 && !session.has_work())
+    });
+
+    acked(&state, cx, 3, move_to(&quick_project)).unwrap();
+    acked(&state, cx, 4, send("and now?")).unwrap();
+    cx.run_until(|_| !launches.lock().unwrap()[0].1.is_empty());
+    let moved = next_command(&launches.lock().unwrap()[0].1);
+    assert!(
+        matches!(&moved, Ok(SessionCommand::MoveTo { cwd }) if *cwd == quick),
+        "{moved:?}"
+    );
+    let (_, text, _) = next_turn(cx, &launches, 0);
+    assert_eq!(text, "and now?");
+    assert_eq!(
+        launches.lock().unwrap().len(),
+        1,
+        "the same provider process"
+    );
+    state.read(|state| {
+        let session = state.resident("thread").unwrap();
+        assert_eq!(session.live_cwd, quick);
+        assert_eq!(session.meta.cwd, quick);
+        assert_eq!(session.meta.moved_from, None);
+        let moves: Vec<_> = session
+            .timeline
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.content {
+                EntryContent::SessionMoved { from, to } => Some((from.clone(), to.clone())),
+                EntryContent::ProviderRelay { .. } => panic!("a native move is no handoff"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            moves,
+            [(quick.clone(), demo.clone()), (demo.clone(), quick.clone())]
+        );
+    });
+}
+
 /// Two Claude accounts, each signed in through its own config directory, an
 /// Anthropic-compatible endpoint profile, and a thread whose first turn ran on the built-in
 /// account under the native session `native-1`.

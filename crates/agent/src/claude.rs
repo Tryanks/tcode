@@ -1534,7 +1534,9 @@ async fn handle_command(
             }
             ControlFlow::Continue(())
         }
-        SessionCommand::RetryTurn { .. } => ControlFlow::Continue(()),
+        SessionCommand::RetryTurn { .. } | SessionCommand::MoveTo { .. } => {
+            ControlFlow::Continue(())
+        }
         // The same `get_usage` control request [`read_usage`] sends, asked
         // of the running CLI instead of a process started for it.
         SessionCommand::ReadAccountUsage { reply } => {
