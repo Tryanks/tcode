@@ -1001,9 +1001,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             project_id,
             cwd,
         } => {
-            return CommandOutcome::Immediate(
-                app.move_session(&session_id, &project_id, cwd, cx)
-                    .map(|()| CommandResponse::Unit),
+            let moved = app.move_session(session_id, project_id, cwd, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { moved.await.map(|()| CommandResponse::Unit) }),
             );
         }
         Command::MergeWorktree { session_id } => {
