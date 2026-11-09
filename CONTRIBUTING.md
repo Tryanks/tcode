@@ -207,10 +207,15 @@ implicit use it cannot detect.
 New user-facing strings must be added to **every** locale file — `locales/en.yml`,
 `locales/zh-CN.yml` and `locales/ja.yml` — a parity test enforces it.
 
-If you changed something visual, launch the surface and look at it in both
-themes and at a wide and a narrow width; compile and unit checks alone do not
-establish visual correctness. `cargo run -p tcode-ui --example phone` opens the
-shared shell at phone geometry without a device.
+If you changed something visual, look at it in the running app; compile and
+unit checks alone do not establish visual correctness. Launch one instance and
+look at the surface you changed. Check another state only where the change can
+look different there: a colour or theme-token change in the other theme
+(toggle it in the running app), a layout, wrapping or overflow change at a
+narrow width (resize the window). `cargo run -p tcode-ui --example phone` opens
+the shared shell at phone geometry without a device, for a change to what only
+the phone shell shows. Reuse the running instance instead of relaunching, and
+stop once the changed surface has been seen in the states it affects.
 
 ### Verifying real behaviour
 
