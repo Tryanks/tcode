@@ -189,6 +189,7 @@ fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first()
     assert!(home.machines[0].this_machine);
     let link = invitation(&headless);
     assert_eq!(parse_pair_url(&link).unwrap().group, Some(home.id.clone()));
+    let saved_changes = tcode_traverse::hosts::watch(&desktop_dir.0);
     let joined = group(
         &desktop,
         GroupAction::Join {
@@ -212,6 +213,10 @@ fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first()
     );
     let from_window = saved(&window, &headless);
     assert_eq!(from_window.group_id.as_deref(), Some(home.id.as_str()));
+    assert!(
+        saved_changes.try_recv().is_ok(),
+        "the window hears of the group's machines as they are saved"
+    );
     let client = tcode_traverse::connect(&from_window, &window);
     wait_state(&client, up);
     client.to_host.close();

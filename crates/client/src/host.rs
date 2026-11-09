@@ -221,6 +221,14 @@ pub trait ClientHost: 'static {
     fn load_hosts(&self) -> Vec<PairedHost>;
     fn save_hosts(&self, hosts: &[PairedHost]);
 
+    /// Wakes after the saved machines change, for as long as it is held:
+    /// a group's roster arrives with a pairing, a connection or the machine
+    /// in this process joining the group, none of which the window asked
+    /// for. `None` where nothing else changes them.
+    fn saved_hosts_changes(&self) -> Option<async_channel::Receiver<()>> {
+        None
+    }
+
     /// Replace one pairing while preserving unrelated saved machines. Native
     /// adapters make these mutations atomic with transport address updates.
     fn remember_host(&self, host: PairedHost) {

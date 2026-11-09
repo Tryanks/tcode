@@ -751,6 +751,9 @@ pub struct AppShell {
     /// same views, so neither can be drawn beside the other for a
     /// cross-fade; what they share moves instead.
     layout_reflow: Option<crate::motion::reflow::Reflow>,
+    /// Opens the workspace's new members once the saved machines say who
+    /// they are.
+    _saved_hosts: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -967,6 +970,7 @@ impl AppShell {
             departing: None,
             layout_flipped: false,
             layout_reflow: None,
+            _saved_hosts: None,
             _subscriptions: subscriptions,
             setup,
         };
@@ -984,6 +988,23 @@ impl AppShell {
         };
         let initial = shell.setup.initial.take();
         shell.open_workspace(initial, local_started, window, cx);
+        shell._saved_hosts = shell
+            .setup
+            .client_host
+            .as_ref()
+            .and_then(|client| client.saved_hosts_changes())
+            .map(|changes| {
+                cx.spawn_in(window, async move |this, cx| {
+                    while changes.recv().await.is_ok() {
+                        if this
+                            .update_in(cx, |shell, window, cx| shell.open_new_members(window, cx))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                })
+            });
         if let Some(mut snapshot) = restored {
             let pane = shell.column.as_ref().and_then(|column| {
                 let thread = snapshot.thread.as_ref()?;
@@ -2165,10 +2186,7 @@ impl AppShell {
             && std::mem::replace(&mut link.connected, connected) != connected
             && connected
         {
-            // A machine that comes up may have told this device of its
-            // group's new members.
             self.stamp_connected(&host, cx);
-            self.open_new_members(window, cx);
         }
         self.reconcile_navigation_restore(cx);
         self.schedule_navigation_save(cx);
@@ -6801,6 +6819,8 @@ pub(crate) mod tests {
         last_host_id: RefCell<Option<String>>,
         /// What the next pairing admits this device to.
         pairs: RefCell<Option<tcode_client::pairing::PairedHost>>,
+        /// Who hears of a change to `saved`.
+        watchers: RefCell<Vec<async_channel::Sender<()>>>,
     }
 
     impl ClientHost for WorkspaceClient {
@@ -6830,6 +6850,15 @@ pub(crate) mod tests {
 
         fn save_hosts(&self, hosts: &[tcode_client::pairing::PairedHost]) {
             *self.saved.borrow_mut() = hosts.to_vec();
+            for watcher in self.watchers.borrow().iter() {
+                let _ = watcher.try_send(());
+            }
+        }
+
+        fn saved_hosts_changes(&self) -> Option<async_channel::Receiver<()>> {
+            let (watcher, changes) = async_channel::unbounded();
+            self.watchers.borrow_mut().push(watcher);
+            Some(changes)
         }
 
         fn last_host_id(&self) -> Option<String> {
@@ -6991,6 +7020,7 @@ pub(crate) mod tests {
             preferences: RefCell::new(preferences),
             last_host_id: RefCell::default(),
             pairs: RefCell::default(),
+            watchers: RefCell::default(),
         });
         let hosts: HashMap<HostKey, WorkspaceHost> = saved
             .iter()
@@ -7391,6 +7421,40 @@ pub(crate) mod tests {
             cx,
         );
         assert_eq!(linked(&shell, cx), [HostKey::Remote("host-d".into())]);
+    }
+
+    /// A group this device comes to know of — the machine in this process
+    /// joined it, which writes its members beside the saved machines — opens
+    /// its members at once, beside the hosts already open: no machine has to
+    /// connect again first.
+    #[gpui::test]
+    fn a_groups_members_open_as_soon_as_the_device_knows_them(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, client, cx) = mount_workspace(
+            cx,
+            vec![saved_machine("host-a", false)],
+            tcode_client::host::ClientPreferences {
+                workspace: Some(crate::workspace::arranged(
+                    None,
+                    &[HostKey::Remote("host-a".into())],
+                )),
+                ..Default::default()
+            },
+            1200.,
+        );
+        let key_a = HostKey::Remote("host-a".into());
+        let a = store_on(&shell, "host-a", cx);
+        hosts[&key_a].come_up(&a, Vec::new(), None, cx);
+
+        let _b = WorkspaceHost::offer(&client, "host-b", cx);
+        client.remember_host(saved_machine("host-b", true));
+        draw(cx);
+        assert_eq!(
+            linked(&shell, cx),
+            [key_a.clone(), HostKey::Remote("host-b".into())]
+        );
+        assert_eq!(store_on(&shell, "host-a", cx), a, "A's link is kept");
+        assert_eq!(store_of(&shell, cx), a, "the column stays");
     }
 
     /// Two hosts up at `width`, each listing `thread-1` and `thread-2`, with
