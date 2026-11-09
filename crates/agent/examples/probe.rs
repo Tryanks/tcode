@@ -16,7 +16,8 @@
 //! run for that long, to see turns the agent starts itself), `--follow-up
 //! <seconds> <prompt>` (send another turn that long after the first completes,
 //! running turn or not), `--apply-settings <model> <effort>` (ask the running
-//! process to take them just before that follow-up), `--stop-background
+//! process to take them just before that follow-up), `--move-to <dir>` (send
+//! the session to that directory just before that follow-up), `--stop-background
 //! <seconds>` (stop all background work that long after the first turn
 //! completes), `--interrupt-after
 //! <seconds>`, `--steer <message>`, and
@@ -278,6 +279,10 @@ fn main() {
                 continuation.stop_background =
                     Some(Duration::from_secs(seconds.unwrap_or_else(|| usage())));
             }
+            "--move-to" => {
+                continuation.move_to =
+                    Some(args.next().map(PathBuf::from).unwrap_or_else(|| usage()));
+            }
             "--apply-settings" => {
                 let model = args.next().unwrap_or_else(|| usage());
                 let effort = args.next().unwrap_or_else(|| usage());
@@ -392,6 +397,7 @@ struct Continuation {
     linger: Option<Duration>,
     follow_up: Option<(Duration, String)>,
     apply: Option<(String, String)>,
+    move_to: Option<PathBuf>,
     stop_background: Option<Duration>,
 }
 
@@ -509,6 +515,7 @@ async fn run_probe(
         .or(continuation.follow_up.as_ref().map(|_| PHANTOM_TURN_GRACE));
     let mut follow_up = continuation.follow_up;
     let mut apply = continuation.apply;
+    let mut move_to = continuation.move_to;
     let mut stop_background = continuation.stop_background;
     let mut open_until = None;
     let mut running = false;
@@ -685,6 +692,7 @@ async fn run_probe(
                     open_until = Some(Instant::now() + delay + Duration::from_secs(1));
                     let commands = handle.commands.clone();
                     let apply = apply.take();
+                    let move_to = move_to.take();
                     smol::spawn(async move {
                         smol::Timer::after(delay).await;
                         if let Some((model, effort)) = apply {
@@ -700,6 +708,10 @@ async fn run_probe(
                                 .await
                                 .ok();
                             smol::Timer::after(Duration::from_secs(1)).await;
+                        }
+                        if let Some(cwd) = move_to {
+                            eprintln!("probe: MOVE TO -> {}", cwd.display());
+                            commands.send(SessionCommand::MoveTo { cwd }).await.ok();
                         }
                         eprintln!("probe: FOLLOW-UP -> {text:?}");
                         commands

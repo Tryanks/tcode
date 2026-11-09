@@ -614,6 +614,8 @@ enum PendingRequest {
     TurnStart {
         permission: String,
         settings: Option<Value>,
+        /// The `cwd` the request carried.
+        moved_to: Option<PathBuf>,
     },
     Interrupt,
     Steer {
@@ -731,6 +733,9 @@ struct Actor {
     /// loop drains it before its next model request and echoes it back as a
     /// `userMessage` item, which is the real acceptance signal.
     pending_steers: Vec<(String, String)>,
+    /// The directory [`SessionCommand::MoveTo`] named, sent as `turn/start.cwd`
+    /// until Codex takes a turn there: the thread runs there from then on.
+    moved_to: Option<PathBuf>,
     /// [`SessionOptions::instructions`], sent as `turn/start.additionalContext`.
     instructions: Option<String>,
     /// A retry's `turn/start` with empty input is on its way: the turn it
@@ -824,6 +829,7 @@ async fn run_actor(
         last_turn_options: None,
         interrupted: false,
         pending_steers: Vec::new(),
+        moved_to: None,
         instructions: opts.instructions.clone(),
         continuing: false,
         continuations: HashSet::new(),
@@ -903,6 +909,7 @@ impl SessionActor for Actor {
                     PendingRequest::TurnStart {
                         permission: self.requested_permission.clone(),
                         settings: None,
+                        moved_to: self.moved_to.clone(),
                     },
                 )?;
                 self.events
@@ -1229,6 +1236,11 @@ impl SessionActor for Actor {
                 PendingRequest::AccountUsage(reply),
             ),
             SessionCommand::MoveToBackground { .. } => Ok(()),
+            SessionCommand::MoveTo { cwd } => {
+                self.cwd = cwd.clone();
+                self.moved_to = Some(cwd);
+                Ok(())
+            }
             SessionCommand::Shutdown => Ok(()),
         }
     }
@@ -1286,6 +1298,7 @@ impl SessionActor for Actor {
             PendingRequest::TurnStart {
                 permission: self.requested_permission.clone(),
                 settings: None,
+                moved_to: self.moved_to.clone(),
             },
         )
     }
@@ -2075,6 +2088,9 @@ impl Actor {
         if let Some(effort) = &effort {
             params["effort"] = json!(effort);
         }
+        if let Some(cwd) = &self.moved_to {
+            params["cwd"] = json!(cwd.to_string_lossy());
+        }
         if let Some(tier) = &self.service_tier {
             params["serviceTier"] = json!(tier);
         }
@@ -2218,7 +2234,11 @@ impl Actor {
                     Some(PendingRequest::TurnStart {
                         permission,
                         settings,
+                        moved_to,
                     }) => {
+                        if moved_to.is_some() && moved_to == self.moved_to {
+                            self.moved_to = None;
+                        }
                         if let Some(turn_id) =
                             value.pointer("/result/turn/id").and_then(Value::as_str)
                         {
@@ -4999,12 +5019,79 @@ mod tests {
                 capacity_retries: 0,
                 last_turn_options: None,
                 interrupted: false,
+                moved_to: None,
                 instructions: None,
                 continuing: false,
                 continuations: HashSet::new(),
             },
             event_rx,
         )
+    }
+
+    /// A moved thread's next `turn/start` names the directory it moved to, and so does
+    /// every one after it until Codex starts a turn there: a refused request moved nothing.
+    #[test]
+    fn a_move_rides_turn_start_until_codex_starts_a_turn_there() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor
+                .handle_command(SessionCommand::MoveTo {
+                    cwd: PathBuf::from("/work/feature"),
+                })
+                .await
+                .unwrap();
+            let turn_start = async |actor: &mut Actor, delivery_id| {
+                actor
+                    .handle_command(SessionCommand::SendTurn {
+                        delivery_id,
+                        text: "go on".into(),
+                        options: None,
+                        attachments: Vec::new(),
+                    })
+                    .await
+                    .unwrap();
+                // A refused request's failure reports come first.
+                while !matches!(
+                    events.recv().await.unwrap(),
+                    AgentEvent::TurnAccepted { .. }
+                ) {}
+                let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
+                    panic!("native request")
+                };
+                serde_json::from_str::<Value>(&line).unwrap()
+            };
+            let refused = turn_start(&mut actor, 1).await;
+            assert_eq!(
+                refused,
+                json!({"id":1,"method":"turn/start","params":{
+                    "threadId":"thread-1",
+                    "input":[{"type":"text","text":"go on","text_elements":[]}],
+                    "approvalPolicy":"on-request",
+                    "approvalsReviewer":"user",
+                    "sandboxPolicy":{
+                        "type":"workspaceWrite","writableRoots":[],"networkAccess":false,
+                        "excludeTmpdirEnvVar":false,"excludeSlashTmp":false
+                    },
+                    "cwd":"/work/feature",
+                    "collaborationMode":{"mode":"default","settings":{
+                        "model":"gpt-5-codex","reasoning_effort":"medium",
+                        "developer_instructions":null
+                    }}
+                }})
+            );
+            actor
+                .handle_line(r#"{"id":1,"error":{"code":-32600,"message":"busy"}}"#)
+                .await;
+            let accepted = turn_start(&mut actor, 2).await;
+            assert_eq!(accepted["params"]["cwd"], "/work/feature");
+            actor
+                .handle_line(r#"{"id":2,"result":{"turn":{"id":"turn-2"}}}"#)
+                .await;
+            let after = turn_start(&mut actor, 3).await;
+            assert!(after["params"].get("cwd").is_none(), "{after}");
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
     }
 
     #[test]

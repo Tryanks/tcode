@@ -209,6 +209,25 @@ pub(crate) fn settings_kept_divider(id: &str, cx: &App) -> AnyElement {
     )
 }
 
+pub(crate) fn session_moved_divider(
+    id: &str,
+    from: &std::path::Path,
+    to: &std::path::Path,
+    cx: &App,
+) -> AnyElement {
+    divider(
+        SharedString::from(format!("moved-{id}")),
+        crate::tr!(
+            "chat.session_moved",
+            from = from.to_string_lossy(),
+            to = to.to_string_lossy()
+        )
+        .into_owned(),
+        cx.theme().muted_foreground,
+        cx,
+    )
+}
+
 /// Why a harness did not rewind, in the user's words.
 pub(crate) fn rewind_reason(reason: agent::RewindFailureReason, harness: &str) -> String {
     use agent::RewindFailureReason as Reason;

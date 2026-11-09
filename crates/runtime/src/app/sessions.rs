@@ -399,14 +399,10 @@ impl AppState {
             .collect();
         let mut stranded = Vec::new();
         for mut meta in metas {
+            let mut moved = None;
             if let Some(cwd) = rebase_path(&meta.cwd, &old_root, &root) {
-                let old_cwd = std::mem::replace(&mut meta.cwd, cwd);
-                if meta.cwd != old_cwd {
-                    // Keep the native session out of the new directory, as
-                    // `move_session_by` does: Claude Code cannot resume it there.
-                    meta.moved_from.get_or_insert(old_cwd);
-                    meta.resume_cursor = None;
-                    meta.pending_fork = None;
+                if meta.cwd != cwd {
+                    moved = move_meta(&mut meta, cwd);
                 }
                 if self
                     .resident(&meta.id)
@@ -434,6 +430,9 @@ impl AppState {
                 resident.meta.pending_fork = meta.pending_fork.clone();
             }
             self.persist_meta(&meta, cx);
+            if let Some(moved) = moved {
+                self.record_event(&meta.id, &moved, cx);
+            }
         }
         match absorbing {
             Some(target_id) => {
@@ -489,12 +488,8 @@ impl AppState {
     }
 
     /// Move a thread into `project_id`, its conversation continuing in `cwd` (the project
-    /// root when absent), a directory the project owns ([`project_directory`]). A provider's
-    /// native session belongs to the directory it ran in — Claude Code keeps its sessions per
-    /// directory and cannot resume one from another — so the move clears the resume cursor
-    /// and the next turn starts a fresh provider session there, handed the conversation so
-    /// far by the relay owner ([`Self::hand_off_conversation`]). The Tcode transcript stays
-    /// as it is.
+    /// root when absent), a directory the project owns ([`project_directory`]), as
+    /// [`move_meta`] decides. The Tcode transcript stays as it is.
     pub fn move_session(
         &self,
         session_id: String,
@@ -589,13 +584,10 @@ impl AppState {
             ));
         }
 
-        let old_cwd = std::mem::replace(&mut meta.cwd, cwd);
-        meta.moved_from.get_or_insert(old_cwd);
+        let moved = move_meta(&mut meta, cwd);
         meta.project_id = Some(project.id.clone());
-        meta.resume_cursor = None;
-        meta.pending_fork = None;
         meta.updated_at = now_secs();
-        if !by_own_turn {
+        if !by_own_turn && moved.is_none() {
             self.detach_provider_to_idle(session_id, cx);
         }
         if let Some(resident) = self.resident_mut(session_id) {
@@ -604,6 +596,9 @@ impl AppState {
             resident.branches.clear();
         }
         self.persist_meta(&meta, cx);
+        if let Some(moved) = moved {
+            self.record_event(session_id, &moved, cx);
+        }
         self.refresh_control_grants();
         if self.resident(session_id).is_some() {
             self.refresh_session_git_branch(meta.id.clone(), meta.cwd.clone(), cx);
@@ -2388,6 +2383,30 @@ impl AppState {
         );
         self.refresh_git_status(&session_id, cx);
     }
+}
+
+/// Point a thread at `cwd`, the directory it moved to. Where its native session goes along
+/// ([`agent::Caps::session_move`]), this returns the move for the timeline to show, and the
+/// provider is sent there before its next turn. Otherwise the native session belongs to the
+/// directory it ran in — Claude Code keeps its sessions per directory and cannot resume one
+/// from another — so the next turn starts a fresh provider session in `cwd`, handed the
+/// conversation so far by the relay owner (`hand_off_conversation`).
+fn move_meta(meta: &mut SessionMeta, cwd: PathBuf) -> Option<AgentEvent> {
+    let from = std::mem::replace(&mut meta.cwd, cwd);
+    // A relay already owed (`moved_from`) is to a fresh session, which carries nothing along.
+    if meta.provider.caps().session_move
+        && meta.resume_cursor.is_some()
+        && meta.moved_from.is_none()
+    {
+        return Some(AgentEvent::SessionMoved {
+            from,
+            to: meta.cwd.clone(),
+        });
+    }
+    meta.moved_from.get_or_insert(from);
+    meta.resume_cursor = None;
+    meta.pending_fork = None;
+    None
 }
 
 fn project_root_error(error: std::io::Error) -> ProtocolError {

@@ -539,6 +539,10 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
         EntryContent::ContextCompacted(_) => {}
         EntryContent::ContextWindowChanged { window } => window.hash(hash),
         EntryContent::SettingsKept => {}
+        EntryContent::SessionMoved { from, to } => {
+            from.hash(hash);
+            to.hash(hash);
+        }
         EntryContent::ControlAction(action) => {
             action.actor_thread_id.hash(hash);
             action.action.hash(hash);

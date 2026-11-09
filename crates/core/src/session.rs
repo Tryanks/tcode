@@ -546,6 +546,11 @@ pub enum EntryContent {
     },
     /// The message before this ran on the live process's old settings.
     SettingsKept,
+    /// The thread moved to another directory, its native session along with it.
+    SessionMoved {
+        from: std::path::PathBuf,
+        to: std::path::PathBuf,
+    },
     /// Another thread's model acted on this thread through `tcode_control`
     /// (a system row naming the actor and the action).
     ControlAction(agent::ControlAction),
@@ -1652,6 +1657,21 @@ impl Timeline {
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
                     content: EntryContent::SettingsKept,
+                    ts,
+                    finished_ts: None,
+                    background: false,
+                    turn,
+                }));
+            }
+            AgentEvent::SessionMoved { from, to } => {
+                let turn = self.ensure_turn();
+                let id = self.synthetic_id("moved", ts);
+                self.entries.push(Arc::new(TimelineEntry {
+                    id,
+                    content: EntryContent::SessionMoved {
+                        from: from.clone(),
+                        to: to.clone(),
+                    },
                     ts,
                     finished_ts: None,
                     background: false,

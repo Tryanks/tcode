@@ -281,13 +281,15 @@ fn a_changed_root_delivers_what_a_missing_directory_left_queued() {
     let options = launched.try_recv().unwrap();
     assert_eq!(options.cwd, moved_to);
     assert_eq!(
-        options.resume, None,
-        "the native session stayed behind in the old directory"
+        options.resume,
+        Some(agent::ResumeCursor(
+            serde_json::json!({"thread_id": "native"})
+        )),
+        "Codex resumes its native session in the new directory"
     );
-    assert!(text.contains("do not lose me"), "{text}");
-    assert!(
-        text.contains("the earlier answer"),
-        "the fresh provider session is handed the conversation so far: {text}"
+    assert_eq!(
+        text, "do not lose me",
+        "no handoff to a session that has it all"
     );
     assert!(launched.is_empty(), "one start, one delivery");
 }
