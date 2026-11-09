@@ -280,6 +280,7 @@ impl TraverseHost {
                 hosting_changed: Arc::new(tokio::sync::Notify::new()),
                 hosting_listeners: Mutex::new(Vec::new()),
             });
+            shared.observe_spaces(&shared.state.lock().unwrap());
             // A fetched manifest is applied to the running endpoint, whether
             // it refreshes the one in hand or is the first to arrive. The
             // loop holds no reference that would keep a stopped host alive.
@@ -959,6 +960,7 @@ impl Shared {
                     }),
                 link_enabled: space.link_enabled,
                 link_dead: space.link_failures >= MAX_PAIRING_FAILURES,
+                policy: space.policy.clone(),
                 members: state
                     .identity
                     .devices
@@ -975,6 +977,7 @@ impl Shared {
         let previous = state.identity.clone();
         let mut affected = Vec::new();
         let mut created = None;
+        let mut deleted = None;
         match action {
             SpaceAction::Create { name } => {
                 let name = space_name(name)?;
@@ -987,6 +990,7 @@ impl Shared {
                     secret: new_secret(),
                     link_enabled: true,
                     link_failures: 0,
+                    policy: tcode_protocol::SpacePolicy::new_space(),
                 });
                 created = Some(id);
             }
@@ -1043,7 +1047,8 @@ impl Shared {
                     | SpaceAction::Delete { id }
                     | SpaceAction::SetProjects { id, .. }
                     | SpaceAction::RegenerateLink { id }
-                    | SpaceAction::SetLinkEnabled { id, .. } => id,
+                    | SpaceAction::SetLinkEnabled { id, .. }
+                    | SpaceAction::SetPolicy { id, .. } => id,
                     _ => unreachable!(),
                 };
                 let index = state
@@ -1057,6 +1062,7 @@ impl Shared {
                     SpaceAction::Rename { .. }
                         | SpaceAction::Delete { .. }
                         | SpaceAction::SetProjects { .. }
+                        | SpaceAction::SetPolicy { .. }
                 ) {
                     affected = state
                         .identity
@@ -1071,6 +1077,7 @@ impl Shared {
                         state.identity.spaces[index].name = space_name(name)?
                     }
                     SpaceAction::Delete { id } => {
+                        deleted = Some(id.clone());
                         state.identity.spaces.remove(index);
                         state.identity.devices.retain_mut(|device| {
                             if let DeviceGrant::Spaces(ids) = &mut device.access {
@@ -1093,6 +1100,9 @@ impl Shared {
                     SpaceAction::SetLinkEnabled { enabled, .. } => {
                         state.identity.spaces[index].link_enabled = enabled
                     }
+                    SpaceAction::SetPolicy { policy, .. } => {
+                        state.identity.spaces[index].policy = policy
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -1110,7 +1120,37 @@ impl Shared {
             };
             close_device(&mut state, &id, code, b"space changed");
         }
+        self.observe_spaces(&state);
+        // What its former members left queued must not go on under the policy
+        // the space had: the host holds it under one that allows nothing.
+        if let Some(id) = deleted {
+            self.mux.observe(Principal::Space {
+                policy_revision: state.identity.policy_revision,
+                space_id: id,
+                space_name: String::new(),
+                project_ids: Vec::new(),
+                device_id: String::new(),
+                device_name: String::new(),
+                policy: tcode_protocol::SpacePolicy::new_space(),
+            });
+        }
         Ok(created)
+    }
+
+    /// Show the host every space's scope and policy as they stand, so what
+    /// a member's queued or running work may do follows a change at once.
+    fn observe_spaces(&self, state: &State) {
+        for space in &state.identity.spaces {
+            self.mux.observe(Principal::Space {
+                policy_revision: state.identity.policy_revision,
+                space_id: space.id.clone(),
+                space_name: space.name.clone(),
+                project_ids: space.project_ids.clone(),
+                device_id: String::new(),
+                device_name: String::new(),
+                policy: space.policy.clone(),
+            });
+        }
     }
 
     fn principal(&self, remote: EndpointId) -> Option<Principal> {
@@ -1134,6 +1174,7 @@ impl Shared {
                     project_ids: space.project_ids.clone(),
                     device_id: device.id.clone(),
                     device_name: device.name.clone(),
+                    policy: space.policy.clone(),
                 })
             }
         }
@@ -2618,8 +2659,13 @@ impl StreamTask {
                 if !self.hello_done.load(Ordering::Acquire) {
                     return refuse(send, "hello required").await;
                 }
-                if !matches!(*self.principal.lock().unwrap(), Some(Principal::Full)) {
-                    return refuse(send, "space members cannot open tunnels").await;
+                let allowed = match &*self.principal.lock().unwrap() {
+                    Some(Principal::Full) => true,
+                    Some(Principal::Space { policy, .. }) => policy.preview,
+                    None => false,
+                };
+                if !allowed {
+                    return refuse(send, "this space does not allow Preview tunnels").await;
                 }
                 if !wire::valid_tunnel_target(&host, port) {
                     return refuse(send, "invalid tunnel target").await;

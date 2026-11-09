@@ -15,6 +15,9 @@ use crate::store::SessionStore;
 
 const WORKTREE_SEED_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 
+/// How much of a repository's directory name its worktrees' directory keeps.
+const REPOSITORY_NAME_CHARS: usize = 24;
+
 /// Removal deletes only branches in this namespace: Tcode created them.
 const BRANCH_PREFIX: &str = "tcode/";
 
@@ -198,7 +201,12 @@ fn repository_key(checkout: &Path) -> Result<String, WorktreeError> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    Ok(format!("{}-{hash}", path_safe(directory)))
+    // Git refuses a worktree whose `<path>/.git` is longer than its PATH_MAX
+    // less 40, 220 characters on Windows: the readable part stays short and
+    // the hash keeps repositories apart.
+    let mut readable = path_safe(directory);
+    readable.truncate(REPOSITORY_NAME_CHARS);
+    Ok(format!("{}-{hash}", readable.trim_end_matches('-')))
 }
 
 /// `name` as one path segment that is also a valid branch-name component.
@@ -243,15 +251,27 @@ fn provision_at(
         prune(root)?;
     }
 
+    let failure =
+        |output: &std::process::Output| String::from_utf8_lossy(&output.stderr).trim().to_string();
     let mut output = add(root, &path, &branch, base)?;
     if !output.status.success() && registered_worktree(root, &path)?.is_none() {
+        let first = failure(&output);
+        // `worktree add -b` makes the branch before it checks it out, so a
+        // failed add can leave the branch behind and the retry would only
+        // say it already exists.
+        delete_branch_without_own_commits(root, &branch);
         prune(root)?;
         output = add(root, &path, &branch, base)?;
+        if !output.status.success() {
+            delete_branch_without_own_commits(root, &branch);
+            return Err(WorktreeError(format!(
+                "{first} (again after pruning: {})",
+                failure(&output)
+            )));
+        }
     }
     if !output.status.success() {
-        return Err(WorktreeError(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
+        return Err(WorktreeError(failure(&output)));
     }
 
     let seed_summary = match seed(&path, seed_plan, seed_limit) {

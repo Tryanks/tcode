@@ -393,6 +393,10 @@ pub(crate) fn handle_client_message(
         principal,
     } = message;
     cx.principal = principal.unwrap_or(Principal::Full);
+    cx.space = match &cx.principal {
+        Principal::Full => None,
+        Principal::Space { space_id, .. } => Some(space_id.clone()),
+    };
     cx.origin = Some(tcode_core::session::MessageOrigin::Human);
     cx.author = match &cx.principal {
         Principal::Full => None,
@@ -405,8 +409,8 @@ pub(crate) fn handle_client_message(
             name: device_name.clone(),
         }),
     };
-    if !matches!(payload, ClientPayload::Unsubscribe(_)) {
-        state.observe_principal(&cx.principal);
+    if !matches!(payload, ClientPayload::Unsubscribe(_)) && state.observe_principal(&cx.principal) {
+        state.space_policy_changed(cx);
     }
     if let Err(error) = state.authorize(&cx.principal, &payload, cx) {
         let reply = if matches!(payload, ClientPayload::Query(_)) {
@@ -423,6 +427,7 @@ pub(crate) fn handle_client_message(
         cx.send_message(reply);
         cx.principal = Principal::Full;
         cx.author = None;
+        cx.space = None;
         cx.origin = None;
         return;
     }
@@ -443,6 +448,7 @@ pub(crate) fn handle_client_message(
                     cx.send_message(HostMessage::Ack { id, result });
                     cx.principal = Principal::Full;
                     cx.author = None;
+                    cx.space = None;
                     cx.origin = None;
                     return;
                 }
@@ -503,6 +509,7 @@ pub(crate) fn handle_client_message(
     }
     cx.principal = Principal::Full;
     cx.author = None;
+    cx.space = None;
     cx.origin = None;
 }
 
@@ -739,7 +746,8 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         } => app.add_custom_acp_agent(name, command, args, cx),
         Command::UpdateAcpAgent { id, patch } => app.update_acp_agent(&id, patch, cx),
         Command::SetActiveAcpAgent { session_id, id } => {
-            app.set_active_acp_agent(&session_id, &id, cx)
+            app.set_active_acp_agent(&session_id, &id, cx);
+            app.release_policy_holds(&session_id, cx);
         }
         Command::RefreshProviderPlugins { profile_id, cwd } => {
             app.refresh_provider_plugins(&profile_id, cwd, cx)
@@ -915,7 +923,12 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::ToggleProjectCollapsed { project_id } => {
             app.toggle_project_collapsed(&project_id, cx)
         }
-        Command::PatchSettings { patch } => app.patch_settings(patch, cx),
+        Command::PatchSettings { patch } => {
+            app.patch_settings(patch, cx);
+            // A default model or an enabled profile is part of what a held
+            // message waits on.
+            app.space_policy_changed(cx);
+        }
         Command::SettleChildren { session_id } => {
             response = CommandResponse::ChildrenSettled(app.settle_children(&session_id, cx));
         }
@@ -1020,7 +1033,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             through,
         } => app.mark_session_read(&session_id, through, cx),
         Command::StartDraft { project_id, cwd } => {
-            response = CommandResponse::SessionId(Some(app.start_draft(project_id, cwd, cx)));
+            let id = app.start_draft(project_id, cwd, cx);
+            app.fit_draft_to_space(&id, cx);
+            response = CommandResponse::SessionId(Some(id));
         }
         Command::SetDraftWorkspace { session_id, mode } => {
             app.set_draft_workspace(&session_id, mode, cx)
@@ -1058,7 +1073,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             turn_id,
         } => {
             return CommandOutcome::Immediate(
-                app.retry_turn(&session_id, turn_id)
+                app.retry_turn(&session_id, turn_id, cx)
                     .map(|()| CommandResponse::Unit),
             );
         }
@@ -1143,12 +1158,18 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             provider,
             model,
             profile_id,
-        } => app.set_active_model(&session_id, provider, model, profile_id, cx),
+        } => {
+            app.set_active_model(&session_id, provider, model, profile_id, cx);
+            app.release_policy_holds(&session_id, cx);
+        }
         Command::SetActiveOption {
             session_id,
             id,
             value,
-        } => app.set_active_option(&session_id, &id, value, cx),
+        } => {
+            app.set_active_option(&session_id, &id, value, cx);
+            app.release_policy_holds(&session_id, cx);
+        }
         Command::LoadBranches { session_id } => app.load_branches(&session_id, cx),
         Command::CheckoutBranch { session_id, branch } => {
             app.checkout_branch(&session_id, branch, cx);

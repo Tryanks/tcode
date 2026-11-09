@@ -28,7 +28,7 @@ pub(super) enum TogglePanel {
 /// thread does not offer.
 #[derive(Clone, Copy)]
 struct HeaderPanels {
-    terminal: bool,
+    terminal: Option<bool>,
     plan: bool,
     agents: Option<bool>,
     preview: Option<bool>,
@@ -987,6 +987,10 @@ impl ChatView {
         let agents_showing = right_panel_open && right_tab == RightTab::Agents;
         let preview_showing = right_panel_open && right_tab == RightTab::Preview;
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
+        let terminals = self
+            .workspace_store
+            .read(cx)
+            .space_allows(|policy| policy.terminals);
         let diff_showing = right_panel_open && right_tab == RightTab::Diff;
         let agent_tools = self
             .workspace_store
@@ -1102,7 +1106,7 @@ impl ChatView {
                     1,
                     self.render_header_overflow(
                         HeaderPanels {
-                            terminal: terminal_open,
+                            terminal: terminals.then_some(terminal_open),
                             plan: plan_showing,
                             agents: agents_cue.map(|_| agents_showing),
                             preview: self
@@ -1145,20 +1149,26 @@ impl ChatView {
                             h_flex()
                                 .flex_none()
                                 .gap_1()
-                                .child(
-                                    Button::new("panel-layout")
-                                        .motion(&self.motion)
-                                        .on_mouse_down(gpui::MouseButton::Left, stop_press)
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .icon(IconName::PanelBottom)
-                                        .selected(terminal_open)
-                                        .tooltip(crate::tr!("chat.toggle_terminal"))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.on_toggle_panel(&TogglePanel::Terminal, window, cx)
-                                        })),
-                                )
+                                .when(terminals, |row| {
+                                    row.child(
+                                        Button::new("panel-layout")
+                                            .motion(&self.motion)
+                                            .on_mouse_down(gpui::MouseButton::Left, stop_press)
+                                            .ghost()
+                                            .small()
+                                            .compact()
+                                            .icon(IconName::PanelBottom)
+                                            .selected(terminal_open)
+                                            .tooltip(crate::tr!("chat.toggle_terminal"))
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.on_toggle_panel(
+                                                    &TogglePanel::Terminal,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })),
+                                    )
+                                })
                                 .child(
                                     Button::new("plan-panel")
                                         .motion(&self.motion)
@@ -1347,7 +1357,7 @@ impl ChatView {
         let rows = [
             (
                 "chat.toggle_terminal",
-                Some(panels.terminal),
+                panels.terminal,
                 TogglePanel::Terminal,
             ),
             ("chat.toggle_tasks", Some(panels.plan), TogglePanel::Plan),

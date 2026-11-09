@@ -234,6 +234,8 @@ pub enum Scope {
         space_name: String,
         projects: Vec<Project>,
         providers: Vec<ScopedProviderChoice>,
+        #[serde(default = "crate::SpacePolicy::unrestricted")]
+        policy: crate::SpacePolicy,
     },
 }
 
@@ -1068,6 +1070,10 @@ pub struct QueuedMessageStatus {
     /// message. Like the queue itself, this status is ephemeral.
     #[serde(default)]
     pub fire_at_unix_secs: Option<u64>,
+    /// Held because the space it was sent from does not allow the thread's
+    /// setup as it stands; it goes once the thread or the space allows it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub space_held: bool,
 }
 
 /// The unarchived threads and every project. Archived threads are read on

@@ -1360,24 +1360,45 @@ impl PermissionControl {
             } => {
                 let rows = options
                     .into_iter()
-                    .map(|option| PermissionRow {
-                        recommended: recommended.as_deref() == Some(option.value.as_str()),
-                        description: option.description.map(|description| {
-                            crate::i18n::translate_permission_description(
-                                &format!("permission.values.{id}.{}", option.value),
-                                &description,
+                    .map(|option| {
+                        // A member's space may not allow every value.
+                        let refused = composer
+                            .provider
+                            .and_then(|provider| {
+                                agent::approval_class(provider, &id, &option.value)
+                            })
+                            .zip(composer.space_policy.as_ref())
+                            .is_some_and(|(class, policy)| !policy.allows_class(class));
+                        PermissionRow {
+                            recommended: recommended.as_deref() == Some(option.value.as_str()),
+                            description: option.description.map(|description| {
+                                crate::i18n::translate_permission_description(
+                                    &format!("permission.values.{id}.{}", option.value),
+                                    &description,
+                                )
+                            }),
+                            value: serde_json::Value::String(option.value),
+                            label: crate::i18n::translate_english(
+                                "permission.current.label",
+                                &option.label,
                             )
-                        }),
-                        value: serde_json::Value::String(option.value),
-                        label: crate::i18n::translate_english(
-                            "permission.current.label",
-                            &option.label,
-                        )
-                        .into_owned(),
-                        unavailable: option.unavailable.map(|reason| {
-                            crate::i18n::translate_english("permission.unavailable", &reason)
-                                .into_owned()
-                        }),
+                            .into_owned(),
+                            unavailable: option
+                                .unavailable
+                                .map(|reason| {
+                                    crate::i18n::translate_english(
+                                        "permission.unavailable",
+                                        &reason,
+                                    )
+                                    .into_owned()
+                                })
+                                .or_else(|| {
+                                    refused.then(|| {
+                                        crate::tr!("space_policy.permission_unavailable")
+                                            .into_owned()
+                                    })
+                                }),
+                        }
                     })
                     .collect();
                 (

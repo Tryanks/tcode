@@ -1211,6 +1211,7 @@ approval:
   blocked_path: "Blocked path: %{path}"
   pending: "PENDING APPROVAL"
   cancel_turn: "Cancel turn"
+  space_reviewed_only: "In this space the agent's harness settles approvals; only the machine's owner answers this one."
 diff:
   binary: "Binary file. Its contents aren't shown."
   empty_file: "Empty file."
@@ -1768,6 +1769,47 @@ spaces:
     hide_qr: "Hide QR"
     resume: "Turn on link"
 
+space_policy:
+  permission_unavailable: "Not allowed in this space"
+  queued_held: "Waiting: this space doesn't allow the thread's current agent, model or permissions"
+  acp_agents: "ACP agents"
+  agents:
+    title: "Agents members may use"
+    every: "Every agent and model, including ones added later."
+    choose: "Choose agents"
+    none_available: "This machine has no enabled agent to allow."
+    blocked: "Unavailable under these permission modes: it has no mode they allow."
+  models:
+    every: "All models"
+    some: "%{count} models"
+  acp:
+    some: "%{count} agents"
+  approval:
+    section: "Approvals"
+    title: "Permission modes"
+    any: "Any mode"
+    no_unrestricted: "No unrestricted mode"
+    reviewed_only: "Automatic review only"
+    any_description: "Members may pick any permission mode and answer approvals themselves."
+    no_unrestricted_description: "Modes that run everything without asking are off; members answer approvals themselves."
+    reviewed_only_description: "Only modes in which the agent's harness reviews actions itself. What it still asks during a member's turn is declined."
+  reach:
+    title: "Beyond threads"
+  terminals:
+    title: "Terminals"
+    description: "A terminal is a shell under this machine's account: with it, the limits on agents and approvals above can be bypassed."
+  git_remote:
+    title: "Push, pull and pull requests"
+    description: "Uses this machine's own git and forge credentials."
+  preview:
+    title: "Preview"
+    description: "Members reach this machine's local services, and an agent working for a member drives the preview browser."
+  computer_use:
+    title: "Computer use in members' turns"
+    description: "Lets an agent working for a member operate this machine's desktop."
+  editor:
+    title: "Open in an editor"
+    description: "An editor's remote connection is a shell under this machine's account, beyond the space's projects: with it, every other limit here can be bypassed."
 group:
   section: "MACHINE GROUP"
   intro: "A group links your machines, so a device paired with one can open all of them."

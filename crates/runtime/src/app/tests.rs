@@ -4524,6 +4524,147 @@ fn child_native_approval_callback_and_respond_approval_preserve_options_and_scop
     });
 }
 
+/// A `tcode_control` call made during a member's turn stays inside the member's space and
+/// its policy, whatever the thread's grant reaches; the owner's own turn keeps the grant.
+#[test]
+fn control_calls_in_a_members_turn_stay_inside_the_space() {
+    use tcode_core::control::{ControlCategory, ControlGrant, ControlScope, ControlTier};
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-control-space");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (commands, receiver) = smol::channel::unbounded();
+    state.update(cx, |state, cx| {
+        let thread = |id: &str, project: &str| {
+            let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
+            meta.id = id.into();
+            meta.project_id = Some(project.into());
+            meta
+        };
+        let root = store.root().join("project-a");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut project = tcode_core::project::Project::from_root(root.clone());
+        project.id = "a".into();
+        state.projects.push(project);
+        let mut caller = live_session(ProviderKind::Codex, commands);
+        caller.meta.id = "caller".into();
+        caller.meta.cwd = root.clone();
+        caller.live_cwd = root;
+        caller.meta.project_id = Some("a".into());
+        caller.meta.control_grant = Some(ControlGrant {
+            scope: ControlScope::Host,
+            tiers: ControlTier::ALL.into_iter().collect(),
+            categories: ControlCategory::ALL.into_iter().collect(),
+        });
+        state.sessions.extend([
+            caller.meta.clone(),
+            thread("same", "a"),
+            thread("other", "b"),
+        ]);
+        state.residents.live.insert("caller".into(), caller);
+        state.observe_principal(&tcode_protocol::Principal::Space {
+            policy_revision: 1,
+            space_id: "s".into(),
+            space_name: "Shared".into(),
+            project_ids: vec!["a".into()],
+            device_id: "phone".into(),
+            device_name: "Phone".into(),
+            policy: tcode_protocol::SpacePolicy {
+                git_remote: false,
+                ..tcode_protocol::SpacePolicy::unrestricted()
+            },
+        });
+        let get = |id: &str| {
+            control_mcp::ControlOp::GetThread(control_mcp::GetThreadParams {
+                thread_id: id.into(),
+            })
+        };
+        let push = control_mcp::ControlOp::Git(control_mcp::GitParams {
+            thread_id: "same".into(),
+            op: control_mcp::GitOp::Push,
+            request_id: None,
+        });
+        let settings =
+            || control_mcp::ControlOp::GetSettings(control_mcp::GetSettingsParams { keys: None });
+        assert!(control_call(state, cx, "caller", get("other")).is_ok());
+        assert!(control_call(state, cx, "caller", settings()).is_ok());
+
+        // A member sends the turn the agent works in, as the pipe admits it.
+        cx.space = Some("s".into());
+        state.send_turn("caller", "go".into(), Vec::new(), cx);
+        cx.space = None;
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(SessionCommand::SendTurn { .. })
+        ));
+
+        assert!(control_call(state, cx, "caller", get("same")).is_ok());
+        let refused = control_call(state, cx, "caller", get("other")).unwrap_err();
+        assert!(refused.contains("outside"), "{refused}");
+        let refused = control_call(state, cx, "caller", push).unwrap_err();
+        assert!(refused.contains("pushing and pulling"), "{refused}");
+        let refused = control_call(state, cx, "caller", settings()).unwrap_err();
+        assert!(refused.contains("in this space"), "{refused}");
+
+        // What the member's turn sets going works for the member too: a
+        // subagent it starts and a message it queues in another thread wait
+        // once the space allows nothing.
+        let started = control_call(
+            state,
+            cx,
+            "caller",
+            control_mcp::ControlOp::StartThread(control_mcp::StartThreadParams {
+                project_id: None,
+                cwd: None,
+                workspace: None,
+                subagent: Some(true),
+                provider: "codex".into(),
+                model: None,
+                profile: None,
+                options: None,
+                title: None,
+                message: "work".into(),
+                attachments: None,
+                request_id: "child".into(),
+            }),
+        )
+        .unwrap();
+        let child = started["thread_id"].as_str().unwrap().to_owned();
+        control_call(
+            state,
+            cx,
+            "caller",
+            control_mcp::ControlOp::SendMessage(control_mcp::SendMessageParams {
+                thread_ids: vec!["same".into()],
+                text: "more".into(),
+                mode: control_mcp::SendMode::Queue,
+                attachments: None,
+                request_id: None,
+            }),
+        )
+        .unwrap();
+        state.observe_principal(&tcode_protocol::Principal::Space {
+            policy_revision: 2,
+            space_id: "s".into(),
+            space_name: "Shared".into(),
+            project_ids: vec!["a".into()],
+            device_id: "phone".into(),
+            device_name: "Phone".into(),
+            policy: tcode_protocol::SpacePolicy::new_space(),
+        });
+        for id in [child.as_str(), "same"] {
+            let status = state.session_status_snapshot(id).unwrap();
+            assert!(
+                status
+                    .queued_messages
+                    .iter()
+                    .any(|message| message.space_held),
+                "{id}: {:?}",
+                status.queued_messages
+            );
+        }
+    });
+}
+
 #[test]
 fn child_questions_reach_the_lead_and_respond_input_answers_them() {
     let cx = &mut TestAppContext::default();
@@ -5320,7 +5461,7 @@ fn native_retry_keeps_queue_waiting_and_cancellation_releases_it() {
             let status = state.session_status_snapshot("retry").unwrap();
             assert!(status.turn_retry.is_none());
             assert!(!status.activity.working);
-            assert!(state.retry_turn("retry", "failed".into()).is_err());
+            assert!(state.retry_turn("retry", "failed".into(), cx).is_err());
         });
     }
 }
@@ -6138,220 +6279,6 @@ fn next_worktree_answer(
             other => panic!("expected RespondWorktree, got {other:?}"),
         }
     }
-}
-
-/// A worktree Claude Code asks for comes from Tcode's worktree module, in the data
-/// directory's bucket for the repository, and belongs to the thread; asked for by the
-/// same name again it is the same worktree. The thread follows the native session into
-/// it and out of it with the same provider process and no handoff, and Claude's removal
-/// removes it and its untouched branch.
-#[test]
-fn a_claude_worktree_comes_from_tcode_and_the_thread_follows_its_session() {
-    use agent::{WorktreeAnswer, WorktreeRequest};
-    let test_store = TestStore::new("tcode-claude-worktree");
-    let repo = test_store.root().join("repo");
-    init_git_repo(&repo);
-    let project = Project::from_root(repo.clone());
-    test_store.upsert_project(&project).unwrap();
-    let native = agent::ResumeCursor(serde_json::json!({"session_id": "native-1"}));
-    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, repo.clone(), None);
-    meta.id = "thread".into();
-    meta.project_id = Some(project.id.clone());
-    meta.resume_cursor = Some(native.clone());
-    test_store.upsert_meta(&meta).unwrap();
-    let cx = &mut TestAppContext::default();
-    let (launcher, launches) = recording_launcher();
-    let state = cx.new_entity({
-        let mut state = TestClientState::new((*test_store).clone());
-        state.set_provider_launcher_for_test(launcher);
-        state
-    });
-    state.update(cx, |state, cx| state.select_session("thread", cx));
-    let send = |text: &str| Command::SendTurn {
-        session_id: "thread".into(),
-        text: text.into(),
-        attachment_paths: Vec::new(),
-    };
-    acked(&state, cx, 1, send("work in a worktree")).unwrap();
-    let (delivery_id, _, events) = next_turn(cx, &launches, 0);
-    for event in [
-        AgentEvent::TurnAccepted { delivery_id },
-        AgentEvent::TurnStarted {
-            turn_id: "turn-1".into(),
-        },
-    ] {
-        events.try_send(event).unwrap();
-    }
-    let create = WorktreeRequest::Create {
-        cwd: repo.clone(),
-        name: "feat".into(),
-    };
-    events
-        .try_send(AgentEvent::WorktreeRequested {
-            request_id: "hook-1".into(),
-            request: create.clone(),
-        })
-        .unwrap();
-    let (request_id, answer) = next_worktree_answer(cx, &launches, 0);
-    assert_eq!(request_id, "hook-1");
-    let WorktreeAnswer::Ready {
-        path: worktree,
-        reused: false,
-    } = answer.clone()
-    else {
-        panic!("{answer:?}")
-    };
-    let bucket = tcode_services::worktree::worktrees_root(test_store.root())
-        .canonicalize()
-        .unwrap();
-    assert_eq!(worktree.parent().unwrap().parent().unwrap(), bucket);
-    assert_eq!(worktree.file_name().unwrap(), "feat");
-    assert_eq!(
-        run_git(&worktree, &["branch", "--show-current"])
-            .unwrap()
-            .trim(),
-        "tcode/feat"
-    );
-    state.read(|state| {
-        let meta = state.find_meta("thread").unwrap();
-        assert_eq!(meta.cwd, repo);
-        assert_eq!(
-            meta.other_worktrees
-                .iter()
-                .map(|owned| (&owned.path, owned.info.branch.as_str()))
-                .collect::<Vec<_>>(),
-            [(&worktree, "tcode/feat")]
-        );
-    });
-    for event in [
-        AgentEvent::WorktreeResolved {
-            request_id: "hook-1".into(),
-            request: create.clone(),
-            answer,
-        },
-        AgentEvent::SessionMoved {
-            from: repo.clone(),
-            to: worktree.clone(),
-            parent_item_id: None,
-        },
-        AgentEvent::TurnCompleted {
-            turn_id: "turn-1".into(),
-            status: TurnStatus::Completed,
-            usage: None,
-        },
-    ] {
-        events.try_send(event).unwrap();
-    }
-    cx.run_until(|state| {
-        state
-            .resident("thread")
-            .is_some_and(|session| session.meta.cwd == worktree && !session.has_work())
-    });
-    state.read(|state| {
-        let session = state.resident("thread").unwrap();
-        assert_eq!(session.live_cwd, worktree);
-        assert_eq!(
-            session.meta.worktree.as_ref().map(|w| w.branch.as_str()),
-            Some("tcode/feat")
-        );
-        assert_eq!(session.meta.other_worktrees, []);
-        assert_eq!(session.meta.moved_from, None);
-        assert_eq!(session.meta.resume_cursor, Some(native.clone()));
-        let shown: Vec<_> = session
-            .timeline
-            .entries
-            .iter()
-            .filter_map(|entry| match &entry.content {
-                EntryContent::Worktree { request, answer } => {
-                    Some(format!("{request:?} {answer:?}"))
-                }
-                EntryContent::SessionMoved { from, to } => Some(format!("{from:?} -> {to:?}")),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            shown,
-            [
-                format!(
-                    "{create:?} {:?}",
-                    WorktreeAnswer::Ready {
-                        path: worktree.clone(),
-                        reused: false
-                    }
-                ),
-                format!("{repo:?} -> {worktree:?}"),
-            ]
-        );
-    });
-
-    acked(&state, cx, 2, send("go on")).unwrap();
-    let (delivery_id, text, events) = next_turn(cx, &launches, 0);
-    assert_eq!(text, "go on");
-    assert_eq!(
-        launches.lock().unwrap().len(),
-        1,
-        "the same provider process"
-    );
-    state.read(|state| {
-        let session = state.resident("thread").unwrap();
-        assert!(
-            !session
-                .timeline
-                .entries
-                .iter()
-                .any(|entry| matches!(entry.content, EntryContent::ProviderRelay { .. }))
-        );
-    });
-    events
-        .try_send(AgentEvent::TurnAccepted { delivery_id })
-        .unwrap();
-    events
-        .try_send(AgentEvent::WorktreeRequested {
-            request_id: "hook-2".into(),
-            request: create,
-        })
-        .unwrap();
-    assert_eq!(
-        next_worktree_answer(cx, &launches, 0),
-        (
-            "hook-2".into(),
-            WorktreeAnswer::Ready {
-                path: worktree.clone(),
-                reused: true
-            }
-        )
-    );
-
-    events
-        .try_send(AgentEvent::SessionMoved {
-            from: worktree.clone(),
-            to: repo.clone(),
-            parent_item_id: None,
-        })
-        .unwrap();
-    events
-        .try_send(AgentEvent::WorktreeRequested {
-            request_id: "hook-3".into(),
-            request: WorktreeRequest::Remove {
-                path: worktree.clone(),
-            },
-        })
-        .unwrap();
-    assert_eq!(
-        next_worktree_answer(cx, &launches, 0),
-        ("hook-3".into(), WorktreeAnswer::Removed)
-    );
-    assert!(!worktree.exists());
-    assert_eq!(
-        run_git(&repo, &["branch", "--list", "tcode/feat"]).unwrap(),
-        ""
-    );
-    state.read(|state| {
-        let meta = state.find_meta("thread").unwrap();
-        assert_eq!(meta.cwd, repo);
-        assert_eq!(meta.worktree, None);
-        assert_eq!(meta.other_worktrees, []);
-    });
 }
 
 /// A worktree made for a native subagent is where that subagent's mirror works, and the

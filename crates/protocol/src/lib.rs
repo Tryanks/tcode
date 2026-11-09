@@ -54,15 +54,15 @@ pub use event::{
     ThreadReferenceStatus, ThreadWakes, Topic,
 };
 pub use query::{
-    ControlActivityFilter, ControlActivityPage, ControlActivityThread, DeviceAccess,
-    DirectoryListing, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, GroupAction,
-    GroupInfo, GroupMachineInfo, HostedDevice, HostingAction, HostingState, IconImageEntry,
-    MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo,
-    PathKind, Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES,
-    STORED_OUTPUT_BYTES, STORED_OUTPUT_COLS, STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS,
-    SessionSearchHit, SourceTool, SpaceAction, SpaceInfo, TraverseLookupState,
-    TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus,
-    TraverseSourceStatus,
+    AgentAccess, AgentGrant, ControlActivityFilter, ControlActivityPage, ControlActivityThread,
+    DeviceAccess, DirectoryListing, ExternalThread, GitDiffResult, GitDiffScope, GitFileText,
+    GroupAction, GroupInfo, GroupMachineInfo, HostedDevice, HostingAction, HostingState,
+    IconImageEntry, MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, ModelGrant,
+    OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo, PathKind, Query, QueryResponse, RecentDir,
+    SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, STORED_OUTPUT_BYTES, STORED_OUTPUT_COLS,
+    STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool, SpaceAction,
+    SpaceAgents, SpaceApproval, SpaceInfo, SpacePolicy, TraverseLookupState, TraverseLookupStatus,
+    TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus, TraverseSourceStatus,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
@@ -312,6 +312,10 @@ pub use wire::{
 // ready {path, reused} | removed | refused {error}), the timeline the
 // worktree entry, and SessionMeta other_worktrees ({path, root_project_path,
 // base, branch}).
+//
+// Unreleased: spaces gain a policy (SpacePolicy: agents, approval, terminals,
+// git_remote, preview, computer_use, editor), carried by SpaceInfo, the Space
+// principal and the Space scope, and set by SpaceAction set_policy.
 pub const PROTOCOL_VERSION: u32 = 26;
 
 #[cfg(test)]

@@ -1406,9 +1406,20 @@ pub struct SelectOption {
     pub unavailable: Option<String>,
 }
 
-/// Pre-session controls; a session's ProviderOptions is authoritative.
-pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
-    let (id, apply, default, recommended, permissive, values) = match provider {
+type PermissionTable = (
+    &'static str,
+    ApplyTiming,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static [(&'static str, &'static str, &'static str, ApprovalClass)],
+);
+
+/// Each provider's native permission control: its option id, when a change
+/// applies, its default, recommended and most permissive values, and every
+/// value with its label, description and [`ApprovalClass`].
+fn permission_table(provider: ProviderKind) -> Option<PermissionTable> {
+    Some(match provider {
         ProviderKind::ClaudeCode => (
             "permissionMode",
             ApplyTiming::Live,
@@ -1420,28 +1431,33 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
                     "default",
                     "Manual",
                     "Reads and built-in read-only commands run without asking; edits, other commands and network access ask you.",
+                    ApprovalClass::Manual,
                 ),
                 (
                     "acceptEdits",
                     "Accept edits",
                     "Reads, file edits and common filesystem commands run without asking; other commands ask.",
+                    ApprovalClass::Manual,
                 ),
                 (
                     "auto",
                     "Auto",
                     "A background safety classifier reviews each action; safe ones run, risky ones are blocked or ask. Unavailable when the account, model or organization does not support it.",
+                    ApprovalClass::Reviewed,
                 ),
                 (
                     "dontAsk",
                     "Don't ask",
                     "Only pre-approved tools run; anything that would ask is denied instead.",
+                    ApprovalClass::Reviewed,
                 ),
                 (
                     "bypassPermissions",
                     "Bypass permissions",
                     "Skips permission prompts. Deny/ask rules and protected paths still apply.",
+                    ApprovalClass::Unrestricted,
                 ),
-            ] as &[(&str, &str, &str)],
+            ] as &[(&str, &str, &str, ApprovalClass)],
         ),
         ProviderKind::Codex => (
             "permissions",
@@ -1454,19 +1470,27 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
                     "ask",
                     "Ask for approval",
                     "Reads, edits and commands run inside the workspace sandbox; access to the internet or files outside the workspace asks you.",
+                    ApprovalClass::Manual,
                 ),
                 (
                     "auto_review",
                     "Approve for me",
                     "Same workspace sandbox; requests that would ask are reviewed by Codex's auto-reviewer and only actions it finds risky ask you.",
+                    ApprovalClass::Reviewed,
                 ),
                 (
                     "read_only",
                     "Read Only",
                     "Reads run in a read-only sandbox; editing files or network access asks you.",
+                    ApprovalClass::Manual,
                 ),
-                ("full_access", "Full Access", "No sandbox and no prompts."),
-            ] as &[(&str, &str, &str)],
+                (
+                    "full_access",
+                    "Full Access",
+                    "No sandbox and no prompts.",
+                    ApprovalClass::Unrestricted,
+                ),
+            ] as &[(&str, &str, &str, ApprovalClass)],
         ),
         ProviderKind::Grok => (
             "permissionMode",
@@ -1479,28 +1503,33 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
                     "default",
                     "Ask",
                     "Reads run without asking; edits and commands ask you.",
+                    ApprovalClass::Manual,
                 ),
                 (
                     "acceptEdits",
                     "Accept edits",
                     "Edits run without asking; commands still ask.",
+                    ApprovalClass::Manual,
                 ),
                 (
                     "auto",
                     "Auto",
                     "A safety classifier approves routine actions; flagged ones ask you.",
+                    ApprovalClass::Reviewed,
                 ),
                 (
                     "bypassPermissions",
                     "Always approve",
                     "Every tool call runs; deny rules still apply.",
+                    ApprovalClass::Unrestricted,
                 ),
                 (
                     "dontAsk",
                     "Don't ask",
                     "Only pre-approved tools run; anything that would ask is denied.",
+                    ApprovalClass::Reviewed,
                 ),
-            ] as &[(&str, &str, &str)],
+            ] as &[(&str, &str, &str, ApprovalClass)],
         ),
         // Cursor exposes approvalMode only in user config, with no CLI override; --force honors unrestricted.
         ProviderKind::Cursor => (
@@ -1513,7 +1542,8 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
                 "unrestricted",
                 "Run everything",
                 "Every tool call runs without asking",
-            )] as &[(&str, &str, &str)],
+                ApprovalClass::Unrestricted,
+            )] as &[(&str, &str, &str, ApprovalClass)],
         ),
         ProviderKind::OpenCode => (
             "permission_mode",
@@ -1526,22 +1556,29 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
                     "normal",
                     "Normal",
                     "Follows your OpenCode permission rules; actions marked ask wait for you.",
+                    ApprovalClass::Manual,
                 ),
                 (
                     "auto",
                     "Auto-approve",
                     "Answers every ask with once, as OpenCode's own clients do; explicit deny rules still deny.",
+                    ApprovalClass::Unrestricted,
                 ),
-            ] as &[(&str, &str, &str)],
+            ] as &[(&str, &str, &str, ApprovalClass)],
         ),
         ProviderKind::Pi | ProviderKind::Acp => return None,
-    };
+    })
+}
+
+/// Pre-session controls; a session's ProviderOptions is authoritative.
+pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
+    let (id, apply, default, recommended, permissive, values) = permission_table(provider)?;
     Some(OptionDescriptor::Select {
         id: id.into(),
         label: "Permissions".into(),
         options: values
             .iter()
-            .map(|(value, label, description)| SelectOption {
+            .map(|(value, label, description, _)| SelectOption {
                 value: (*value).into(),
                 label: (*label).into(),
                 description: Some((*description).into()),
@@ -1576,6 +1613,57 @@ pub fn permission_notice(provider: ProviderKind) -> Option<&'static str> {
         ProviderKind::Pi => Some("No permission control"),
         _ => None,
     }
+}
+
+/// Who settles what a harness would otherwise stop to ask, under one value of
+/// its permission control, from least to most permissive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalClass {
+    /// The person driving the turn answers.
+    Manual,
+    /// The harness settles it itself: a reviewer or classifier decides, or
+    /// the request is denied.
+    Reviewed,
+    /// It runs without anyone deciding.
+    Unrestricted,
+}
+
+/// The class of `value` for option `id` of `provider`. Every ACP session
+/// mode counts as [`ApprovalClass::Unrestricted`]: what an agent's mode lets
+/// run is the agent's own and cannot be known here. `None` for an option that
+/// does not govern approvals.
+pub fn approval_class(provider: ProviderKind, id: &str, value: &str) -> Option<ApprovalClass> {
+    if id == ACP_MODE_OPTION_ID {
+        return Some(ApprovalClass::Unrestricted);
+    }
+    let (own, .., values) = permission_table(provider)?;
+    (own == id).then(|| {
+        values
+            .iter()
+            .find(|(listed, ..)| *listed == value)
+            .map_or(ApprovalClass::Unrestricted, |(.., class)| *class)
+    })
+}
+
+/// The class a session with `selections` runs under: its permission
+/// control's selected value or its default. A provider without one (pi runs
+/// every call; an ACP agent's modes are its own) and a value the provider does
+/// not list count as [`ApprovalClass::Unrestricted`].
+pub fn session_approval_class(
+    provider: ProviderKind,
+    selections: &[OptionSelection],
+) -> ApprovalClass {
+    let Some((id, _, default, ..)) = permission_table(provider) else {
+        return ApprovalClass::Unrestricted;
+    };
+    let value = selections
+        .iter()
+        .find(|selection| selection.id == id)
+        .map_or(Some(default), |selection| selection.value.as_str());
+    value
+        .and_then(|value| approval_class(provider, id, value))
+        .unwrap_or(ApprovalClass::Unrestricted)
 }
 
 #[cfg(test)]

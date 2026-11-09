@@ -938,16 +938,24 @@ impl AppState {
         }
     }
 
-    fn scoped_provider_choices(&self) -> Vec<tcode_protocol::ScopedProviderChoice> {
+    /// The profiles and models `policy` lets a space's members run.
+    /// A provider none of whose permission modes the policy allows is not
+    /// offered, nor is a profile the policy leaves no model of.
+    pub(super) fn scoped_provider_choices(
+        &self,
+        policy: &tcode_protocol::SpacePolicy,
+    ) -> Vec<tcode_protocol::ScopedProviderChoice> {
         ProviderKind::NATIVE
             .into_iter()
             .chain([ProviderKind::Acp])
+            .filter(|kind| policy.allows_provider(*kind))
             .flat_map(|kind| {
                 self.settings
                     .profiles_for_kind(kind)
                     .into_iter()
                     .filter(|profile| profile.settings.enabled)
-                    .map(move |profile| {
+                    .filter_map(move |profile| {
+                        let access = policy.agent(&profile.id)?;
                         let mut models: Vec<_> = self
                             .models_for(kind)
                             .iter()
@@ -966,12 +974,18 @@ impl AppState {
                                 });
                             }
                         }
-                        tcode_protocol::ScopedProviderChoice {
+                        models.retain(|model| access.allows_model(Some(&model.id)));
+                        // A catalog not read yet still leaves a profile
+                        // granted with every model.
+                        if models.is_empty() && !access.allows_model(None) {
+                            return None;
+                        }
+                        Some(tcode_protocol::ScopedProviderChoice {
                             provider: kind,
                             name: self.profile_display_name(&profile.id),
                             profile_id: Some(profile.id),
                             models,
-                        }
+                        })
                     })
             })
             .collect()
@@ -984,12 +998,14 @@ impl AppState {
                 space_id,
                 space_name,
                 project_ids,
+                policy,
                 ..
             } => tcode_protocol::Scope::Space {
                 space_id: space_id.clone(),
                 space_name: space_name.clone(),
                 projects: self.space_projects(&project_ids.iter().cloned().collect()),
-                providers: self.scoped_provider_choices(),
+                providers: self.scoped_provider_choices(policy),
+                policy: policy.clone(),
             },
         }
     }
@@ -1318,6 +1334,7 @@ impl AppState {
                             .ok()
                             .map(|duration| duration.as_secs())
                     }),
+                    space_held: self.queued_held(session, message),
                 })
                 .collect(),
             review_comment_drafts: self

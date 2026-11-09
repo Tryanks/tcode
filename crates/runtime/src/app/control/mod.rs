@@ -88,6 +88,33 @@ pub(super) struct Caller {
     /// The thread that started it as its subagent and that thread's ancestors, which it may
     /// neither read nor act on.
     pub(super) ancestors: Vec<String>,
+    /// The space whose member's turn makes the call, which confines it to that space's
+    /// projects and policy whatever the grant says.
+    pub(super) space: Option<CallerSpace>,
+}
+
+#[derive(Clone)]
+pub(super) struct CallerSpace {
+    pub(super) projects: BTreeSet<String>,
+    pub(super) policy: tcode_protocol::SpacePolicy,
+}
+
+impl CallerSpace {
+    pub(super) fn holds(&self, project_id: Option<&str>) -> bool {
+        project_id.is_some_and(|id| self.projects.contains(id))
+    }
+}
+
+impl Caller {
+    /// Whether a call naming `project_id` reaches it: inside `scope`, and
+    /// inside the caller's space when a member's turn makes the call.
+    pub(super) fn reaches_project(&self, scope: &ControlScope, project_id: &str) -> bool {
+        scope.reaches(self.project_id.as_deref(), Some(project_id))
+            && self
+                .space
+                .as_ref()
+                .is_none_or(|space| space.holds(Some(project_id)))
+    }
 }
 
 impl AppState {
@@ -247,12 +274,20 @@ impl AppState {
                 .and_then(|parent| parent.parent_session_id);
             ancestors.push(id);
         }
+        let space = self.turn_space_of(&meta.id).map(|id| CallerSpace {
+            projects: self.space_scopes.get(&id).cloned().unwrap_or_default(),
+            policy: self
+                .turn_policy(&meta.id)
+                .cloned()
+                .unwrap_or_else(tcode_protocol::SpacePolicy::new_space),
+        });
         Caller {
             thread_id: meta.id.clone(),
             project_id: meta.project_id.clone(),
             grant: self.caller_grant(meta).0,
             subagent: meta.is_dispatched(),
             ancestors,
+            space,
         }
     }
 
@@ -267,7 +302,12 @@ impl AppState {
         target: &SessionMeta,
         reads_content: bool,
     ) -> bool {
-        if caller.ancestors.contains(&target.id) {
+        if caller.ancestors.contains(&target.id)
+            || caller
+                .space
+                .as_ref()
+                .is_some_and(|space| !space.holds(target.project_id.as_deref()))
+        {
             return false;
         }
         if scope.reaches(caller.project_id.as_deref(), target.project_id.as_deref()) {
@@ -303,6 +343,7 @@ impl AppState {
         let mut authored_cx = cx.clone();
         authored_cx.origin = Some(MessageOrigin::Agent);
         authored_cx.author = None;
+        authored_cx.space = self.turn_space_of(&thread_id);
         let cx = &mut authored_cx;
         let answer = match self.find_meta(&thread_id) {
             _ if !self.settings.control.enabled => Answer::Now(Err(
@@ -385,6 +426,9 @@ impl AppState {
                 ));
             }
             _ => {}
+        }
+        if let Some(space) = &caller.space {
+            self.authorize_space_control(space, op)?;
         }
         if let ControlOp::RespondInput(params) = op
             && !grant.allows_category(ControlCategory::AnswerInput)
@@ -649,5 +693,111 @@ impl TargetRefusal {
                 format!("outside_scope: your grant's scope is {}", scope.describe())
             }
         }
+    }
+}
+
+impl AppState {
+    /// What a call made during a member's turn may not do, whatever the thread's grant: what
+    /// a member could not do from their own device, and what their space's policy withholds.
+    /// Which threads it reaches is confined in [`Self::target_reachable`].
+    fn authorize_space_control(&self, space: &CallerSpace, op: &ControlOp) -> Result<(), String> {
+        let policy = &space.policy;
+        let name = op.tool_name();
+        let refused = |why: &str| Err(format!("refused: `{name}` {why} in this space"));
+        match op {
+            ControlOp::GetSettings(_)
+            | ControlOp::PatchSettings(_)
+            | ControlOp::CreateProject(_)
+            | ControlOp::DeleteThreads(_) => refused("is not available"),
+            ControlOp::Terminal(_) | ControlOp::ReadTerminal(_) if !policy.terminals => {
+                refused("needs terminals, which the space does not allow")
+            }
+            ControlOp::PullRequest(_) | ControlOp::GetPullRequest(_) if !policy.git_remote => {
+                refused("needs pull requests, which the space does not allow")
+            }
+            ControlOp::Git(params)
+                if git_action(&params.op).is_some_and(GitAction::remote) && !policy.git_remote =>
+            {
+                refused("needs pushing and pulling, which the space does not allow")
+            }
+            ControlOp::MoveThread(params) if !space.holds(Some(&params.project_id)) => {
+                refused("cannot move a thread out of the space's projects")
+            }
+            ControlOp::StartThread(params)
+                if params
+                    .project_id
+                    .as_deref()
+                    .is_some_and(|project| !space.holds(Some(project))) =>
+            {
+                refused("cannot start a thread outside the space's projects")
+            }
+            ControlOp::StartThread(params) => {
+                let provider = super::orchestrate::native_provider_named(&params.provider)
+                    .ok_or_else(|| format!("unknown provider: {}", params.provider.trim()))?;
+                let profile = params
+                    .profile
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty());
+                self.model_allowed(policy, provider, profile, params.model.as_deref())
+                    .map_err(|error| format!("refused: {}", error.message))
+            }
+            ControlOp::RespondApproval(params)
+                if policy.approval == tcode_protocol::SpaceApproval::ReviewedOnly =>
+            {
+                let plan = params.approval_id.as_deref().is_some_and(|id| {
+                    self.approval_requests(&params.thread_id)
+                        .iter()
+                        .any(|request| {
+                            request.id == id
+                                && matches!(request.kind, agent::ApprovalKind::Plan { .. })
+                        })
+                });
+                if plan {
+                    Ok(())
+                } else {
+                    refused("cannot answer an approval: the agent's harness settles them itself")
+                }
+            }
+            ControlOp::ControlThread(params) => {
+                use control_mcp::params::RunOp;
+                for change in &params.changes {
+                    let refusal = |error: ProtocolError| format!("refused: {}", error.message);
+                    match &change.op {
+                        RunOp::SetModel { model } => {
+                            if let Some(meta) = self.current_meta(&change.thread_id) {
+                                self.model_allowed(
+                                    policy,
+                                    meta.provider,
+                                    meta.profile_id.as_deref(),
+                                    Some(model),
+                                )
+                                .map_err(refusal)?;
+                            }
+                        }
+                        // Each runs the thread's model, as a message would.
+                        RunOp::Retry { .. } | RunOp::Compact | RunOp::SteerQueued { .. } => self
+                            .session_setup_allowed(policy, &change.thread_id)
+                            .map_err(refusal)?,
+                        _ => {}
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The git quick action a control `git` op runs, for the ops that are one.
+fn git_action(op: &control_mcp::GitOp) -> Option<GitAction> {
+    use control_mcp::GitOp;
+    match op {
+        GitOp::Commit { .. } => Some(GitAction::Commit),
+        GitOp::CommitPush { .. } => Some(GitAction::CommitPush),
+        GitOp::Push => Some(GitAction::Push),
+        GitOp::Pull => Some(GitAction::Pull),
+        GitOp::PublishBranch => Some(GitAction::PublishBranch),
+        GitOp::CheckoutBranch { .. } | GitOp::MergeWorktree => None,
     }
 }
