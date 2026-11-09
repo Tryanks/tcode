@@ -803,30 +803,6 @@ impl State {
         Some((toplevel.clone(), Point::from((-own.x, -own.y)).to_f64()))
     }
 
-    /// A press outside every popup of a grabbing menu dismisses the menu and
-    /// is not delivered, as on a desktop compositor.
-    fn dismiss_popups(&mut self, id: ViewId, location: Point<f64, Logical>) -> bool {
-        let Some(view) = self.views.get(&id) else {
-            return false;
-        };
-        if !view.popups.iter().any(|p| p.grab) {
-            return false;
-        }
-        let inside = view.popups.iter().any(|popup| {
-            let origin = self.window_origin(view, popup.surface.wl_surface());
-            Rectangle::new(origin, popup.geometry.size)
-                .to_f64()
-                .contains(location)
-        });
-        if inside {
-            return false;
-        }
-        for popup in view.popups.iter().rev() {
-            popup.surface.send_popup_done();
-        }
-        true
-    }
-
     fn pointer_event(&mut self, id: ViewId, event: PointerEvent) {
         let pointer = self.pointer.clone();
         let serial = SERIAL_COUNTER.next_serial();
@@ -857,10 +833,12 @@ impl State {
                     },
                 );
             }
+            // A press outside a grabbing popup still goes to the client, as
+            // an xdg_popup grab delivers presses on the client's own
+            // surfaces, and the client closes the popup itself. After
+            // popup_done instead, a page whose <select> popup it closed
+            // takes no more clicks or keys (WebKitGTK 2.52, GTK 3.24.41).
             PointerEvent::Button { button, pressed } => {
-                if pressed && self.dismiss_popups(id, pointer.current_location()) {
-                    return;
-                }
                 let state = if pressed {
                     ButtonState::Pressed
                 } else {
