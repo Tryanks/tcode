@@ -23,6 +23,10 @@ const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 /// How long a part drawn here takes to cross-fade to another of its states.
 const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// The step the timeline's list holds its width to while the column is at
+/// its widest ([`ChatView::list_overhang`]): the most it runs past the pane.
+const LIST_WIDTH_STEP: f32 = 256.;
+
 mod background;
 pub(crate) mod components;
 mod empty;
@@ -552,10 +556,15 @@ impl ChatView {
     /// How far past the right edge of a body `width` wide the timeline's list
     /// runs. A list drops every row's height when its width changes, so
     /// while the body keeps the widest column the list keeps the pane's
-    /// width, running on under the panel, and only the column's centre moves.
+    /// width, running on under the panel and past the pane's edge, which
+    /// clips it, and only the column's centre moves. That width is held to
+    /// a step: a window resized frame by frame, as macOS animates one into
+    /// full screen, changes it only as the pane crosses a step, rather than
+    /// laying every row out again on each frame.
     fn list_overhang(&self, width: gpui::Pixels) -> gpui::Pixels {
-        if width >= px(CONTENT_MAX_WIDTH + 2. * CONTENT_MIN_PADDING) {
-            (self.pane_width - width).max(px(0.))
+        if self.pane_width > px(0.) && width >= px(CONTENT_MAX_WIDTH + 2. * CONTENT_MIN_PADDING) {
+            let reach = f32::from(self.pane_width.max(width));
+            px((reach / LIST_WIDTH_STEP).ceil() * LIST_WIDTH_STEP) - width
         } else {
             px(0.)
         }
