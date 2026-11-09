@@ -607,6 +607,34 @@ impl AppState {
         Ok(())
     }
 
+    /// Take a thread to `cwd`, where its provider reports the native session moved: on its
+    /// own (the model moved it) or as a move of the thread asked, which [`move_meta`] has
+    /// already recorded. `false` when the thread is already there.
+    pub(super) fn follow_native_move(
+        &mut self,
+        session_id: &str,
+        cwd: &Path,
+        cx: &mut HostCx,
+    ) -> bool {
+        let Some(session) = self
+            .resident_mut(session_id)
+            .filter(|session| session.meta.cwd != cwd)
+        else {
+            return false;
+        };
+        session.meta.cwd = cwd.to_path_buf();
+        session.meta.updated_at = now_secs();
+        session.live_cwd = cwd.to_path_buf();
+        session.git_branch = None;
+        session.branches.clear();
+        let meta = session.meta.clone();
+        self.persist_meta(&meta, cx);
+        self.refresh_control_grants();
+        self.refresh_session_git_branch(meta.id, meta.cwd, cx);
+        self.refresh_git_status(session_id, cx);
+        true
+    }
+
     pub fn create_new_project(
         &self,
         name: String,
