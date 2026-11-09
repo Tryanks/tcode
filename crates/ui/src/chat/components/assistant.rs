@@ -209,6 +209,7 @@ impl EndingActions {
                 .max(fork_focused)
         };
         let copy = copy_button(&key, self.copied, self.compact, on_copy, cx)
+            .touch_in_row(self.compact)
             .track_focus(&focus)
             .motion(motion)
             .debug_selector(move || selector);
@@ -280,7 +281,7 @@ fn fork_action(
                 cx,
             )
             .disabled(blocked)
-            .touch(compact)
+            .touch_in_row(compact)
             .motion(motion)
             .debug_selector(move || selector)
             .on_click(move |_, _, cx| on_fork(turn, cx));
@@ -412,7 +413,15 @@ pub(crate) fn assistant(
                     let actions = h_flex()
                         .gap(ACTION_GAP)
                         .items_center()
-                        .child(copy_button(&key, copied, compact, on_copy, cx).motion(&motion))
+                        .child(
+                            copy_button(&key, copied, compact, on_copy, cx)
+                                .touch_in_row(compact)
+                                .motion(&motion)
+                                .debug_selector({
+                                    let selector = format!("copy-{key}");
+                                    move || selector
+                                }),
+                        )
                         .children(fork_action(
                             &fork_id,
                             fork.clone(),

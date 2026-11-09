@@ -123,7 +123,7 @@ pub(crate) fn rewind_button(
         cx,
     )
     .disabled(menu.blocked.is_some())
-    .touch(compact)
+    .touch_in_row(compact)
     .motion(motion)
     .debug_selector(move || format!("rewind-{key}"))
 }
@@ -194,7 +194,11 @@ pub(crate) fn user_bubble(
         1.
     };
     let copy = (!visible.trim().is_empty()).then(|| {
-        copy_button(&format!("user:{entry_id}"), copied, compact, copy, cx).motion(&motion)
+        let selector = format!("copy-user:{entry_id}");
+        copy_button(&format!("user:{entry_id}"), copied, compact, copy, cx)
+            .touch_in_row(compact)
+            .motion(&motion)
+            .debug_selector(move || selector)
     });
     // The rewind comes into the row beside Copy once the harness offers it,
     // and goes as it was, inert, when it stops.
