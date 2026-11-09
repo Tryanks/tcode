@@ -83,7 +83,7 @@ impl SpeechState {
         let platform = match recognizer.start(self.locale, sender) {
             Ok(platform) => Rc::new(RefCell::new(platform)),
             Err(error) => {
-                self.on_event(id, SpeechEvent::Error(error), cx);
+                self.on_events(id, [SpeechEvent::Error(error)], cx);
                 return;
             }
         };
@@ -93,8 +93,17 @@ impl SpeechState {
                 futures_lite::future::or(
                     async {
                         while let Ok(event) = receiver.recv().await {
+                            // gpui-base's text wrapper drops its width cache on
+                            // every edit and re-shapes the whole edited line, so
+                            // each write costs as much as the dictated line is
+                            // long. What queued while the main thread was busy,
+                            // as when speech stops, is applied as one revision.
+                            let mut events = vec![event];
+                            while let Ok(event) = receiver.try_recv() {
+                                events.push(event);
+                            }
                             let active = this.update(cx, |this, cx| {
-                                this.on_event(id, event, cx);
+                                this.on_events(id, events, cx);
                                 this.dictation.is_session(id)
                             });
                             if !matches!(active, Ok(true)) {
@@ -129,7 +138,9 @@ impl SpeechState {
             let id = session.id;
             let timeout = cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(Duration::from_secs(3)).await;
-                _ = this.update(cx, |this, cx| this.on_event(id, SpeechEvent::Finished, cx));
+                _ = this.update(cx, |this, cx| {
+                    this.on_events(id, [SpeechEvent::Finished], cx)
+                });
             });
             self.session.as_mut().unwrap()._timeout = Some(timeout);
         }
@@ -144,8 +155,13 @@ impl SpeechState {
         }
     }
 
-    fn on_event(&mut self, id: u64, event: SpeechEvent, cx: &mut Context<Self>) {
-        if let Some(event) = self.dictation.apply(id, event) {
+    fn on_events(
+        &mut self,
+        id: u64,
+        events: impl IntoIterator<Item = SpeechEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        for event in self.dictation.apply(id, events) {
             cx.emit(event);
         }
         if !self.dictation.status().is_active() {
