@@ -385,12 +385,12 @@ impl Composer {
 
     /// Keep `shift` clear right of the page inset, so the column centres
     /// where the chat's rows do beside its side rail. Only the column's
-    /// place changes: the width it is laid out at stays the same.
-    pub(crate) fn set_column_shift(&mut self, shift: Pixels, cx: &mut Context<Self>) {
-        if self.column_shift != shift {
-            self.column_shift = shift;
-            cx.notify();
-        }
+    /// place changes: the width it is laid out at stays the same. Handed
+    /// as the chat renders, before the composer is built in the same frame,
+    /// so it does not notify: that would build the composer again on the
+    /// next frame as well.
+    pub(crate) fn set_column_shift(&mut self, shift: Pixels) {
+        self.column_shift = shift;
     }
 
     /// How far its card's bottom is above the composer's bottom, as its

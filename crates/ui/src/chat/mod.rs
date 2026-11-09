@@ -531,12 +531,11 @@ impl ChatView {
     }
 
     /// How wide the pane drawing this view is, its right panel's room
-    /// included.
+    /// included. Handed as the pane's drawer renders, before the chat is
+    /// built in the same frame: a notify would build it again on the next
+    /// frame as well.
     pub(crate) fn set_pane_width(this: &Entity<Self>, width: gpui::Pixels, cx: &mut App) {
-        this.update(cx, |chat, cx| {
-            chat.pane_width = width;
-            cx.notify();
-        });
+        this.update(cx, |chat, _| chat.pane_width = width);
     }
 
     /// Whether the pane's right panel lies over this view rather than beside
@@ -983,7 +982,7 @@ impl ChatView {
         if self.composer_layout.1 != shift {
             self.composer_layout.1 = shift;
             self.composer
-                .update(cx, |composer, cx| composer.set_column_shift(shift, cx));
+                .update(cx, |composer, _| composer.set_column_shift(shift));
         }
         let rail_layout = rail::RailLayout {
             body: self.body,
@@ -1021,7 +1020,7 @@ impl ChatView {
         if timeline_layout != self.timeline_layout {
             self.timeline_layout = timeline_layout.clone();
             self.timeline
-                .update(cx, |timeline, cx| timeline.set_layout(timeline_layout, cx));
+                .update(cx, |timeline, _| timeline.set_layout(timeline_layout));
         }
 
         let composer = self.composer.clone().into_any_element();
