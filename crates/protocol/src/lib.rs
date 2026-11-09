@@ -269,115 +269,37 @@ pub use wire::{
 // ScrollToLatestOnSend patch; and the provider_batch_line_break runtime
 // error.
 //
-// Unreleased: the host holds each thread's preview (PreviewSession, its
-// renderer, tabs and user_acted_since_snapshot) on the new PreviewSession
-// topic with PreviewSessionReplaced; the Preview topic carries the
-// subscribing client (PreviewClient) and only the requests of the threads it
-// renders, with PreviewRenderingReplaced naming those threads; the protocol
-// adds the ShowPreviewHere, ReportPreviewTabs and ReportPreviewInput
-// commands; and a status request's reply carries userActedSinceSnapshot and
-// renderedOn. PreviewRequest's Click and Type take an optional selector and
-// an optional ref, and Scroll an optional ref; a snapshot's reply is the
-// page agent's outline (url, title, loading, generation, elements, outline,
-// omitted) instead of interactiveElements and visibleText; a status reply
-// adds generation and console. PreviewRequest::Screenshot is a
-// struct variant with an optional ref and full_page. The DevServers topic
-// carries the host's dev servers for one thread (DevServersReplaced with
-// DevServer port, pid, process and cwd). The settings_unreadable runtime
-// error. The StorageMigration topic carries the host's move of an older
-// build's threads into its storage (StorageMigrationReplaced with
-// StorageMigration moved, total and waiting_for_space, or null when none
-// runs). The DiskUsage topic carries the host's last disk-usage measurement
-// (DiskUsageReplaced with DiskUsageState last and measuring; DiskUsage
-// measured_at, tcode, providers; TcodeDiskUsage dir, conversations, images,
-// worktrees, other; ProviderDiskUsage provider, bytes, accounts;
-// AccountDiskUsage profile_id, dirs, bytes, parts; DiskUsagePart name,
-// bytes), and the MeasureDiskUsage command measures again. Settings drops
-// auto_open_task_panel with the AutoOpenTaskPanel patch. The host no longer
-// stops a turn on a model change: ServerEvent drops ModelFallbackBlocked and
-// FallbackReviewReady; Settings drops abort_on_model_fallback,
-// fallback_review_advisor and fallback_review with the AbortOnModelFallback,
-// FallbackReviewAdvisor, FallbackReviewProvider, FallbackReviewModel and
-// FallbackReviewProfileId patches; and the model_fallback_detected and
-// turn_blocked agent events are no longer emitted, only read from stored
-// logs. Orchestrate goes: the protocol drops the OrchestrateTurn command and
-// the OrchestrateDecisionModels and OrchestrateChildModels patches, and
-// Settings' orchestrate carries only child_approval and child_worktrees.
-// Code platforms: a source-control host's status carries login, the account
-// its token signs in as, and its problem may be rejected (status, at); the
-// protocol adds the VerifyHostToken command, which saves a token only when
-// the host takes it, and its TokenCheck response (accepted with an optional
-// account, rejected, missing_scopes, unreachable, unconfirmed).
-// Computer use never brings an app to the front for typing: Settings'
-// computer_use drops allow_foreground_fallback (an older file still loads)
-// with the ComputerUseAllowForegroundFallback patch.
-// Plugin management has no switches: Settings drops plugins with the
-// PluginManagementEnabled and PluginManagementProvider patches, and the host
-// keeps two catalogs per profile, one listed from outside any project and one
-// for the project last asked about, so ProvidersStatus.plugins may name a
-// profile twice, told apart by context_cwd; ProviderPluginEntry adds
-// latest_version and always_on, and PluginInstallation adds other_project.
-// Harness settings: ProvidersStatus carries `harnesses`, one HarnessDescription per
-// native harness and installed ACP agent; ProfileSettingsPatch is adjacently
-// tagged with one variant per field (SetHarnessEnabled, SetDisplayName,
-// SetAccentColor, SetEnv, SetSharedEnv, SetBinaryPath, SetHomePath,
-// SetLaunchArgs, SetToggle, SetCustomModels, SetHiddenModels) instead of
-// ReplaceConfiguration; ProviderSettings' shared_env; CreateThirdPartyProfile
-// names its provider; AddCustomAcpAgent drops env; an installed ACP agent's
-// env is EnvVar rows and AcpAgentPatch has SetLaunchArgs and SetEnv instead
-// of SetLaunchOptions; ProviderLogin's AwaitingDevice and the MissingApiKey
-// probe diagnostic.
-// Rewind follows each harness's own: RewindTurn takes an optional steer,
-// checkpoint_id and client_id (PreviewRewind a steer and checkpoint_id); the
-// PreviewRewind command (answered with
-// CommandResponse::RewindPreview) and the UndoRewind command are new;
-// ServerEvent::NativeRewindPrefill becomes RewindPrefill (client_id,
-// attachments); SessionStatus drops native_rewind_blocked,
-// native_rewind_pending and native_rewind_prefill_available for rewind
-// (RewindStatus with RewindBlocked and PendingRewind) and queue_held;
-// RuntimeError drops native_rewind_blocked and RuntimeNotice
-// native_rewind_completed. The rewind agent events change (RewindFailed's
-// failure, RewindCompleted's later_history, files, incomplete, undo_token
-// and prefill_attachments) and SteerCheckpoint, CheckpointsCleared,
-// RewindAvailability, RewindPreviewed, RewindUndone and RewindUndoFailed
-// are new.
-// Files only a client can read reach the host through the new BeginUpload,
-// WriteUpload and DiscardUpload queries (answered with UploadBegun,
-// UploadWritten and UploadDiscarded).
-// RuntimeError's ProviderStart and ProviderClosed carry `harness`, the
-// display name of the thread's Harness.
-// Fork from a message: ForkThread takes an optional at (ForkAt), answered with
-// CommandResponse::ForkedAt; SessionStatus has fork_at (ForkStatus); SessionMeta
-// has fork_origin and pending_fork is a ForkPoint (a stored bool still reads).
-// are new. Query::ControlActivity takes a filter (ControlActivityFilter) and
-// answers a ControlActivityPage: the matching entries, how many match, and the
-// threads and actions the log offers to filter by. HarnessDescription gains
-// native_mcp_config and permission, the NativeMcpServers query is new, and
-// ProfileSettingsPatch gains SetDefaultPermission.
-// AgentEvent::RewindUndoClosed is new.
-// ForkAt names a finished turn to fork through and its checkpoint_id is
-// optional, CommandResponse::ForkedAt is gone (ForkThread answers SessionId)
-// and ForkStatus drops first_turn.
-// AgentEvent::SettingsKept and EntryContent::SettingsKept are new.
-// AgentEvent::SettingsApplied is new.
-// AgentEvent::BackgroundTaskList and Command::StopBackgroundTask are new, and
-// SessionStatus carries background_tasks.
-// Command::ForceTerminate is new, and SessionStatus carries stopping_since.
-// ChildExpectation carries undelivered.
-// Query::BrowseDirectories (answered with QueryResponse::Directories, a
-// DirectoryListing) is new. Settings.new_project_dir (where CreateNewProject
-// puts a project), Settings.project_start (ProjectStart) and
-// Settings.project_start_custom are new, with SettingsPatch::NewProjectDir,
-// ProjectStart and ProjectStartCustom. CreateNewProject takes an optional
-// parent folder.
-//
-// Background work: SessionActivity drops waiting for background
-// (BackgroundActivity tasks and agents), unsettled and wakes (ThreadWakes
-// pull_requests, scheduled_at and notify). SessionStatus.background_tasks
-// lists BackgroundTaskStatus (task, listed, stopping_since, ended), whose
-// BackgroundTask adds kind, item_id and started_reported. AgentExecution
-// adds background. Command::MoveToBackground is new.
-pub const PROTOCOL_VERSION: u32 = 25;
+// Version 26 (v0.4.0-rc.3): the PreviewSession topic (PreviewSessionReplaced)
+// and the Preview topic's PreviewClient with PreviewRenderingReplaced; the
+// ShowPreviewHere, ReportPreviewTabs and ReportPreviewInput commands;
+// PreviewRequest's selector and ref targets, the outline snapshot, a status
+// reply's generation and console, and Screenshot's ref and full_page; the
+// DevServers, StorageMigration and DiskUsage topics with MeasureDiskUsage;
+// the settings_unreadable runtime error; Settings without
+// auto_open_task_panel, the model-fallback stop and its review settings (with
+// ModelFallbackBlocked, FallbackReviewReady and their patches), without
+// orchestrate's decision and child models (and OrchestrateTurn), and without
+// computer_use's allow_foreground_fallback and plugins with their patches;
+// source-control status's login and rejected problem with VerifyHostToken
+// and TokenCheck; per-profile plugin catalogs told apart by context_cwd with
+// latest_version, always_on and other_project; ProvidersStatus' harnesses and
+// the per-field ProfileSettingsPatch, shared_env, ACP agent EnvVar rows,
+// AwaitingDevice and MissingApiKey; rewind following each harness
+// (RewindTurn's steer, checkpoint_id and client_id, PreviewRewind,
+// UndoRewind, RewindPrefill, RewindStatus and the rewind agent events); the
+// BeginUpload, WriteUpload and DiscardUpload queries; ProviderStart and
+// ProviderClosed's harness; ForkThread's at (ForkAt), ForkStatus and
+// SessionMeta's fork_origin and ForkPoint pending_fork; ControlActivity's
+// filter and page; HarnessDescription's native_mcp_config and permission,
+// NativeMcpServers and SetDefaultPermission; RewindUndoClosed,
+// SettingsKept and SettingsApplied; background work (BackgroundTaskList,
+// StopBackgroundTask, ForceTerminate, stopping_since, MoveToBackground,
+// SessionActivity's background, unsettled and wakes instead of waiting,
+// BackgroundTaskStatus and AgentExecution::Background); ChildExpectation's
+// undelivered; and BrowseDirectories (DirectoryListing), Settings'
+// new_project_dir, project_start and project_start_custom with their
+// patches, and CreateNewProject's parent.
+pub const PROTOCOL_VERSION: u32 = 26;
 
 #[cfg(test)]
 mod tests;
