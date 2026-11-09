@@ -575,7 +575,9 @@ impl ProviderKind {
                 instruction_channel: InstructionChannel::SessionAppend,
                 account_login: false,
                 session_transfer: false,
-                session_move: false,
+                // `POST /session/{id}/move` (2.2.6), which the model's own
+                // `session_move` tool also calls.
+                session_move: true,
             },
             ProviderKind::Cursor => Caps {
                 supports_steering: false,
@@ -2527,8 +2529,10 @@ pub enum AgentEvent {
     /// after the user message it describes.
     SettingsKept,
     /// The thread moved from `from` to `to` and its native session went along
-    /// ([`Caps::session_move`]). Never emitted by an adapter; the runtime
-    /// records it when the thread moves.
+    /// ([`Caps::session_move`]). The runtime records it when it moves the
+    /// thread; an adapter reports one its harness made, after a
+    /// [`SessionCommand::MoveTo`] or on its own, and the thread follows a move
+    /// to anywhere it is not.
     SessionMoved {
         from: PathBuf,
         to: PathBuf,

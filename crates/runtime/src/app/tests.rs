@@ -5945,7 +5945,8 @@ fn a_moved_threads_handoff_waits_for_its_log() {
 /// A thread on a harness whose native session goes along to another directory keeps that
 /// session through a move: moved while its provider is down, the provider resumes it in the
 /// new directory; moved while its provider runs, that provider is sent there before the next
-/// turn. Neither turn is a handoff, and the thread shows each move.
+/// turn. When the harness moves its session itself, the thread follows it there. No turn is
+/// a handoff, and the thread shows each move once.
 #[test]
 fn a_moved_thread_keeps_a_native_session_that_can_move() {
     let test_store = TestStore::new("tcode-native-move");
@@ -5957,8 +5958,8 @@ fn a_moved_thread_keeps_a_native_session_that_can_move() {
     let demo_project = Project::from_root(demo.clone());
     test_store.upsert_project(&quick_project).unwrap();
     test_store.upsert_project(&demo_project).unwrap();
-    let native = agent::ResumeCursor(serde_json::json!({"thread_id": "native-1"}));
-    let mut meta = SessionMeta::new(ProviderKind::Codex, quick.clone(), None);
+    let native = agent::ResumeCursor(serde_json::json!({"session_id": "native-1"}));
+    let mut meta = SessionMeta::new(ProviderKind::OpenCode, quick.clone(), None);
     meta.id = "thread".into();
     meta.project_id = Some(quick_project.id.clone());
     meta.resume_cursor = Some(native.clone());
@@ -6052,8 +6053,41 @@ fn a_moved_thread_keeps_a_native_session_that_can_move() {
         matches!(&moved, Ok(SessionCommand::MoveTo { cwd }) if *cwd == quick),
         "{moved:?}"
     );
-    let (_, text, _) = next_turn(cx, &launches, 0);
+    let (delivery_id, text, events) = next_turn(cx, &launches, 0);
     assert_eq!(text, "and now?");
+
+    // The harness reports the move it was sent, then one its model makes during the turn.
+    let elsewhere = test_store.root().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    for event in [
+        AgentEvent::SessionMoved {
+            from: demo.clone(),
+            to: quick.clone(),
+        },
+        AgentEvent::TurnAccepted { delivery_id },
+        AgentEvent::TurnStarted {
+            turn_id: "turn-3".into(),
+        },
+        AgentEvent::SessionMoved {
+            from: quick.clone(),
+            to: elsewhere.clone(),
+        },
+        AgentEvent::TurnCompleted {
+            turn_id: "turn-3".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        },
+    ] {
+        events.try_send(event).unwrap();
+    }
+    cx.run_until(|state| {
+        state
+            .resident("thread")
+            .is_some_and(|session| session.timeline.turns.len() == 3 && !session.has_work())
+    });
+    acked(&state, cx, 5, send("go on")).unwrap();
+    let (_, text, _) = next_turn(cx, &launches, 0);
+    assert_eq!(text, "go on");
     assert_eq!(
         launches.lock().unwrap().len(),
         1,
@@ -6061,8 +6095,9 @@ fn a_moved_thread_keeps_a_native_session_that_can_move() {
     );
     state.read(|state| {
         let session = state.resident("thread").unwrap();
-        assert_eq!(session.live_cwd, quick);
-        assert_eq!(session.meta.cwd, quick);
+        assert_eq!(session.live_cwd, elsewhere);
+        assert_eq!(session.meta.cwd, elsewhere);
+        assert_eq!(state.find_meta("thread").unwrap().cwd, elsewhere);
         assert_eq!(session.meta.moved_from, None);
         let moves: Vec<_> = session
             .timeline
@@ -6076,7 +6111,11 @@ fn a_moved_thread_keeps_a_native_session_that_can_move() {
             .collect();
         assert_eq!(
             moves,
-            [(quick.clone(), demo.clone()), (demo.clone(), quick.clone())]
+            [
+                (quick.clone(), demo.clone()),
+                (demo.clone(), quick.clone()),
+                (quick.clone(), elsewhere.clone())
+            ]
         );
     });
 }

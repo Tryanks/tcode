@@ -283,7 +283,18 @@ fn open_session(http: &Http, opts: &SessionOptions) -> Result<SessionSetup, Agen
         .pointer("/location/directory")
         .and_then(Value::as_str)
     {
-        Some(directory) => http.at(Path::new(directory)),
+        Some(directory) => {
+            let directory = Path::new(directory);
+            // The thread moved while no server ran: the session goes there now, and
+            // its `session.moved` takes the requests along.
+            if resumed.is_some() && !same_directory(directory, &opts.cwd) {
+                http.post_empty(
+                    &format!("/api/session/{session_id}/move"),
+                    &move_body(&opts.cwd),
+                )?;
+            }
+            http.at(directory)
+        }
         None => http.clone(),
     };
     let mut model = ModelRef::from_wire(&session["model"]);
@@ -381,7 +392,7 @@ impl ModelRef {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct AgentInfo {
     id: String,
     name: String,
@@ -665,10 +676,15 @@ impl SessionActor for OpenCodeActor {
                     .emit(AgentEvent::SettingsApplied { applied })
                     .await;
             }
+            // The session follows once OpenCode reports `session.moved`.
+            SessionCommand::MoveTo { cwd } => {
+                self.http
+                    .post_empty(&self.session_path("move"), &move_body(&cwd))
+                    .map_err(|err| err.to_string())?;
+            }
             SessionCommand::RetryTurn { .. }
             | SessionCommand::StopBackgroundTask { .. }
             | SessionCommand::MoveToBackground { .. }
-            | SessionCommand::MoveTo { .. }
             | SessionCommand::SetGoal { .. }
             | SessionCommand::ClearGoal
             | SessionCommand::ReadAccountUsage { .. }
@@ -1143,6 +1159,9 @@ impl OpenCodeActor {
             }
             "session.inbox.delivered" if data["sessionID"] == self.mapper.root.as_str() => {
                 let inbox_id = data["inboxID"].as_str().unwrap_or_default();
+                if let Some(started) = self.mapper.delivered(inbox_id) {
+                    self.events.emit(started).await;
+                }
                 if let Some(request_id) = self.steers.remove(inbox_id) {
                     self.events
                         .emit(AgentEvent::SteerAccepted { request_id })
@@ -1160,20 +1179,24 @@ impl OpenCodeActor {
             }
             // Plugins register commands, skills and agents after the server
             // is ready; these announce each change.
-            "command.updated" | "skill.updated" => {
-                let commands = discover_commands(&self.http);
-                if commands != self.commands {
-                    self.commands = commands.clone();
-                    self.events
-                        .emit(AgentEvent::ProviderCommands { commands })
-                        .await;
-                }
-            }
+            "command.updated" | "skill.updated" => self.refresh_commands().await,
             "mcp.status.changed" => self.mapper.mcp_servers = mcp_servers(&self.http),
-            "agent.updated" => {
-                if let Ok(agents) = self.http.get("/api/agent") {
-                    self.agents = map_agents(&agents["data"]);
-                    self.emit_options().await;
+            "agent.updated" => self.refresh_agents().await,
+            // Moved by `MoveTo` or by the model's own `session_move`: requests
+            // follow the session, and so does what OpenCode scopes to a location.
+            "session.moved" if data["sessionID"] == self.mapper.root.as_str() => {
+                if let Some(to) = data.pointer("/location/directory").and_then(Value::as_str) {
+                    let moved = self.http.at(Path::new(to));
+                    let from = std::mem::replace(&mut self.http, moved);
+                    self.events
+                        .emit(AgentEvent::SessionMoved {
+                            from: from.directory,
+                            to: to.into(),
+                        })
+                        .await;
+                    self.refresh_commands().await;
+                    self.refresh_agents().await;
+                    self.mapper.mcp_servers = mcp_servers(&self.http);
                 }
             }
             "session.step.started" if data["sessionID"] == self.mapper.root.as_str() => {
@@ -1255,6 +1278,26 @@ impl OpenCodeActor {
                         .await;
                 }
             },
+        }
+    }
+
+    async fn refresh_commands(&mut self) {
+        let commands = discover_commands(&self.http);
+        if commands != self.commands {
+            self.commands = commands.clone();
+            self.events
+                .emit(AgentEvent::ProviderCommands { commands })
+                .await;
+        }
+    }
+
+    async fn refresh_agents(&mut self) {
+        if let Ok(agents) = self.http.get("/api/agent") {
+            let agents = map_agents(&agents["data"]);
+            if agents != self.agents {
+                self.agents = agents;
+                self.emit_options().await;
+            }
         }
     }
 
@@ -1394,6 +1437,23 @@ impl OpenCodeActor {
         }
         self.server.stop();
     }
+}
+
+/// `POST /session/{id}/move` to `directory` with `queue` delivery: a running
+/// execution finishes where it is, and the prompt sent next waits behind the
+/// move in the inbox. `steer` would move the session in the middle of a turn.
+fn move_body(directory: &Path) -> Value {
+    json!({ "directory": directory.to_string_lossy(), "delivery": "queue" })
+}
+
+/// OpenCode reports a created session's location canonicalized and a moved
+/// one's as the move named it.
+fn same_directory(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
 }
 
 fn prompt_body(text: String, attachments: &[Attachment], delivery: &str) -> Value {
@@ -1644,6 +1704,11 @@ struct Mapper {
     context_window: Option<u64>,
     turn_counter: u64,
     active_turn: Option<String>,
+    /// The root's inbox items not yet delivered → whether the item is a move.
+    undelivered: HashMap<String, bool>,
+    /// An execution started for moves alone, which is no turn: its turn id,
+    /// for the turn it starts if it delivers anything else.
+    held_turn: Option<String>,
     last_turn: Option<String>,
     turn_usage: Option<TokenUsage>,
     turn_processed: u64,
@@ -1665,6 +1730,8 @@ impl Mapper {
             context_window: None,
             turn_counter: 0,
             active_turn: None,
+            undelivered: HashMap::new(),
+            held_turn: None,
             last_turn: None,
             turn_usage: None,
             turn_processed: 0,
@@ -1683,6 +1750,17 @@ impl Mapper {
         } else {
             self.children.get(session_id).cloned()
         }
+    }
+
+    /// The root's inbox item `inbox_id` was delivered: the turn an execution
+    /// held for moves starts once it delivers something else.
+    fn delivered(&mut self, inbox_id: &str) -> Option<AgentEvent> {
+        if self.undelivered.remove(inbox_id) == Some(true) {
+            return None;
+        }
+        let turn_id = self.held_turn.take()?;
+        self.active_turn = Some(turn_id.clone());
+        Some(AgentEvent::TurnStarted { turn_id })
     }
 
     fn turn_id(&self) -> String {
@@ -1714,21 +1792,41 @@ impl Mapper {
         let root = session_id == self.root;
         let message_id = data["assistantMessageID"].as_str().unwrap_or_default();
         match kind {
+            "session.inbox.enqueued" if root => {
+                if let Some(inbox_id) = data["inboxID"].as_str() {
+                    self.undelivered.insert(
+                        inbox_id.to_owned(),
+                        data.pointer("/item/type") == Some(&json!("move")),
+                    );
+                }
+            }
+            "session.inbox.cancelled" if root => {
+                if let Some(inbox_id) = data["inboxID"].as_str() {
+                    self.undelivered.remove(inbox_id);
+                }
+            }
             "session.execution.started" if root => {
                 self.turn_processed = 0;
                 self.turn_cost = None;
                 self.last_error = None;
-                if self.active_turn.is_none() {
+                if self.active_turn.is_none() && self.held_turn.is_none() {
                     // The event's id, unique across the session's servers, names
                     // the turn: a counter restarts with every server.
                     let turn_id = event["id"].as_str().map(str::to_owned).unwrap_or_else(|| {
                         self.turn_counter += 1;
                         format!("opencode-turn-{}", self.turn_counter)
                     });
-                    self.active_turn = Some(turn_id.clone());
                     self.turn_usage = None;
                     self.turn_failed = false;
-                    mapped.events.push(AgentEvent::TurnStarted { turn_id });
+                    // A move delivered on its own runs an execution with no
+                    // prompt and no step.
+                    if !self.undelivered.is_empty() && self.undelivered.values().all(|&moves| moves)
+                    {
+                        self.held_turn = Some(turn_id);
+                    } else {
+                        self.active_turn = Some(turn_id.clone());
+                        mapped.events.push(AgentEvent::TurnStarted { turn_id });
+                    }
                 }
             }
             "session.execution.succeeded"
@@ -1740,6 +1838,7 @@ impl Mapper {
                     _ => ItemStatus::Interrupted,
                 };
                 if root {
+                    self.held_turn = None;
                     if status == ItemStatus::Failed {
                         self.turn_failed = true;
                         let message = error_message(&data["error"]);
@@ -2592,7 +2691,7 @@ struct Http {
     base: String,
     authorization: String,
     /// `x-opencode-directory`: the location a request resolves against.
-    directory: String,
+    directory: PathBuf,
     agent: ureq::Agent,
 }
 
@@ -2604,7 +2703,7 @@ impl Http {
                 "Basic {}",
                 base64::engine::general_purpose::STANDARD.encode(format!("opencode:{password}"))
             ),
-            directory: uri_component(&directory.to_string_lossy()),
+            directory: directory.to_path_buf(),
             agent: ureq::AgentBuilder::new()
                 .timeout_connect(Duration::from_secs(1))
                 .timeout_read(Duration::from_secs(60))
@@ -2615,7 +2714,7 @@ impl Http {
 
     fn at(&self, directory: &Path) -> Self {
         Self {
-            directory: uri_component(&directory.to_string_lossy()),
+            directory: directory.to_path_buf(),
             ..self.clone()
         }
     }
@@ -2624,7 +2723,10 @@ impl Http {
         self.agent
             .request(method, &format!("{}{path}", self.base))
             .set("Authorization", &self.authorization)
-            .set("x-opencode-directory", &self.directory)
+            .set(
+                "x-opencode-directory",
+                &uri_component(&self.directory.to_string_lossy()),
+            )
     }
 
     fn get(&self, path: &str) -> Result<Value, AgentError> {
@@ -2851,6 +2953,8 @@ mod tests {
     struct Request {
         key: String,
         body: Value,
+        /// `x-opencode-directory`, as sent.
+        directory: String,
     }
 
     #[derive(Default)]
@@ -2920,13 +3024,17 @@ mod tests {
         let method = parts.next().unwrap_or_default().to_owned();
         let path = parts.next().unwrap_or_default().to_owned();
         let mut length = 0;
+        let mut directory = String::new();
         loop {
             let mut header = String::new();
             if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
                 break;
             }
-            if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
-                length = value.trim().parse().unwrap();
+            let (name, value) = header.split_once(':').unwrap_or_default();
+            match name.to_ascii_lowercase().as_str() {
+                "content-length" => length = value.trim().parse().unwrap(),
+                "x-opencode-directory" => value.trim().clone_into(&mut directory),
+                _ => {}
             }
         }
         let mut body = vec![0; length];
@@ -2970,6 +3078,7 @@ mod tests {
                 guard.requests.push(Request {
                     key: key.clone(),
                     body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+                    directory,
                 });
                 state.1.notify_all();
             }
@@ -3982,6 +4091,120 @@ cat > /dev/null
                     (
                         PROMPT.into(),
                         json!({"text": "$opencode how do agents work?", "delivery": "queue", "skills": [{"id": "opencode", "mention": {"start": 0, "end": 9, "text": "$opencode"}}]})
+                    ),
+                ]
+            );
+        });
+    }
+
+    const MOVE: &str = "POST /api/session/ses_root/move";
+
+    /// A move reaches OpenCode queued behind what the session runs (2.2.6),
+    /// and the execution that only delivers it is no turn. Once OpenCode
+    /// reports the session moved, requests address the new location and the
+    /// next prompt runs there as an ordinary turn.
+    #[test]
+    fn a_move_is_queued_in_opencode_and_the_session_follows_it_without_a_turn() {
+        smol::block_on(async {
+            let mut steps: Vec<Step> = frames("move_turn.jsonl")
+                .into_iter()
+                .map(Step::Frame)
+                .collect();
+            let prompt = steps
+                .iter()
+                .rposition(|step| {
+                    matches!(step, Step::Frame(frame) if frame["type"] == "session.inbox.enqueued")
+                })
+                .unwrap();
+            steps.insert(prompt, Step::After(PROMPT.into(), 1));
+            steps.insert(0, Step::After(MOVE.into(), 1));
+            let fixture = fixture(
+                steps,
+                vec![(PROMPT, 200, inbox("msg_1c19cb4c8001MhVuEeuVlViJsq"))],
+            );
+            let handle = open(fixture.options.clone()).await;
+            send(
+                &handle,
+                SessionCommand::MoveTo {
+                    cwd: "/work/feature".into(),
+                },
+            )
+            .await;
+            assert_eq!(
+                serde_json::to_value(recv(&handle).await).unwrap(),
+                json!({"type": "session_moved", "from": "/work/project", "to": "/work/feature"})
+            );
+            send(&handle, turn("Reply with exactly: PONG")).await;
+            let text = "msg_1c19cb8210017is3TIDIiyQxE8:text:0";
+            let turn_id = "evt_1c19cb817001IpfqEDCmLwzQJL";
+            assert_eq!(
+                until(&handle, turn_completed).await,
+                vec![
+                    json!({"type": "turn_accepted", "delivery_id": 1}),
+                    json!({"type": "turn_started", "turn_id": turn_id}),
+                    json!({"type": "turn_checkpoint", "turn_id": turn_id, "checkpoint_id": "msg_1c19cb4c8001MhVuEeuVlViJsq"}),
+                    json!({"type": "served_model", "model": "opencode/iceman-free", "reason": null}),
+                    json!({"type": "item_started", "id": text, "content": {"kind": "assistant_message", "text": ""}}),
+                    json!({"type": "delta", "item_id": text, "kind": "assistant_text", "text": "PONG"}),
+                    json!({"type": "item_completed", "id": text, "content": {"kind": "assistant_message", "text": "PONG"}}),
+                    json!({"type": "token_usage", "freshness": "current", "turn_processed_tokens": null, "input_tokens": 4325, "cached_input_tokens": 4096, "output_tokens": 46, "used_tokens": 8467, "context_window": null, "total_processed_tokens": null, "cost_usd": null, "duration_ms": null}),
+                    json!({"type": "turn_completed", "turn_id": turn_id, "status": "completed", "usage": {"freshness": "current", "turn_processed_tokens": 8467, "input_tokens": 4325, "cached_input_tokens": 4096, "output_tokens": 46, "used_tokens": 8467, "context_window": null, "total_processed_tokens": null, "cost_usd": 0.0, "duration_ms": null}}),
+                ]
+            );
+            shut_down(handle).await;
+            assert_eq!(
+                fixture.server.writes()[2..],
+                [
+                    (
+                        MOVE.into(),
+                        json!({"directory": "/work/feature", "delivery": "queue"})
+                    ),
+                    (
+                        PROMPT.into(),
+                        json!({"text": "Reply with exactly: PONG", "delivery": "queue"})
+                    ),
+                ]
+            );
+            let requests = fixture.server.requests();
+            let moved = requests
+                .iter()
+                .position(|request| request.key == MOVE)
+                .unwrap();
+            let addressed = |key: &str| {
+                requests[moved..]
+                    .iter()
+                    .filter(|request| request.key == key)
+                    .map(|request| request.directory.as_str())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(addressed("GET /api/command"), ["%2Fwork%2Ffeature"]);
+            assert_eq!(addressed("GET /api/skill"), ["%2Fwork%2Ffeature"]);
+            assert_eq!(addressed("GET /api/agent"), ["%2Fwork%2Ffeature"]);
+            assert_eq!(addressed("GET /api/mcp"), ["%2Fwork%2Ffeature"]);
+            assert_eq!(addressed(PROMPT), ["%2Fwork%2Ffeature"]);
+        });
+    }
+
+    /// A thread that moved while no server ran resumes its session and sends
+    /// it where the thread went.
+    #[test]
+    fn a_session_resumed_in_another_directory_is_moved_there() {
+        smol::block_on(async {
+            let mut fixture = fixture(Vec::new(), vec![(SESSION_GET, 200, SESSION.into())]);
+            fixture.options.resume = Some(ResumeCursor(json!({"session_id": "ses_root"})));
+            let handle = open(fixture.options.clone()).await;
+            shut_down(handle).await;
+            assert_eq!(
+                fixture.server.writes(),
+                [
+                    (
+                        MOVE.into(),
+                        json!({"directory": fixture.directory, "delivery": "queue"})
+                    ),
+                    (
+                        "DELETE /api/experimental/session/ses_root/instructions/entries/tcode"
+                            .into(),
+                        Value::Null
                     ),
                 ]
             );
