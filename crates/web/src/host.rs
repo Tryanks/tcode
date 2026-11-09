@@ -1,6 +1,8 @@
-use tcode_client::host::{ClientHost, ClientPreferences, Transport, persistent_device_id};
+use tcode_client::host::{
+    ClientHost, ClientPreferences, HostFuture, PickedFile, Transport, persistent_device_id,
+};
 use tcode_client::pairing::PairedHost;
-use wasm_bindgen::{JsCast as _, JsValue};
+use wasm_bindgen::{JsCast as _, JsValue, closure::Closure};
 
 /// A browser tab served by a machine's browser listener. It is signed in
 /// with that machine's password before the shell starts (`auth.mjs`), so
@@ -181,6 +183,18 @@ impl ClientHost for WebHost {
         )
     }
 
+    fn supports_file_picker(&self) -> bool {
+        true
+    }
+
+    fn pick_files(&self) -> HostFuture<'_, Result<Vec<PickedFile>, String>> {
+        Box::pin(async {
+            pick_browser_files()
+                .await
+                .map_err(|error| error.as_string().unwrap_or_else(|| format!("{error:?}")))
+        })
+    }
+
     fn supports_artifact_delivery(&self) -> bool {
         true
     }
@@ -189,6 +203,43 @@ impl ClientHost for WebHost {
         download(name, mime, bytes)
             .map_err(|error| error.as_string().unwrap_or_else(|| format!("{error:?}")))
     }
+}
+
+/// A browser hands files only to a file input a user gesture opened; the
+/// input's `cancel` event ends a dismissed picker.
+async fn pick_browser_files() -> Result<Vec<PickedFile>, JsValue> {
+    let document = window()
+        .document()
+        .ok_or_else(|| JsValue::from_str("no document"))?;
+    let input: web_sys::HtmlInputElement = document.create_element("input")?.dyn_into()?;
+    input.set_type("file");
+    input.set_multiple(true);
+    let (done, finished) = async_channel::bounded::<()>(1);
+    let finish = Closure::<dyn FnMut()>::new(move || {
+        let _ = done.try_send(());
+    });
+    let target: &web_sys::EventTarget = input.as_ref();
+    let callback = finish.as_ref().unchecked_ref();
+    target.add_event_listener_with_callback("change", callback)?;
+    target.add_event_listener_with_callback("cancel", callback)?;
+    input.click();
+    let _ = finished.recv().await;
+    let mut picked = Vec::new();
+    let Some(files) = input.files() else {
+        return Ok(picked);
+    };
+    for index in 0..files.length() {
+        let Some(file) = files.item(index) else {
+            continue;
+        };
+        let buffer = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await?;
+        picked.push(PickedFile {
+            name: file.name(),
+            mime: file.type_(),
+            bytes: js_sys::Uint8Array::new(&buffer).to_vec(),
+        });
+    }
+    Ok(picked)
 }
 
 /// A browser has no filesystem: the only way to give the user a file is a Blob

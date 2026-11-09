@@ -490,15 +490,7 @@ async fn latest<P: Probe>(probe: &P, query: &LatestQuery) -> Option<String> {
 }
 
 fn binary_name(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::ClaudeCode => "claude",
-        ProviderKind::Codex => "codex",
-        ProviderKind::Pi => "pi",
-        ProviderKind::OpenCode => "opencode",
-        ProviderKind::Cursor => "cursor-agent",
-        ProviderKind::Grok => "grok",
-        ProviderKind::Acp => "",
-    }
+    provider.harness().binary_name
 }
 
 fn within<P: Probe>(context: &Context<'_, P>, path: &Path, root: &Path) -> bool {
@@ -1155,7 +1147,8 @@ async fn javascript_windows<P: Probe>(context: &Context<'_, P>) -> Option<Instal
             let Some(relative) = windows_relative(&bin, &target) else {
                 continue;
             };
-            if !known_cmd_shim(&wrapper, &relative) {
+            // A wrapper that merely mentions the bin could run anything.
+            if !agent::CmdShim::parse(&wrapper).is_some_and(|shim| shim.target == relative) {
                 continue;
             }
             let package = Package {
@@ -1199,135 +1192,6 @@ fn windows_relative(from: &Path, to: &Path) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\\");
     (!relative.contains(['%', '"', '\r', '\n'])).then_some(relative)
-}
-
-/// Recognize npm/cmd-shim and pnpm/@zkochan/cmd-shim launchers. Checking a
-/// substring would authorize arbitrary wrappers that happen to mention a bin.
-fn known_cmd_shim(wrapper: &str, relative: &str) -> bool {
-    let lines: Vec<_> = wrapper
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-    let npm_header = [
-        "@ECHO off",
-        "GOTO start",
-        ":find_dp0",
-        "SET dp0=%~dp0",
-        "EXIT /b",
-        ":start",
-        "SETLOCAL",
-        "CALL :find_dp0",
-    ];
-    let npm_target = format!("\"%dp0%\\{relative}\"");
-    if let Some(body) = lines.strip_prefix(&npm_header) {
-        if body.len() == 1 && invocation(body[0], &npm_target) {
-            return true;
-        }
-        let setup = [
-            "IF EXIST \"%dp0%\\node.exe\" (",
-            "SET \"_prog=%dp0%\\node.exe\"",
-            ") ELSE (",
-            "SET \"_prog=node\"",
-        ];
-        if let Some(body) = body.strip_prefix(&setup) {
-            let body = body
-                .strip_prefix(&["SET PATHEXT=%PATHEXT:;.JS;=;%"])
-                .unwrap_or(body);
-            if let [")", launch] = body {
-                for prefix in [
-                    "endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"",
-                    "endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & set PATHEXT=%PATHEXT:;.JS;=;% & \"%_prog%\"",
-                ] {
-                    if let Some(launch) = launch.strip_prefix(prefix) {
-                        return invocation(launch.trim(), &npm_target);
-                    }
-                }
-            }
-        }
-        return false;
-    }
-    // Yarn Classic's older cmd-shim puts SETLOCAL inside the fallback branch.
-    let legacy = if let Some(paths) = lines
-        .first()
-        .and_then(|line| line.strip_prefix("@SET NODE_PATH="))
-    {
-        if paths
-            .replace("%~dp0", "")
-            .contains(['%', '"', '&', '|', '<', '>', '^'])
-        {
-            return false;
-        }
-        &lines[1..]
-    } else {
-        &lines
-    };
-    let target = format!("\"%~dp0\\{relative}\"");
-    if let [launch] = legacy {
-        return invocation(launch.trim_start_matches('@'), &target);
-    }
-    if legacy.len() == 7
-        && legacy[0] == "@IF EXIST \"%~dp0\\node.exe\" ("
-        && legacy[2] == ") ELSE ("
-        && legacy[3] == "@SETLOCAL"
-        && legacy[4] == "@SET PATHEXT=%PATHEXT:;.JS;=;%"
-        && legacy[6] == ")"
-    {
-        return legacy[1]
-            .strip_prefix("\"%~dp0\\node.exe\"")
-            .is_some_and(|line| invocation(line.trim(), &target))
-            && legacy[5]
-                .strip_prefix("node ")
-                .is_some_and(|line| invocation(line.trim(), &target));
-    }
-    let Some(body) = lines.strip_prefix(&["@SETLOCAL"]) else {
-        return false;
-    };
-    let body = if body.first() == Some(&"@IF NOT DEFINED NODE_PATH (") {
-        if body.len() < 5 {
-            return false;
-        }
-        let Some(paths) = body[1]
-            .strip_prefix("@SET \"NODE_PATH=")
-            .and_then(|line| line.strip_suffix('"'))
-        else {
-            return false;
-        };
-        if paths
-            .replace("%~dp0", "")
-            .contains(['%', '"', '&', '|', '<', '>', '^'])
-            || body[2] != ") ELSE ("
-            || body[3] != format!("@SET \"NODE_PATH={paths};%NODE_PATH%\"")
-            || body[4] != ")"
-        {
-            return false;
-        }
-        &body[5..]
-    } else {
-        body
-    };
-    if let [launch] = body {
-        return invocation(launch.trim_start_matches('@'), &target);
-    }
-    if body.len() != 6
-        || body[0] != "@IF EXIST \"%~dp0\\node.exe\" ("
-        || body[2] != ") ELSE ("
-        || body[3] != "@SET PATHEXT=%PATHEXT:;.JS;=;%"
-        || body[5] != ")"
-    {
-        return false;
-    }
-    body[1]
-        .strip_prefix("\"%~dp0\\node.exe\"")
-        .is_some_and(|line| invocation(line.trim(), &target))
-        && body[4]
-            .strip_prefix("node ")
-            .is_some_and(|line| invocation(line.trim(), &target))
-}
-
-fn invocation(line: &str, target: &str) -> bool {
-    line.strip_prefix(target)
-        .is_some_and(|rest| rest.trim() == "%*")
 }
 
 fn native<P: Probe>(context: &Context<'_, P>) -> Option<Installation> {

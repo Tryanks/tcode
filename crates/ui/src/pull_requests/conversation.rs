@@ -1,5 +1,6 @@
 //! The Conversation view: the description, comments, reviews and review threads, oldest first.
 
+use crate::widgets::TooltipTrigger as _;
 use std::rc::Rc;
 
 use gpui::{
@@ -34,6 +35,21 @@ use crate::{
     },
 };
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a picture drawn here takes to fade in once it has decoded.
+const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A comment's ⋯ menu item that writes.
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = tcode_pull_requests, no_json)]
@@ -54,7 +70,7 @@ pub(super) enum CommentMenu {
 
 /// One row of the conversation list.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Item {
+pub(super) enum Item {
     Notice,
     Meta,
     Description,
@@ -108,6 +124,47 @@ fn reaction_emoji(content: PullRequestReactionContent) -> &'static str {
     }
 }
 
+/// The field that stands where a thread's reply editor opens.
+fn reply_field(cx: &App) -> gpui::Div {
+    div()
+        .h(px(material::input_height(false)))
+        .px_2()
+        .flex()
+        .items_center()
+        .rounded(material::radius_input(cx))
+        .border_1()
+        .border_color(cx.theme().input)
+        .bg(cx.theme().background)
+        .text_body(false, cx)
+        .text_color(cx.theme().muted_foreground)
+        .child(crate::tr!("pull_requests.compose.reply_row"))
+}
+
+/// A comment's body and its editor cross-fade as one replaces the other, each in its own
+/// layer. A closed editor's input is gone, so on cancel or save only the body fades in.
+fn fade_on_edit(
+    comment: &str,
+    editor: Option<AnyElement>,
+    text: Option<AnyElement>,
+) -> Option<AnyElement> {
+    if editor.is_none() && text.is_none() {
+        return None;
+    }
+    let id = SharedString::from(format!("pr-comment-editing-{comment}"));
+    let editing = editor.is_some();
+    Some(
+        crate::motion::Sampled::new(move |window, cx| {
+            let fade =
+                crate::motion::CrossFade::new(id, usize::from(editing), 2, CHANGE, window, cx);
+            let layers = [(0, text), (1, editor)]
+                .into_iter()
+                .filter_map(|(layer, element)| element.map(|element| (layer, element)));
+            fade.render(layers).w_full().min_w_0().into_any_element()
+        })
+        .into_any_element(),
+    )
+}
+
 /// A reaction chip; the account's own reactions show selected.
 fn reaction_chip(id: SharedString, label: String, own: bool, cx: &App) -> Button {
     Button::new(id)
@@ -118,6 +175,110 @@ fn reaction_chip(id: SharedString, label: String, own: bool, cx: &App) -> Button
         .selected(own)
         .aria_label(label)
         .text_token(&cx.theme().tokens.typography.xs)
+}
+
+impl super::detail::ConversationView {
+    /// Splices only the rows that changed, so a re-read keeps the reader where they were.
+    /// A row that comes in where the reader looks (a new comment, the merge, a pending
+    /// review) opens its room, and one that goes while in view (a deleted comment, a
+    /// discarded review) folds away, drawn from the conversation it was last drawn from,
+    /// which the view keeps until it has gone. The rows a conversation opens with are in
+    /// place at once. `pending` is how many comments the pending review holds.
+    fn sync_rows(
+        &mut self,
+        items: Vec<Item>,
+        conversation: Option<&tcode_protocol::PullRequestConversation>,
+        pending: usize,
+        cx: &App,
+    ) {
+        if self.rows == items {
+            return;
+        }
+        let keys = item_keys(&items, conversation);
+        if !self.keys.is_empty() && !cx.reduce_motion() {
+            let top = self.list.logical_scroll_top();
+            let viewport = self.list.viewport_bounds();
+            let shown = (top.item_ix..self.rows.len())
+                .take_while(|index| {
+                    self.list.bounds_for_item(*index).is_some_and(|bounds| {
+                        bounds.top() < viewport.bottom() && bounds.bottom() >= viewport.top()
+                    })
+                })
+                .count();
+            let reach = top.item_ix..top.item_ix + shown;
+            let at = cx.background_executor().now();
+            let changed = crate::motion::list_rows::changes(&self.keys, &keys);
+            for (index, arrival) in changed.arrived {
+                if reach.contains(&index) {
+                    self.arrivals.arrive(keys[index], arrival, (), at);
+                }
+            }
+            if let Some(drawn) = &self.drawn {
+                for (index, attach) in changed.left {
+                    if index < top.item_ix + shown && index >= top.item_ix {
+                        let left = LeftRow {
+                            item: self.rows[index].clone(),
+                            conversation: drawn.clone(),
+                            pending: self.drawn_pending,
+                        };
+                        self.arrivals.leave(self.keys[index], left, attach, at);
+                    }
+                }
+            }
+        }
+        crate::diff::list::reconcile_rows(&self.list, &self.rows, &items);
+        self.rows = items;
+        self.keys = keys;
+        self.drawn = conversation.cloned().map(Rc::new);
+        self.drawn_pending = pending;
+    }
+}
+
+/// A conversation row that went, as it was last drawn: what it showed, from the
+/// conversation and pending review it was drawn from.
+#[derive(Clone)]
+pub(super) struct LeftRow {
+    item: Item,
+    conversation: Rc<tcode_protocol::PullRequestConversation>,
+    pending: usize,
+}
+
+/// Each row's key: what it shows, not where it is, so a comment keeps its key as others
+/// come in before it.
+fn item_keys(
+    items: &[Item],
+    conversation: Option<&tcode_protocol::PullRequestConversation>,
+) -> Vec<u64> {
+    let key = |name: &dyn Fn(&mut std::hash::DefaultHasher)| {
+        use std::hash::Hasher as _;
+        let mut hasher = std::hash::DefaultHasher::new();
+        name(&mut hasher);
+        hasher.finish()
+    };
+    items
+        .iter()
+        .map(|item| {
+            use std::hash::Hash as _;
+            key(&|hasher| match item {
+                Item::Comment(index) => (
+                    "comment",
+                    conversation
+                        .and_then(|conversation| conversation.comments.get(*index))
+                        .map(|comment| comment.id.as_str()),
+                )
+                    .hash(hasher),
+                Item::Thread(index) => (
+                    "thread",
+                    conversation
+                        .and_then(|conversation| conversation.threads.get(*index))
+                        .map(|thread| thread.id.as_str()),
+                )
+                    .hash(hasher),
+                Item::Event(state, at) => ("event", format!("{state:?}"), at).hash(hasher),
+                other => format!("{other:?}").hash(hasher),
+            })
+        })
+        .collect()
 }
 
 impl PullRequestView {
@@ -171,17 +332,23 @@ impl PullRequestView {
     }
 
     pub(super) fn scroll_conversation_to_end(&mut self, cx: &mut Context<Self>) {
-        let count = self.items(cx).len();
+        let items = self.items(cx);
+        let count = items.len();
+        let pending = self.pending_count(cx);
         if let Some(page) = self.page_mut()
             && count > 0
         {
-            if page.conversation_view.list.item_count() != count {
-                page.conversation_view.list.reset(count);
-            }
-            page.conversation_view.list.scroll_to(gpui::ListOffset {
-                item_ix: count - 1,
-                offset_in_item: px(0.),
-            });
+            page.conversation_view
+                .sync_rows(items, page.conversation.data.as_ref(), pending, cx);
+            let view = &page.conversation_view;
+            view.scroll.scroll_to(
+                &view.list,
+                crate::motion::ScrollTarget::Row(gpui::ListOffset {
+                    item_ix: count - 1,
+                    offset_in_item: px(0.),
+                }),
+                cx,
+            );
         }
     }
 
@@ -348,6 +515,7 @@ impl PullRequestView {
     /// Switches to the conversation at a thread.
     pub(super) fn show_thread(&mut self, id: &str, cx: &mut Context<Self>) {
         let items = self.items(cx);
+        let pending = self.pending_count(cx);
         let Some(page) = self.page_mut() else { return };
         page.tab = Some(Tab::Conversation);
         let position = items.iter().position(|item| match item {
@@ -361,13 +529,17 @@ impl PullRequestView {
         });
         page.conversation_view.expanded.insert(id.to_owned());
         if let Some(position) = position {
-            if page.conversation_view.list.item_count() != items.len() {
-                page.conversation_view.list.reset(items.len());
-            }
-            page.conversation_view.list.scroll_to(gpui::ListOffset {
-                item_ix: position,
-                offset_in_item: px(0.),
-            });
+            page.conversation_view
+                .sync_rows(items, page.conversation.data.as_ref(), pending, cx);
+            let view = &page.conversation_view;
+            view.scroll.scroll_to(
+                &view.list,
+                crate::motion::ScrollTarget::Row(gpui::ListOffset {
+                    item_ix: position,
+                    offset_in_item: px(0.),
+                }),
+                cx,
+            );
         }
         cx.notify();
     }
@@ -383,7 +555,7 @@ impl PullRequestView {
             page.tab = Some(Tab::Files);
             page.files_view.collapsed.insert(anchor.path.clone(), false);
             if let (Some(index), Some(list)) = (index, page.files_view.list.as_ref()) {
-                list.scroll_to_file(index);
+                list.scroll_to_file(index, cx);
             }
         }
         cx.notify();
@@ -393,10 +565,12 @@ impl PullRequestView {
     fn resolver(&self) -> Option<ImageResolver> {
         let (session, key) = self.current.clone()?;
         let account = self.page()?.conversation.data.as_ref()?.account.clone();
+        let host = self.image_host;
         let source = {
             let (session, key, account) = (session.clone(), key.clone(), account.clone());
             Rc::new(move |url: &str| {
                 Some(pull_request_media(
+                    host,
                     session.clone(),
                     key.clone(),
                     account.clone(),
@@ -411,9 +585,10 @@ impl PullRequestView {
                   window: &mut Window,
                   cx: &mut App|
                   -> Option<AnyElement> {
-                let state = pull_request_media_state(&session, &key, &account, url, window, cx);
+                let state =
+                    pull_request_media_state(host, &session, &key, &account, url, window, cx);
                 let host_name = super::host_name(store.read(cx), &key.host);
-                media_stand_in(state, url, title, &host_name, cx)
+                settle_media(url, media_stand_in(state, url, title, &host_name, cx))
             },
         );
         Some(ImageResolver { source, pending })
@@ -462,59 +637,20 @@ impl PullRequestView {
     }
 
     pub(super) fn avatar(&self, login: &str, url: Option<&str>, size: f32, cx: &App) -> AnyElement {
-        let initial = login
-            .chars()
-            .next()
-            .map(|initial| initial.to_uppercase().to_string())
-            .unwrap_or_default();
-        let fallback = Avatar::new()
-            .size(px(size))
-            .rounded_full()
-            .bg(cx.theme().muted)
-            .fallback(
-                AvatarFallback::new()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    // The initial scales with the avatar, which no text token does.
-                    .text_size(px(size * 0.5))
-                    .font_medium()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(initial),
-            );
-        let image = self
-            .current
-            .as_ref()
-            .zip(url)
-            .and_then(|((session, key), url)| {
-                let account = self.page()?.conversation.data.as_ref()?.account.clone();
-                Some(
-                    Avatar::new()
-                        .absolute()
-                        .inset_0()
-                        .rounded_full()
-                        .overflow_hidden()
-                        .image(
-                            AvatarImage::new(pull_request_media(
-                                session.clone(),
-                                key.clone(),
-                                account,
-                                url.to_owned(),
-                            ))
-                            .size(px(size))
-                            .rounded_full(),
-                        ),
-                )
-            });
-        // The initial stands behind the picture until it loads, and instead of it on failure.
-        div()
-            .relative()
-            .flex_none()
-            .size(px(size))
-            .child(fallback)
-            .children(image)
-            .into_any_element()
+        avatar_image(login, self.avatar_source(url), size, cx)
+    }
+
+    /// Where the host reads an avatar the conversation names.
+    pub(super) fn avatar_source(&self, url: Option<&str>) -> Option<gpui::ImageSource> {
+        let ((session, key), url) = self.current.as_ref().zip(url)?;
+        let account = self.page()?.conversation.data.as_ref()?.account.clone();
+        Some(pull_request_media(
+            self.image_host,
+            session.clone(),
+            key.clone(),
+            account,
+            url.to_owned(),
+        ))
     }
 
     fn comment_head(
@@ -585,11 +721,13 @@ impl PullRequestView {
         let add_reaction =
             (writable && self.can_react(comment) && self.shown_reactions(comment).is_empty())
                 .then(|| self.reaction_popover(comment, true, cx));
+        let head = SharedString::from(format!("pr-comment-head-{}", comment.id));
+        let hover = self
+            .page()
+            .map(|page| page.conversation_view.hover.on_hover(head.clone()));
         h_flex()
-            .group(SharedString::from(format!(
-                "pr-comment-head-{}",
-                comment.id
-            )))
+            .id(head)
+            .when_some(hover, |head, hover| head.on_hover(hover))
             .gap_2()
             .items_center()
             .text_secondary(self.compact(cx), cx)
@@ -606,7 +744,7 @@ impl PullRequestView {
                     .id(SharedString::from(format!("pr-ago-{}", comment.id)))
                     .text_color(muted)
                     .children(ago_rfc3339(&comment.created_at))
-                    .tooltip(move |window, cx| {
+                    .with_tooltip(move |_, _| {
                         let local = chrono::DateTime::parse_from_rfc3339(&created)
                             .map(|time| {
                                 time.with_timezone(&chrono::Local)
@@ -614,7 +752,7 @@ impl PullRequestView {
                                     .to_string()
                             })
                             .unwrap_or_default();
-                        Tooltip::new(local).build(window, cx)
+                        Tooltip::new(local)
                     }),
             )
             .when(comment.edited_at.is_some(), |head| {
@@ -722,26 +860,22 @@ impl PullRequestView {
         let open_id = id.clone();
         // In the head row a pointer that can hover finds it on hover; a keyboard on focus.
         let reveal = head && !compact && !crate::window_seam::is_mobile(cx);
+        let chip_id = SharedString::from(format!("pr-reaction-add-{id}-{head}"));
         let chip = reaction_chip(
-            SharedString::from(format!("pr-reaction-add-{id}-{head}")),
+            chip_id.clone(),
             crate::tr!("pull_requests.reactions.add").into_owned(),
             false,
             cx,
         )
         .icon(IconName::Sticker)
         .tooltip(crate::tr!("pull_requests.reactions.add"))
-        .when(reveal, |chip| {
-            // `focus`, not `focus_visible`: the Button paints its ring through `focus_visible`.
-            chip.opacity(0.)
-                .group_hover(
-                    SharedString::from(format!("pr-comment-head-{id}")),
-                    |chip| chip.opacity(1.),
-                )
-                .focus(|chip| chip.opacity(1.))
-        })
         .on_click(cx.listener(move |this, _, _, cx| {
             this.open_sheet(Some(Sheet::Reactions(open_id.clone())), cx)
         }));
+        let hover = reveal
+            .then(|| self.page().map(|page| page.conversation_view.hover.clone()))
+            .flatten();
+        let head_key = SharedString::from(format!("pr-comment-head-{id}"));
         let popover = Popover::new(SharedString::from(format!("pr-reactions-{id}-{head}")))
             .open(self.sheet_open(&sheet))
             .on_open_change({
@@ -752,13 +886,30 @@ impl PullRequestView {
                     }
                 }
             })
-            .trigger_with(move |_, _, _, _| chip.into_any_element());
+            .trigger_with(move |_, _, _, _| match hover {
+                // The chip fades in as the pointer comes onto its comment's head, and out as it
+                // leaves; while it holds focus it stays shown.
+                Some(hover) => crate::motion::Sampled::new(move |window, cx| {
+                    let (focus, focused) =
+                        crate::motion::focus_ring::focus_reveal(&chip_id.into(), false, window, cx);
+                    let shown = hover.reveal(&head_key, window, cx).max(focused);
+                    chip.track_focus(&focus).opacity(shown).into_any_element()
+                })
+                .into_any_element(),
+                None => chip.into_any_element(),
+            });
         let popover = if compact {
             popover.bottom_sheet(crate::tr!("pull_requests.reactions.add").into_owned())
         } else {
             popover
         };
-        popover
+        // The chip moves from the head into the reactions row with the first reaction, and
+        // back with the last one gone, travelling between them.
+        let shared = self
+            .page()
+            .map(|page| page.conversation_view.shared.clone());
+        let travel_key = SharedString::from(format!("pr-reaction-add-{id}"));
+        let popover = popover
             .content(move |_, _, cx| {
                 h_flex()
                     .p_1()
@@ -786,7 +937,15 @@ impl PullRequestView {
                             })
                     }))
             })
-            .into_any_element()
+            .into_any_element();
+        match shared {
+            Some(shared) => {
+                let site = SharedString::new_static(if head { "head" } else { "reactions" });
+                shared.arrive(&travel_key, &site, cx);
+                shared.element(travel_key, popover).into_any_element()
+            }
+            None => popover,
+        }
     }
 
     fn reactions(
@@ -799,49 +958,104 @@ impl PullRequestView {
             return None;
         }
         let interactive = self.writable(cx) && self.can_react(comment);
-        let add = interactive.then(|| self.reaction_popover(comment, false, cx));
+        let mut add = interactive.then(|| self.reaction_popover(comment, false, cx));
+        let mut chips: Vec<(SharedString, Option<PullRequestReaction>)> = shown
+            .into_iter()
+            .map(|reaction| {
+                (
+                    SharedString::from(format!("{:?}", reaction.content)),
+                    Some(reaction),
+                )
+            })
+            .collect();
+        if add.is_some() {
+            chips.push(("add".into(), None));
+        }
+        let view = cx.entity();
+        let comment_id = comment.id.clone();
         Some(
-            h_flex()
-                .flex_wrap()
-                .gap_1()
-                .pt_1()
-                .children(shown.into_iter().map(|reaction| {
-                    let own = reaction.viewer_reacted;
-                    let label = crate::tr!(
-                        "pull_requests.reactions.chip_label",
-                        name = crate::tr!(reaction_name(reaction.content)).into_owned(),
-                        count = reaction.count.to_string()
-                    )
-                    .into_owned();
-                    let chip = reaction_chip(
-                        SharedString::from(format!(
-                            "pr-reaction-chip-{}-{:?}",
-                            comment.id, reaction.content
-                        )),
-                        label,
-                        own,
-                        cx,
-                    )
-                    .aria_toggled(if own {
-                        gpui::Toggled::True
-                    } else {
-                        gpui::Toggled::False
-                    })
-                    .child(reaction_emoji(reaction.content))
-                    .child(reaction.count.to_string());
-                    if interactive {
-                        let (id, content) = (comment.id.clone(), reaction.content);
-                        chip.on_click(cx.listener(move |this, _, window, cx| {
-                            this.react(id.clone(), content, !own, window, cx)
-                        }))
-                        .into_any_element()
-                    } else {
-                        chip.into_any_element()
-                    }
-                }))
-                .children(add)
-                .into_any_element(),
+            crate::motion::Sampled::new(move |window, cx| {
+                // A chip that comes or goes widens in or narrows away, carrying the gap before
+                // it; the row starts a gap early so each line's first chip sits at its start.
+                let chips = crate::motion::keyed_across(
+                    SharedString::from(format!("pr-reactions-row-{comment_id}")),
+                    chips,
+                    ROWS,
+                    window,
+                    cx,
+                    |_, reaction, _, cx| {
+                        let chip = match reaction {
+                            None => add.take(),
+                            Some(reaction) => Some(Self::reaction_row_chip(
+                                &view,
+                                &comment_id,
+                                reaction,
+                                interactive,
+                                cx,
+                            )),
+                        };
+                        div().pl_1().children(chip).into_any_element()
+                    },
+                );
+                chips.render(h_flex().flex_wrap().gap_y_1().pt_1().ml(gpui::rems(-0.25)))
+            })
+            .into_any_element(),
         )
+    }
+
+    /// One reaction's chip under a comment, with its count.
+    fn reaction_row_chip(
+        view: &Entity<Self>,
+        comment_id: &str,
+        reaction: &PullRequestReaction,
+        interactive: bool,
+        cx: &App,
+    ) -> AnyElement {
+        let own = reaction.viewer_reacted;
+        let label = crate::tr!(
+            "pull_requests.reactions.chip_label",
+            name = crate::tr!(reaction_name(reaction.content)).into_owned(),
+            count = reaction.count.to_string()
+        )
+        .into_owned();
+        let chip = reaction_chip(
+            SharedString::from(format!(
+                "pr-reaction-chip-{}-{:?}",
+                comment_id, reaction.content
+            )),
+            label,
+            own,
+            cx,
+        )
+        .aria_toggled(if own {
+            gpui::Toggled::True
+        } else {
+            gpui::Toggled::False
+        })
+        .child(reaction_emoji(reaction.content))
+        .child({
+            let id = SharedString::from(format!(
+                "pr-reaction-count-{}-{:?}",
+                comment_id, reaction.content
+            ));
+            let count = reaction.count.to_string();
+            crate::motion::Sampled::new(move |window, cx| {
+                crate::motion::cross_fade(id, count, CHANGE, window, cx, |count, _, _| {
+                    div().child(count.clone()).into_any_element()
+                })
+            })
+        });
+        if interactive {
+            let (view, id, content) = (view.clone(), comment_id.to_owned(), reaction.content);
+            chip.on_click(move |_, window, cx| {
+                view.update(cx, |this, cx| {
+                    this.react(id.clone(), content, !own, window, cx)
+                })
+            })
+            .into_any_element()
+        } else {
+            chip.into_any_element()
+        }
     }
 
     fn body(
@@ -949,11 +1163,14 @@ impl PullRequestView {
             Some(
                 div()
                     .text_color(muted)
-                    .child(crate::tr!(if description {
-                        "pull_requests.conversation.opened"
-                    } else {
-                        "pull_requests.conversation.commented"
-                    }))
+                    .child(crate::tr!(
+                        if description {
+                            "pull_requests.conversation.opened"
+                        } else {
+                            "pull_requests.conversation.commented"
+                        },
+                        pr = self.noun(cx).pr
+                    ))
                     .into_any_element(),
             )
         });
@@ -972,10 +1189,10 @@ impl PullRequestView {
         } else {
             Slot::Edit(comment.id.clone())
         };
-        let body = self
-            .editing_body(&slot, cx)
-            .or_else(|| self.body(comment, true, cx));
-        let empty_description = description && body.is_none();
+        let editing = self.editing_body(&slot, cx);
+        let text = self.body(comment, true, cx);
+        let empty_description = description && editing.is_none() && text.is_none();
+        let body = fade_on_edit(&comment.id, editing, text);
         v_flex()
             .w_full()
             .min_w_0()
@@ -1088,13 +1305,20 @@ impl PullRequestView {
         let id = thread.id.clone();
         let thread_for_files = thread.clone();
         let current = thread.anchor.is_some() && !thread.outdated;
-        let chip = |label: &'static str, cx: &App| {
-            material::semantic_chip(
+        let chip = |label: &'static str, shown: bool, cx: &App| {
+            let chip = material::semantic_chip(
                 crate::tr!(label).into_owned(),
                 cx.theme().secondary,
                 muted,
                 cx,
-            )
+            );
+            let id = SharedString::from(format!("pr-thread-{}-{inline}-{label}", thread.id));
+            crate::motion::Sampled::new(move |window, cx| {
+                match crate::motion::shown(id, shown.then_some(()), SHOW, window, cx) {
+                    Some(kept) => kept.fade(chip),
+                    None => div().absolute().into_any_element(),
+                }
+            })
         };
         let head = material::card_header_row(cx)
             .text_secondary(compact, cx)
@@ -1116,12 +1340,16 @@ impl PullRequestView {
                 )
             })
             .when(inline, |head| head.children(lines.clone()))
-            .when(thread.outdated, |head| {
-                head.child(chip("pull_requests.conversation.outdated", cx))
-            })
-            .when(thread.resolved, |head| {
-                head.child(chip("pull_requests.conversation.resolved", cx))
-            })
+            .child(chip(
+                "pull_requests.conversation.outdated",
+                thread.outdated,
+                cx,
+            ))
+            .child(chip(
+                "pull_requests.conversation.resolved",
+                thread.resolved,
+                cx,
+            ))
             .child(
                 crate::tr!(
                     if count == 1 {
@@ -1183,17 +1411,29 @@ impl PullRequestView {
             .when(collapsed, |card| card.pb_0())
             .relative()
             .font_family(cx.theme().font_family.clone())
-            .child(
-                // The thread's accent rail; no token names an accent edge's width or inset.
-                div()
-                    .absolute()
-                    .left(px(0.))
-                    .top(px(6.))
-                    .bottom(px(6.))
-                    .w(px(2.))
-                    .rounded_full()
-                    .bg(rail),
-            )
+            .child({
+                // Resolving a thread mutes its rail where it stands.
+                let rail_id = SharedString::from(format!("pr-thread-rail-{}-{inline}", thread.id));
+                crate::motion::Sampled::new(move |window, cx| {
+                    let rail = gpui_base::motion::transition(
+                        rail_id,
+                        rail,
+                        gpui_base::motion::Transition::new(GLIDE),
+                        window,
+                        cx,
+                    );
+                    // The thread's accent rail; no token names an accent edge's width or inset.
+                    div()
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(6.))
+                        .bottom(px(6.))
+                        .w(px(2.))
+                        .rounded_full()
+                        .bg(rail)
+                        .into_any_element()
+                })
+            })
             .child(head);
         if collapsed {
             if !inline && self.can_resolve(thread) && self.writable(cx) {
@@ -1247,10 +1487,10 @@ impl PullRequestView {
                 },
                 cx,
             );
-            let body = (!inline)
+            let editing = (!inline)
                 .then(|| self.editing_body(&Slot::Edit(comment.id.clone()), cx))
-                .flatten()
-                .or_else(|| self.body(&comment, inline, cx));
+                .flatten();
+            let body = fade_on_edit(&comment.id, editing, self.body(&comment, inline, cx));
             card = card.child(
                 v_flex()
                     .px(px(material::CARD_INSET))
@@ -1271,6 +1511,7 @@ impl PullRequestView {
             + replies.map_or(0, |replies| replies.comments.len() as u64);
         if after.is_some() {
             let remaining = thread.total_comments.saturating_sub(read);
+            let failed_id = SharedString::from(format!("pr-thread-replies-failed-{}", thread.id));
             let thread = thread.clone();
             card = card.child(
                 div().px(px(material::CARD_INSET)).child(
@@ -1295,18 +1536,26 @@ impl PullRequestView {
                         ),
                 ),
             );
-            if let Some(error) = replies.and_then(|replies| replies.error.clone()) {
-                card = card.child(
-                    div()
-                        .px(px(material::CARD_INSET))
-                        .text_secondary(compact, cx)
-                        .text_color(cx.theme().warning)
-                        .child(
-                            crate::tr!("pull_requests.conversation.replies_failed", reason = error)
-                                .into_owned(),
+            let error = replies.and_then(|replies| replies.error.clone());
+            let note = div()
+                .px(px(material::CARD_INSET))
+                .text_secondary(compact, cx)
+                .text_color(cx.theme().warning);
+            card = card.child(crate::motion::Sampled::new(move |window, cx| {
+                match crate::motion::shown(failed_id, error, SHOW, window, cx) {
+                    Some(kept) => kept.fold(
+                        note.child(
+                            crate::tr!(
+                                "pull_requests.conversation.replies_failed",
+                                reason = kept.value.clone()
+                            )
+                            .into_owned(),
                         ),
-                );
-            }
+                    ),
+                    // Out of flow, so an absent note takes no gap in the card.
+                    None => div().absolute().into_any_element(),
+                }
+            }));
         } else if read < thread.total_comments {
             card = card.child(
                 div()
@@ -1398,23 +1647,14 @@ impl PullRequestView {
                     cx,
                 )
             } else {
-                match self.editor_element(&cx.entity(), &slot, spec.clone(), cx) {
+                let editor = self.editor_element(&cx.entity(), &slot, spec.clone(), cx);
+                let editing = editor.is_some();
+                let reply = match editor {
                     Some(editor) => editor,
-                    None => div()
+                    // A field placeholder that becomes an editor on click, not a button.
+                    None => reply_field(cx)
                         .id(SharedString::from(format!("pr-reply-row-{}", thread.id)))
-                        // A field placeholder that becomes an editor on click, not a button.
-                        .h(px(material::input_height(false)))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .rounded(material::radius_input(cx))
-                        .border_1()
-                        .border_color(cx.theme().input)
-                        .bg(cx.theme().background)
-                        .text_body(false, cx)
-                        .text_color(cx.theme().muted_foreground)
                         .cursor_text()
-                        .child(crate::tr!("pull_requests.compose.reply_row"))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_editor(
                                 reply_slot.clone(),
@@ -1429,7 +1669,22 @@ impl PullRequestView {
                             }
                         }))
                         .into_any_element(),
-                }
+                };
+                // The editor cross-fades over the field that stood for it.
+                let id = SharedString::from(format!("pr-reply-editing-{}", thread.id));
+                let mut reply = Some(reply);
+                crate::motion::Sampled::new(move |window, cx| {
+                    crate::motion::cross_fade(id, editing, CHANGE, window, cx, |shown, _, cx| {
+                        match reply.take().filter(|_| *shown == editing) {
+                            Some(reply) => reply,
+                            None if !*shown => {
+                                div().w_full().child(reply_field(cx)).into_any_element()
+                            }
+                            None => div().into_any_element(),
+                        }
+                    })
+                })
+                .into_any_element()
             }
         });
         let resolve = self
@@ -1554,15 +1809,54 @@ impl PullRequestView {
             .into_any_element()
     }
 
-    fn render_item(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    /// Row `index`, arriving or else gliding to each new height it takes: a long body
+    /// opened, an editor in place of a comment, replies paged in, a reply being written.
+    fn render_item(
+        &mut self,
+        index: usize,
+        scope: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let items = self.items(cx);
-        let Some(item) = items.get(index).cloned() else {
+        let (Some(item), Some(conversation)) = (
+            items.get(index).cloned(),
+            self.page().and_then(|page| page.conversation.data.clone()),
+        ) else {
             return div().into_any_element();
         };
-        let Some(conversation) = self.page().and_then(|page| page.conversation.data.clone()) else {
-            return div().into_any_element();
+        let pending = self.pending_count(cx);
+        let row = self.render_row(item, &conversation, pending, cx);
+        let Some(view) = self.page().map(|page| &page.conversation_view) else {
+            return row;
         };
-        let row = match item {
+        let key = view.keys.get(index).copied().unwrap_or_default();
+        let around = view.arrivals.around(key, cx);
+        around.draw(
+            "pr-conversation-row",
+            key,
+            crate::motion::list_rows::Glide::Height { scope },
+            row,
+            |left: &LeftRow, _| {
+                self.render_row(left.item.clone(), &left.conversation, left.pending, cx)
+            },
+            window,
+        )
+    }
+
+    fn pending_count(&self, cx: &App) -> usize {
+        self.draft(cx).map_or(0, |draft| draft.comments.len())
+    }
+
+    /// The row `item` shows, from `conversation` and a pending review of `pending` comments.
+    fn render_row(
+        &mut self,
+        item: Item,
+        conversation: &tcode_protocol::PullRequestConversation,
+        pending: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row = match item.clone() {
             Item::Notice => {
                 let url = self.url(cx);
                 let host_name = self.host_name(cx);
@@ -1590,10 +1884,7 @@ impl PullRequestView {
                 Some(block) => block,
                 None => div().into_any_element(),
             },
-            Item::PendingReview => match self.pending_review_line(cx) {
-                Some(line) => line,
-                None => div().into_any_element(),
-            },
+            Item::PendingReview => self.pending_review_line(pending, cx),
             Item::Composer => self.composer(cx),
             Item::Description => self.comment_card(&conversation.description, true, cx),
             Item::Comment(index) => match conversation.comments.get(index) {
@@ -1630,7 +1921,12 @@ impl PullRequestView {
             }
         };
         let compact = self.compact(cx);
+        let name = match &item {
+            Item::Comment(_) | Item::Thread(_) | Item::Event(..) => None,
+            other => Some(format!("pr-conversation-{other:?}")),
+        };
         div()
+            .when_some(name, |row, name| row.debug_selector(move || name.clone()))
             .px(if compact {
                 px(material::COMPACT_PAGE_INSET)
             } else {
@@ -1645,6 +1941,14 @@ impl PullRequestView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let loading = self.page().is_some_and(|page| {
+            page.conversation.data.is_none() && page.conversation.error.is_none()
+        });
+        let body = self.conversation_body(window, cx);
+        self.settle_body("conversation", loading, body, window, cx)
+    }
+
+    fn conversation_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // The desktop composer is always open at the end of the list.
         if !self.compact(cx)
             && !self.read_only(cx)
@@ -1696,7 +2000,7 @@ impl PullRequestView {
                     material::empty_state(
                         Icon::new(IconName::MessageSquare),
                         crate::tr!("pull_requests.conversation.empty_title").into_owned(),
-                        crate::tr!("pull_requests.conversation.empty_desc").into_owned(),
+                        String::new(),
                         cx,
                     )
                     .flex_1(),
@@ -1712,14 +2016,22 @@ impl PullRequestView {
                 )
                 .into_any_element();
         }
-        let count = self.items(cx).len();
-        let Some(page) = self.page() else {
+        let items = self.items(cx);
+        let pending = self.pending_count(cx);
+        let Some(page) = self.page_mut() else {
             return div().into_any_element();
         };
+        page.conversation_view
+            .sync_rows(items, page.conversation.data.as_ref(), pending, cx);
         let state = page.conversation_view.list.clone();
-        if state.item_count() != count {
-            state.reset(count);
-        }
+        page.conversation_view.scroll.step(&state, window, cx);
+        let view = &mut page.conversation_view;
+        view.arrivals.settle_list(&state, &view.keys, window, cx);
+        page.conversation_view
+            .shared
+            .begin_frame(state.viewport_bounds(), cx);
+        // A resize of the list puts every row at its new height at once.
+        let scope = u64::from(f32::from(state.viewport_bounds().size.width).to_bits());
         let view = cx.entity();
         div()
             .id("pr-conversation")
@@ -1727,8 +2039,8 @@ impl PullRequestView {
             .min_h_0()
             .size_full()
             .child(
-                list(state, move |index, _, cx| {
-                    view.update(cx, |view, cx| view.render_item(index, cx))
+                list(state, move |index, window, cx| {
+                    view.update(cx, |view, cx| view.render_item(index, scope, window, cx))
                 })
                 .size_full(),
             )
@@ -1761,14 +2073,57 @@ impl PullRequestView {
     }
 }
 
-/// What stands in for host media until it can be drawn.
+/// A stand-in that cross-fades from the loading one: an unavailable, too large or external
+/// card replacing the box that held the media's place.
+fn settle_media(url: &str, stand_in: Option<(bool, AnyElement)>) -> Option<AnyElement> {
+    let (loading, stand_in) = stand_in?;
+    let id = SharedString::from(format!("pr-media-{url}"));
+    Some(
+        crate::motion::Sampled::new(move |window, cx| {
+            let mut stand_in = Some(stand_in);
+            crate::motion::cross_fade(
+                id,
+                loading,
+                CHANGE,
+                window,
+                cx,
+                |shown, _, cx| match stand_in.take().filter(|_| *shown == loading) {
+                    Some(stand_in) => stand_in,
+                    None if *shown => loading_media(cx).into_any_element(),
+                    None => div().into_any_element(),
+                },
+            )
+        })
+        .into_any_element(),
+    )
+}
+
+/// The box that holds an image's place while it loads; its size is unknown until then.
+fn loading_media(cx: &App) -> gpui::Div {
+    div()
+        .w_full()
+        .h(px(180.))
+        .max_h(px(240.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(material::radius_card(cx))
+        .bg(cx.theme().muted)
+        .child(
+            Icon::new(IconName::Image)
+                .size(px(20.))
+                .text_color(cx.theme().muted_foreground),
+        )
+}
+
+/// What stands in for host media until it can be drawn, and whether it is the loading one.
 fn media_stand_in(
     state: MediaState,
     url: &str,
     title: &str,
     host_name: &str,
     cx: &App,
-) -> Option<AnyElement> {
+) -> Option<(bool, AnyElement)> {
     // Alt text may run over lines; these rows truncate on one.
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
     let title = title.as_str();
@@ -1809,32 +2164,26 @@ fn media_stand_in(
     };
     match state {
         MediaState::Ready => None,
-        MediaState::Loading => Some(
-            // Holds an image's place while it loads; its size is unknown until then.
-            div()
-                .w_full()
-                .h(px(180.))
-                .max_h(px(240.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(material::radius_card(cx))
-                .bg(cx.theme().muted)
-                .child(Icon::new(IconName::Image).size(px(20.)).text_color(muted))
-                .into_any_element(),
-        ),
-        MediaState::Unavailable => Some(unavailable(
-            crate::tr!("pull_requests.media.unavailable").into_owned(),
-            cx,
+        MediaState::Loading => Some((true, loading_media(cx).into_any_element())),
+        MediaState::Unavailable => Some((
+            false,
+            unavailable(
+                crate::tr!("pull_requests.media.unavailable").into_owned(),
+                cx,
+            ),
         )),
-        MediaState::TooLarge => Some(unavailable(
-            crate::tr!(
-                "pull_requests.media.too_large",
-                size =
-                    crate::thread_export::format_size(tcode_protocol::MAX_PULL_REQUEST_MEDIA_BYTES)
-            )
-            .into_owned(),
-            cx,
+        MediaState::TooLarge => Some((
+            false,
+            unavailable(
+                crate::tr!(
+                    "pull_requests.media.too_large",
+                    size = crate::thread_export::format_size(
+                        tcode_protocol::MAX_PULL_REQUEST_MEDIA_BYTES as u64
+                    )
+                )
+                .into_owned(),
+                cx,
+            ),
         )),
         MediaState::External(mime) => {
             let audio = mime.starts_with("audio/");
@@ -1854,7 +2203,8 @@ fn media_stand_in(
             } else {
                 title.to_owned()
             };
-            Some(
+            Some((
+                false,
                 material::card_secondary(cx)
                     .flex_row()
                     .w_full()
@@ -1887,7 +2237,66 @@ fn media_stand_in(
                             }),
                     )
                     .into_any_element(),
-            )
+            ))
         }
     }
+}
+
+/// A person's avatar: their initial, with the picture `source` names fading in over it once it
+/// decodes; the initial stays instead of a picture that fails.
+pub(super) fn avatar_image(
+    login: &str,
+    source: Option<gpui::ImageSource>,
+    size: f32,
+    cx: &App,
+) -> AnyElement {
+    let initial = login
+        .chars()
+        .next()
+        .map(|initial| initial.to_uppercase().to_string())
+        .unwrap_or_default();
+    let fallback = Avatar::new()
+        .size(px(size))
+        .rounded_full()
+        .bg(cx.theme().muted)
+        .fallback(
+            AvatarFallback::new()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                // The initial scales with the avatar, which no text token does.
+                .text_size(px(size * 0.5))
+                .font_medium()
+                .text_color(cx.theme().muted_foreground)
+                .child(initial),
+        );
+    let image = source.map(|source| {
+        let id = SharedString::from(format!("pr-avatar-{login}-{size}"));
+        crate::motion::Sampled::new(move |window, cx| {
+            let arrived = crate::motion::image_arrival(
+                crate::motion::Clock::Element,
+                id,
+                &source,
+                ARRIVE,
+                window,
+                cx,
+            );
+            Avatar::new()
+                .absolute()
+                .inset_0()
+                .rounded_full()
+                .overflow_hidden()
+                .opacity(arrived)
+                .image(AvatarImage::new(source).size(px(size)).rounded_full())
+                .into_any_element()
+        })
+    });
+    div()
+        .relative()
+        .flex_none()
+        .size(px(size))
+        .child(fallback)
+        .children(image)
+        .into_any_element()
 }

@@ -606,7 +606,7 @@ fn a_fresh_data_dir_gets_a_completed_database_through_the_staged_path() {
     let store = dir.store();
     assert!(store.load_index().unwrap().is_empty());
     store.close().unwrap();
-    let db = db::Db::open(&dir.path().join(DB_FILE), false).unwrap();
+    let db = db::Db::open(&dir.path().join(DB_FILE), None).unwrap();
     assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
     drop(db);
     assert!(!dir.path().join("legacy").exists());
@@ -616,7 +616,7 @@ fn a_fresh_data_dir_gets_a_completed_database_through_the_staged_path() {
 #[test]
 fn an_unfinished_newer_or_corrupt_database_is_refused_and_left_untouched() {
     let set_version = |root: &Path, version: i64| {
-        let db = db::Db::open(&root.join(DB_FILE), false).unwrap();
+        let db = db::Db::open(&root.join(DB_FILE), None).unwrap();
         db.write(|db, connection| {
             db.execute(connection, &format!("PRAGMA user_version = {version}"), ())
                 .map(drop)
@@ -762,6 +762,30 @@ fn removing_project_cleans_only_managed_icons() {
         assert!(store.read_file().unwrap().projects.is_empty());
         assert_eq!(path.exists(), !managed);
     }
+}
+
+#[test]
+fn replacing_a_project_icon_deletes_the_superseded_managed_copy() {
+    let dir = DataDir::new();
+    let root = dir.path();
+    let store = dir.store();
+    fs::create_dir(root.join("project-icons")).unwrap();
+    let mut project = Project::from_root(root.join("project"));
+    let first = root.join("project-icons/first.png");
+    let second = root.join("project-icons/second.png");
+    for path in [&first, &second] {
+        fs::write(path, b"stored image").unwrap();
+    }
+    project.icon_path = Some(first.clone());
+    store.upsert_project(&project).unwrap();
+    project.icon_path = Some(second.clone());
+    store.upsert_project(&project).unwrap();
+    assert!(!first.exists());
+    assert!(second.exists());
+    project.icon_path = None;
+    store.upsert_project(&project).unwrap();
+    assert!(!second.exists());
+    assert_eq!(store.read_file().unwrap().projects[0].icon_path, None);
 }
 
 #[test]
@@ -1135,7 +1159,7 @@ fn migration_survives_sigkill() {
                 .find(|path| path.exists())
         };
         let outcome = if dir.path().join(DB_FILE).exists() {
-            let db = db::Db::open(&dir.path().join(DB_FILE), false).unwrap();
+            let db = db::Db::open(&dir.path().join(DB_FILE), None).unwrap();
             assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION, "run {run}");
             drop(db);
             if dir.path().join("tcode.db.archive").exists() {
@@ -1191,6 +1215,16 @@ const SNAPSHOT_LOG: &[u8] = b"{\"ts\":1,\"event\":{\"type\":\"turn_started\",\"t
 {\"author\":{\"device_id\":\"phone\",\"name\":\"Alice\"},\"ts\":6,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":\"+d\\n\"}],\"completeness\":\"exact\"}}\n\
 {\"ts\":7,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":\"+e\\n\"}],\"completeness\":\"exact\"}}\n";
 
+/// Run the compaction pass over one thread to its end.
+fn compact(store: &SessionStore, id: &str) -> Compaction {
+    let mut plan = store.plan_compaction(id).unwrap();
+    loop {
+        if let Some(outcome) = store.compact(&mut plan).unwrap() {
+            return outcome;
+        }
+    }
+}
+
 fn rows(store: &SessionStore, id: &str) -> Vec<Vec<u8>> {
     store
         .read_event_log(id)
@@ -1220,13 +1254,12 @@ fn superseded_snapshots_lose_their_diffs_in_place_once() {
         .unwrap();
     let before = rows(&store, "codex");
     let folded = tcode_core::session::Timeline::fold_events(store.read_events("codex").unwrap());
-    assert_eq!(store.threads_without_diff_pass().unwrap(), ["codex"]);
+    assert_eq!(store.threads_to_compact().unwrap(), ["codex"]);
 
-    let DiffPass::Dropped { rows: dropped, .. } = store.drop_superseded_diffs("codex").unwrap()
-    else {
+    let Compaction::Compacted { rewritten, .. } = compact(&store, "codex") else {
         panic!("superseded snapshots lose their diffs")
     };
-    assert_eq!(dropped, 2);
+    assert_eq!(rewritten, 2);
     let after = rows(&store, "codex");
     let mut expected = before.clone();
     expected[1] = b"{\"type\":\"turn_changes_updated\",\"turn_id\":\"t1\",\"changes\":[{\"path\":\"f\",\"kind\":\"modify\",\"diff\":null}],\"completeness\":\"exact\"}\n".to_vec();
@@ -1236,15 +1269,12 @@ fn superseded_snapshots_lose_their_diffs_in_place_once() {
         tcode_core::session::Timeline::fold_events(store.read_events("codex").unwrap()),
         folded
     );
-    assert!(store.threads_without_diff_pass().unwrap().is_empty());
-    assert_eq!(
-        store.drop_superseded_diffs("codex").unwrap(),
-        DiffPass::Unchanged
-    );
+    assert!(store.threads_to_compact().unwrap().is_empty());
+    assert_eq!(compact(&store, "codex"), Compaction::Unchanged);
 
     store.close().unwrap();
     store = dir.store();
-    assert!(store.threads_without_diff_pass().unwrap().is_empty());
+    assert!(store.threads_to_compact().unwrap().is_empty());
     store.backfill_thread_activity(&["codex".into()]).unwrap();
     let snapshot = parse_stored_line(
         std::str::from_utf8(
@@ -1269,7 +1299,7 @@ fn superseded_snapshots_lose_their_diffs_in_place_once() {
         })
         .collect();
     assert_eq!(snapshots, [false, true, false, false, true]);
-    assert!(store.threads_without_diff_pass().unwrap().is_empty());
+    assert!(store.threads_to_compact().unwrap().is_empty());
     let mut fresh = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
     fresh.id = "fresh".into();
     store.upsert_meta(&fresh).unwrap();
@@ -1282,12 +1312,12 @@ fn superseded_snapshots_lose_their_diffs_in_place_once() {
             },
         )
         .unwrap();
-    assert!(store.threads_without_diff_pass().unwrap().is_empty());
+    assert!(store.threads_to_compact().unwrap().is_empty());
     store
         .apply(&[Mutation::replace_event_log("codex", SNAPSHOT_LOG.to_vec())])
         .unwrap();
-    assert_eq!(store.threads_without_diff_pass().unwrap(), ["codex"]);
-    store.drop_superseded_diffs("codex").unwrap();
+    assert_eq!(store.threads_to_compact().unwrap(), ["codex"]);
+    compact(&store, "codex");
 }
 
 /// A tolerant read folds without a row it cannot decode, so it could name
@@ -1313,17 +1343,14 @@ fn a_thread_with_an_undecodable_row_keeps_every_row() {
         store
             .apply(&[Mutation::replace_event_log("codex", log.clone())])
             .unwrap();
-        assert_eq!(store.threads_without_diff_pass().unwrap(), ["codex"]);
+        assert_eq!(store.threads_to_compact().unwrap(), ["codex"]);
         assert_eq!(
-            store.drop_superseded_diffs("codex").unwrap(),
-            DiffPass::Undecodable { position: 5 },
+            compact(&store, "codex"),
+            Compaction::Undecodable { position: 5 },
             "{label}"
         );
         assert_eq!(store.read_event_log("codex").unwrap(), log, "{label}");
-        assert!(
-            store.threads_without_diff_pass().unwrap().is_empty(),
-            "{label}"
-        );
+        assert!(store.threads_to_compact().unwrap().is_empty(), "{label}");
     }
 }
 
@@ -1334,14 +1361,11 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
     let dir = DataDir::new();
     let mut store = dir.store();
     let mut fold = Timeline::default();
-    let mut starts = Vec::new();
+    let mut starts = tcode_core::session::TurnStarts::default();
     for (row, line) in LOG.lines().enumerate() {
         let record = parse_stored_line(line).unwrap().stored;
-        let turns = fold.turns.len();
-        fold.apply_stored(&record);
-        if fold.turns.len() > turns {
-            starts.push(row as u64);
-        }
+        starts.apply(&fold.apply_stored(&record), row as u64);
+        let starts = starts.rows().to_vec();
         store
             .append_event("thread", row as u64, &record.event)
             .unwrap();
@@ -1360,9 +1384,11 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
     }
     let expected = TurnIndex {
         turns: 2,
-        starts: vec![
-            2, 8, 15, 21, 26, 29, 31, 37, 42, 45, 48, 51, 54, 57, 61, 66, 71,
-        ],
+        // The turns the fold holds: the divider's of the rewind at row 60
+        // (to before the first turn) and of the one at row 70; a rewind's
+        // row opens the turn its divider stands in, and the turns it took
+        // out leave their starts behind.
+        starts: vec![60, 70],
     };
     assert_eq!(store.turn_index("thread").unwrap(), Some(expected.clone()));
     store
@@ -1380,11 +1406,30 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
         assert_eq!(store.turn_index(id).unwrap(), Some(expected.clone()));
     }
     store
-        .run("seed an older fold version", |db| {
-            db.write(|db, connection| {
-                db.execute(
+        .apply(&[
+            Mutation::clone_events_to("thread", "before", CloneBound::BeforeTurn(1)),
+            Mutation::clone_events_to("thread", "through", CloneBound::ThroughTurnOpening(1)),
+        ])
+        .unwrap();
+    let source = rows(&store, "thread");
+    for (id, end, starts) in [("before", 70, vec![60, 66]), ("through", 71, vec![60, 70])] {
+        assert_eq!(rows(&store, id), source[..end], "{id}");
+        assert_eq!(
+            store.turn_index(id).unwrap(),
+            Some(TurnIndex {
+                turns: starts.len() as u64,
+                starts,
+            }),
+            "{id}: its own index, which appends go on from"
+        );
+    }
+    store
+        .run("seed an older fold version", |st| {
+            st.write(|st, connection| {
+                st.execute(
                     connection,
-                    "UPDATE turn_index SET fold_version = 0 WHERE session_id = 'thread'",
+                    "UPDATE turn_index SET fold_version = 0 \
+                     WHERE thread = (SELECT key FROM threads WHERE id = 'thread')",
                     (),
                 )?;
                 Ok(())
@@ -1460,5 +1505,866 @@ fn legacy_codex_file_contents_replay_as_patches_without_rewriting_history() {
     assert_eq!(
         patch(&store.read_events("new-diffs").unwrap()[0].event),
         patch(&records[0].event)
+    );
+}
+
+/// Tool calls recorded before every adapter kept results canonical, as
+/// tcode.db holds them (images swapped for 1x1 pictures): a Codex MCP result,
+/// a Claude image read whose image is also inlined in the text, a connector
+/// whose payload is only structured, and a Codex rollout import. They read
+/// back as text and images; text in no provider shape is left alone.
+#[test]
+fn tool_output_recorded_in_provider_shapes_reads_back_canonical() {
+    const LOG: &str = include_str!("fixtures/legacy-tool-output.jsonl");
+    let dir = DataDir::new();
+    let store = dir.store();
+    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
+    meta.id = "legacy".into();
+    store.upsert_meta(&meta).unwrap();
+    store
+        .apply(&[Mutation::replace_event_log("legacy", LOG.into())])
+        .unwrap();
+    let calls: Vec<_> = store
+        .read_log("legacy")
+        .unwrap()
+        .records
+        .into_iter()
+        .map(|record| match record.event {
+            AgentEvent::ItemCompleted(agent::ThreadItem {
+                content:
+                    agent::ItemContent::ToolCall {
+                        output,
+                        image_reads,
+                        ..
+                    },
+                ..
+            }) => (
+                output.unwrap(),
+                image_reads
+                    .into_iter()
+                    .map(|image| image.media_type)
+                    .collect::<Vec<_>>(),
+            ),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let tree = "The following is a diff from the previous accessibility tree for Window: \"\" with ~ and + representing changed and added elements, respectively. Removed elements are summarized by ID range.\nRemoved element IDs: 1-30\n+41 window Secondary Actions: Raise\nThe focused UI element is 41 window Secondary Actions: Raise";
+    assert_eq!(
+        calls,
+        [
+            (tree.to_owned(), vec!["image/jpeg".to_owned()]),
+            (String::new(), vec!["image/png".to_owned()]),
+            (
+                "Action completed.\n{\"repositories\":[]}".to_owned(),
+                vec![]
+            ),
+            (
+                format!("Wall time: 0.4182 seconds\nOutput:\n{tree}"),
+                vec!["image/jpeg".to_owned()]
+            ),
+            (
+                "{\"type\":\"tool_reference\",\"tool_name\":\"Monitor\"}".to_owned(),
+                vec![]
+            ),
+        ]
+    );
+}
+
+/// A Codex sleep, image view and image generation recorded as `Other`
+/// before the adapter mapped them, as tcode.db holds them (the picture
+/// swapped for a 1x1 one), read back as the items a new row holds.
+#[test]
+fn codex_items_recorded_as_other_read_back_as_their_items() {
+    const LOG: &str = include_str!("fixtures/legacy-codex-items.jsonl");
+    let dir = DataDir::new();
+    let store = dir.store();
+    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
+    meta.id = "legacy".into();
+    store.upsert_meta(&meta).unwrap();
+    store
+        .apply(&[Mutation::replace_event_log("legacy", LOG.into())])
+        .unwrap();
+    let contents: Vec<_> = store
+        .read_events("legacy")
+        .unwrap()
+        .into_iter()
+        .map(|record| match record.event {
+            AgentEvent::ItemCompleted(item) => item.content,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        contents,
+        [
+            agent::ItemContent::ToolCall {
+                image_reads: Vec::new(),
+                name: "sleep".into(),
+                input: serde_json::json!({"duration_ms": 20000}),
+                output: None,
+                status: agent::ItemStatus::Completed,
+            },
+            agent::ItemContent::ImageRead {
+                path: "/tmp/tcode-before.png".into(),
+                image: None,
+            },
+            agent::ItemContent::ToolCall {
+                image_reads: vec![agent::Attachment {
+                    media_type: "image/png".into(),
+                    data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==".into(),
+                    source_path: Some("/Users/me/.codex/generated_images/01a196f6-db20-7941-b9de-d73415937480/exec-89f575db-4c35-4d77-a024-611fdd5d1d50.png".into()),
+                }],
+                name: "image_generation".into(),
+                input: serde_json::json!({
+                    "revised_prompt": "Edit the reference image: keep the subject, make the background transparent.",
+                    "input_images": ["/Users/me/project/assets/reference.png"],
+                }),
+                output: None,
+                status: agent::ItemStatus::Completed,
+            },
+        ]
+    );
+}
+
+/// Grok's MCP call as its adapter recorded it before naming it
+/// `server/tool` (the call in the recorded Grok fixture) reads back with the
+/// name a new row holds.
+#[test]
+fn a_grok_mcp_call_recorded_with_its_spelling_reads_back_as_server_and_tool() {
+    let dir = DataDir::new();
+    let store = dir.store();
+    let mut meta = SessionMeta::new(ProviderKind::Grok, PathBuf::from("/w"), None);
+    meta.id = "grok".into();
+    store.upsert_meta(&meta).unwrap();
+    let log = "{\"ts\":1,\"event\":{\"type\":\"item_completed\",\"id\":\"call_37_0\",\"content\":{\"kind\":\"tool_call\",\"name\":\"tcode_probe__echo_upper\",\"input\":{\"tool_name\":\"tcode_probe__echo_upper\",\"tool_input\":{\"text\":\"hello mcp\"}},\"output\":\"HELLO MCP\",\"status\":\"completed\"}}}\n";
+    store
+        .apply(&[Mutation::replace_event_log("grok", log.into())])
+        .unwrap();
+    let AgentEvent::ItemCompleted(item) = &store.read_events("grok").unwrap()[0].event else {
+        panic!("a completed item")
+    };
+    assert!(
+        matches!(&item.content, agent::ItemContent::ToolCall { name, .. } if name == "tcode_probe/echo_upper"),
+        "{item:?}"
+    );
+}
+
+/// A tool call recorded now is stamped as canonical and reads back as it
+/// was recorded, so a reopened thread shows what the live one did, even
+/// when the tool's text is itself in a provider's block shape.
+#[test]
+fn a_canonical_tool_call_reads_back_as_recorded() {
+    let dir = DataDir::new();
+    let store = dir.store();
+    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
+    meta.id = "canonical".into();
+    store.upsert_meta(&meta).unwrap();
+    let event = AgentEvent::ItemCompleted(agent::ThreadItem {
+        id: "call".into(),
+        parent_item_id: None,
+        content: agent::ItemContent::ToolCall {
+            image_reads: Vec::new(),
+            name: "tcode_control/read".into(),
+            input: serde_json::json!({}),
+            output: Some("[{\"type\":\"text\",\"text\":\"quoted\"}]".into()),
+            status: agent::ItemStatus::Completed,
+        },
+    });
+    store.append_event("canonical", 5, &event).unwrap();
+    assert_eq!(
+        String::from_utf8(store.read_event_log("canonical").unwrap()).unwrap(),
+        "{\"ts\":5,\"event\":{\"type\":\"item_completed\",\"id\":\"call\",\"content\":{\"kind\":\"tool_call\",\"name\":\"tcode_control/read\",\"input\":{},\"output\":\"[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"quoted\\\"}]\",\"status\":\"completed\"}},\"item_version\":1}\n"
+    );
+    assert_eq!(store.read_events("canonical").unwrap()[0].event, event);
+}
+
+/// Every row of `id` as the store reads it: its position and canonical bytes,
+/// and how many named a blob that is missing.
+fn decoded_rows(store: &SessionStore, id: &str) -> (Vec<(u64, Vec<u8>)>, usize) {
+    store
+        .run("read rows", |st| {
+            st.read(|st, connection| {
+                let mut out = (Vec::new(), 0);
+                let Some(thread) = rows::thread(st, connection, id)? else {
+                    return Ok(out);
+                };
+                let codec = st.codec();
+                let mut decoder = codec.decoder();
+                rows::visit(
+                    st,
+                    connection,
+                    &thread,
+                    0..u64::MAX,
+                    false,
+                    |position, row| {
+                        let decoded = st.decode(&mut decoder, &row, Mode::Full)?;
+                        out.1 += usize::from(decoded.missing);
+                        out.0.push((position, decoded.bytes));
+                        Ok(true)
+                    },
+                )?;
+                Ok(out)
+            })
+        })
+        .unwrap()
+}
+
+fn fold_rows<'a>(rows: impl IntoIterator<Item = &'a [u8]>) -> tcode_core::session::Timeline {
+    let mut fold = tcode_core::session::Timeline::default();
+    for line in rows {
+        if let Ok(Some(record)) = decode_row(line) {
+            fold.apply_stored(&record.into_stored(None));
+        }
+    }
+    fold
+}
+
+/// A copy of a real data dir after the storage pass (`TCODE_STORAGE_DATA`)
+/// against an untouched copy of the `tcode.db` it started from
+/// (`TCODE_STORAGE_BASE`): every row reads back byte for byte except the
+/// deltas a completion superseded (gone, or the one that created the entry
+/// emptied) and the snapshots a later one superseded (without diffs), and
+/// every thread folds exactly as before. With `TCODE_STORAGE_OTHER`, a second
+/// migrated copy (say, one interrupted over and over) must read back the same.
+#[test]
+#[ignore = "needs copies of a real data dir named by TCODE_STORAGE_BASE and TCODE_STORAGE_DATA; run deliberately"]
+fn a_real_data_dir_reads_back_as_its_original() {
+    let base = PathBuf::from(std::env::var_os("TCODE_STORAGE_BASE").unwrap());
+    let data = PathBuf::from(std::env::var_os("TCODE_STORAGE_DATA").unwrap());
+    let other = std::env::var_os("TCODE_STORAGE_OTHER").map(PathBuf::from);
+    let started = Instant::now();
+    let base = db::Db::open(&base.join(DB_FILE), None).unwrap();
+    let store = SessionStore::open_at(data).unwrap();
+    let other = other.map(|other| SessionStore::open_at(other).unwrap());
+    let mut ids = Vec::new();
+    let mut after = String::new();
+    base.read(|db, connection| {
+        loop {
+            let mut next = None;
+            db.query(
+                connection,
+                "SELECT session_id FROM events WHERE session_id > ?1 ORDER BY session_id LIMIT 1",
+                [after.as_str()],
+                |row| {
+                    next = Some(db::text(row, 0)?);
+                    Ok(())
+                },
+            )?;
+            let Some(next) = next else { return Ok(()) };
+            ids.push(next.clone());
+            after = next;
+        }
+    })
+    .unwrap();
+    let (mut rows_total, mut kept, mut deleted, mut emptied, mut dropped, mut missing) =
+        (0, 0, 0, 0, 0, 0);
+    let (mut bytes_before, mut bytes_after) = (0u64, 0u64);
+    for (index, id) in ids.iter().enumerate() {
+        let mut original = Vec::new();
+        base.read(|db, connection| {
+            db.query(
+                connection,
+                "SELECT position, line FROM events WHERE session_id = ?1 ORDER BY position",
+                [id.as_str()],
+                |row| {
+                    original.push((integer(row, 0)? as u64, blob(row, 1)?));
+                    Ok(())
+                },
+            )
+        })
+        .unwrap();
+        let (moved, gaps) = decoded_rows(&store, id);
+        missing += gaps;
+        let mut moved_at: HashMap<u64, &Vec<u8>> = moved
+            .iter()
+            .map(|(position, line)| (*position, line))
+            .collect();
+        for (position, line) in &original {
+            rows_total += 1;
+            bytes_before += line.len() as u64;
+            let Some(now) = moved_at.remove(position) else {
+                let record = decode_row(line).unwrap().unwrap().stored;
+                assert!(
+                    matches!(record.event, AgentEvent::Delta { .. }),
+                    "{id}: row {position} is gone and was not a delta"
+                );
+                deleted += 1;
+                continue;
+            };
+            bytes_after += now.len() as u64;
+            if now == line {
+                kept += 1;
+            } else if compact::rewrite(line, |event| match event {
+                AgentEvent::Delta { text, .. } => {
+                    text.clear();
+                    true
+                }
+                _ => false,
+            })
+            .unwrap()
+            .as_ref()
+                == Some(now)
+            {
+                emptied += 1;
+            } else {
+                assert_eq!(
+                    compact::rewrite(line, tcode_core::session::drop_turn_diffs)
+                        .unwrap()
+                        .as_ref(),
+                    Some(now),
+                    "{id}: row {position} differs"
+                );
+                dropped += 1;
+            }
+        }
+        assert!(moved_at.is_empty(), "{id}: rows the original lacks");
+        assert_eq!(
+            fold_rows(original.iter().map(|(_, line)| line.as_slice())),
+            fold_rows(moved.iter().map(|(_, line)| line.as_slice())),
+            "{id}: the fold changed"
+        );
+        assert_eq!(
+            store.read_event_log(id).unwrap(),
+            moved
+                .iter()
+                .flat_map(|(_, line)| line.clone())
+                .collect::<Vec<_>>(),
+            "{id}: the export differs from the rows"
+        );
+        if let Some(other) = &other {
+            assert!(
+                decoded_rows(other, id).0 == moved,
+                "{id}: the copies differ"
+            );
+        }
+        if index % 500 == 0 {
+            println!("{index}/{} threads in {:.0?}", ids.len(), started.elapsed());
+        }
+    }
+    println!(
+        "{} threads, {rows_total} rows ({bytes_before} bytes): {kept} identical, {deleted} \
+         deltas gone, {emptied} emptied, {dropped} without superseded diffs, {bytes_after} bytes \
+         read back; {missing} rows name a missing blob; checked in {:.0?}",
+        ids.len(),
+        started.elapsed()
+    );
+    assert_eq!(missing, 0);
+}
+
+/// Bytes standing in for an image: deterministic, and different per seed.
+fn image_bytes(seed: u32, len: usize) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(2_654_435_761) | 1;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect()
+}
+
+/// `fixtures/legacy-images.jsonl` with its placeholders filled: runs long
+/// enough to leave their rows (A–F), a short one (G) and a long run that is
+/// not base64 (H), which stay.
+fn images_log() -> Vec<u8> {
+    use base64::Engine as _;
+    let mut log = include_str!("fixtures/legacy-images.jsonl").to_owned();
+    for (index, (name, len)) in [
+        ("A", 10_000),
+        ("B", 38_000),
+        ("C", 30_000),
+        ("D", 21_000),
+        ("E", 5_000),
+        ("F", 3_100),
+        ("G", 600),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let run = base64::engine::general_purpose::STANDARD.encode(image_bytes(index as u32, len));
+        log = log.replace(&format!("@{name}@"), &run);
+    }
+    log.replace("@H@", &"A".repeat(5_001)).into_bytes()
+}
+
+/// A thread that streams text and command output: items whose completion
+/// repeats their deltas, one whose completion abbreviates them, and one that
+/// never completes.
+fn stream_log(turns: usize) -> Vec<u8> {
+    let mut log = String::new();
+    let mut ts = 1;
+    let mut line = |event: String| {
+        ts += 1;
+        log.push_str(&format!("{{\"ts\":{ts},\"event\":{event}}}\n"));
+    };
+    for turn in 0..turns {
+        line(format!(
+            "{{\"type\":\"turn_started\",\"turn_id\":\"t{turn}\"}}"
+        ));
+        for text in ["Hel", "lo ", "world"] {
+            line(format!(
+                "{{\"type\":\"delta\",\"item_id\":\"a{turn}\",\"kind\":\"assistant_text\",\"text\":\"{text}\"}}"
+            ));
+        }
+        line(format!(
+            "{{\"type\":\"item_completed\",\"id\":\"a{turn}\",\"content\":{{\"kind\":\"assistant_message\",\"text\":\"Hello world\"}}}}"
+        ));
+        line(format!(
+            "{{\"type\":\"item_started\",\"id\":\"c{turn}\",\"content\":{{\"kind\":\"command_execution\",\"command\":\"ls\",\"output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}}}"
+        ));
+        for chunk in ["one\\n", "two\\n"] {
+            line(format!(
+                "{{\"type\":\"delta\",\"item_id\":\"c{turn}\",\"kind\":\"command_output\",\"text\":\"{chunk}\"}}"
+            ));
+        }
+        let output = if turn % 2 == 0 {
+            "one\\ntwo\\n"
+        } else {
+            "one… 4 bytes omitted"
+        };
+        line(format!(
+            "{{\"type\":\"item_completed\",\"id\":\"c{turn}\",\"content\":{{\"kind\":\"command_execution\",\"command\":\"ls\",\"output\":\"{output}\",\"exit_code\":0,\"status\":\"completed\"}}}}"
+        ));
+        line(format!(
+            "{{\"type\":\"delta\",\"item_id\":\"r{turn}\",\"kind\":\"reasoning_text\",\"text\":\"redacted\"}}"
+        ));
+        line(format!(
+            "{{\"type\":\"turn_completed\",\"turn_id\":\"t{turn}\",\"status\":\"completed\",\"usage\":null}}"
+        ));
+    }
+    log.into_bytes()
+}
+
+/// A data dir as an older build leaves it: `tcode.db` at `user_version` 1
+/// holding `logs`, each thread with a session.
+fn older_data_dir(logs: &[(&str, Vec<u8>)]) -> DataDir {
+    let dir = DataDir::new();
+    let db = db::Db::open(&dir.path().join(DB_FILE), Some(db::V1_SCHEMA)).unwrap();
+    db.write(|db, connection| {
+        db.execute(
+            connection,
+            "CREATE TABLE kept_worktrees (path TEXT PRIMARY KEY)",
+            (),
+        )?;
+        for (id, log) in logs {
+            let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
+            meta.id = (*id).to_owned();
+            db.execute(
+                connection,
+                "INSERT INTO sessions (id, body) VALUES (?1, ?2)",
+                (*id, serde_json::to_vec(&meta).unwrap()),
+            )?;
+            for (position, line) in segments(log).enumerate() {
+                db.execute(
+                    connection,
+                    "INSERT INTO events (session_id, position, line) VALUES (?1, ?2, ?3)",
+                    (*id, position as i64, line),
+                )?;
+            }
+        }
+        db.execute(connection, "PRAGMA user_version = 1", ())
+    })
+    .unwrap();
+    db.checkpoint().unwrap();
+    dir
+}
+
+fn copy_data_dir(from: &DataDir) -> DataDir {
+    let dir = DataDir::new();
+    fs::copy(from.path().join(DB_FILE), dir.path().join(DB_FILE)).unwrap();
+    dir
+}
+
+/// Run the storage pass's steps in the order the host does, committing at
+/// most `limit` of them; returns how many it committed.
+fn storage_pass(store: &SessionStore, limit: usize) -> usize {
+    let committed = std::cell::Cell::new(0);
+    let commit = |step: StorageStep| {
+        if committed.get() == limit {
+            return None;
+        }
+        committed.set(committed.get() + 1);
+        Some(store.commit_storage_step(step).unwrap())
+    };
+    let work = store.storage_work().unwrap();
+    if work.dictionary
+        && let Some(step) = store.prepare_dictionary().unwrap()
+        && commit(step).is_none()
+    {
+        return committed.get();
+    }
+    for id in &work.moves {
+        let Some(mut plan) = store.plan_move(id).unwrap() else {
+            continue;
+        };
+        while let Ok(step) = store.prepare_move_chunk(&mut plan).unwrap() {
+            match commit(step) {
+                None => return committed.get(),
+                Some(StepOutcome::Moved { done: false, .. }) => {}
+                Some(_) => break,
+            }
+        }
+    }
+    store.retire_source().unwrap();
+    for id in store.threads_to_compact().unwrap() {
+        let mut plan = store.plan_compaction(&id).unwrap();
+        loop {
+            if committed.get() == limit {
+                return committed.get();
+            }
+            committed.set(committed.get() + 1);
+            if store.compact(&mut plan).unwrap().is_some() {
+                break;
+            }
+        }
+    }
+    for step in store
+        .prepare_sweep(std::time::SystemTime::now() - Duration::from_secs(3600))
+        .unwrap()
+    {
+        if commit(step).is_none() {
+            return committed.get();
+        }
+    }
+    committed.get()
+}
+
+/// What a client and a model can see of a thread: its records, folded and
+/// as each history window holds them, where each entry is anchored, and the
+/// entries search holds for it.
+#[derive(Debug, PartialEq)]
+struct Observed {
+    fold: tcode_core::session::Timeline,
+    anchors: Vec<(u64, String)>,
+    search: Vec<crate::session_search::SearchableEntry>,
+    window: Vec<(u64, StoredEvent)>,
+}
+
+fn observe(store: &SessionStore, id: &str) -> Observed {
+    let log = store.read_log(id).unwrap();
+    let indexed = crate::thread_index::IndexedLog::build(&log);
+    let read = store.snapshot_log(id).unwrap();
+    let mut window = Vec::new();
+    // A row with a legacy Codex diff is only read whole, both times.
+    let _ = read.visit_projected_rows(
+        0..read.end,
+        true,
+        "observe",
+        usize::MAX,
+        |record| std::borrow::Cow::Borrowed(record),
+        |position, record| {
+            // What compaction changes; the folds above cover it.
+            if !matches!(
+                record.event,
+                AgentEvent::Delta { .. } | AgentEvent::TurnChangesUpdated { .. }
+            ) {
+                window.push((position, record));
+            }
+            true
+        },
+    );
+    Observed {
+        fold: tcode_core::session::Timeline::fold_stored(&log.records),
+        anchors: indexed
+            .entries()
+            .map(|(position, entry)| (position, entry.id.clone()))
+            .collect(),
+        search: crate::session_search::extract_searchable_entries(&log),
+        window,
+    }
+}
+
+/// An older build's store turns over on the first open, and its rows move
+/// in the background while every read sees the same thread: rows read back
+/// byte for byte, from the older file or from this one, except what the
+/// move drops — superseded deltas (the one that created an entry emptied)
+/// and superseded snapshots' diffs. Images leave the rows for one file each
+/// and come back exactly. The older file is gone at the end.
+#[test]
+fn an_older_store_moves_in_the_background_and_every_thread_reads_back_the_same() {
+    let logs = [
+        ("images", images_log()),
+        ("codex", SNAPSHOT_LOG.to_vec()),
+        ("mixed", MIXED_LOG.to_vec()),
+        (
+            "turns",
+            include_bytes!("fixtures/turn-index.jsonl").to_vec(),
+        ),
+        (
+            "tools",
+            include_bytes!("fixtures/legacy-tool-output.jsonl").to_vec(),
+        ),
+        (
+            "items",
+            include_bytes!("fixtures/legacy-codex-items.jsonl").to_vec(),
+        ),
+        ("stream", stream_log(2)),
+    ];
+    let dir = older_data_dir(&logs);
+    let store = dir.store();
+    store.open().unwrap();
+    let version = |path: &Path| db::Db::open(path, None).unwrap().user_version().unwrap();
+    assert!(dir.path().join(source::SOURCE_FILE).exists());
+    let mut before = HashMap::new();
+    for (id, log) in &logs {
+        assert_eq!(
+            &store.read_event_log(id).unwrap(),
+            log,
+            "{id} before moving"
+        );
+        before.insert(*id, observe(&store, id));
+    }
+
+    assert!(storage_pass(&store, usize::MAX) > 0);
+    store.close().unwrap();
+    assert!(!dir.path().join(source::SOURCE_FILE).exists());
+    assert_eq!(version(&dir.path().join(DB_FILE)), SCHEMA_VERSION);
+    let store = dir.store();
+    for (id, log) in &logs {
+        let after = observe(&store, id);
+        assert_eq!(after, before[id], "{id}");
+        let expected: Vec<u8> = match *id {
+            "codex" => {
+                let mut rows: Vec<&[u8]> = segments(log).collect();
+                rows[1] = b"{\"type\":\"turn_changes_updated\",\"turn_id\":\"t1\",\"changes\":[{\"path\":\"f\",\"kind\":\"modify\",\"diff\":null}],\"completeness\":\"exact\"}\n";
+                rows[6] = b"{\"author\":{\"device_id\":\"phone\",\"name\":\"Alice\"},\"ts\":6,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":null}],\"completeness\":\"exact\"}}\n";
+                rows.concat()
+            }
+            "stream" => {
+                let text = String::from_utf8(log.clone()).unwrap();
+                text.lines()
+                    .filter(|line| {
+                        !(line.contains("\"text\":\"lo \"")
+                            || line.contains("\"text\":\"world\"")
+                            || line.contains("\"item_id\":\"c0\""))
+                    })
+                    .map(|line| line.replace("\"text\":\"Hel\"", "\"text\":\"\"") + "\n")
+                    .collect::<String>()
+                    .into_bytes()
+            }
+            _ => log.clone(),
+        };
+        assert_eq!(store.read_event_log(id).unwrap(), expected, "{id}");
+        let (_, missing) = decoded_rows(&store, id);
+        assert_eq!(missing, 0, "{id}");
+    }
+    let blobs = crate::fs_tree::tree_size(&dir.path().join("blobs/sha256")).unwrap();
+    let images: u64 = [10_000, 38_000, 30_000, 21_000, 5_000, 3_100].iter().sum();
+    assert_eq!(
+        blobs, images,
+        "one file per image, however often a row names it"
+    );
+    assert!(store.threads_to_compact().unwrap().is_empty());
+    assert_eq!(
+        storage_pass(&store, usize::MAX),
+        0,
+        "a second pass has nothing to do"
+    );
+}
+
+/// Stopping the pass after any commit and starting it again on a reopened
+/// store ends with the store an uninterrupted pass leaves.
+#[test]
+fn an_interrupted_storage_pass_resumes_and_converges() {
+    let logs = [("stream", stream_log(400)), ("images", images_log())];
+    let older = older_data_dir(&logs);
+    let read_all = |store: &SessionStore| {
+        logs.iter()
+            .map(|(id, _)| decoded_rows(store, id).0)
+            .collect::<Vec<_>>()
+    };
+    let reference = copy_data_dir(&older);
+    let store = reference.store();
+    let commits = storage_pass(&store, usize::MAX);
+    assert!(
+        commits > 4,
+        "{commits} commits leave too few places to stop"
+    );
+    assert!(
+        store
+            .run("dictionary", |st| Ok(st.codec().has_dictionary()))
+            .unwrap(),
+        "enough rows to train a dictionary"
+    );
+    let expected = read_all(&store);
+    store.close().unwrap();
+    for stop in 0..commits {
+        let dir = copy_data_dir(&older);
+        let store = dir.store();
+        assert_eq!(storage_pass(&store, stop), stop);
+        store.close().unwrap();
+        let store = dir.store();
+        storage_pass(&store, usize::MAX);
+        assert_eq!(read_all(&store), expected, "stopped after {stop} commits");
+        store.close().unwrap();
+        assert!(
+            !dir.path().join(source::SOURCE_FILE).exists(),
+            "stopped after {stop}"
+        );
+    }
+}
+
+/// Writes to a thread between reading a chunk of it and committing the
+/// chunk: an append keeps both, a replacement or removal makes the chunk
+/// stale so the older rows never come back, and a fork takes the rows still
+/// to move. Blobs only a stale chunk wrote are collected; no blob a row
+/// names ever is.
+#[test]
+fn a_thread_written_while_it_moves_loses_nothing() {
+    let logs = [
+        ("appended", images_log()),
+        ("replaced", images_log()),
+        ("forked", stream_log(3)),
+    ];
+    let dir = older_data_dir(&logs);
+    let store = dir.store();
+    store.open().unwrap();
+    let event = AgentEvent::TurnStarted {
+        turn_id: "after".into(),
+    };
+    let chunk = |id: &str| {
+        let mut plan = store.plan_move(id).unwrap().unwrap();
+        store.prepare_move_chunk(&mut plan).unwrap().unwrap()
+    };
+
+    let appended = chunk("appended");
+    store.append_event("appended", 99, &event).unwrap();
+    assert!(matches!(
+        store.commit_storage_step(appended).unwrap(),
+        StepOutcome::Moved { done: true, .. }
+    ));
+    let mut expected = images_log();
+    expected.extend_from_slice(
+        b"{\"ts\":99,\"event\":{\"type\":\"turn_started\",\"turn_id\":\"after\"}}\n",
+    );
+    assert_eq!(store.read_event_log("appended").unwrap(), expected);
+
+    let replaced = chunk("replaced");
+    store
+        .apply(&[Mutation::replace_event_log(
+            "replaced",
+            SNAPSHOT_LOG.to_vec(),
+        )])
+        .unwrap();
+    assert_eq!(
+        store.commit_storage_step(replaced).unwrap(),
+        StepOutcome::Stale
+    );
+
+    let forked = chunk("forked");
+    store
+        .apply(&[
+            Mutation::clone_events("forked", "fork"),
+            Mutation::clone_events_to("forked", "partial", CloneBound::ThroughTurnOpening(0)),
+            Mutation::remove_session("forked"),
+        ])
+        .unwrap();
+    assert_eq!(
+        store.commit_storage_step(forked).unwrap(),
+        StepOutcome::Stale
+    );
+    assert_eq!(
+        store.read_event_log("fork").unwrap(),
+        logs[2].1,
+        "the fork reads the rows still to move"
+    );
+    assert!(
+        logs[2]
+            .1
+            .starts_with(&store.read_event_log("partial").unwrap()),
+        "a partial copy reads only its own of the rows still to move"
+    );
+    assert!(store.read_event_log("partial").unwrap().len() < logs[2].1.len());
+
+    storage_pass(&store, usize::MAX);
+    assert!(!dir.path().join(source::SOURCE_FILE).exists());
+    assert_eq!(
+        fold_rows(segments(&store.read_event_log("replaced").unwrap())),
+        fold_rows(segments(SNAPSHOT_LOG)),
+        "the replacement, not the rows it replaced"
+    );
+    assert!(store.read_event_log("forked").unwrap().is_empty());
+    let fork = store.read_log("fork").unwrap();
+    assert_eq!(
+        tcode_core::session::Timeline::fold_stored(&fork.records),
+        fold_rows(segments(&logs[2].1))
+    );
+    let files = || {
+        fs::read_dir(dir.path().join("blobs/sha256"))
+            .unwrap()
+            .count()
+    };
+    let named = files();
+    let swept: usize = store
+        .prepare_sweep(std::time::SystemTime::now() + Duration::from_secs(1))
+        .unwrap()
+        .into_iter()
+        .map(|step| match store.commit_storage_step(step).unwrap() {
+            StepOutcome::Swept { files, .. } => files,
+            other => panic!("{other:?}"),
+        })
+        .sum();
+    assert_eq!(
+        swept, 0,
+        "every blob the stale chunk wrote is also the appended thread's"
+    );
+    assert_eq!(files(), named);
+    store
+        .apply(&[Mutation::remove_session("appended")])
+        .unwrap();
+    let swept: usize = store
+        .prepare_sweep(std::time::SystemTime::now() + Duration::from_secs(1))
+        .unwrap()
+        .into_iter()
+        .map(|step| match store.commit_storage_step(step).unwrap() {
+            StepOutcome::Swept { files, .. } => files,
+            other => panic!("{other:?}"),
+        })
+        .sum();
+    assert_eq!(swept, 6, "the removed thread's images");
+    for id in ["replaced", "fork"] {
+        assert_eq!(decoded_rows(&store, id).1, 0, "{id}");
+    }
+}
+
+/// A switch a crash interrupted is done again from the older file, which
+/// stays whole until the new one is in place; a file under the source's name
+/// that is not the older store itself is kept aside. An older build only
+/// ever opens `tcode.db`, and from the switch on refuses it.
+#[test]
+fn an_interrupted_switch_starts_over_and_an_older_build_never_opens_a_partial_store() {
+    let logs = [("images", images_log())];
+    let dir = older_data_dir(&logs);
+    fs::hard_link(
+        dir.path().join(DB_FILE),
+        dir.path().join(source::SOURCE_FILE),
+    )
+    .unwrap();
+    fs::write(dir.path().join("tcode.db.next"), b"half written").unwrap();
+    let store = dir.store();
+    assert_eq!(store.read_event_log("images").unwrap(), logs[0].1);
+    store.close().unwrap();
+    let version = db::Db::open(&dir.path().join(DB_FILE), None)
+        .unwrap()
+        .user_version()
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION);
+    assert_ne!(version, db::V1_VERSION, "what an older build opens");
+    assert!(!dir.path().join("tcode.db.next").exists());
+
+    let dir = older_data_dir(&logs);
+    fs::write(dir.path().join(source::SOURCE_FILE), b"someone else's").unwrap();
+    let store = dir.store();
+    assert_eq!(store.read_event_log("images").unwrap(), logs[0].1);
+    store.close().unwrap();
+    let aside: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
+        .filter(|name| name.starts_with("tcode.db.v1."))
+        .collect();
+    assert_eq!(aside.len(), 1);
+    assert_eq!(
+        fs::read(dir.path().join(&aside[0])).unwrap(),
+        b"someone else's"
     );
 }

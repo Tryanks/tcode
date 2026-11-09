@@ -10,7 +10,7 @@ use tcode_core::{
     git::{GitAction, GitStatus},
     project::{Project, SessionMeta, WorktreeInfo},
     provider_status::ProviderSnapshot,
-    session::{PendingUserInput, ReviewComment, RunningTurn, StoredEvent},
+    session::{LatestActivity, PendingUserInput, ReviewComment, RunningTurn, StoredEvent},
     settings::Settings,
     settlement::{AgentDelivery, AgentExecution, AgentReport},
     ui::{TerminalSplitDirection, WorkspaceMode},
@@ -55,10 +55,36 @@ pub enum Topic {
         item_id: String,
         cols: u16,
     },
-    Preview,
+    /// One client's preview channel, subscribed while it can render pages:
+    /// the threads it renders, and their agents' preview requests.
+    Preview {
+        client: crate::PreviewClient,
+    },
+    /// The host-held preview of one thread.
+    PreviewSession {
+        session_id: String,
+    },
+    /// The listeners on the host a thread's preview offers to open, most
+    /// relevant to the thread first. The host reads them only while
+    /// something subscribes.
+    DevServers {
+        session_id: String,
+    },
     ExternalImport {
         project_id: String,
     },
+    /// The machine's hosting state, for a full device: answered on subscribe
+    /// and pushed after every change but its invitation's countdown and its
+    /// Traverse status. The transport that owns hosting answers it, not the
+    /// runtime.
+    Hosting,
+    /// The host's move of an older build's threads into its current storage,
+    /// for a full device: answered on subscribe, and pushed while it runs.
+    StorageMigration,
+    /// What the host's data and its providers' take on its disk, for a full
+    /// device: answered on subscribe with the last measurement, and pushed
+    /// when one starts or ends. The first subscription measures.
+    DiskUsage,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,14 +109,31 @@ pub enum ServerEvent {
         terminal_id: u64,
         delta: Box<crate::terminal::TerminalDelta>,
     },
-    /// The whole rendered screen of a [`Topic::CommandOutput`]: no cursor and
-    /// no scrollback, trailing blank rows trimmed.
+    /// The whole rendered screen of a [`Topic::CommandOutput`], with no cursor
+    /// and trailing blank rows trimmed: the answer to subscribing, and a push
+    /// when its subscribers may hold different screens.
     CommandOutputReplaced(Box<crate::terminal::TerminalFrame>),
+    /// What changed in a [`Topic::CommandOutput`]'s screen since the last
+    /// screen or change pushed on it.
+    CommandOutputDelta(Box<crate::terminal::TerminalDelta>),
+    /// An agent's preview request, sent on the [`Topic::Preview`] of the
+    /// one client rendering its thread.
     PreviewRequest {
         request_id: u64,
         session_id: String,
         request: crate::PreviewRequest,
     },
+    /// The threads a [`Topic::Preview`]'s client renders, each as it stood
+    /// when rendering came to that client: the answer to subscribing, and a
+    /// push whenever the set changes. A thread that leaves the set is
+    /// rendered elsewhere or nowhere, and its page here is let go.
+    PreviewRenderingReplaced(Vec<crate::PreviewSession>),
+    /// A [`Topic::PreviewSession`]'s whole state: the answer to subscribing,
+    /// and a push after every change.
+    PreviewSessionReplaced(crate::PreviewSession),
+    /// A [`Topic::DevServers`]'s whole list: the answer to subscribing, and a
+    /// push whenever it changes.
+    DevServersReplaced(Vec<crate::DevServer>),
     SessionEvent(StoredEvent),
     SessionStatusReplaced(Box<SessionStatus>),
     SessionUsageChanged {
@@ -99,10 +142,16 @@ pub enum ServerEvent {
     },
     SessionPlanReplaced(SessionPlan),
     ProvidersReplaced(ProvidersStatus),
+    /// Account usage and the usage reads in flight, when the rest of the
+    /// providers status is unchanged.
+    ProviderUsageChanged {
+        provider_usage: HashMap<String, tcode_core::usage::ProviderUsage>,
+        usage_checking: HashSet<String>,
+    },
     GitStatusReplaced(GitStatusStatus),
     /// An unarchived thread was added or changed. Archiving a thread removes
     /// it with [`ServerEvent::IndexRemoveSession`].
-    IndexUpsertSession(SessionMeta),
+    IndexUpsertSession(Box<SessionMeta>),
     IndexUpsertProject(Project),
     IndexSummaryReplaced(IndexSummary),
     IndexActivitiesChanged {
@@ -120,45 +169,28 @@ pub enum ServerEvent {
         project_id: String,
     },
     SettingsReplaced(Settings),
+    HostingReplaced(Box<crate::HostingState>),
     /// Visit times that changed while the rest of the settings did not.
     LastVisitedChanged(HashMap<String, u64>),
     Runtime(RuntimeNotification),
 
-    /// A provider-native rewind prompt is delivered once over the serialized
-    /// event stream. The client store owns consumption after receipt.
-    NativeRewindPrefill {
+    /// The prompt a rewind restored, for the composer of the client that
+    /// asked for the rewind; every other client ignores it.
+    RewindPrefill {
         session_id: String,
+        client_id: String,
         text: String,
-    },
-    /// A turn was stopped because Claude Code's safety classifier fired: the request
-    /// was blocked (fallback prevented) or the model silently fell back and tcode
-    /// interrupted it. Drives the recovery card. Transient; never persisted.
-    ModelFallbackBlocked {
-        session_id: String,
-        category: Option<agent::ClassifierCategory>,
-        /// The selected model that refused / was expected.
-        model: Option<String>,
-        /// The model Claude rerouted to, when a silent fallback actually occurred
-        /// (tcode interrupted it). None when the request was blocked outright.
-        fallback_model: Option<String>,
-        /// Claude's own explanation text when available (empty otherwise).
-        detail: String,
-    },
-    /// A secondary model's review of a classifier-blocked turn: a user-facing
-    /// assessment plus a DRAFT clarification the user reviews and sends. Advisory
-    /// only; never auto-sent. Transient.
-    FallbackReviewReady {
-        session_id: String,
-        assessment: String,
-        /// Suggested first-person clarification, prefilled but editable. Empty when
-        /// the reviewer judged the flag not a false positive.
-        draft: String,
+        /// Local paths of the images the prompt carried.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
     },
     /// Records standing for the log cursors `from..end`. A cursor is the
     /// position of a stored row of the log, and a row without a readable
     /// record stands for none; the host may also merge or drop records whose
     /// effect a later record in the log repeats, so `records` can be shorter
-    /// than the range.
+    /// than the range. A reply to a subscription ends at `total`: it starts
+    /// at the subscriber's cursor when what follows that fits one reply, and
+    /// is otherwise the log's tail, as a subscriber without a cursor gets.
     SessionSnapshot {
         from: u64,
         end: u64,
@@ -184,6 +216,13 @@ pub enum ServerEvent {
         project_id: String,
         status: Option<ExternalImportStatus>,
     },
+    /// A [`Topic::StorageMigration`]'s state: the answer to subscribing, a
+    /// push at most about once a second while the move runs, and `None` once
+    /// none runs.
+    StorageMigrationReplaced(Option<StorageMigration>),
+    /// A [`Topic::DiskUsage`]'s state: the answer to subscribing, and a push
+    /// when a measurement starts or ends.
+    DiskUsageReplaced(DiskUsageState),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -213,6 +252,86 @@ pub struct ExternalImportStatus {
     /// the run it started.
     pub run_id: u64,
     pub state: ExternalImportState,
+}
+
+/// The host moving an older build's threads into its current storage, in
+/// the background while it serves them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageMigration {
+    /// Stored rows moved so far, of `total` across every thread to move.
+    pub moved: u64,
+    pub total: u64,
+    /// The move is paused until the disk has room for it.
+    pub waiting_for_space: bool,
+}
+
+/// The host's disk usage: its last measurement, and whether one runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskUsageState {
+    /// `None` until the first measurement ends.
+    pub last: Option<DiskUsage>,
+    pub measuring: bool,
+}
+
+/// What the host's data and its providers' took on its disk when measured,
+/// as the host's `disk_usage` service counts it: a symbolic link counts as
+/// itself, never as what it points at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskUsage {
+    /// When the measurement ended, in seconds since the Unix epoch.
+    pub measured_at: u64,
+    pub tcode: TcodeDiskUsage,
+    /// Largest first; a provider with nothing on disk is left out.
+    pub providers: Vec<ProviderDiskUsage>,
+}
+
+/// Tcode's data directory, by part. An extra account's directory inside it
+/// counts under its provider instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TcodeDiskUsage {
+    /// The data directory, `~` standing for the host's home.
+    pub dir: String,
+    /// The thread store, its write-ahead files, an older build's store while
+    /// it moves, and the images cut out of stored events.
+    pub conversations: u64,
+    /// Files attached to messages and the previews made of images.
+    pub images: u64,
+    /// Project copies threads work in.
+    pub worktrees: u64,
+    pub other: u64,
+}
+
+impl TcodeDiskUsage {
+    pub fn total(&self) -> u64 {
+        self.conversations + self.images + self.worktrees + self.other
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderDiskUsage {
+    pub provider: ProviderKind,
+    pub bytes: u64,
+    /// Each account whose directories hold something, largest first.
+    pub accounts: Vec<AccountDiskUsage>,
+}
+
+/// The directories one provider account's CLI keeps its state in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountDiskUsage {
+    /// The first profile launching with these directories.
+    pub profile_id: String,
+    /// `~` standing for the host's home.
+    pub dirs: Vec<String>,
+    pub bytes: u64,
+    /// The largest entries directly inside those directories, largest first.
+    pub parts: Vec<DiskUsagePart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskUsagePart {
+    /// The entry's file name.
+    pub name: String,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,10 +375,177 @@ pub struct ProvidersStatus {
     /// Environment-variable names present for each profile. Values never cross
     /// the protocol boundary.
     pub secret_names: HashMap<String, HashSet<String>>,
-    /// Native plugin catalogs of the profiles a client asked about, for
-    /// providers whose plugin management is switched on.
+    /// Native plugin catalogs of the profiles a client asked about: for each,
+    /// the listing from outside any project and the listing of the one
+    /// project last asked about.
     #[serde(default)]
     pub plugins: Vec<ProviderPluginCatalog>,
+    /// What each harness is, as clients present it: every native one, then
+    /// every installed ACP agent.
+    #[serde(default)]
+    pub harnesses: Vec<HarnessDescription>,
+}
+
+/// One harness as its host describes it to clients: which sections and
+/// fields its settings have, and the native names behind them. A client
+/// presents a harness from this alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessDescription {
+    pub provider: ProviderKind,
+    /// The installed ACP agent this is, for an ACP harness.
+    #[serde(default)]
+    pub acp_agent_id: Option<String>,
+    /// The command looked up on `PATH`, for a harness with a binary setting.
+    #[serde(default)]
+    pub binary_name: Option<String>,
+    /// How an ACP agent is started.
+    #[serde(default)]
+    pub launch_summary: Option<String>,
+    #[serde(default)]
+    pub install_command: Option<String>,
+    #[serde(default)]
+    pub doctor_command: Option<String>,
+    /// What to run in a terminal to sign in, where Tcode does not sign in.
+    #[serde(default)]
+    pub sign_in_command: Option<String>,
+    /// The variable naming each account's config directory, when the
+    /// harness has one.
+    #[serde(default)]
+    pub config_dir_env: Option<String>,
+    #[serde(default)]
+    pub default_config_dir: Option<String>,
+    #[serde(default)]
+    pub endpoint: Option<EndpointDescription>,
+    /// The ids of the harness's native switches.
+    #[serde(default)]
+    pub toggles: Vec<String>,
+    /// Tcode runs the harness's account sign-in, so accounts can be added.
+    #[serde(default)]
+    pub account_login: bool,
+    #[serde(default)]
+    pub launch_args: bool,
+    /// Its plugins are managed in Settings → Plugins.
+    #[serde(default)]
+    pub plugins: bool,
+    #[serde(default)]
+    pub mcp_servers: bool,
+    #[serde(default)]
+    pub native_computer_use: bool,
+    /// Its own configuration can be listed ([`crate::Query::NativeMcpServers`]).
+    #[serde(default)]
+    pub native_mcp_config: bool,
+    /// The choice of what a new thread may do without asking, where the
+    /// harness has more than one.
+    #[serde(default)]
+    pub permission: Option<HarnessPermission>,
+    /// A newer version of an ACP agent in the registry.
+    #[serde(default)]
+    pub registry_update: Option<String>,
+}
+
+/// A harness's permission control, as its adapter publishes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessPermission {
+    pub id: String,
+    pub options: Vec<agent::SelectOption>,
+    #[serde(default)]
+    pub recommended: Option<String>,
+}
+
+impl HarnessPermission {
+    fn of(provider: ProviderKind) -> Option<Self> {
+        match agent::permission_control(provider)? {
+            agent::OptionDescriptor::Select {
+                id,
+                options,
+                recommended,
+                ..
+            } if options.len() > 1 => Some(Self {
+                id,
+                options,
+                recommended,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// The variables a harness reads to reach a model API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointDescription {
+    pub base_url_env: String,
+    pub key_env: String,
+    #[serde(default)]
+    pub model_env: Option<String>,
+    /// Endpoint profiles can be added for it.
+    #[serde(default)]
+    pub profiles: bool,
+    #[serde(default)]
+    pub presets: Vec<EndpointPresetDescription>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointPresetDescription {
+    pub name: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+impl HarnessDescription {
+    /// A native harness as its adapter's facts and capabilities describe it.
+    pub fn native(provider: ProviderKind) -> Self {
+        let facts = provider.harness();
+        let caps = provider.caps();
+        let text = |value: Option<&str>| value.map(str::to_owned);
+        Self {
+            provider,
+            acp_agent_id: None,
+            binary_name: Some(facts.binary_name.to_owned()).filter(|name| !name.is_empty()),
+            launch_summary: None,
+            install_command: text(facts.install_command),
+            doctor_command: text(facts.doctor_command),
+            sign_in_command: text(facts.sign_in_command),
+            config_dir_env: text(facts.config_dir_env).filter(|_| caps.home_path),
+            default_config_dir: text(facts.default_config_dir),
+            endpoint: facts.endpoint.map(|endpoint| EndpointDescription {
+                base_url_env: endpoint.base_url_env.to_owned(),
+                key_env: endpoint
+                    .key_envs
+                    .first()
+                    .copied()
+                    .unwrap_or_default()
+                    .to_owned(),
+                model_env: text(endpoint.model_env),
+                profiles: endpoint.profiles,
+                presets: endpoint
+                    .presets
+                    .iter()
+                    .map(|preset| EndpointPresetDescription {
+                        name: preset.name.to_owned(),
+                        base_url: preset.base_url.to_owned(),
+                        model: text(preset.model),
+                    })
+                    .collect(),
+            }),
+            toggles: facts.toggles.iter().map(|id| (*id).to_owned()).collect(),
+            account_login: caps.account_login,
+            launch_args: caps.launch_args,
+            plugins: caps.plugin_management.manages(),
+            mcp_servers: caps.mcp_servers,
+            native_computer_use: caps.native_computer_use,
+            native_mcp_config: facts.native_mcp.is_some(),
+            permission: HarnessPermission::of(provider),
+            registry_update: None,
+        }
+    }
+
+    /// Whether endpoint profiles can be added to this harness.
+    pub fn offers_endpoint_profiles(&self) -> bool {
+        self.endpoint
+            .as_ref()
+            .is_some_and(|endpoint| endpoint.profiles)
+    }
 }
 
 /// One provider profile's native plugin catalog. The native CLI's own files
@@ -428,9 +714,15 @@ pub enum ForkAvailability {
 pub struct SessionActivity {
     pub working: bool,
     pub turn_running: bool,
-    /// Background tasks run, or a child thread holds this thread: one still
-    /// runs, or a dispatched one finished and awaits its lead's settle.
-    pub waiting: bool,
+    /// What goes on running in the thread's background.
+    #[serde(default, skip_serializing_if = "BackgroundActivity::is_idle")]
+    pub background: BackgroundActivity,
+    /// Dispatched agents that finished and await this thread's settle.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unsettled: u32,
+    /// What wakes the thread later though nothing of it runs.
+    #[serde(default, skip_serializing_if = "ThreadWakes::is_empty")]
+    pub wakes: ThreadWakes,
     pub waiting_for_approval: bool,
     pub waiting_for_input: bool,
     /// The latest run ended in an error and nothing has run since.
@@ -441,6 +733,74 @@ pub struct SessionActivity {
     /// every other thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentStatus>,
+    /// What the thread's running turn last started; absent between turns and
+    /// for a provider that has reported no item yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_activity: Option<LatestActivity>,
+}
+
+fn is_zero(count: &u32) -> bool {
+    *count == 0
+}
+
+/// What goes on running in a thread's background, which keeps it from
+/// settling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundActivity {
+    /// Pieces of background work its harness runs (see
+    /// [`SessionStatus::background_tasks`]).
+    pub tasks: u32,
+    /// Its agents still running: the dispatched ones, and the harness's own
+    /// subagents that run in its turn rather than in its background.
+    pub agents: u32,
+}
+
+impl BackgroundActivity {
+    pub fn is_idle(&self) -> bool {
+        self.tasks == 0 && self.agents == 0
+    }
+
+    pub fn count(&self) -> u32 {
+        self.tasks + self.agents
+    }
+}
+
+/// What wakes a thread later though nothing of it runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadWakes {
+    /// Numbers of the pull requests a watch that is not paused follows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pull_requests: Vec<u64>,
+    /// When its earliest scheduled message is due (unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_at: Option<u64>,
+    /// Its `notify_when` watches on other threads.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub notify: u32,
+}
+
+impl ThreadWakes {
+    pub fn is_empty(&self) -> bool {
+        self.pull_requests.is_empty() && self.scheduled_at.is_none() && self.notify == 0
+    }
+}
+
+/// One piece of a thread's background work as its host lists it: what the
+/// harness lists, and calls going on in the background that it does not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundTaskStatus {
+    pub task: agent::BackgroundTask,
+    /// The harness lists it, so a stop can reach it. One it does not is
+    /// known only by its call, and `task.id` is the call's.
+    pub listed: bool,
+    /// When a stop for it went out (unix ms), while the harness still lists
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopping_since: Option<u64>,
+    /// The harness no longer lists it while its call has not ended: it has
+    /// ended, and the harness has yet to say so in the conversation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ended: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -462,6 +822,9 @@ pub struct AgentStatus {
 pub struct SessionPlan {
     pub session_id: String,
     pub steps: Vec<PlanStep>,
+    /// What the agent said of the plan when it last set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
 }
 
 /// Host-owned runtime and full-history facts for one resident session.
@@ -477,6 +840,10 @@ pub struct SessionStatus {
     pub acp_agent_id: Option<String>,
     pub project_id: Option<String>,
     pub queued_messages: Vec<QueuedMessageStatus>,
+    /// The thread's background work: what its harness lists, then calls
+    /// going on in the background that it does not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_tasks: Vec<BackgroundTaskStatus>,
     /// Backend-owned drafts used by provider-bound send-path assembly.
     pub review_comment_drafts: Vec<ReviewComment>,
     pub terminals: Vec<TerminalStatus>,
@@ -490,12 +857,26 @@ pub struct SessionStatus {
     /// An interrupt was accepted by the provider and its turn has not ended yet.
     #[serde(default)]
     pub stopping: bool,
+    /// When that first interrupt went out (unix ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopping_since: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_retry: Option<agent::TurnRetry>,
     /// The harness's standing goal (Codex `thread/goal`, Claude Code `/goal`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<agent::Goal>,
-    pub native_rewind_blocked: bool,
+    /// What a rewind does in this thread and whether one can start now; none
+    /// when its harness, or this thread's session, has no rewind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewind: Option<RewindStatus>,
+    /// What a fork from a message does in this thread and whether one can
+    /// start now; none when its harness, or this thread's session, has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_at: Option<ForkStatus>,
+    /// Queued messages wait, after a rewind, until the user sends the next
+    /// message.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queue_held: bool,
     pub checkout_blocked: bool,
     pub conversation_read_only: bool,
     pub terminal_limit_reached: bool,
@@ -522,8 +903,6 @@ pub struct SessionStatus {
     pub worktree: Option<WorktreeInfo>,
     pub preparing_worktree: bool,
     pub relay_confirmation: Option<(String, String)>,
-    pub native_rewind_pending: bool,
-    pub native_rewind_prefill_available: bool,
     pub model_pending_restart: bool,
     pub options_pending_restart: bool,
     /// The MCP tools offered to this thread's provider, with every text Tcode gives its
@@ -534,6 +913,62 @@ pub struct SessionStatus {
     /// takes no MCP server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<ControlStatus>,
+}
+
+/// A thread's fork through a finished turn, where its harness has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkStatus {
+    /// A rewind is being made, and the turns it touches are not settled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
+}
+
+/// A thread's rewind, as its harness declares it and the thread refines it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindStatus {
+    /// What a rewind restores, in the order the panel offers them.
+    pub modes: Vec<RewindMode>,
+    pub first_turn_conversation: bool,
+    pub steer_targets: bool,
+    pub later_history: agent::LaterHistory,
+    pub preview: agent::RewindPreviewKind,
+    pub running_turn: agent::RunningTurnPolicy,
+    pub restores_command_edits: bool,
+    /// Why no rewind can start now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<RewindBlocked>,
+    /// The rewind, or undo, the harness is making now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<PendingRewind>,
+}
+
+impl RewindStatus {
+    /// Whether `mode` can restore turn `turn`, or a steer inside it.
+    pub fn offers(&self, mode: RewindMode, turn: usize, steer: bool) -> bool {
+        self.modes.contains(&mode)
+            && (!steer || (self.steer_targets && mode == RewindMode::Conversation))
+            && (turn > 0 || steer || self.first_turn_conversation || !mode.includes_conversation())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindBlocked {
+    /// A rewind or its undo is being made.
+    InProgress,
+    /// A message is on its way to the harness.
+    Delivering,
+    /// A turn runs and the harness does not stop it for a rewind.
+    TurnRunning,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRewind {
+    pub checkpoint_id: String,
+    pub mode: RewindMode,
+    /// An undo of the rewind to `checkpoint_id`, not a rewind.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub undo: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -805,6 +1240,11 @@ pub enum RuntimeError {
     PersistSettings {
         error: String,
     },
+    /// settings.json could not be read at start, so the host runs on defaults
+    /// and writes no settings over it.
+    SettingsUnreadable {
+        error: String,
+    },
     TerminalStart {
         error: String,
     },
@@ -823,7 +1263,6 @@ pub enum RuntimeError {
     DeleteProject {
         error: String,
     },
-    NativeRewindBlocked,
     PersistEvent {
         error: String,
     },
@@ -841,7 +1280,15 @@ pub enum RuntimeError {
     },
     DirtyTree,
     ProviderStart {
+        /// The display name of the thread's Harness, with its account.
+        harness: String,
         error: String,
+    },
+    /// The provider's CLI is a Windows batch file Tcode cannot start as what
+    /// it runs, and one of its arguments spans lines, which a batch file
+    /// cannot be given.
+    ProviderBatchLineBreak {
+        program: PathBuf,
     },
     /// A provider could not start because the thread's working directory is
     /// gone; `project_id` lets a client offer to re-point or remove the project.
@@ -851,6 +1298,7 @@ pub enum RuntimeError {
         cwd: PathBuf,
     },
     ProviderClosed {
+        harness: String,
         reason: Option<String>,
     },
     PersistSessionIndex {
@@ -871,9 +1319,6 @@ pub enum RuntimeNotice {
     ProviderMessage(String),
     TcodeUpdateAvailable {
         version: String,
-    },
-    NativeRewindCompleted {
-        mode: RewindMode,
     },
     SwitchedBranch {
         branch: String,
@@ -917,7 +1362,6 @@ impl RuntimeNotice {
             | Self::WorktreeMergeFailed { .. }
             | Self::ReferenceBoundaryCrossed { .. } => NoticeSeverity::Warning,
             Self::TcodeUpdateAvailable { .. }
-            | Self::NativeRewindCompleted { .. }
             | Self::SwitchedBranch { .. }
             | Self::WorktreeSeeded { .. }
             | Self::WorktreeMergedFastForward

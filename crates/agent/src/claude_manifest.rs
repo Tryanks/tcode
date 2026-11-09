@@ -219,7 +219,7 @@ impl CatalogModel {
     }
 
     /// Tokens of the default context window selection.
-    fn default_context_window(&self) -> Option<u64> {
+    pub(crate) fn default_context_window(&self) -> Option<u64> {
         self.runtime.fixed_context_window_tokens.or_else(|| {
             let default = self.default_select("contextWindow")?;
             self.runtime.context_window_tokens.get(default).copied()

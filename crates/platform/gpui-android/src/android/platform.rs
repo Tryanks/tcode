@@ -12,8 +12,8 @@ use gpui::{
     Action, ActivityGuard, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, ClipboardItem,
     CursorStyle, DummyKeyboardMapper, ForegroundExecutor, GestureTuning, Keymap, Menu, MenuItem,
     PathPromptOptions, Platform, PlatformDisplay, PlatformGestures, PlatformKeyboardLayout,
-    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, ScrollPhysics, Task, ThermalState,
-    WindowAppearance, WindowParams, point, px, size,
+    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, PowerMode, ScrollPhysics, Task,
+    ThermalState, WindowAppearance, WindowParams, point, px, size,
 };
 use gpui_wgpu::{CosmicTextSystem, GpuContext};
 use ndk::configuration::UiModeNight;
@@ -43,6 +43,7 @@ struct PlatformCallbacks {
     will_open_app_menu: Option<Box<dyn FnMut()>>,
     validate_app_menu: Option<ValidateActionCallback>,
     thermal: Option<Box<dyn FnMut()>>,
+    power_mode: Option<Box<dyn FnMut()>>,
     keyboard_layout: Option<Box<dyn FnMut()>>,
     process_back: Option<Box<dyn FnMut()>>,
     scroll_capture: Option<Box<dyn FnMut(ScrollCaptureRequest)>>,
@@ -63,6 +64,8 @@ pub(crate) struct AndroidPlatform {
     active_handle: Cell<Option<AnyWindowHandle>>,
     callbacks: RefCell<PlatformCallbacks>,
     clipboard: RefCell<Option<ClipboardItem>>,
+    thermal_state: Cell<ThermalState>,
+    power_mode: Cell<PowerMode>,
     quit_pending: Cell<bool>,
     quitting: Cell<bool>,
 }
@@ -90,6 +93,8 @@ impl AndroidPlatform {
             active_handle: Cell::new(None),
             callbacks: RefCell::new(PlatformCallbacks::default()),
             clipboard: RefCell::new(None),
+            thermal_state: Cell::new(ThermalState::Nominal),
+            power_mode: Cell::new(PowerMode::Unknown),
             quit_pending: Cell::new(false),
             quitting: Cell::new(false),
         }
@@ -197,6 +202,43 @@ impl AndroidPlatform {
         }
     }
 
+    fn update_thermal_state(&self, status: i32) {
+        // MODERATE is throttling the platform says leaves the UX unimpaired;
+        // SEVERE is the first status at which it is impaired.
+        let thermal_state = match status {
+            0 => ThermalState::Nominal,
+            1 | 2 => ThermalState::Fair,
+            3 => ThermalState::Serious,
+            _ => ThermalState::Critical,
+        };
+        if self.thermal_state.replace(thermal_state) == thermal_state {
+            return;
+        }
+        let callback = self.callbacks.borrow_mut().thermal.take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.callbacks.borrow_mut().thermal = Some(callback);
+        }
+    }
+
+    fn update_power_mode(&self, power_save: bool) {
+        // Android tells Battery Saver apart from nothing else, so any other
+        // state is unknown, as on macOS.
+        let power_mode = if power_save {
+            PowerMode::LowPower
+        } else {
+            PowerMode::Unknown
+        };
+        if self.power_mode.replace(power_mode) == power_mode {
+            return;
+        }
+        let callback = self.callbacks.borrow_mut().power_mode.take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.callbacks.borrow_mut().power_mode = Some(callback);
+        }
+    }
+
     fn emit_process_back(&self) {
         let callback = self.callbacks.borrow_mut().process_back.take();
         if let Some(mut callback) = callback {
@@ -243,18 +285,27 @@ impl AndroidPlatform {
     }
 
     fn process_host_events(&self) {
-        // Choreographer queues a frame every vsync. When drawing outlasts one,
-        // drawing each queued frame in turn would keep input unread for the
-        // whole backlog, so a drain draws at most once.
+        // The Java Choreographer queues a frame every vsync. When drawing
+        // outlasts one, drawing each queued frame in turn would keep input
+        // unread for the whole backlog, so a drain draws at most once.
         let mut frame = false;
         for event in host::drain() {
             if let HostEvent::RefreshRate(rate) = event {
+                host::set_frame_rate(rate);
                 if self.display.set_refresh_rate(rate) {
                     if let Some(window) = self.window() {
                         window.display_changed();
                     }
                     self.emit_displays_changed();
                 }
+                continue;
+            }
+            if let HostEvent::ThermalStatus(status) = event {
+                self.update_thermal_state(status);
+                continue;
+            }
+            if let HostEvent::PowerSaveMode(enabled) = event {
+                self.update_power_mode(enabled);
                 continue;
             }
             let Some(window) = self.window() else {
@@ -600,11 +651,19 @@ impl Platform for AndroidPlatform {
     }
 
     fn thermal_state(&self) -> ThermalState {
-        ThermalState::Nominal
+        self.thermal_state.get()
     }
 
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>) {
         self.callbacks.borrow_mut().thermal = Some(callback);
+    }
+
+    fn power_mode(&self) -> PowerMode {
+        self.power_mode.get()
+    }
+
+    fn on_power_mode_change(&self, callback: Box<dyn FnMut()>) {
+        self.callbacks.borrow_mut().power_mode = Some(callback);
     }
 
     fn prevent_idle_sleep(&self, _reason: &str) -> Task<Result<ActivityGuard>> {

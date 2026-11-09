@@ -1,55 +1,6 @@
 use super::*;
 
 impl AppState {
-    /// Request a provider-owned restore point. No local Git or transcript
-    /// operation is performed: the canonical timeline changes only after the
-    /// provider confirms the native request.
-    pub fn rewind_turn(&mut self, target_id: &str, turn: usize, mode: RewindMode, cx: &mut HostCx) {
-        let Some(active) = self.resident(target_id) else {
-            return;
-        };
-        if self.native_rewind_blocked(active) {
-            self.report_error(RuntimeError::NativeRewindBlocked, cx);
-            return;
-        }
-        let Some(checkpoint_id) = active
-            .timeline
-            .turns
-            .get(turn)
-            .and_then(|turn| turn.provider_checkpoint_id.clone())
-        else {
-            self.report_error(RuntimeError::NativeRewindBlocked, cx);
-            return;
-        };
-        // Claude Code 2.1.214 cannot persist a conversation rewind before the
-        // first assistant anchor. File-only rewind remains valid there.
-        if turn == 0 && mode.includes_conversation() {
-            self.report_error(RuntimeError::NativeRewindBlocked, cx);
-            return;
-        }
-        let session_id = active.meta.id.clone();
-        let live_commands = match &active.runtime {
-            Runtime::Live(commands) => Some(commands.clone()),
-            Runtime::Idle | Runtime::Starting { .. } => None,
-        };
-        self.pending_native_rewinds
-            .insert(session_id.clone(), (checkpoint_id.clone(), mode));
-        if let Some(commands) = live_commands {
-            if commands
-                .try_send(SessionCommand::Rewind {
-                    checkpoint_id,
-                    mode,
-                })
-                .is_err()
-            {
-                self.pending_native_rewinds.remove(&session_id);
-                self.report_error(RuntimeError::ProcessGone, cx);
-            }
-        } else {
-            self.ensure_started(target_id, cx);
-        }
-    }
-
     /// The command asked for while the provider was starting; clears it.
     fn take_requested_command(&mut self, session_id: &str) -> Option<SessionCommand> {
         self.resident_mut(session_id)?.requested_command.take()
@@ -85,6 +36,7 @@ impl AppState {
         if !idle {
             return;
         }
+        self.requeue_unconfirmed_steers(session_id, cx);
         self.next_start_generation = self
             .next_start_generation
             .checked_add(1)
@@ -94,19 +46,28 @@ impl AppState {
         if active.meta.moved_from.is_some() {
             // The native session belongs to the directory the thread left.
             active.meta.resume_cursor = None;
-            active.meta.pending_fork = false;
+            active.meta.pending_fork = None;
         }
         active.runtime = Runtime::Starting { generation };
         active.mcp_servers_attached = true;
         active.idle_since = None;
         active.live_model = active.meta.model.clone();
         active.live_cwd = active.meta.cwd.clone();
+        active.live_profile_id = active.meta.profile_id.clone();
         active.live_option_selections = active.meta.option_selections.clone();
         active.confirmed_option_selections.clear();
+        active.settings_refused = None;
 
         let meta = active.meta.clone();
         let settings = self.settings.clone();
         let launch_env = self.prepare_session_env(&meta, cx);
+        // The thread switched accounts since its session last ran: that session
+        // is copied into this profile's home before the provider resumes it.
+        let transfer = meta
+            .session_transfer_from
+            .as_deref()
+            .zip(meta.resume_cursor.clone())
+            .map(|(home, cursor)| (self.prepare_profile_env(home, cx), cursor));
         let preview_registration = if meta.provider.caps().mcp_servers {
             self.preview_registration_for(&meta)
         } else {
@@ -120,8 +81,6 @@ impl AppState {
         let instructions = pull_request_registration
             .is_some()
             .then(|| self.pull_request_instructions(&meta.id));
-        let orchestrate_registration = self.orchestrate_registration_for(&meta);
-        let orchestrate_report_registration = self.orchestrate_child_registration_for(&meta);
         let computer_use_registration = if computer_use_attaches(meta.provider, &self.settings) {
             self.computer_use_registration_for(&meta)
         } else {
@@ -142,22 +101,46 @@ impl AppState {
 
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
+            let mut transfer_failed = None;
             let result = async {
                 let launch_env = launch_env.await.map_err(agent::AgentError::Spawn)?;
+                if let Some((from, cursor)) = transfer {
+                    let to = launch_env.clone();
+                    let provider = meta.provider;
+                    let copied = match from.await {
+                        Ok(from) => {
+                            host_cx
+                                .unblock(move || {
+                                    agent::transfer_session(provider, &from, &to, &cursor)
+                                })
+                                .await
+                        }
+                        Err(error) => Err(std::io::Error::other(error)),
+                    };
+                    if let Err(error) = copied {
+                        log::warn!(
+                            "session {} could not be carried to its new profile: {error}",
+                            meta.id
+                        );
+                        transfer_failed = Some(error);
+                    }
+                }
                 let mut opts = session_options(
                     &meta,
                     &settings,
                     launch_env,
                     McpServers {
                         preview: preview_registration,
-                        orchestrate: orchestrate_registration,
-                        orchestrate_report: orchestrate_report_registration,
                         computer_use: computer_use_registration,
                         control: control_registration,
                     },
                 );
                 opts.mcp_servers.extend(pull_request_registration);
                 opts.instructions = instructions;
+                if transfer_failed.is_some() {
+                    opts.resume = None;
+                    opts.fork = None;
+                }
                 provider_launcher.launch(meta.provider, opts).await
             }
             .await;
@@ -171,6 +154,12 @@ impl AppState {
                     && state
                         .resident(&session_id)
                         .is_some_and(|parked| parked.is_starting_generation(generation));
+                if transfer_failed.is_some()
+                    && (matches_active || matches_parked)
+                    && let Some(resident) = state.resident_mut(&session_id)
+                {
+                    resident.fail_session_transfer();
+                }
                 match result {
                     Ok(handle) => {
                         if !matches_active && !matches_parked {
@@ -229,50 +218,19 @@ impl AppState {
                                 }
                             }
                         }
-                        if matches_active {
-                            if let Some((checkpoint_id, mode)) =
-                                state.pending_native_rewinds.get(&session_id).cloned()
-                            {
-                                if commands
-                                    .try_send(SessionCommand::Rewind {
-                                        checkpoint_id,
-                                        mode,
-                                    })
-                                    .is_err()
-                                {
-                                    state.pending_native_rewinds.remove(&session_id);
-                                    state.report_error(RuntimeError::ProcessGone, cx);
-                                }
-                            } else if let Some(command) = state.take_requested_command(&session_id) {
-                                if commands.try_send(command).is_err() {
-                                    state.report_error(RuntimeError::ProcessGone, cx);
-                                }
-                            } else if state.dispatch_next_queued(&session_id, cx).is_err() {
+                        // A rewind waiting for the start takes the place of
+                        // the queue's next message.
+                        if state.send_waiting_rewinds(&session_id, &commands, cx) {
+                        } else if let Some(command) = state.take_requested_command(&session_id) {
+                            if commands.try_send(command).is_err() {
                                 state.report_error(RuntimeError::ProcessGone, cx);
                             }
-                        } else {
-                            if let Some((checkpoint_id, mode)) =
-                                state.pending_native_rewinds.get(&session_id).cloned()
-                            {
-                                if commands
-                                    .try_send(SessionCommand::Rewind {
-                                        checkpoint_id,
-                                        mode,
-                                    })
-                                    .is_err()
-                                {
-                                    state.pending_native_rewinds.remove(&session_id);
-                                    state.report_error(RuntimeError::ProcessGone, cx);
-                                }
-                            } else if let Some(command) = state.take_requested_command(&session_id) {
-                                if commands.try_send(command).is_err() {
-                                    state.report_error(RuntimeError::ProcessGone, cx);
-                                }
-                            } else {
-                                // Work through the parked queue exactly as a
-                                // finished background turn would.
-                                state.on_background_turn_completed(&session_id, cx);
-                            }
+                        } else if !matches_active {
+                            // Work through the parked queue exactly as a
+                            // finished background turn would.
+                            state.on_background_turn_completed(&session_id, cx);
+                        } else if state.dispatch_next_queued(&session_id, cx).is_err() {
+                            state.report_error(RuntimeError::ProcessGone, cx);
                         }
                     }
                     Err(err) => {
@@ -287,8 +245,13 @@ impl AppState {
                                 resident.delivery_in_flight = None;
                                 resident.turn_in_flight = false;
                                 resident.background_task_count = 0;
+                                resident.background.clear();
                             }
-                            state.pending_native_rewinds.remove(&session_id);
+                            state.settle_rewind_unanswered(
+                                &session_id,
+                                agent::RewindFailureReason::ProcessGone,
+                                cx,
+                            );
                             let error_event = AgentEvent::ProviderStartFailed {
                                 error: err.to_string(),
                             };
@@ -311,13 +274,19 @@ impl AppState {
                                 .find_meta(&session_id)
                                 .filter(|meta| !meta.cwd.is_dir())
                                 .map(|meta| (meta.project_id, meta.cwd));
-                            let error = match missing_cwd {
-                                Some((project_id, cwd)) => RuntimeError::WorkingDirectoryMissing {
-                                    session_id: session_id.clone(),
-                                    project_id,
-                                    cwd,
-                                },
-                                None => RuntimeError::ProviderStart {
+                            let error = match (missing_cwd, err) {
+                                (Some((project_id, cwd)), _) => {
+                                    RuntimeError::WorkingDirectoryMissing {
+                                        session_id: session_id.clone(),
+                                        project_id,
+                                        cwd,
+                                    }
+                                }
+                                (None, agent::AgentError::BatchLineBreak { program }) => {
+                                    RuntimeError::ProviderBatchLineBreak { program }
+                                }
+                                (None, err) => RuntimeError::ProviderStart {
+                                    harness: state.thread_harness_name(&session_id),
                                     error: err.to_string(),
                                 },
                             };
@@ -373,6 +342,18 @@ impl AppState {
     }
 
     pub(super) fn persist_meta(&mut self, meta: &SessionMeta, cx: &mut HostCx) {
+        self.enqueue_store_write(
+            StoreWrite::UpsertMeta {
+                meta: Box::new(meta.clone()),
+                initial: false,
+            },
+            cx,
+        );
+        self.adopt_meta(meta.clone(), cx);
+    }
+
+    /// Take `meta` as the thread's, its store write made by the caller.
+    pub(super) fn adopt_meta(&mut self, meta: SessionMeta, cx: &mut HostCx) {
         let old_parent = self
             .sessions
             .iter()
@@ -387,17 +368,10 @@ impl AppState {
             self.thread_activity.remove(&meta.id);
         }
         self.advance_decision_revision(&meta.id);
-        self.enqueue_store_write(
-            StoreWrite::UpsertMeta {
-                meta: Box::new(meta.clone()),
-                initial: false,
-            },
-            cx,
-        );
-        self.upsert_session_in_memory(meta.clone());
         let id = meta.id.clone();
         let former_parent =
             old_parent.filter(|parent| Some(parent) != meta.parent_session_id.as_ref());
+        self.upsert_session_in_memory(meta);
         cx.enqueue(move |state, cx| {
             state.evaluate_thread_settlement(&id, cx);
             if let Some(parent) = former_parent {
@@ -444,7 +418,7 @@ impl AppState {
             .map(str::to_string)
         {
             self.clear_approvals(&session_id);
-            self.pending_native_rewinds.remove(&session_id);
+            self.drop_rewind_requests(&session_id);
         }
         if let Some(active) = self.residents.live.remove(target_id) {
             if active.draft && self.archived_sharing_affected(&active.meta) {
@@ -459,7 +433,7 @@ impl AppState {
 
     /// Shut down every provider process before the application exits.
     pub fn shutdown_all(&mut self, cx: &mut HostCx) {
-        self.stop_diff_pass();
+        self.stop_storage_pass();
         self.stop_pull_request_workers();
         for id in self
             .mcp
@@ -481,7 +455,8 @@ impl AppState {
         // Drop every conversation-owned PTY, including those parked while an
         // idle thread was off screen.
         self.terminal_workspaces.clear();
-        self.pending_native_rewinds.clear();
+        self.rewind_requests.clear();
+        self.rewind_previews.clear();
     }
 
     /// Leave the active session without killing its provider or in-memory work.
@@ -495,7 +470,7 @@ impl AppState {
             self.archived_revision += 1;
         }
         self.park_terminal_workspace(&mut active);
-        let native_rewind_pending = self.pending_native_rewinds.contains_key(&active.meta.id);
+        let native_rewind_pending = self.rewind_requests.contains_key(&active.meta.id);
         let has_work = active.turn_in_flight
             || active.delivery_in_flight.is_some()
             || !active.queue.is_empty()
@@ -524,7 +499,7 @@ impl AppState {
     /// keeps the grace its last turn end started, so parking a thread does not
     /// extend its process's life.
     pub(super) fn mark_resident_idle(&mut self, session_id: &str, cx: &mut HostCx) {
-        let rewind_pending = self.pending_native_rewinds.contains_key(session_id);
+        let rewind_pending = self.rewind_requests.contains_key(session_id);
         let Some(session) = self
             .residents
             .resident_mut(session_id)
@@ -543,7 +518,7 @@ impl AppState {
             .parked
             .iter()
             .filter(|(id, session)| {
-                session.fully_idle() && !self.pending_native_rewinds.contains_key(id.as_str())
+                session.fully_idle() && !self.rewind_requests.contains_key(id.as_str())
             })
             .filter_map(|(id, session)| {
                 session.idle_since.map(|idle| {
@@ -606,7 +581,7 @@ impl AppState {
         idle_since: Instant,
         cx: &mut HostCx,
     ) {
-        let still_idle = !self.pending_native_rewinds.contains_key(session_id)
+        let still_idle = !self.rewind_requests.contains_key(session_id)
             && self.residents.resident(session_id).is_some_and(|session| {
                 session.idle_since == Some(idle_since) && session.fully_idle()
             });
@@ -627,7 +602,7 @@ impl AppState {
     pub(super) fn drop_background(&mut self, session_id: &str, cx: &mut HostCx) {
         self.revoke_computer_use_registration(session_id);
         self.clear_approvals(session_id);
-        self.pending_native_rewinds.remove(session_id);
+        self.drop_rewind_requests(session_id);
         if let Some(parked) = self.residents.evict(session_id)
             && let Runtime::Live(commands) = parked.runtime
         {
@@ -654,18 +629,12 @@ impl AppState {
             self.drop_background(&child_id, cx);
             self.revoke_preview_registration(&child_id);
             self.revoke_pull_request_registration(&child_id);
-            self.revoke_orchestrate_child_registration(&child_id);
             self.revoke_control_registration(&child_id);
         }
         self.revoke_preview_registration(parent_id);
         self.revoke_pull_request_registration(parent_id);
         self.revoke_computer_use_registration(parent_id);
         self.revoke_control_registration(parent_id);
-        if let Some(registration) = self.mcp.orchestrate_registrations.remove(parent_id)
-            && let Some(tokens) = &self.mcp.orchestrate_tokens
-        {
-            tokens.revoke(&registration.bearer_token);
-        }
     }
 
     pub(super) fn revoke_preview_registration(&mut self, session_id: &str) {

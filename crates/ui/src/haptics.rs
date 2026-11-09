@@ -12,7 +12,8 @@ pub(crate) fn long_press() {
 
 /// The lighter tap a phone plays when a drag crosses a point that changes
 /// what releasing it does: a dragged row lifting out of its place, or a
-/// swiped row passing the distance at which it acts, either way.
+/// swiped row passing the distance at which it acts, either way, or its
+/// thread coming to let it act there.
 pub(crate) fn threshold() {
     #[cfg(target_os = "ios")]
     gpui_ios::haptic_threshold();

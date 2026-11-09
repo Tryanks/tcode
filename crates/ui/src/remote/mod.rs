@@ -1,11 +1,12 @@
-//! Hosts: which host this window talks to, and which devices may talk to it.
+//! Hosts: the machines this window can show and which of them it does, and
+//! which devices may talk to this one.
 //!
 //! This is a product surface, not a settings page. It is where connections
 //! are made, in both directions: the invitation this machine shows other
 //! devices, the saved machines this window can open, pairing by a scanned or
 //! pasted invitation and authentication repair. It is reached from the
 //! sidebar's feature area at every width. It needs `tcode_client` and the
-//! attachment owner's switch action, and nothing else: it compiles on every
+//! window's host requests, and nothing else: it compiles on every
 //! client, including `--no-default-features`.
 //!
 //! **Hosting** — whether the endpoint runs, its name, Traverse, whether new
@@ -33,13 +34,22 @@ use crate::material::{
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::pairing::PairForm;
 use crate::settings_rows::{CONTENT_MAX_WIDTH, settings_group};
-use crate::store::WorkspaceStore;
+use crate::store::{HostKey, WorkspaceStore};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent};
 use crate::widgets::menu::DropdownMenu as _;
 use crate::window_state::{Destination, WindowState};
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[cfg(feature = "remote-hosting")]
 mod hosting;
@@ -71,12 +81,42 @@ pub enum AttachmentTarget {
     Remote(Box<PairedHost>),
 }
 
-pub type SwitchAttachment = Rc<dyn Fn(AttachmentTarget, &mut Window, &mut App)>;
+impl AttachmentTarget {
+    pub fn key(&self) -> HostKey {
+        match self {
+            Self::Local => HostKey::Local,
+            Self::Remote(host) => HostKey::Remote(host.host_id.clone()),
+        }
+    }
+}
 
-/// Leave the host this row names, keeping the saved record.
+/// What the window is asked to do with a host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostRequest {
+    /// Show `target` in the workspace beside the hosts already there; a
+    /// host that is reached only alone replaces them.
+    Open(AttachmentTarget),
+    /// Take the host out of the workspace, keeping its saved record.
+    Leave(HostKey),
+    /// Move the host one place earlier, or later, among the workspace's.
+    Move { host: HostKey, earlier: bool },
+}
+
+pub type RequestHost = Rc<dyn Fn(HostRequest, &mut Window, &mut App)>;
+
+/// Leave the workspace of the host this row names, keeping the saved record.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_hosts, no_json)]
-struct DisconnectHost;
+struct DisconnectHost(String);
+
+/// Move the host this row names one place earlier, or later, among the
+/// workspace's hosts.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_hosts, no_json)]
+struct MoveHost {
+    host_id: String,
+    earlier: bool,
+}
 
 /// Forget the saved record. A live attachment to it keeps running: the record
 /// is a credential, not the connection.
@@ -84,15 +124,14 @@ struct DisconnectHost;
 #[action(namespace = tcode_hosts, no_json)]
 struct ForgetHost(String);
 
-/// The client's own identity and the action that re-points this window at a
-/// different host.
+/// The client's own identity and the way to ask this window for a host.
 ///
 /// It is deliberately separate from hosting: a client that can never host still
-/// needs saved hosts, a device name and a way to switch attachment.
+/// needs saved hosts, a device name and a way to open one.
 pub struct ClientAttachment {
     host: Rc<dyn ClientHost>,
     local: bool,
-    switch: SwitchAttachment,
+    request: RequestHost,
 }
 
 impl Global for ClientAttachment {}
@@ -104,12 +143,12 @@ impl ClientAttachment {
     pub fn new(
         host: Rc<dyn ClientHost>,
         local: bool,
-        switch: impl Fn(AttachmentTarget, &mut Window, &mut App) + 'static,
+        request: impl Fn(HostRequest, &mut Window, &mut App) + 'static,
     ) -> Self {
         Self {
             host,
             local,
-            switch: Rc::new(switch),
+            request: Rc::new(request),
         }
     }
 
@@ -122,8 +161,8 @@ impl ClientAttachment {
         self.host.clone()
     }
 
-    pub fn switcher(&self) -> SwitchAttachment {
-        self.switch.clone()
+    pub fn requester(&self) -> RequestHost {
+        self.request.clone()
     }
 
     pub fn hosts(&self) -> Vec<PairedHost> {
@@ -269,7 +308,7 @@ fn submit_actions(
     )
 }
 
-type Row = gpui::Stateful<gpui::Div>;
+type Row = crate::material::Clickable<gpui::Div>;
 
 /// A [`panel_row`] inside one of the page's groups. Compact, a panel row is a
 /// page-inset list row; inside a group it takes the group's inset, so its text
@@ -284,9 +323,9 @@ fn group_entry(
 }
 
 pub struct RemotePanel {
-    /// The window's current attachment, when it has one. Hosts is also the
-    /// root of a window that has none.
-    store: Option<Entity<WorkspaceStore>>,
+    /// The stores of the hosts the window is linked to, in the workspace's
+    /// order.
+    stores: Vec<Entity<WorkspaceStore>>,
     /// Why the host in this process did not start the last time this window
     /// tried to attach to it.
     local_failure: Option<String>,
@@ -309,12 +348,14 @@ pub struct RemotePanel {
     space_qr: Option<String>,
     #[cfg(feature = "remote-hosting")]
     spaces_observer: spaces::SpacesObserver,
+    /// The panel's size-class motion: the window draws its pages under
+    /// another parent when it turns compact or wide.
+    motion: crate::motion::owned::Owned,
     _subscriptions: Vec<Subscription>,
 }
 
 impl RemotePanel {
     pub fn new(
-        store: Option<Entity<WorkspaceStore>>,
         window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -330,9 +371,17 @@ impl RemotePanel {
                 &window_state,
                 window,
                 |this: &mut Self, state, window, cx| {
+                    // Every way onto the paste page opens it with an empty
+                    // field: an invitation is single use, so whatever the
+                    // field held last time is spent.
                     let pairing = state.read(cx).destination() == Destination::Pair;
-                    if std::mem::replace(&mut this.pairing, pairing) && !pairing {
-                        this.form.leave(window, cx);
+                    match (std::mem::replace(&mut this.pairing, pairing), pairing) {
+                        (true, false) => this.form.leave(window, cx),
+                        (false, true) => {
+                            this.form.restart();
+                            this.form.clear(window, cx);
+                        }
+                        _ => {}
                     }
                 },
             ),
@@ -368,7 +417,7 @@ impl RemotePanel {
             ),
         ];
         Self {
-            store,
+            stores: Vec::new(),
             local_failure: None,
             window_state,
             form,
@@ -382,13 +431,14 @@ impl RemotePanel {
             space_qr: None,
             #[cfg(feature = "remote-hosting")]
             spaces_observer: spaces::SpacesObserver::default(),
+            motion: Default::default(),
             _subscriptions: subscriptions,
         }
     }
 
-    /// Follow the window onto another attachment, or off every attachment.
-    pub fn set_store(&mut self, store: Option<Entity<WorkspaceStore>>, cx: &mut Context<Self>) {
-        self.store = store;
+    /// Follow the window onto the hosts it is linked to now.
+    pub fn set_stores(&mut self, stores: Vec<Entity<WorkspaceStore>>, cx: &mut Context<Self>) {
+        self.stores = stores;
         cx.notify();
     }
 
@@ -468,47 +518,43 @@ impl RemotePanel {
             }
             let attachment = cx.global::<ClientAttachment>();
             attachment.save_host(host.clone());
-            let switch = attachment.switcher();
-            switch(AttachmentTarget::Remote(Box::new(host)), window, cx);
+            let request = attachment.requester();
+            request(
+                HostRequest::Open(AttachmentTarget::Remote(Box::new(host))),
+                window,
+                cx,
+            );
         }
         cx.notify();
     }
 
-    /// Open the paste form with an empty field. An invitation is single use,
-    /// so whatever the field held last time is spent.
-    fn open_pair(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.form.restart();
-        self.form.clear(window, cx);
-        self.window_state
-            .update(cx, |state, cx| state.go(Destination::Pair, cx));
-        cx.notify();
-    }
-
-    fn attached_host_id(&self, cx: &App) -> Option<String> {
-        self.store
-            .as_ref()?
-            .read(cx)
-            .remote_host_id()
-            .map(str::to_owned)
-    }
-
-    fn attached_locally(&self, cx: &App) -> bool {
-        self.store
-            .as_ref()
-            .is_some_and(|store| store.read(cx).remote_host_id().is_none())
+    /// The store of `host`, while the window is linked to it.
+    fn store_of(&self, host: &HostKey, cx: &App) -> Option<&Entity<WorkspaceStore>> {
+        self.stores
+            .iter()
+            .find(|store| store.read(cx).host_key() == *host)
     }
 
     /// The dot that says how this window's link to the attached machine is
     /// doing. Only a remote link has a state to show.
-    fn status_glyph(&self, cx: &App) -> AnyElement {
+    fn status_glyph(&self, host_id: &str, window: &mut Window, cx: &mut App) -> AnyElement {
         let color = self
-            .store
-            .as_ref()
+            .store_of(&HostKey::Remote(host_id.to_owned()), cx)
             .map(|store| {
                 cx.theme()
                     .connection_color(&store.read(cx).connection_state())
             })
             .unwrap_or(cx.theme().success);
+        let color = gpui_base::motion::transition(
+            (
+                SharedString::from(format!("host-status-{host_id}")),
+                "color",
+            ),
+            color,
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
         crate::material::status_dot(color).into_any_element()
     }
 
@@ -526,13 +572,75 @@ impl RemotePanel {
     /// on it is not a connection, so the row carries a check, not a dot. A
     /// host that did not start says why, and offers starting it again or
     /// quitting.
-    fn local_row(&self, compact: bool, cx: &mut Context<Self>) -> Option<Row> {
+    fn local_row(&self, compact: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<Row> {
         cx.try_global::<ClientAttachment>()
             .is_some_and(ClientAttachment::can_attach_local)
             .then(|| {
-                let current = self.attached_locally(cx);
+                let current = self.store_of(&HostKey::Local, cx).is_some();
                 let failure = self.local_failure.clone();
                 let failed = failure.is_some();
+                let failure =
+                    crate::motion::shown("hosts-local-failure", failure, SHOW, window, cx).map(
+                        |shown| {
+                            shown.fold(
+                                div()
+                                    .debug_selector(|| "hosts-local-failure".into())
+                                    .text_secondary(compact, cx)
+                                    .text_color(cx.theme().danger_foreground)
+                                    .child(
+                                        crate::tr!(
+                                            "hosts.local.unavailable",
+                                            reason = shown.value.clone()
+                                        )
+                                        .into_owned(),
+                                    ),
+                            )
+                        },
+                    );
+                let current = crate::motion::shown(
+                    "hosts-local-current",
+                    current.then_some(()),
+                    SHOW,
+                    window,
+                    cx,
+                )
+                .map(|shown| shown.fade(Self::current_glyph(cx)));
+                let actions = crate::motion::shown(
+                    "hosts-local-actions",
+                    failed.then_some(()),
+                    SHOW,
+                    window,
+                    cx,
+                )
+                .map(|shown| {
+                    shown.fade(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("hosts-local-retry")
+                                    .debug_selector(|| "hosts-local-retry".into())
+                                    .primary()
+                                    .compact()
+                                    .label(crate::tr!("hosts.local.retry"))
+                                    .on_click(|_, window, cx| {
+                                        let request = cx.global::<ClientAttachment>().requester();
+                                        request(
+                                            HostRequest::Open(AttachmentTarget::Local),
+                                            window,
+                                            cx,
+                                        );
+                                    }),
+                            )
+                            .child(
+                                Button::new("hosts-local-quit")
+                                    .compact()
+                                    .label(crate::tr!("quit.confirm"))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(crate::shell::Quit), cx);
+                                    }),
+                            ),
+                    )
+                });
                 group_entry(
                     "hosts-local",
                     crate::tr!("hosts.this_computer").into_owned().into(),
@@ -549,50 +657,14 @@ impl RemotePanel {
                                 crate::widgets::fade_text(crate::tr!("hosts.this_computer")),
                             ),
                         )
-                        .when_some(failure, |column, reason| {
-                            column.child(
-                                div()
-                                    .debug_selector(|| "hosts-local-failure".into())
-                                    .text_secondary(compact, cx)
-                                    .text_color(cx.theme().danger_foreground)
-                                    .child(
-                                        crate::tr!("hosts.local.unavailable", reason = reason)
-                                            .into_owned(),
-                                    ),
-                            )
-                        }),
+                        .children(failure),
                 )
-                .when(current, |row| row.child(Self::current_glyph(cx)))
-                .when(failed, |row| {
-                    row.child(
-                        h_flex()
-                            .flex_none()
-                            .gap_2()
-                            .child(
-                                Button::new("hosts-local-retry")
-                                    .debug_selector(|| "hosts-local-retry".into())
-                                    .primary()
-                                    .compact()
-                                    .label(crate::tr!("hosts.local.retry"))
-                                    .on_click(|_, window, cx| {
-                                        let switch = cx.global::<ClientAttachment>().switcher();
-                                        switch(AttachmentTarget::Local, window, cx);
-                                    }),
-                            )
-                            .child(
-                                Button::new("hosts-local-quit")
-                                    .compact()
-                                    .label(crate::tr!("quit.confirm"))
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(Box::new(crate::shell::Quit), cx);
-                                    }),
-                            ),
-                    )
-                })
+                .children(current)
+                .children(actions)
                 .when(!failed, |row| {
                     row.on_click(|_, window, cx| {
-                        let switch = cx.global::<ClientAttachment>().switcher();
-                        switch(AttachmentTarget::Local, window, cx);
+                        let request = cx.global::<ClientAttachment>().requester();
+                        request(HostRequest::Open(AttachmentTarget::Local), window, cx);
                     })
                 })
             })
@@ -604,16 +676,12 @@ impl RemotePanel {
         host: &PairedHost,
         current: bool,
         compact: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let reason = if current {
-            self.store
-                .as_ref()
-                .and_then(|store| match store.read(cx).connection_state() {
-                    tcode_client::ConnectionState::Offline { reason } => Some(reason),
-                    tcode_client::ConnectionState::Reconnecting { reason, .. } => reason,
-                    _ => None,
-                })
+            self.store_of(&HostKey::Remote(host.host_id.clone()), cx)
+                .and_then(|store| connection_failure(store.read(cx).connection_state()))
         } else {
             None
         };
@@ -621,6 +689,48 @@ impl RemotePanel {
             && !self.fixed_machine;
         let name = SharedString::from(host.name.clone());
         let connect_host = host.clone();
+        let part = |part: &str| SharedString::from(format!("host-{part}-{}", host.host_id));
+        let reason = crate::motion::shown(
+            part("reason"),
+            reason
+                .as_ref()
+                .map(|reason| failure_description(reason, needs_pairing)),
+            SHOW,
+            window,
+            cx,
+        )
+        .map(|shown| {
+            shown.fold(
+                div()
+                    .text_secondary(compact, cx)
+                    .text_color(cx.theme().danger_foreground)
+                    .child(shown.value.clone()),
+            )
+        });
+        let status = crate::motion::shown(part("current"), current.then_some(()), SHOW, window, cx)
+            .map(|shown| shown.fade(self.status_glyph(&host.host_id, window, cx)));
+        let repair = crate::motion::shown(
+            part("repair"),
+            needs_pairing.then_some(()),
+            SHOW,
+            window,
+            cx,
+        )
+        .map(|shown| {
+            shown.fade(
+                Button::new(SharedString::from(format!("repair-{}", host.host_id)))
+                    .primary()
+                    .compact()
+                    .label(crate::tr!("hosts.pair_again"))
+                    // A new pairing needs a new invitation from the
+                    // machine; nothing from the stale record carries over.
+                    .on_click(cx.listener(move |panel, _, _, cx| {
+                        panel
+                            .window_state
+                            .update(cx, |state, cx| state.go(Destination::Pair, cx));
+                    })),
+            )
+        });
         let row = group_entry(
             SharedString::from(format!("host-{}", host.host_id)),
             name.clone(),
@@ -657,46 +767,36 @@ impl RemotePanel {
                         )
                     },
                 )
-                .when_some(reason, |column, reason| {
-                    column.child(
-                        div()
-                            .text_secondary(compact, cx)
-                            .text_color(cx.theme().danger_foreground)
-                            .child(failure_description(&reason)),
-                    )
-                }),
+                .children(reason),
         )
-        .when(current, |row| row.child(self.status_glyph(cx)))
-        .when(needs_pairing, |row| {
-            row.child(
-                Button::new(SharedString::from(format!("repair-{}", host.host_id)))
-                    .primary()
-                    .compact()
-                    .label(crate::tr!("hosts.pair_again"))
-                    // A new pairing needs a new invitation from the machine;
-                    // nothing from the stale record carries over.
-                    .on_click(cx.listener(move |panel, _, window, cx| {
-                        panel.open_pair(window, cx);
-                    })),
-            )
-        })
+        .children(status)
+        .children(repair)
         .when(!needs_pairing, |row| {
             row.on_click(move |_, window, cx| {
-                let switch = cx.global::<ClientAttachment>().switcher();
-                switch(
-                    AttachmentTarget::Remote(Box::new(connect_host.clone())),
+                let request = cx.global::<ClientAttachment>().requester();
+                request(
+                    HostRequest::Open(AttachmentTarget::Remote(Box::new(connect_host.clone()))),
                     window,
                     cx,
                 );
             })
         })
         // The row must keep its hover fill while the child menu is hovered.
-        .child(self.host_menu(host, current));
+        .child(self.host_menu(host, current, cx));
         row.into_any_element()
     }
 
-    fn host_menu(&self, host: &PairedHost, current: bool) -> AnyElement {
+    fn host_menu(&self, host: &PairedHost, current: bool, cx: &App) -> AnyElement {
         let host_id = host.host_id.clone();
+        // Where the host stands among the workspace's, which a space's
+        // host, reached alone, is not one of.
+        let key = HostKey::Remote(host.host_id.clone());
+        let place = self
+            .stores
+            .iter()
+            .position(|store| store.read(cx).host_key() == key)
+            .filter(|_| self.stores.len() > 1);
+        let last = self.stores.len().saturating_sub(1);
         let label = crate::tr!("hosts.actions", name = host.name.clone()).into_owned();
         div()
             .flex_none()
@@ -712,12 +812,31 @@ impl RemotePanel {
                     .icon(IconName::Ellipsis)
                     .aria_label(label)
                     .dropdown_menu(move |menu, _window, _cx| {
-                        let menu = menu.when(current, |menu| {
-                            menu.menu(
-                                crate::tr!("hosts.disconnect").into_owned(),
-                                Box::new(DisconnectHost),
-                            )
-                        });
+                        let menu = menu
+                            .when(place.is_some_and(|place| place > 0), |menu| {
+                                menu.menu(
+                                    crate::tr!("hosts.move_up").into_owned(),
+                                    Box::new(MoveHost {
+                                        host_id: host_id.clone(),
+                                        earlier: true,
+                                    }),
+                                )
+                            })
+                            .when(place.is_some_and(|place| place < last), |menu| {
+                                menu.menu(
+                                    crate::tr!("hosts.move_down").into_owned(),
+                                    Box::new(MoveHost {
+                                        host_id: host_id.clone(),
+                                        earlier: false,
+                                    }),
+                                )
+                            })
+                            .when(current, |menu| {
+                                menu.menu(
+                                    crate::tr!("hosts.disconnect").into_owned(),
+                                    Box::new(DisconnectHost(host_id.clone())),
+                                )
+                            });
                         menu.menu(
                             crate::tr!("hosts.forget").into_owned(),
                             Box::new(ForgetHost(host_id.clone())),
@@ -732,7 +851,7 @@ impl RemotePanel {
     /// machines and, where the client can pair, the ways to add another.
     pub(crate) fn render_hosts(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
@@ -740,17 +859,16 @@ impl RemotePanel {
             .client(cx)
             .map(|client| client.load_hosts())
             .unwrap_or_default();
-        let current_id = self.attached_host_id(cx);
         let mut column = v_flex().gap(section_gap(cx));
 
         let mut this_machine: Vec<AnyElement> = Vec::new();
-        if let Some(local) = self.local_row(compact, cx) {
+        if let Some(local) = self.local_row(compact, window, cx) {
             this_machine.push(local.into_any_element());
         }
         // Only a host running in this process can offer an invitation.
         #[cfg(feature = "remote-hosting")]
         if cx.has_global::<RemoteController>() {
-            this_machine.push(self.invitation_row(compact, cx));
+            this_machine.push(self.invitation_row(compact, window, cx));
         }
         if !this_machine.is_empty() {
             column = column.child(settings_group(
@@ -761,29 +879,58 @@ impl RemotePanel {
         }
         #[cfg(feature = "remote-hosting")]
         if cx.has_global::<RemoteController>() {
-            column = column.children(self.space_links(compact, cx));
+            column = column.children(self.space_links(compact, window, cx));
         }
 
-        let saved = if hosts.is_empty() {
-            vec![
-                crate::material::empty_row(crate::tr!("hosts.empty"), cx)
-                    .text_secondary(compact, cx)
-                    .into_any_element(),
-            ]
+        // The empty row is one more key, which leaves as the first machine
+        // arrives and comes back after the last one goes.
+        // The workspace's hosts first, in its order, then the others.
+        let mut hosts = hosts;
+        hosts.sort_by_key(|host| {
+            let key = HostKey::Remote(host.host_id.clone());
+            self.stores
+                .iter()
+                .position(|store| store.read(cx).host_key() == key)
+                .unwrap_or(self.stores.len())
+        });
+        let saved: Vec<(SharedString, Option<(PairedHost, bool)>)> = if hosts.is_empty() {
+            vec![("hosts-empty".into(), None)]
         } else {
             hosts
-                .iter()
+                .into_iter()
                 .map(|host| {
-                    let current = current_id.as_deref() == Some(host.host_id.as_str());
-                    self.host_row(host, current, compact, cx)
+                    let current = self
+                        .store_of(&HostKey::Remote(host.host_id.clone()), cx)
+                        .is_some();
+                    (
+                        format!("host-{}", host.host_id).into(),
+                        Some((host, current)),
+                    )
                 })
                 .collect()
         };
-        column = column.child(settings_group(crate::tr!("hosts.saved"), saved, cx));
+        let saved = crate::motion::keyed(
+            "hosts-saved",
+            saved,
+            ROWS,
+            window,
+            cx,
+            |_, row, window, cx| match row {
+                Some((host, current)) => self.host_row(host, *current, compact, window, cx),
+                None => crate::material::empty_row(crate::tr!("hosts.empty"), cx)
+                    .text_secondary(compact, cx)
+                    .into_any_element(),
+            },
+        );
+        column = column.child(settings_group(
+            crate::tr!("hosts.saved"),
+            vec![saved.render(v_flex().w_full())],
+            cx,
+        ));
         if !self.fixed_machine {
-            column = column.child(self.add_machine(compact, cx));
+            column = column.child(self.add_machine(compact, window, cx));
         }
-        self.page(column, &self.hosts_scroll, cx)
+        self.page(column, &self.hosts_scroll, window, cx)
     }
 
     /// What this machine offers other devices: the live invitation while
@@ -791,38 +938,72 @@ impl RemotePanel {
     /// turns it on. Hosting itself — the endpoint, its name, Traverse — is
     /// configured in Settings → Remote; this is where the connection is made.
     #[cfg(feature = "remote-hosting")]
-    fn invitation_row(&mut self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn invitation_row(
+        &mut self,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         use hosting::{InvitationOffer, RemoteController};
         let offer = cx
             .try_global::<RemoteController>()
             .map(RemoteController::invitation_offer)
             .unwrap_or(InvitationOffer::NotHosting);
         self.sync_invitation_ticker(matches!(offer, InvitationOffer::Live { .. }), cx);
-        match offer {
+        // Each state of the offer folds into the next, so an expiring
+        // invitation shrinks its card down to the row that replaces it.
+        let live = match &offer {
             InvitationOffer::Live {
                 invitation,
                 remaining,
-            } => {
-                let group = spaces::local(cx)
-                    .and_then(|spaces| spaces.read(cx).group().map(|group| group.name.clone()));
-                access::invitation_card(
-                    &invitation.url(),
-                    remaining,
-                    group.as_deref(),
-                    compact,
-                    hosting::new_invitation(),
-                    cx,
-                )
-            }
-            InvitationOffer::Expired => {
-                access::expired_invitation_row(compact, hosting::new_invitation(), cx)
-            }
-            InvitationOffer::NotHosting | InvitationOffer::PairingOff => {
-                let note = if offer == InvitationOffer::PairingOff {
-                    crate::tr!("hosts.invite.pairing_off")
-                } else {
-                    crate::tr!("hosts.invite.disabled")
-                };
+            } => Some((
+                invitation.url(),
+                *remaining,
+                spaces::local(cx)
+                    .and_then(|spaces| spaces.read(cx).group().map(|group| group.name.clone())),
+            )),
+            _ => None,
+        };
+        let live = crate::motion::shown("hosts-invite-live", live, SHOW, window, cx).map(|shown| {
+            let (link, remaining, group) = &shown.value;
+            shown.fold(access::invitation_card(
+                link,
+                *remaining,
+                group.as_deref(),
+                self.motion
+                    .reflow_in("hosts-invite-qr", u64::from(compact), window, cx),
+                compact,
+                hosting::new_invitation(),
+                window,
+                cx,
+            ))
+        });
+        let expired = crate::motion::shown(
+            "hosts-invite-expired",
+            (offer == InvitationOffer::Expired).then_some(()),
+            SHOW,
+            window,
+            cx,
+        )
+        .map(|shown| {
+            shown.fold(access::expired_invitation_row(
+                compact,
+                hosting::new_invitation(),
+                cx,
+            ))
+        });
+        let note = matches!(
+            offer,
+            InvitationOffer::NotHosting | InvitationOffer::PairingOff
+        )
+        .then_some(offer == InvitationOffer::PairingOff);
+        let note = crate::motion::shown("hosts-invite-note", note, SHOW, window, cx).map(|shown| {
+            let note = if shown.value {
+                crate::tr!("hosts.invite.pairing_off")
+            } else {
+                crate::tr!("hosts.invite.disabled")
+            };
+            shown.fold(
                 crate::settings_rows::row_frame(compact, cx)
                     .child(crate::settings_rows::row_labels(
                         note, None, None, compact, cx,
@@ -840,26 +1021,38 @@ impl RemotePanel {
                                     state.open_settings(cx);
                                 });
                             })),
-                    )
-                    .into_any_element()
-            }
-        }
+                    ),
+            )
+        });
+        v_flex()
+            .w_full()
+            .children(live)
+            .children(expired)
+            .children(note)
+            .into_any_element()
     }
 
     /// This machine's shared spaces, each with its link and QR on demand.
     #[cfg(feature = "remote-hosting")]
-    fn space_links(&mut self, compact: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn space_links(
+        &mut self,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let spaces = spaces::local(cx);
         self.spaces_observer.watch(spaces.as_ref(), cx);
         spaces.and_then(|spaces| {
             spaces::machine_links(
                 &spaces,
+                &self.motion,
                 self.space_qr.as_deref(),
                 |panel: &mut Self, id, cx| {
                     panel.space_qr = (panel.space_qr.as_deref() != Some(id.as_str())).then_some(id);
                     cx.notify();
                 },
                 compact,
+                window,
                 cx,
             )
         })
@@ -893,7 +1086,12 @@ impl RemotePanel {
     /// field. A first pairing is always by invitation, never by finding a
     /// machine on the network. The attempt in flight and its failure are
     /// shown here, under the rows that started them.
-    fn add_machine(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn add_machine(
+        &self,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let scannable = self.client(cx).is_some_and(|client| client.supports_qr());
         let entry = |id: &'static str, title: SharedString, cx: &mut Context<Self>| {
             group_entry(id, title.clone(), compact, cx)
@@ -930,27 +1128,41 @@ impl RemotePanel {
                 crate::tr!("hosts.pair.paste").into_owned().into(),
                 cx,
             )
-            .on_click(cx.listener(|panel, _, window, cx| panel.open_pair(window, cx)))
+            .on_click(cx.listener(|panel, _, _, cx| {
+                panel
+                    .window_state
+                    .update(cx, |state, cx| state.go(Destination::Pair, cx));
+            }))
             .into_any_element(),
         );
-        rows.extend(
-            self.attempt_status(compact, cx)
-                .map(|status| group_row(cx).child(status).into_any_element()),
-        );
-        rows.extend(
-            self.address_prompt(true, compact, cx)
-                .map(|prompt| group_row(cx).child(prompt).into_any_element()),
-        );
+        let in_row = |line: AnyElement, cx: &App| group_row(cx).child(line);
+        rows.extend(self.attempt_status(compact, in_row, window, cx));
+        rows.extend(self.address_prompt(true, compact, in_row, window, cx));
         settings_group(crate::tr!("hosts.pair.title"), rows, cx)
             .debug_selector(|| "hosts-add-machine".into())
             .into_any_element()
     }
 
     /// The pairing attempt in flight, or the failure of the last one; one
-    /// line at both the Hosts page and the paste page.
-    fn attempt_status(&self, compact: bool, cx: &App) -> Option<AnyElement> {
-        if self.form.busy {
-            return Some(
+    /// line at both the Hosts page and the paste page, drawn in `frame`.
+    /// Each folds in and out, so a failed attempt's line folds into its
+    /// error.
+    fn attempt_status(
+        &self,
+        compact: bool,
+        frame: impl Fn(AnyElement, &App) -> gpui::Div,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<AnyElement> {
+        let busy = crate::motion::shown(
+            "hosts-pairing",
+            self.form.busy.then_some(()),
+            SHOW,
+            window,
+            cx,
+        )
+        .map(|shown| {
+            shown.fold(frame(
                 h_flex()
                     .w_full()
                     .gap_2()
@@ -960,84 +1172,122 @@ impl RemotePanel {
                     .child(crate::widgets::spinner::Spinner::new())
                     .child(div().min_w_0().child(crate::tr!("hosts.pair.connecting")))
                     .into_any_element(),
-            );
-        }
-        let error = self.form.error.clone().or_else(|| {
-            self.form
-                .invalid(cx)
-                .then(|| crate::tr!("hosts.pair.bad_invite").into_owned())
-        })?;
-        Some(
-            div()
-                .w_full()
-                .text_secondary(compact, cx)
-                .min_w_0()
-                .text_color(cx.theme().danger_foreground)
-                .debug_selector(|| "hosts-pair-error".into())
-                .child(error)
-                .into_any_element(),
-        )
+                cx,
+            ))
+        });
+        let error = (!self.form.busy)
+            .then(|| {
+                self.form.error.clone().or_else(|| {
+                    self.form
+                        .invalid(cx)
+                        .then(|| crate::tr!("hosts.pair.bad_invite").into_owned())
+                })
+            })
+            .flatten();
+        let error =
+            crate::motion::shown("hosts-pair-error", error, SHOW, window, cx).map(|shown| {
+                shown.fold(frame(
+                    div()
+                        .w_full()
+                        .text_secondary(compact, cx)
+                        .min_w_0()
+                        .text_color(cx.theme().danger_foreground)
+                        .debug_selector(|| "hosts-pair-error".into())
+                        .child(shown.value.clone())
+                        .into_any_element(),
+                    cx,
+                ))
+            });
+        busy.into_iter().chain(error).collect()
     }
 
     /// The machine's IP address, asked for once an attempt found no path to
-    /// it; the prompt stands in for that failure. `retry` adds the button
-    /// that sends it, where no Connect button is beside the field.
+    /// it; the prompt stands in for that failure and folds in and out with
+    /// it, drawn in `frame`. `retry` adds the button that sends it, where no
+    /// Connect button is beside the field.
     fn address_prompt(
         &self,
         retry: bool,
         compact: bool,
+        frame: impl Fn(AnyElement, &App) -> gpui::Div,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.form.needs_address(cx) {
-            return None;
-        }
+        let shown = crate::motion::shown(
+            "hosts-pair-address",
+            self.form.needs_address(cx).then_some(()),
+            SHOW,
+            window,
+            cx,
+        )?;
         let invalid = self.form.typed_address(cx).is_err();
         let error = if invalid {
             Some(crate::tr!("hosts.pair.bad_address").into_owned())
         } else {
             self.form.address_error(cx).map(str::to_owned)
         };
-        let busy = self.form.busy;
-        Some(
-            v_flex()
-                .w_full()
-                .gap_1p5()
-                .debug_selector(|| "hosts-pair-address".into())
-                .child(
+        let error = crate::motion::shown("hosts-pair-address-error", error, SHOW, window, cx).map(
+            |shown| {
+                shown.fold(
                     div()
-                        .text_body(compact, cx)
-                        .child(crate::tr!("hosts.pair.address")),
-                )
-                .child(
-                    div()
-                        .text_secondary(compact, cx)
-                        .min_w_0()
-                        .child(crate::tr!("hosts.pair.address_description")),
-                )
-                .child(
-                    Input::new(&self.form.address)
-                        .placeholder(crate::tr!("hosts.pair.address_placeholder")),
-                )
-                .children(error.map(|error| {
-                    div()
+                        .pt_1p5()
                         .text_secondary(compact, cx)
                         .min_w_0()
                         .text_color(cx.theme().danger_foreground)
                         .debug_selector(|| "hosts-pair-address-error".into())
-                        .child(error)
-                }))
-                .when(retry, |column| {
-                    column.child(
-                        Button::new("hosts-pair-retry")
-                            .primary()
-                            .when(compact, |button| button.w_full())
-                            .loading(busy)
-                            .disabled(busy || invalid)
-                            .label(crate::tr!("hosts.pair.retry"))
-                            .on_click(cx.listener(|panel, _, window, cx| panel.submit(window, cx))),
+                        .child(shown.value.clone()),
+                )
+            },
+        );
+        let busy = self.form.busy;
+        Some(
+            shown.fold(frame(
+                v_flex()
+                    .w_full()
+                    .debug_selector(|| "hosts-pair-address".into())
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .text_body(compact, cx)
+                                    .child(crate::tr!("hosts.pair.address")),
+                            )
+                            .child(
+                                div()
+                                    .text_secondary(compact, cx)
+                                    .min_w_0()
+                                    .child(crate::tr!("hosts.pair.address_description")),
+                            )
+                            .child(
+                                Input::new(&self.form.address)
+                                    .placeholder(crate::tr!("hosts.pair.address_placeholder")),
+                            ),
                     )
-                })
-                .into_any_element(),
+                    // The error carries its own spacing, so it folds away
+                    // with it.
+                    .children(error)
+                    .when(retry, |column| {
+                        column.child(
+                            div().pt_1p5().child(
+                                Button::new("hosts-pair-retry")
+                                    .primary()
+                                    .when(compact, |button| button.w_full())
+                                    .loading(busy)
+                                    .disabled(busy || invalid)
+                                    .label(crate::tr!("hosts.pair.retry"))
+                                    .on_click(
+                                        cx.listener(|panel, _, window, cx| {
+                                            panel.submit(window, cx)
+                                        }),
+                                    ),
+                            ),
+                        )
+                    })
+                    .into_any_element(),
+                cx,
+            )),
         )
     }
 
@@ -1048,7 +1298,7 @@ impl RemotePanel {
     /// accounts for.
     pub(crate) fn render_pair(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
@@ -1056,6 +1306,7 @@ impl RemotePanel {
         let ready = !busy && self.form.request(cx).is_some() && self.form.typed_address(cx).is_ok();
         let scannable = self.client(cx).is_some_and(|client| client.supports_qr());
         let action = Button::new("hosts-pair-submit")
+            .debug_selector(|| "hosts-pair-submit".into())
             .primary()
             .loading(busy)
             .disabled(!ready)
@@ -1071,6 +1322,13 @@ impl RemotePanel {
         });
         let field = Input::new(&self.form.invitation)
             .placeholder(crate::tr!("hosts.pair.invitation_placeholder"));
+        let as_is = |line: AnyElement, _: &App| div().w_full().child(line);
+        // A window turning compact moves the field, the scan button and the
+        // action into a page with the action pinned at its foot; each glides
+        // there from where it was, and back.
+        let reflow = self
+            .motion
+            .reflow_in("hosts-pair", u64::from(compact), window, cx);
         if !compact {
             let form = group_row_stacked(cx)
                 .child(crate::settings_rows::row_labels(
@@ -1085,18 +1343,18 @@ impl RemotePanel {
                         .w_full()
                         .gap(cx.theme().tokens.spacing.sm)
                         .items_center()
-                        .child(div().flex_1().min_w_0().child(field))
-                        .children(scan)
-                        .child(action),
+                        .child(reflow.part("field", div().flex_1().min_w_0().child(field)))
+                        .children(scan.map(|scan| reflow.part("scan", scan)))
+                        .child(reflow.part("action", action)),
                 )
-                .children(self.attempt_status(compact, cx))
-                .children(self.address_prompt(false, compact, cx));
+                .children(self.attempt_status(compact, as_is, window, cx))
+                .children(self.address_prompt(false, compact, as_is, window, cx));
             let page = v_flex().child(
                 crate::material::group(cx)
                     .debug_selector(|| "hosts-pair-form".into())
                     .child(form),
             );
-            return self.page(page, &self.pair_scroll, cx);
+            return reflow.render(self.page(page, &self.pair_scroll, window, cx));
         }
         let body = v_flex()
             .gap(section_gap(cx))
@@ -1115,17 +1373,24 @@ impl RemotePanel {
                             .text_caption(cx)
                             .child(crate::tr!("hosts.pair.invitation")),
                     )
-                    .child(field),
+                    .child(reflow.part("field", field)),
             )
-            .children(self.attempt_status(compact, cx))
-            .children(self.address_prompt(false, compact, cx))
-            .children(scan.map(|scan| scan.w_full()));
-        self.page_with_footer(body, action.w_full().into_any_element(), cx)
+            .children(self.attempt_status(compact, as_is, window, cx))
+            .children(self.address_prompt(false, compact, as_is, window, cx))
+            .children(scan.map(|scan| reflow.part("scan", scan.w_full())));
+        let action = reflow.part("action", action.w_full());
+        reflow.render(self.page_with_footer(body, action, window, cx))
     }
 
     /// The scrolling page body: the settings content column, so the page's
     /// groups line up with Settings' at every width.
-    fn page(&self, body: gpui::Div, scroll: &ScrollHandle, cx: &mut Context<Self>) -> AnyElement {
+    fn page(
+        &self,
+        body: gpui::Div,
+        scroll: &ScrollHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
         crate::scroll::page_viewport(
             "hosts-scroll-bounce",
@@ -1139,8 +1404,15 @@ impl RemotePanel {
                 .lock_scroll_axis()
                 .track_scroll(scroll)
                 .on_action(cx.listener(Self::on_disconnect))
+                .on_action(cx.listener(Self::on_move))
                 .on_action(cx.listener(Self::on_forget))
-                .child(crate::settings_rows::content_column(body, compact, cx)),
+                .child(crate::settings_rows::content_column(
+                    body,
+                    compact,
+                    &self.motion,
+                    window,
+                    cx,
+                )),
         )
         .into_any_element()
     }
@@ -1149,11 +1421,12 @@ impl RemotePanel {
         &self,
         body: gpui::Div,
         action: AnyElement,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         v_flex()
             .size_full()
-            .child(self.page(body, &self.pair_scroll, cx))
+            .child(self.page(body, &self.pair_scroll, window, cx))
             .child(
                 h_flex().flex_none().w_full().justify_center().child(
                     div()
@@ -1168,19 +1441,30 @@ impl RemotePanel {
             .into_any_element()
     }
 
-    fn on_disconnect(&mut self, _: &DisconnectHost, window: &mut Window, cx: &mut Context<Self>) {
-        // Leaving a host is an explicit act; the saved record stays. A client
-        // with a host of its own falls back to it rather than to nothing, and
-        // to nothing when that host does not start.
-        crate::shell::detach_current(cx);
-        if cx
-            .try_global::<ClientAttachment>()
-            .is_some_and(ClientAttachment::can_attach_local)
-        {
-            let switch = cx.global::<ClientAttachment>().switcher();
-            switch(AttachmentTarget::Local, window, cx);
-        }
-        cx.notify();
+    fn on_disconnect(
+        &mut self,
+        action: &DisconnectHost,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let request = cx.global::<ClientAttachment>().requester();
+        request(
+            HostRequest::Leave(HostKey::Remote(action.0.clone())),
+            window,
+            cx,
+        );
+    }
+
+    fn on_move(&mut self, action: &MoveHost, window: &mut Window, cx: &mut Context<Self>) {
+        let request = cx.global::<ClientAttachment>().requester();
+        request(
+            HostRequest::Move {
+                host: HostKey::Remote(action.host_id.clone()),
+                earlier: action.earlier,
+            },
+            window,
+            cx,
+        );
     }
 
     fn on_forget(&mut self, action: &ForgetHost, window: &mut Window, cx: &mut Context<Self>) {
@@ -1256,6 +1540,16 @@ fn relay_region(relay: &str) -> Option<String> {
 /// the baseline over an up link is not a link state: the content area's
 /// skeletons show it, the line says the link is connected.
 pub(crate) fn connection_label(state: &tcode_client::ConnectionState) -> String {
+    connection_line(state, false)
+}
+
+/// [`connection_label`] beside a Pair again button, which the line leaves
+/// the remedy to.
+pub(crate) fn connection_label_beside_pair_again(state: &tcode_client::ConnectionState) -> String {
+    connection_line(state, true)
+}
+
+fn connection_line(state: &tcode_client::ConnectionState, pair_again_shown: bool) -> String {
     use tcode_client::ConnectionState;
     match state {
         ConnectionState::Connected { path } | ConnectionState::Syncing { path } => match path {
@@ -1275,32 +1569,52 @@ pub(crate) fn connection_label(state: &tcode_client::ConnectionState) -> String 
         ConnectionState::Offline { reason } => format!(
             "{} · {}",
             crate::tr!("remote.path.offline"),
-            failure_label(reason)
+            failure_label(reason, pair_again_shown)
         ),
     }
 }
 
-/// The same recovery wording is used in the shell and the machine row.
-pub(crate) fn failure_label(reason: &tcode_client::ConnectionFailure) -> String {
+/// The same recovery wording is used in the shell and the machine row: a
+/// refusal says to pair again unless a Pair again button is beside it.
+fn failure_label(reason: &tcode_client::ConnectionFailure, pair_again_shown: bool) -> String {
     use tcode_client::ConnectionFailure::*;
     match reason {
         Unreachable(_) => crate::tr!("remote.failure.unreachable"),
         Timeout => crate::tr!("remote.failure.timeout"),
-        AuthenticationRejected => crate::tr!("remote.failure.authentication_rejected"),
+        AuthenticationRejected if pair_again_shown => {
+            crate::tr!("remote.failure.authentication_rejected")
+        }
+        AuthenticationRejected => format!(
+            "{} · {}",
+            crate::tr!("remote.failure.authentication_rejected"),
+            crate::tr!("hosts.pair_again")
+        )
+        .into(),
         ProtocolMismatch => crate::tr!("remote.failure.protocol_mismatch"),
         HostClosed => crate::tr!("remote.failure.host_closed"),
     }
     .into_owned()
 }
 
+/// Why a link is down, while it is: it stopped, or it failed and dials again.
+pub(crate) fn connection_failure(
+    state: tcode_client::ConnectionState,
+) -> Option<tcode_client::ConnectionFailure> {
+    match state {
+        tcode_client::ConnectionState::Offline { reason } => Some(reason),
+        tcode_client::ConnectionState::Reconnecting { reason, .. } => reason,
+        _ => None,
+    }
+}
+
 /// The machine row has room for the transport's cause; the shell's status
 /// line does not.
-fn failure_description(reason: &tcode_client::ConnectionFailure) -> String {
+fn failure_description(reason: &tcode_client::ConnectionFailure, pair_again_shown: bool) -> String {
     match reason {
         tcode_client::ConnectionFailure::Unreachable(Some(cause)) => {
             crate::tr!("remote.failure.unreachable_cause", reason = cause).into_owned()
         }
-        reason => failure_label(reason),
+        reason => failure_label(reason, pair_again_shown),
     }
 }
 
@@ -1384,6 +1698,17 @@ mod tests {
             }),
             "Offline · Access rejected · Pair again"
         );
+        // Beside a Pair again button, the line leaves the remedy to it.
+        assert_eq!(
+            connection_label_beside_pair_again(&ConnectionState::Offline {
+                reason: ConnectionFailure::AuthenticationRejected
+            }),
+            "Offline · Access rejected"
+        );
+        assert_eq!(
+            failure_description(&ConnectionFailure::AuthenticationRejected, true),
+            "Access rejected"
+        );
         let unreachable = ConnectionFailure::Unreachable(Some(
             "No addressing information available: Address lookup failed".into(),
         ));
@@ -1391,17 +1716,17 @@ mod tests {
             connection_label(&ConnectionState::Offline {
                 reason: unreachable.clone()
             }),
-            "Offline · Host unreachable",
+            "Offline · Machine unreachable",
             "the status line has no room for the cause"
         );
         assert_eq!(
-            failure_description(&unreachable),
-            "Host unreachable: No addressing information available: Address lookup failed",
+            failure_description(&unreachable, false),
+            "Machine unreachable: No addressing information available: Address lookup failed",
             "the machine row says why"
         );
         assert_eq!(
-            failure_description(&ConnectionFailure::Unreachable(None)),
-            "Host unreachable"
+            failure_description(&ConnectionFailure::Unreachable(None), false),
+            "Machine unreachable"
         );
     }
 
@@ -1472,8 +1797,8 @@ mod tests {
         cx.update(crate::theme::init);
         cx.update(|cx| cx.set_global(ClientAttachment::new(Rc::new(Browser), false, |_, _, _| {})));
         let window = cx.open_window(gpui::size(px(393.), px(852.)), |window, cx| {
-            let state = cx.new(|_| WindowState::new(false));
-            HostsProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
+            let state = cx.new(|_| WindowState::default());
+            HostsProbe(cx.new(|cx| RemotePanel::new(state, window, cx)))
         });
         let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
         cx.run_until_parked();
@@ -1488,6 +1813,220 @@ mod tests {
             cx.debug_bounds("hosts-add-machine").is_none(),
             "a browser has no way to add a machine"
         );
+    }
+
+    /// Forgetting a saved machine: its row folds away where it was, taking no
+    /// press, and the machine below it slides up as it goes rather than
+    /// jumping into its place; a machine paired afterwards folds in.
+    #[gpui::test]
+    fn a_forgotten_machine_folds_away_and_the_next_moves_up(cx: &mut TestAppContext) {
+        use std::cell::{Cell, RefCell};
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        struct Phone(RefCell<Vec<PairedHost>>);
+        impl ClientHost for Phone {
+            fn device_name(&self) -> String {
+                "Phone".into()
+            }
+            fn device_id(&self) -> String {
+                "phone".into()
+            }
+            fn device_platform(&self) -> Option<String> {
+                None
+            }
+            fn load_hosts(&self) -> Vec<PairedHost> {
+                self.0.borrow().clone()
+            }
+            fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
+                Default::default()
+            }
+            fn save_preferences(&self, _: &tcode_client::host::ClientPreferences) {}
+            fn save_hosts(&self, hosts: &[PairedHost]) {
+                *self.0.borrow_mut() = hosts.to_vec();
+            }
+            fn last_host_id(&self) -> Option<String> {
+                None
+            }
+            fn set_last_host_id(&self, _: Option<&str>) {}
+            fn connect(&self, _: &PairedHost) -> tcode_client::host::Transport {
+                unreachable!("nothing connects")
+            }
+        }
+        let host = |id: &str, name: &str| PairedHost {
+            host_id: id.into(),
+            name: name.into(),
+            traverse: Vec::new(),
+            relay: None,
+            addrs: Vec::new(),
+            last_connected_unix: None,
+            group_id: None,
+            space_id: None,
+            space_name: None,
+        };
+        struct HostsProbe(Entity<RemotePanel>);
+        impl Render for HostsProbe {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                v_flex().size_full().child(
+                    self.0
+                        .update(cx, |panel, cx| panel.render_hosts(window, cx)),
+                )
+            }
+        }
+        let presses = Rc::new(Cell::new(0));
+        cx.update(crate::theme::init);
+        cx.update(|cx| {
+            let presses = presses.clone();
+            let phone = Phone(RefCell::new(vec![
+                host("studio", "Studio"),
+                host("laptop", "Laptop"),
+            ]));
+            cx.set_global(ClientAttachment::new(
+                Rc::new(phone),
+                false,
+                move |_, _, _| presses.set(presses.get() + 1),
+            ))
+        });
+        let window = cx.open_window(gpui::size(px(1024.), px(768.)), |window, cx| {
+            let state = cx.new(|_| WindowState::default());
+            HostsProbe(cx.new(|cx| RemotePanel::new(state, window, cx)))
+        });
+        let probe = window.root(cx).unwrap();
+        let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+        let settled = |cx: &mut gpui::VisualTestContext| crate::test_frames::draw_settled(cx);
+        settled(cx);
+        let studio = cx.debug_bounds("host-studio").expect("Studio is listed");
+        let laptop = cx.debug_bounds("host-laptop").expect("Laptop is listed");
+        assert!(laptop.top() > studio.top());
+
+        let change = |cx: &mut gpui::VisualTestContext, change: &dyn Fn(&ClientAttachment)| {
+            cx.update(|_, cx| change(cx.global::<ClientAttachment>()));
+            probe.update(cx, |probe, cx| probe.0.update(cx, |_, cx| cx.notify()));
+            crate::test_frames::draw(cx);
+        };
+        change(cx, &|hosts| hosts.remove_host("studio"));
+        let leaving = cx
+            .debug_bounds("host-studio")
+            .expect("a forgotten machine is drawn while it leaves");
+        cx.simulate_click(leaving.center(), Default::default());
+        assert_eq!(presses.get(), 0, "a leaving machine takes no press");
+
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        crate::test_frames::draw(cx);
+        let moving = cx.debug_bounds("host-laptop").unwrap();
+        assert!(
+            moving.top() > studio.top() && moving.top() < laptop.top(),
+            "Laptop is on its way up, at {:?}",
+            moving.top()
+        );
+
+        settled(cx);
+        assert!(cx.debug_bounds("host-studio").is_none(), "gone once folded");
+        assert_eq!(cx.debug_bounds("host-laptop").unwrap().top(), studio.top());
+
+        let below = |cx: &mut gpui::VisualTestContext| {
+            cx.debug_bounds("hosts-add-machine")
+                .expect("the way to add a machine")
+                .top()
+        };
+        let before = below(cx);
+        change(cx, &|hosts| hosts.save_host(host("studio", "Studio")));
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        crate::test_frames::draw(cx);
+        assert!(
+            cx.debug_bounds("host-studio").is_some(),
+            "a paired machine arrives"
+        );
+        let opening = below(cx);
+        settled(cx);
+        assert!(
+            opening > before && opening < below(cx),
+            "it folds in, so what is below moves down as it opens"
+        );
+    }
+
+    /// A phone turned to a width whose layout is compact moves the pairing
+    /// form's action from beside the field to the page's foot: it is drawn
+    /// where it was, glides there, and with motion reduced is there at once.
+    #[gpui::test]
+    fn the_pair_action_glides_to_the_foot_when_the_window_turns_compact(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        struct Phone;
+        impl ClientHost for Phone {
+            fn device_name(&self) -> String {
+                "Phone".into()
+            }
+            fn device_id(&self) -> String {
+                "phone".into()
+            }
+            fn device_platform(&self) -> Option<String> {
+                None
+            }
+            fn load_hosts(&self) -> Vec<PairedHost> {
+                Vec::new()
+            }
+            fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
+                Default::default()
+            }
+            fn save_preferences(&self, _: &tcode_client::host::ClientPreferences) {}
+            fn save_hosts(&self, _: &[PairedHost]) {}
+            fn last_host_id(&self) -> Option<String> {
+                None
+            }
+            fn set_last_host_id(&self, _: Option<&str>) {}
+            fn connect(&self, _: &PairedHost) -> tcode_client::host::Transport {
+                unreachable!("nothing connects")
+            }
+        }
+        /// Sets the layout for the window's width as it draws, as the shell
+        /// does, so a resize and the layout it calls for land in one frame.
+        struct PairProbe(Entity<RemotePanel>, Entity<WindowState>);
+        impl Render for PairProbe {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let compact = window.viewport_size().width < px(900.);
+                self.1
+                    .update(cx, |state, cx| state.set_compact(compact, cx));
+                v_flex()
+                    .size_full()
+                    .child(self.0.update(cx, |panel, cx| panel.render_pair(window, cx)))
+            }
+        }
+        cx.update(crate::theme::init);
+        cx.update(|cx| cx.set_global(ClientAttachment::new(Rc::new(Phone), false, |_, _, _| {})));
+        let state = cx.new(|_| WindowState::default());
+        let window = cx.open_window(gpui::size(px(1024.), px(852.)), |window, cx| {
+            PairProbe(
+                cx.new(|cx| RemotePanel::new(state.clone(), window, cx)),
+                state.clone(),
+            )
+        });
+        let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+        let turn = |width: f32, cx: &mut gpui::VisualTestContext| {
+            cx.simulate_resize(gpui::size(px(width), px(852.)));
+            crate::test_frames::draw(cx);
+        };
+        let action = |cx: &mut gpui::VisualTestContext| {
+            cx.debug_bounds("hosts-pair-submit")
+                .expect("the action is drawn")
+                .origin
+        };
+        crate::test_frames::draw_settled(cx);
+        let beside = action(cx);
+
+        turn(393., cx);
+        assert_eq!(action(cx), beside, "the action starts where it was");
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        crate::test_frames::draw(cx);
+        let gliding = action(cx);
+        crate::test_frames::draw_settled(cx);
+        let foot = action(cx);
+        assert!(foot.y > px(852. / 2.), "settled, the action is at the foot");
+        assert!(
+            gliding.y > beside.y && gliding.y < foot.y,
+            "the action is on its way down, at {gliding:?}"
+        );
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        turn(1024., cx);
+        assert_eq!(action(cx), beside, "with motion reduced it is back at once");
     }
 
     /// A scanned link that opens no path to the machine: the Hosts page asks
@@ -1567,8 +2106,8 @@ mod tests {
         cx.update(crate::theme::init);
         cx.update(|cx| cx.set_global(ClientAttachment::new(phone.clone(), false, |_, _, _| {})));
         let window = cx.open_window(gpui::size(px(393.), px(852.)), |window, cx| {
-            let state = cx.new(|_| WindowState::new(true));
-            HostsProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
+            let state = cx.new(|_| WindowState::default());
+            HostsProbe(cx.new(|cx| RemotePanel::new(state, window, cx)))
         });
         let panel = window.update(cx, |probe, _, _| probe.0.clone()).unwrap();
         let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
@@ -1645,6 +2184,9 @@ mod tests {
         use tcode_client::HostLink;
         use tcode_traverse::{HostConfig, HostMux, TraverseHost};
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        // The machine's host runs on its own threads and tells the window
+        // of hosting changes from there, as it does in the app.
+        cx.executor().allow_parking();
         let root = crate::store::tests::scratch_root("hosts-invitation");
         std::fs::create_dir_all(&root).unwrap();
         let (to_host, _host_rx) = async_channel::unbounded::<String>();
@@ -1671,17 +2213,22 @@ mod tests {
                 )
             }
         }
-        let state = cx.new(|_| WindowState::new(false));
+        let state = cx.new(|_| WindowState::default());
         let window = cx.open_window(gpui::size(px(1024.), px(768.)), |window, cx| {
-            HostsProbe(cx.new(|cx| RemotePanel::new(None, state.clone(), window, cx)))
+            HostsProbe(cx.new(|cx| RemotePanel::new(state.clone(), window, cx)))
         });
         let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+        // One frame starts whatever the change moves, the next draws it
+        // settled.
         let draw = |cx: &mut gpui::VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                window.refresh();
-                _ = window.draw(cx);
-            });
+            for _ in 0..2 {
+                cx.run_until_parked();
+                cx.update(|window, cx| {
+                    window.refresh();
+                    _ = window.draw(cx);
+                });
+                cx.executor().advance_clock(crate::edge_back::SETTLE);
+            }
         };
         for width in [1024., 393.] {
             cx.simulate_resize(gpui::size(px(width), px(852.)));
@@ -1765,8 +2312,8 @@ mod tests {
         let client = Rc::new(tcode_traverse::NativeClientHost::new(root.clone(), "phone"));
         cx.update(|cx| cx.set_global(ClientAttachment::new(client.clone(), false, |_, _, _| {})));
         let (probe, cx) = cx.add_window_view(|window, cx| {
-            let state = cx.new(|_| WindowState::new(false));
-            PairingProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
+            let state = cx.new(|_| WindowState::default());
+            PairingProbe(cx.new(|cx| RemotePanel::new(state, window, cx)))
         });
         let host = |name: &str| PairedHost {
             host_id: "09e5c592f3234ef329634a0baa6bfe06193be6b64801121d84242af1d27dbecf".into(),

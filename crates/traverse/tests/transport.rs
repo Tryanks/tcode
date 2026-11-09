@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tcode_client::heartbeat::NATIVE_IDLE_MS;
 use tcode_client::host::Transport;
 use tcode_client::pairing::{PairInvite, PairedHost};
+use tcode_client::recovery::Wake;
 use tcode_client::{ConnectionFailure, ConnectionState};
 use tcode_traverse::manifest::ManifestSource;
 use tcode_traverse::{DeviceIdentity, HostConfig, HostMux, PairError, TraverseHost};
@@ -393,6 +393,29 @@ fn invitation_changes_are_reported_in_order() {
     host.shutdown();
 }
 
+/// A fresh manifest cache for an instance whose relay is
+/// `https://{name}.relay.test/`, so no test fetches a manifest.
+fn cache_manifest(path: &std::path::Path, name: &str) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    std::fs::write(
+        path,
+        json!({
+            "fetchedAtMs": now_ms,
+            "manifest": {
+                "version": 1,
+                "updatedAt": "2999-01-01T00:00:00Z",
+                "relays": [{"url": format!("https://{name}.relay.test/")}],
+                "pkarr": [format!("https://{name}.lookup.test/pkarr")]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
 fn wait_relays(device: &DeviceIdentity, wanted: &[&str]) {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut seen = device.relays();
@@ -420,39 +443,12 @@ fn device_relays_follow_the_traverse_instances_of_its_machines() {
     let (mux, _, _) = fake_host();
     let custom_host = start_host(mux, &custom_dir, None);
     let dir = TestDir::new("relays-phone");
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    std::fs::write(
-        dir.0.join("traverse-manifest-official.json"),
-        json!({
-            "fetchedAtMs": now_ms,
-            "manifest": {
-                "version": 1,
-                "updatedAt": "2999-01-01T00:00:00Z",
-                "relays": [{"url": "https://official.relay.test/"}],
-                "pkarr": ["https://official.lookup.test/pkarr"]
-            }
-        })
-        .to_string(),
-    )
-    .unwrap();
+    cache_manifest(&dir.0.join("traverse-manifest-official.json"), "official");
     let custom_base: url::Url = "https://custom.traverse.test/".parse().unwrap();
-    std::fs::write(
-        tcode_traverse::manifest::ManifestSource::Custom(custom_base.clone()).cache_path(&dir.0),
-        json!({
-            "fetchedAtMs": now_ms,
-            "manifest": {
-                "version": 1,
-                "updatedAt": "2999-01-01T00:00:00Z",
-                "relays": [{"url": "https://custom.relay.test/"}],
-                "pkarr": ["https://custom.lookup.test/pkarr"]
-            }
-        })
-        .to_string(),
-    )
-    .unwrap();
+    cache_manifest(
+        &tcode_traverse::manifest::ManifestSource::Custom(custom_base.clone()).cache_path(&dir.0),
+        "custom",
+    );
     let phone = device(&dir, "phone");
 
     let minted = off_host.new_invitation();
@@ -570,10 +566,10 @@ fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
 }
 
 /// The heartbeat is the transport's own line, never charged to the outbox.
-/// Crediting it on send underflowed the outbox count after `NATIVE_IDLE_MS`
-/// of silence and killed the writer, so a connection that went quiet for ten
-/// seconds silently stopped carrying commands while still reporting
-/// `Connected`.
+/// Crediting it on send underflowed the outbox count at the first ping and
+/// killed the writer, so a connection that had been pinged silently stopped
+/// carrying commands while still reporting `Connected`. A network change
+/// probes the link, which pings at once rather than after the idle window.
 #[test]
 fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
     let host_dir = TestDir::new("idle-host");
@@ -589,7 +585,8 @@ fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
     recv_type(&client, "ack", Some(1));
     wait_state(&client, connected_directly);
 
-    std::thread::sleep(Duration::from_millis(NATIVE_IDLE_MS + 2_000));
+    phone.network_changed();
+    recv_type(&client, "query_result", Some(0));
     while let Ok(state) = client.state.try_recv() {
         assert!(
             connected_directly(&state),
@@ -600,6 +597,56 @@ fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
     client.to_host.send_blocking(ping.to_string()).unwrap();
     recv_type(&client, "query_result", Some(2));
     assert_eq!(client.state.try_recv().ok(), None);
+    host.shutdown();
+}
+
+/// Leaving the app parks its link: the connection closes and so does the
+/// device's endpoint, home relay and all, and the machine sees the device
+/// gone. The return binds a new endpoint with the same key, dials again
+/// and delivers what was written while the app was away.
+#[test]
+fn a_parked_link_closes_the_endpoint_and_the_return_delivers_what_was_written_meanwhile() {
+    let host_dir = TestDir::new("park-host");
+    let (mux, _, _) = fake_host();
+    let host = start_host(mux, &host_dir, None);
+    let dir = TestDir::new("park-device");
+    cache_manifest(&dir.0.join("traverse-manifest-official.json"), "official");
+    let phone = device(&dir, "phone");
+    let minted = host.new_invitation();
+    // The test machine runs Off; the saved copy claims the official
+    // service, which the machine never checks, so the endpoint carries a relay.
+    let paired = PairedHost {
+        traverse: Vec::new(),
+        ..pair(&minted.invite, &phone).unwrap()
+    };
+    tcode_traverse::hosts::save_hosts(&dir.0, std::slice::from_ref(&paired)).unwrap();
+    phone.hosts_changed();
+    wait_relays(&phone, &["https://official.relay.test/"]);
+    let client = tcode_traverse::connect(&paired, &phone);
+    wait_state(&client, syncing_directly);
+    client.to_host.send_blocking(subscribe(1)).unwrap();
+    recv_type(&client, "ack", Some(1));
+    wait_state(&client, connected_directly);
+
+    client.to_host.wake(Wake::Park);
+    wait_state(&client, |state| {
+        matches!(state, ConnectionState::Reconnecting { .. })
+    });
+    wait_relays(&phone, &[]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while host.devices()[0].live.is_some() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        host.devices()[0].live.is_none(),
+        "the machine saw the device leave"
+    );
+    let open = json!({"id": 2, "payload": {"type": "command", "content": {"type": "open_latest_session"}}});
+    client.to_host.send_blocking(open.to_string()).unwrap();
+    client.to_host.wake(Wake::Reconnect);
+    wait_state(&client, syncing_directly);
+    recv_type(&client, "ack", Some(2));
+    assert_eq!(phone.relays(), ["https://official.relay.test/"]);
     host.shutdown();
 }
 
@@ -699,6 +746,62 @@ fn two_devices_route_acks_broadcast_events_and_scope_keys() {
     host.shutdown();
 }
 
+fn follow_hosting(id: u64) -> String {
+    json!({"id": id, "payload": {"type": "subscribe", "content": {"topic": {"type": "hosting"}, "after": null}}})
+        .to_string()
+}
+
+/// Whoever follows a machine's hosting state hears of each change made
+/// elsewhere without reading again: this machine's own window through the
+/// host, a full device through the topic, which answers with the state as it
+/// stands.
+#[test]
+fn hosting_followers_hear_of_a_change_made_elsewhere() {
+    let host_dir = TestDir::new("follow-host");
+    let (mux, _, _) = fake_host();
+    let host = start_host(mux, &host_dir, None);
+    let window = host.hosting_events();
+    let design = host.create_space("Design".into()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "the window was not told");
+        match window.try_recv() {
+            Ok(state) if state.spaces.iter().any(|space| space.id == design) => break,
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+
+    let dir = TestDir::new("follow-phone");
+    let phone = device(&dir, "phone");
+    let minted = host.new_invitation();
+    let paired = pair(&minted.invite, &phone).unwrap();
+    let client = tcode_traverse::connect(&paired, &phone);
+    wait_state(&client, syncing_directly);
+    client.to_host.send_blocking(follow_hosting(1)).unwrap();
+    let reply = recv_type(&client, "event", None);
+    assert_eq!(reply["content"]["request_id"], 1);
+    assert_eq!(reply["content"]["topic"], json!({"type": "hosting"}));
+    assert_eq!(reply["content"]["event"]["type"], "hosting_replaced");
+    assert_eq!(
+        reply["content"]["event"]["content"]["spaces"][0]["id"],
+        design.as_str()
+    );
+
+    let review = host.create_space("Review".into()).unwrap();
+    // The device's own path may settle meanwhile, which is a change too.
+    loop {
+        let pushed = recv_type(&client, "event", None);
+        assert_eq!(pushed["content"]["request_id"], Value::Null);
+        assert_eq!(pushed["content"]["event"]["type"], "hosting_replaced");
+        if pushed["content"]["event"]["content"]["spaces"][1]["id"] == review.as_str() {
+            break;
+        }
+    }
+    client.to_host.close();
+    host.shutdown();
+}
+
 /// A revocation is durable or it did not happen: while the allow list
 /// cannot be written, the device stays listed, its connection stays open and
 /// it is still admitted, and the caller is told. Once it is written, the
@@ -764,14 +867,23 @@ fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     host.shutdown();
 }
 
+/// A UDP port the system never hands out to a `:0` bind, free when probed:
+/// the app binds its fixed port below every platform's ephemeral range
+/// (Linux 32768+, macOS and Windows 49152+), so while a machine is down no
+/// other socket on the box is assigned its port behind its back.
+fn fixed_port() -> u16 {
+    let start = std::process::id() % 10_000;
+    (0..10_000)
+        .map(|offset| 20_000 + ((start + offset) % 10_000) as u16)
+        .find(|&port| std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok())
+        .expect("a free UDP port below the ephemeral range")
+}
+
 #[test]
-fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
+fn a_restarted_machine_rejoins_and_delivers_writes_buffered_while_it_was_down() {
     let host_dir = TestDir::new("restart-host");
     let (mux, subscribe_count, _) = fake_host();
-    let port = {
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        socket.local_addr().unwrap().port()
-    };
+    let port = fixed_port();
     let host = start_host(mux.clone(), &host_dir, Some(port));
     let dir = TestDir::new("restart-phone");
     let phone = device(&dir, "phone");
@@ -803,12 +915,13 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
     host.shutdown();
     wait_state(&client, |state| {
         link.set_connection_state(state.clone());
-        state
-            == &ConnectionState::Reconnecting {
-                // This link lived less than 30 seconds, so it must not reset retry history.
-                attempt: 2,
+        matches!(
+            state,
+            ConnectionState::Reconnecting {
                 reason: Some(ConnectionFailure::HostClosed),
+                ..
             }
+        )
     });
     client
         .to_host
@@ -849,16 +962,29 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
+
+    // The rejoin is the replayed subscription's snapshot and the buffered
+    // command's ack, both arriving over the new connection.
     wait_state(&client, |state| {
         link.set_connection_state(state.clone());
         connected_directly(state)
     });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while subscribe_count.load(Ordering::Relaxed) < 2 && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (mut resubscribed, mut acked) = (false, false);
+    while !(resubscribed && acked) {
+        assert!(
+            Instant::now() < deadline,
+            "rejoin incomplete: resubscribed {resubscribed}, buffered write acked {acked}"
+        );
+        let Ok(line) = client.from_host.try_recv() else {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        };
+        let value: Value = serde_json::from_str(line.trim_end()).unwrap();
+        resubscribed |= value["type"] == "event";
+        acked |= value["type"] == "ack" && value["content"]["id"] == 0;
     }
     assert_eq!(subscribe_count.load(Ordering::Relaxed), 2);
-    recv_type(&client, "ack", Some(0));
     link.close();
     restarted.shutdown();
 }
@@ -1024,6 +1150,9 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     let refusal = recv_type(&client, "query_result", Some(2));
     assert_eq!(refusal["content"]["result"]["Err"]["code"], "out_of_scope");
     assert_eq!(host.spaces().len(), 1);
+    client.to_host.send_blocking(follow_hosting(30)).unwrap();
+    let refusal = recv_type(&client, "ack", Some(30));
+    assert_eq!(refusal["content"]["result"]["Err"]["code"], "out_of_scope");
     let opener = client.current_host.as_ref().unwrap().tunnels().unwrap();
     let refusal = tcode_traverse::block_on(opener.open("127.0.0.1", 1)).unwrap_err();
     assert!(
@@ -1386,6 +1515,76 @@ fn originals_preserve_control_progress_bytes_and_cancelled_admission() {
         }
         assert_eq!(received, bytes);
         drop(second);
+        link.close();
+        pump.await.unwrap();
+    });
+    host.shutdown();
+    original_fixture::stop(runtime, &mux);
+}
+
+/// A paired device's upload crosses the real connection in protocol-sized
+/// chunks and arrives whole in the host's scratch directory.
+#[test]
+fn a_device_uploads_a_file_to_the_hosts_scratch_directory() {
+    use tcode_client::HostLink;
+    use tcode_protocol::{Query, QueryResponse};
+    let host_dir = TestDir::new("upload");
+    let device_dir = TestDir::new("upload-device");
+    let documents = host_dir.0.join("documents");
+    let (runtime, mux, session_id, _) = original_fixture::recorded_host_with(
+        &host_dir.0,
+        b"recorded image",
+        tcode_runtime::pipe::HostServices {
+            user_directories: tcode_services::user_files::UserDirectories {
+                home: None,
+                documents: Some(documents.clone()),
+            },
+            ..Default::default()
+        },
+    );
+    let host = start_host(mux.clone(), &host_dir, None);
+    let device = device(&device_dir, "Upload phone");
+    let paired = pair(&host.new_invitation().invite, &device).unwrap();
+    let transport = tcode_traverse::connect(&paired, &device);
+    wait_state(&transport, syncing_directly);
+    let link = HostLink::new_remote(transport.to_host, transport.from_host, transport.originals);
+    let content: Vec<_> = (0..tcode_core::attachments::UPLOAD_CHUNK_BYTES * 3 + 11)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    tcode_traverse::block_on(async {
+        let pump = tcode_traverse::runtime().spawn({
+            let link = link.clone();
+            async move { link.pump().await }
+        });
+        let QueryResponse::UploadBegun(path) = link
+            .query(Query::BeginUpload {
+                session_id: session_id.clone(),
+                name: "report.pdf".into(),
+                size: content.len() as u64,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("upload refused");
+        };
+        assert!(path.starts_with(documents.join("Tcode")));
+        assert_eq!(path.file_name().unwrap(), "report.pdf");
+        let mut offset = 0;
+        for chunk in content.chunks(tcode_core::attachments::UPLOAD_CHUNK_BYTES) {
+            assert_eq!(
+                link.query(Query::WriteUpload {
+                    session_id: session_id.clone(),
+                    path: path.clone(),
+                    offset,
+                    bytes: chunk.to_vec(),
+                })
+                .await
+                .unwrap(),
+                QueryResponse::UploadWritten
+            );
+            offset += chunk.len() as u64;
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), content);
         link.close();
         pump.await.unwrap();
     });

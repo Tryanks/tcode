@@ -1,14 +1,5 @@
 use super::*;
 
-/// A Subagent item recorded inside a mirror: where it was recorded and its
-/// latest snapshot, so the grandchild's mirror can be titled and settled once
-/// the grandchild's own transcript names it.
-#[derive(Clone)]
-pub(super) struct NestedSpawn {
-    mirror_id: String,
-    item: ThreadItem,
-}
-
 impl AppState {
     /// Reroute provider-native subagent transcript items into read-only mirror
     /// sessions. Returns true when the event was consumed instead of entering
@@ -19,15 +10,41 @@ impl AppState {
         event: &AgentEvent,
         cx: &mut HostCx,
     ) -> bool {
+        if let AgentEvent::ItemBackgrounded {
+            item_id,
+            parent_item_id: Some(parent_item_id),
+        } = event
+        {
+            if let Some(mirror_id) =
+                self.ensure_native_subagent_mirror(parent_session_id, parent_item_id, None, cx)
+            {
+                let event = AgentEvent::ItemBackgrounded {
+                    item_id: item_id.clone(),
+                    parent_item_id: None,
+                };
+                self.record_event(&mirror_id, &event, cx);
+            }
+            return true;
+        }
+        if let AgentEvent::Delta { item_id, .. } = event {
+            let key = (parent_session_id.to_string(), item_id.clone());
+            let Some(mirror_id) = self.native_subagent_streams.get(&key).cloned() else {
+                return false;
+            };
+            self.record_event(&mirror_id, event, cx);
+            return true;
+        }
         let Some(item) = lifecycle_item(event) else {
             return false;
         };
 
         // Check child ownership before content: a Subagent item inside a mirror
-        // is content of that mirror, and only becomes a nested mirror of its
-        // own once a grandchild item names it as parent.
+        // is content of that mirror, and has a nested mirror of its own under
+        // it from the spawn on: the grandchild's transcript may reach the host
+        // late or never, and its row must open while it runs.
         if let Some(parent_item_id) = item.parent_item_id.as_deref() {
-            let mirror_id = self.child_item_mirror(parent_session_id, parent_item_id, cx);
+            let mirror_id =
+                self.ensure_native_subagent_mirror(parent_session_id, parent_item_id, None, cx);
             let Some(mirror_id) = mirror_id else {
                 log::warn!(
                     "dropping native subagent child item {}: parent session {} is missing",
@@ -46,18 +63,36 @@ impl AppState {
                 self.sync_mirror_turn(&mirror_id, true, parent_item_id, TurnStatus::Completed, cx);
             }
             self.record_event(&mirror_id, &strip_parent_item_id(event), cx);
-            if matches!(item.content, ItemContent::Subagent { .. }) {
-                self.nested_subagent_spawns.insert(
-                    (parent_session_id.to_string(), item.id.clone()),
-                    NestedSpawn {
-                        mirror_id,
-                        item: item.clone(),
-                    },
-                );
-                if let Some(grandchild_mirror_id) =
-                    self.find_native_subagent_mirror(parent_session_id, &item.id, cx)
+            let key = (parent_session_id.to_string(), item.id.clone());
+            if matches!(event, AgentEvent::ItemCompleted(_)) {
+                self.native_subagent_streams.remove(&key);
+            } else {
+                self.native_subagent_streams.insert(key, mirror_id.clone());
+            }
+            if let ItemContent::Subagent {
+                agent_type,
+                description,
+                ..
+            } = &item.content
+            {
+                // A grandchild whose transcript came first already has a
+                // placeholder: the spawn names it.
+                let nested = match self.find_native_subagent_mirror(parent_session_id, &item.id, cx)
                 {
-                    self.apply_subagent_snapshot(&grandchild_mirror_id, item, cx);
+                    Some(nested) => Some(nested),
+                    None => self.ensure_native_subagent_mirror(
+                        &mirror_id,
+                        &item.id,
+                        Some((agent_type, description)),
+                        cx,
+                    ),
+                };
+                if let Some(nested) = nested {
+                    self.native_subagent_sessions.insert(
+                        (parent_session_id.to_string(), item.id.clone()),
+                        nested.clone(),
+                    );
+                    self.apply_subagent_snapshot(&nested, item, cx);
                 }
             }
             return true;
@@ -78,42 +113,6 @@ impl AppState {
             self.apply_subagent_snapshot(&mirror_id, item, cx);
         }
         false
-    }
-
-    /// The mirror that receives items parented to `parent_item_id`: the
-    /// subagent's own mirror, a nested spawn's mirror under the mirror it was
-    /// spawned in, or — for a subagent this session never announced — a
-    /// placeholder that closes with the parent process.
-    fn child_item_mirror(
-        &mut self,
-        session_id: &str,
-        parent_item_id: &str,
-        cx: &mut HostCx,
-    ) -> Option<String> {
-        if let Some(id) = self.find_native_subagent_mirror(session_id, parent_item_id, cx) {
-            return Some(id);
-        }
-        let key = (session_id.to_string(), parent_item_id.to_string());
-        let Some(spawn) = self.nested_subagent_spawns.get(&key).cloned() else {
-            return self.ensure_native_subagent_mirror(session_id, parent_item_id, None, cx);
-        };
-        let ItemContent::Subagent {
-            agent_type,
-            description,
-            ..
-        } = &spawn.item.content
-        else {
-            return None;
-        };
-        let mirror_id = self.ensure_native_subagent_mirror(
-            &spawn.mirror_id,
-            parent_item_id,
-            Some((agent_type, description)),
-            cx,
-        )?;
-        self.native_subagent_sessions.insert(key, mirror_id.clone());
-        self.apply_subagent_snapshot(&mirror_id, &spawn.item, cx);
-        Some(mirror_id)
     }
 
     /// Fold a Subagent snapshot into its mirror: title, model and effort on
@@ -328,7 +327,7 @@ impl AppState {
         parent_session_id: &str,
         cx: &mut HostCx,
     ) {
-        self.nested_subagent_spawns
+        self.native_subagent_streams
             .retain(|(session_id, _), _| session_id != parent_session_id);
         // Mirrors belong to this provider. An execution child has its own
         // provider and remains independent when this one is intentionally detached.
@@ -374,42 +373,6 @@ impl AppState {
                 self.persist_meta(&meta, cx);
             }
         }
-    }
-
-    /// A mirror loaded with its last turn still open, while no live parent is
-    /// tracking it as running, was orphaned by a host restart or a parent that
-    /// left without a close: end the turn so it stops reporting work nothing
-    /// can finish.
-    pub(super) fn repair_orphaned_mirror_turn(&mut self, mirror_id: &str, cx: &mut HostCx) {
-        if self.native_subagent_turns.get(mirror_id) == Some(&true) {
-            return;
-        }
-        let Some(mirror) = self.resident(mirror_id) else {
-            return;
-        };
-        let Some(subagent_item_id) = mirror.meta.native_subagent.clone() else {
-            return;
-        };
-        let Some(turn) = mirror
-            .timeline
-            .turns
-            .last()
-            .filter(|turn| turn.status.is_none())
-        else {
-            return;
-        };
-        let turn_id = turn.provider_turn_id.clone().unwrap_or(subagent_item_id);
-        self.native_subagent_turns
-            .insert(mirror_id.to_string(), false);
-        self.record_event(
-            mirror_id,
-            &AgentEvent::TurnCompleted {
-                turn_id,
-                status: TurnStatus::Interrupted,
-                usage: None,
-            },
-            cx,
-        );
     }
 }
 

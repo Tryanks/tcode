@@ -1,11 +1,22 @@
 use super::*;
-use tcode_services::store::{DiffPass, Mutation};
+use tcode_core::session::SupersededStream;
+use tcode_services::store::{CloneBound, Mutation};
+
+use super::storage_pass::{StorageJob, StorageJobDone};
 
 /// A drain of the queue is committed in transactions of at most this many
 /// writes and about this many bytes; streamed deltas then share a commit
 /// instead of each paying for one.
 const MAX_BATCH_WRITES: usize = 256;
 const MAX_BATCH_BYTES: usize = 4 << 20;
+
+/// How long a streamed delta may wait for the ones after it before its
+/// commit. Providers stream deltas tens of milliseconds apart, so committing
+/// each one would pay a full drive flush per delta. A power loss can take at
+/// most this much of an in-flight stream's tail, which replays exactly like
+/// a crash this much earlier: a delta only appends text, and the record that
+/// completes its item commits every delta before it.
+const DELTA_WINDOW: Duration = Duration::from_millis(200);
 
 pub(super) enum StoreWrite {
     /// One appended record, committed together with what it changes in the
@@ -16,6 +27,11 @@ pub(super) enum StoreWrite {
         author: Option<Author>,
         origin: Option<MessageOrigin>,
         event: Box<AgentEvent>,
+        /// What the resident log's fold found the record supersedes, when
+        /// the log is resident.
+        streams: Option<Option<SupersededStream<u64>>>,
+        /// Threads whose metas change with what the record says happened.
+        metas: Vec<SessionMeta>,
     },
     UpsertMeta {
         meta: Box<SessionMeta>,
@@ -29,10 +45,11 @@ pub(super) enum StoreWrite {
         kept_worktrees: Vec<PathBuf>,
     },
     RemoveProject(String),
-    /// The source's event log copied to a new thread, committed together with
-    /// the new thread's meta.
+    /// The source's event log copied to a new thread, up to `bound` when one
+    /// is given, committed together with the new thread's meta.
     Fork {
         src: String,
+        bound: Option<CloneBound>,
         meta: Box<SessionMeta>,
         completion: smol::channel::Sender<Result<(), String>>,
     },
@@ -41,7 +58,6 @@ pub(super) enum StoreWrite {
         commands: Vec<ProviderCommand>,
     },
     InvalidateCommands(CommandsCacheKey),
-    WriteTerminalUi(Vec<u8>),
     WriteSettings(Vec<u8>),
     WriteReviewRecords(Vec<tcode_core::control::ReviewRecord>),
     WriteControlActivity(Vec<tcode_core::control::ControlActivityEntry>),
@@ -56,14 +72,16 @@ pub(super) enum StoreWrite {
         host: String,
         token: Option<String>,
         email: Option<String>,
+        /// The host took the token, signed in as this login when it said.
+        accepted: Option<Option<String>>,
         completion: smol::channel::Sender<Result<(), String>>,
     },
     ClearProfileSecrets(String),
-    /// [`SessionStore::drop_superseded_diffs`] for one thread, answered with
-    /// what it did and how long it held the writer.
-    DropSupersededDiffs {
-        id: String,
-        completion: smol::channel::Sender<Result<(DiffPass, Duration), String>>,
+    /// One step of the storage pass, answered with what it did and how long
+    /// it held the writer.
+    Storage {
+        job: StorageJob,
+        completion: smol::channel::Sender<Result<(StorageJobDone, Duration), String>>,
     },
     /// Pin the committed end and turn index after all earlier queued writes
     /// have been attempted. A failed write does not prevent a read.
@@ -111,6 +129,8 @@ impl StoreWrite {
                 author,
                 origin,
                 event,
+                streams,
+                metas,
             } => {
                 match Mutation::append_authored_event(
                     id,
@@ -120,7 +140,12 @@ impl StoreWrite {
                     *origin,
                     |bytes| history::append_projection(bytes, *ts, event, author.as_ref(), *origin),
                 ) {
-                    Ok(mutation) => vec![mutation],
+                    Ok(mutation) => std::iter::once(match streams {
+                        Some(superseded) => mutation.superseding(superseded.clone()),
+                        None => mutation,
+                    })
+                    .chain(metas.iter().cloned().map(Mutation::upsert_meta))
+                    .collect(),
                     Err(error) => return Some(Err(error.to_string())),
                 }
             }
@@ -139,12 +164,26 @@ impl StoreWrite {
                 )
                 .collect(),
             StoreWrite::RemoveProject(id) => vec![Mutation::remove_project(id)],
-            StoreWrite::Fork { src, meta, .. } => vec![
-                Mutation::clone_events(src, &meta.id),
+            StoreWrite::Fork {
+                src, bound, meta, ..
+            } => vec![
+                match bound {
+                    Some(bound) => Mutation::clone_events_to(src, &meta.id, *bound),
+                    None => Mutation::clone_events(src, &meta.id),
+                },
                 Mutation::upsert_meta((**meta).clone()),
             ],
             _ => return None,
         }))
+    }
+
+    /// Streamed text growth, which may wait for the next boundary or the
+    /// delta window to be committed.
+    fn is_streamed_delta(&self) -> bool {
+        matches!(
+            self,
+            StoreWrite::AppendEvent { event, .. } if matches!(**event, AgentEvent::Delta { .. })
+        )
     }
 
     fn member(self) -> Member {
@@ -174,12 +213,11 @@ impl StoreWrite {
                 |error| RuntimeError::PersistEvent { error },
                 Some(completion),
             ),
-            StoreWrite::DropSupersededDiffs { .. } | StoreWrite::SnapshotLog { .. } => {
+            StoreWrite::Storage { .. } | StoreWrite::SnapshotLog { .. } => {
                 (|error| RuntimeError::PersistEvent { error }, None)
             }
             StoreWrite::SaveCommands { .. }
             | StoreWrite::InvalidateCommands(_)
-            | StoreWrite::WriteTerminalUi(_)
             | StoreWrite::WriteSettings(_)
             | StoreWrite::WriteReviewRecords(_)
             | StoreWrite::WriteControlActivity(_)
@@ -197,7 +235,7 @@ impl StoreWrite {
     /// anything else is reported like a failed write.
     pub(super) fn reject(self, reason: &str) -> Option<StoreWriteFailure> {
         match self {
-            StoreWrite::DropSupersededDiffs { completion, .. } => {
+            StoreWrite::Storage { completion, .. } => {
                 let _ = completion.try_send(Err(reason.to_owned()));
                 return None;
             }
@@ -216,6 +254,19 @@ impl StoreWrite {
     }
 }
 
+/// The next write, `None` once `deadline` passes first, or an error once
+/// every sender is gone and the queue is empty.
+fn recv_until(
+    writes: &smol::channel::Receiver<StoreWrite>,
+    deadline: Instant,
+) -> Result<Option<StoreWrite>, smol::channel::RecvError> {
+    use smol::future::FutureExt as _;
+    smol::block_on(async { writes.recv().await.map(Some) }.or(async {
+        smol::Timer::at(deadline).await;
+        Ok(None)
+    }))
+}
+
 pub(super) fn atomic_write(path: PathBuf, bytes: Vec<u8>) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, bytes)?;
@@ -225,7 +276,6 @@ pub(super) fn atomic_write(path: PathBuf, bytes: Vec<u8>) -> std::io::Result<()>
 pub(super) struct StoreWriter {
     pub(super) store: SessionStore,
     pub(super) settings_store: SettingsStore,
-    pub(super) terminal_preferences_path: PathBuf,
     pub(super) failures: smol::channel::Sender<StoreWriteFailure>,
     /// The first failed database write, until the writer stops.
     unresolved: Option<String>,
@@ -235,30 +285,54 @@ impl StoreWriter {
     pub(super) fn new(
         store: SessionStore,
         settings_store: SettingsStore,
-        terminal_preferences_path: PathBuf,
         failures: smol::channel::Sender<StoreWriteFailure>,
     ) -> Self {
         Self {
             store,
             settings_store,
-            terminal_preferences_path,
             failures,
             unresolved: None,
         }
     }
 
     /// Serve `writes` until every sender is gone and the queue is drained.
+    ///
+    /// Streamed deltas wait up to [`DELTA_WINDOW`] for more; any other write
+    /// (an item or turn boundary, a meta, a flush, a log read) commits them
+    /// together with itself at once, and so does the host closing the queue.
     pub(super) fn run(mut self, writes: smol::channel::Receiver<StoreWrite>) {
-        while let Ok(first) = writes.recv_blocking() {
-            let mut queue = vec![first];
+        let mut queue = Vec::new();
+        let mut deadline = None;
+        loop {
+            let received = match deadline {
+                None => writes.recv_blocking().map(Some),
+                Some(deadline) => recv_until(&writes, deadline),
+            };
+            let Ok(received) = received else { break };
+            let Some(first) = received else {
+                self.process(std::mem::take(&mut queue));
+                deadline = None;
+                continue;
+            };
+            let mut boundary = !first.is_streamed_delta();
+            queue.push(first);
             while queue.len() < MAX_BATCH_WRITES {
                 match writes.try_recv() {
-                    Ok(write) => queue.push(write),
+                    Ok(write) => {
+                        boundary |= !write.is_streamed_delta();
+                        queue.push(write);
+                    }
                     Err(_) => break,
                 }
             }
-            self.process(queue);
+            if boundary || queue.len() >= MAX_BATCH_WRITES {
+                self.process(std::mem::take(&mut queue));
+                deadline = None;
+            } else {
+                deadline.get_or_insert_with(|| Instant::now() + DELTA_WINDOW);
+            }
         }
+        self.process(queue);
     }
 
     /// Database writes accumulate into one transaction; any other write is an
@@ -353,15 +427,6 @@ impl StoreWriter {
                     ))
                 })
             }
-            StoreWrite::WriteTerminalUi(bytes) => {
-                atomic_write(self.terminal_preferences_path.clone(), bytes)
-                    .err()
-                    .map(|err| {
-                        StoreWriteFailure::Warning(format!(
-                            "failed to persist terminal UI state: {err}"
-                        ))
-                    })
-            }
             StoreWrite::WriteSettings(bytes) => {
                 atomic_write(self.store.root().join("settings.json"), bytes)
                     .err()
@@ -397,12 +462,25 @@ impl StoreWriter {
                 host,
                 token,
                 email,
+                accepted,
                 completion,
             } => {
-                let result = self
-                    .settings_store
-                    .set_credential(kind, &host, token.as_deref(), email.as_deref())
-                    .map_err(|error| error.to_string());
+                let result = match accepted {
+                    Some(login) => self.settings_store.set_accepted_credential(
+                        kind,
+                        &host,
+                        token.as_deref().unwrap_or_default(),
+                        email.as_deref(),
+                        login.as_deref(),
+                    ),
+                    None => self.settings_store.set_credential(
+                        kind,
+                        &host,
+                        token.as_deref(),
+                        email.as_deref(),
+                    ),
+                }
+                .map_err(|error| error.to_string());
                 let _ = completion.try_send(result);
                 None
             }
@@ -411,9 +489,9 @@ impl StoreWriter {
                 .clear_profile_secrets(&profile_id)
                 .err()
                 .map(settings_failure),
-            StoreWrite::DropSupersededDiffs { id, completion } => {
+            StoreWrite::Storage { job, completion } => {
                 let started = Instant::now();
-                let outcome = self.store.drop_superseded_diffs(&id);
+                let outcome = job.run(&self.store);
                 let held = started.elapsed();
                 let failed = outcome.is_err() && self.store.is_failed();
                 let outcome = outcome.map_err(|error| error.to_string());

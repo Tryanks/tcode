@@ -2,7 +2,7 @@
 //! public project need none; writes do.
 
 use crate::{
-    forge::{ForgeError, ForgeErrorKind},
+    forge::{ForgeError, ForgeErrorKind, account},
     settings::SettingsStore,
 };
 use serde_json::{Value, json};
@@ -15,7 +15,7 @@ use std::{
 };
 use tcode_core::{
     pull_request::HostKind,
-    settings::{CredentialSource, HostSettings},
+    settings::{CredentialSource, HostProblem, HostSettings},
 };
 
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
@@ -220,10 +220,62 @@ impl Api {
             .is_some()
     }
 
-    /// Whether the server has answered a request sent with `credential`, a saved token.
-    pub(super) fn verified(&self, authority: &str, credential: &Credential) -> bool {
-        self.store
-            .credential_verified(HostKind::Gitlab, authority, &credential.verification)
+    /// What the server's last answer to `credential` says: its account, and any problem.
+    pub(super) fn assessed(
+        &self,
+        authority: &str,
+        credential: &Credential,
+    ) -> (Option<HostProblem>, Option<String>) {
+        account::assessed(
+            &self.store,
+            HostKind::Gitlab,
+            authority,
+            &credential.source,
+            &credential.verification,
+        )
+    }
+
+    /// Whose `token` is on the server, and whether it has the `api` scope where the server
+    /// says.
+    pub(super) fn whose(&self, authority: &str, token: &str) -> account::Whose {
+        let authorization = format!("Bearer {token}");
+        let body = account::ask(
+            &self.agent,
+            &format!("https://{authority}/api/v4/user"),
+            &authorization,
+            &[],
+        )?
+        .accepted()?;
+        // Only a personal, group or project access token answers this; an OAuth token's
+        // scopes go unread.
+        let scopes = account::ask(
+            &self.agent,
+            &format!("https://{authority}/api/v4/personal_access_tokens/self"),
+            &authorization,
+            &[],
+        )
+        .ok()
+        .and_then(|answer| answer.accepted().ok())
+        .and_then(|body| body["scopes"].as_array().cloned());
+        let missing = match scopes {
+            Some(scopes) if !scopes.iter().any(|scope| scope == "api") => vec!["api".to_owned()],
+            _ => Vec::new(),
+        };
+        Ok((account::account(&body, "username", "name"), missing))
+    }
+
+    /// Learns whose the token in use is, when that is not yet known.
+    pub(super) fn identify(&self, authority: &str) {
+        if let Ok(Some(credential)) = self.credential(authority) {
+            account::identify(
+                &self.store,
+                HostKind::Gitlab,
+                authority,
+                &credential.source,
+                &credential.verification,
+                || self.whose(authority, &credential.token),
+            );
+        }
     }
 
     fn environment_token(&self, authority: &str) -> Option<String> {
@@ -459,17 +511,15 @@ impl Api {
                 .lock()
                 .unwrap()
                 .succeeded(authority, fingerprint, lease);
-            if let Some(credential) = credential
-                .as_ref()
-                .filter(|credential| credential.source == CredentialSource::Saved)
-                && let Err(error) = self.store.record_verification(
+            if let Some(credential) = &credential {
+                account::record(
+                    &self.store,
                     HostKind::Gitlab,
                     authority,
+                    &credential.source,
                     &credential.verification,
                     true,
-                )
-            {
-                log::warn!("failed to save credential verification: {error}");
+                );
             }
             return Ok(Response {
                 body,
@@ -479,15 +529,15 @@ impl Api {
         }
         Err(match status {
             401 => {
-                if let Some(credential) = credential.as_ref()
-                    && let Err(error) = self.store.record_verification(
+                if let Some(credential) = &credential {
+                    account::record(
+                        &self.store,
                         HostKind::Gitlab,
                         authority,
+                        &credential.source,
                         &credential.verification,
                         false,
-                    )
-                {
-                    log::warn!("failed to clear credential verification: {error}");
+                    );
                 }
                 self.forget(authority);
                 error(

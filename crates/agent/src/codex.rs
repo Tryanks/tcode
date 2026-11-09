@@ -1,6 +1,7 @@
 //! Codex provider: a small client for the newline-delimited JSON protocol used
 //! by `codex app-server`.
 
+use crate::{ForkPoint, LaterHistory, RewindFailure, RewindFailureReason, RewindMode};
 use std::collections::{HashMap, HashSet};
 use std::io::BufWriter;
 #[cfg(test)]
@@ -12,14 +13,16 @@ use serde_json::{Value, json};
 use smol::channel::{Receiver, Sender};
 
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
-use crate::process::{ChildOutput, StderrTail, send_json as write_json, spawn_line_reader};
+use crate::process::{
+    ChildOutput, ProcessTree, StderrTail, send_json as write_json, spawn_line_reader,
+};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
     ApprovalRequest, Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind, Goal,
     GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection,
     PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor,
     SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    TurnOptions, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion,
+    ToolOutput, TurnOptions, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion,
     file_changes_from_unified_diff, permission_control, selection_str,
 };
 
@@ -289,11 +292,23 @@ async fn initialize(
     send_json(stdin, &json!({ "method": "initialized" }))
 }
 
-/// Codex's home: the profile override, else `~/.codex`.
+/// Codex's home: `CODEX_HOME` as the CLI launched with `launch_env` sees it,
+/// else `~/.codex`.
+// What a new account copies of another's home: never `auth.json`, the
+// sessions or the history, which belong to the account they were made in.
+const INHERITED_CONFIG: [&str; 4] = ["config.toml", "AGENTS.md", "prompts", "skills"];
+
+/// Copy the user's configuration from one `CODEX_HOME` into another. Blocking.
+pub fn inherit_config(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut ancestors = std::collections::HashSet::new();
+    INHERITED_CONFIG.iter().try_for_each(|name| {
+        crate::claude::copy_resolved(&from.join(name), &to.join(name), &mut ancestors)
+    })
+}
+
 pub fn home_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
     launch_env
-        .home
-        .clone()
+        .child_path(ProviderKind::Codex, "CODEX_HOME")
         .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
 }
 
@@ -583,7 +598,19 @@ fn thread_config(selections: &[OptionSelection]) -> Option<Value> {
     Some(json!({ "model_context_window": window }))
 }
 
+/// How soon after a turn ends the list is read, so a command ending with it
+/// is not listed.
+const BACKGROUND_TERMINAL_TURN_END_READ: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How often a thread with a running background terminal reads the list again.
+const BACKGROUND_TERMINAL_READ_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 enum PendingRequest {
+    /// `thread/revert` for [`SessionCommand::Rewind`]; the checkpoint is the
+    /// native id of the turn reverted with everything after it.
+    Revert {
+        checkpoint_id: String,
+    },
     TurnStart {
         permission: String,
         settings: Option<Value>,
@@ -608,6 +635,10 @@ enum PendingRequest {
     /// `thread/goal/get` at startup: the snapshot a resumed thread pushes may
     /// arrive while startup still waits for its own responses.
     GoalSnapshot,
+    /// [`SessionCommand::ReadAccountUsage`]: the result goes to its asker.
+    AccountUsage(Sender<Result<Value, String>>),
+    BackgroundTerminalList,
+    BackgroundTerminalStop,
 }
 
 struct PendingApproval {
@@ -641,7 +672,7 @@ enum ElicitFieldKind {
 }
 
 struct Actor {
-    child: Child,
+    child: ProcessTree<Child>,
     stderr_tail: StderrTail,
     stdin: BufWriter<ChildStdin>,
     lines: Receiver<ChildOutput>,
@@ -654,6 +685,8 @@ struct Actor {
     effort: Option<String>,
     /// Session service tier (`serviceTier` selection), if any.
     service_tier: Option<String>,
+    /// What the thread started with that only a new thread changes.
+    thread_config: Option<Value>,
     requested_permission: String,
     effective_permission: String,
     permission_descriptor: OptionDescriptor,
@@ -674,6 +707,11 @@ struct Actor {
     async_questions: Option<(String, Vec<UserInputQuestion>)>,
     items: HashMap<String, ThreadItem>,
     subagents: HashMap<String, CodexSubagent>,
+    /// Subagents a completed turn left running, reported as backgrounded.
+    backgrounded_subagents: HashSet<String>,
+    background_terminals: Vec<crate::BackgroundTask>,
+    /// When to read the list again, while any terminal runs.
+    background_terminal_read: Option<std::time::Instant>,
     /// Stable parent capsule for each provider-native child thread. Codex 0.150
     /// gives completion activities a fresh item id, so the activity id cannot
     /// be the lifecycle identity after spawn.
@@ -695,13 +733,17 @@ struct Actor {
     pending_steers: Vec<(String, String)>,
     /// [`SessionOptions::instructions`], sent as `turn/start.additionalContext`.
     instructions: Option<String>,
+    /// A retry's `turn/start` with empty input is on its way: the turn it
+    /// starts has no prompt to rewind to.
+    continuing: bool,
+    /// Turns that continue a failed one rather than answer a prompt.
+    continuations: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
 struct CodexSubagent {
     agent_type: String,
     description: String,
-    child_item_id: String,
     model: Option<String>,
     effort: Option<String>,
 }
@@ -726,6 +768,7 @@ async fn run_actor(
     let startup = initialize_and_open_thread(&opts, &mut stdin, &lines).await;
     let OpenedThread {
         thread_id,
+        unrevertable,
         model,
         next_id,
         provider_commands,
@@ -755,6 +798,7 @@ async fn run_actor(
         model: model.clone(),
         effort: codex_effort(&opts.option_selections),
         service_tier: codex_service_tier(&opts.option_selections),
+        thread_config: thread_config(&opts.option_selections),
         requested_permission: requested_permission(&opts.option_selections),
         effective_permission,
         permission_descriptor,
@@ -767,6 +811,9 @@ async fn run_actor(
         async_questions: None,
         items: HashMap::new(),
         subagents: HashMap::new(),
+        backgrounded_subagents: HashSet::new(),
+        background_terminals: Vec::new(),
+        background_terminal_read: None,
         subagent_parent_by_thread: HashMap::new(),
         seen_subagent_activities: HashSet::new(),
         usage_by_turn: HashMap::new(),
@@ -778,6 +825,8 @@ async fn run_actor(
         interrupted: false,
         pending_steers: Vec::new(),
         instructions: opts.instructions.clone(),
+        continuing: false,
+        continuations: HashSet::new(),
     };
 
     let started = AgentEvent::SessionStarted {
@@ -792,6 +841,12 @@ async fn run_actor(
         stop_child(&mut actor.child, actor.stdin);
         return;
     }
+    actor
+        .events
+        .emit(AgentEvent::RewindAvailability {
+            unavailable: unrevertable,
+        })
+        .await;
     actor.emit_permissions(None).await;
     // Replace the composer's cached `/` + `$` menu data even when discovery is
     // empty, so removed prompts/skills do not linger from a prior session.
@@ -949,6 +1004,11 @@ impl SessionActor for Actor {
                 };
                 let result = match &decision {
                     ApprovalDecision::Cancel => pending.cancel_reply.clone(),
+                    ApprovalDecision::Feedback(_) => pending
+                        .replies
+                        .get("decline")
+                        .cloned()
+                        .unwrap_or_else(|| pending.cancel_reply.clone()),
                     ApprovalDecision::Option(id) => pending
                         .replies
                         .get(id)
@@ -1025,6 +1085,38 @@ impl SessionActor for Actor {
                     .await;
                 Ok(())
             }
+            // `turn/start` carries the model and effort on every turn, and the
+            // service tier "for this turn and subsequent turns" (0.167.0); the
+            // context window is thread config, set only when the thread starts.
+            SessionCommand::ApplySettings {
+                model,
+                option_selections,
+            } => {
+                let applied = thread_config(&option_selections) == self.thread_config;
+                if applied {
+                    self.model = model;
+                    self.effort = codex_effort(&option_selections);
+                    self.service_tier = codex_service_tier(&option_selections);
+                }
+                self.events
+                    .emit(AgentEvent::SettingsApplied { applied })
+                    .await;
+                Ok(())
+            }
+            SessionCommand::StopBackgroundTask { task_id } => {
+                let thread_id = self.thread_id.clone();
+                let (method, params) = match task_id {
+                    Some(process_id) => (
+                        "thread/backgroundTerminals/terminate",
+                        json!({ "threadId": thread_id, "processId": process_id }),
+                    ),
+                    None => (
+                        "thread/backgroundTerminals/clean",
+                        json!({ "threadId": thread_id }),
+                    ),
+                };
+                self.request(method, params, PendingRequest::BackgroundTerminalStop)
+            }
             SessionCommand::SetOption { id, value } => {
                 if id == "permissions" {
                     let value = value.as_str().ok_or("Codex permissions must be a string")?;
@@ -1086,17 +1178,28 @@ impl SessionActor for Actor {
             }
             SessionCommand::Rewind {
                 checkpoint_id,
-                mode,
+                mode: RewindMode::Conversation,
             } => {
-                self.events
-                    .emit(AgentEvent::RewindFailed {
-                        checkpoint_id,
-                        mode,
-                        error:
-                            "Codex app-server has no stable native file-and-conversation rewind API"
-                                .into(),
-                    })
-                    .await;
+                // The server shuts the thread's runtime down first, which
+                // interrupts a running turn, and reloads it under the same id.
+                let params = json!({
+                    "threadId": self.thread_id,
+                    "beforeTurnId": checkpoint_id,
+                });
+                self.request(
+                    "thread/revert",
+                    params,
+                    PendingRequest::Revert { checkpoint_id },
+                )
+            }
+            command @ (SessionCommand::Rewind { .. }
+            | SessionCommand::PreviewRewind { .. }
+            | SessionCommand::UndoRewind { .. }) => {
+                if let Some(event) = command
+                    .rewind_refusal(RewindFailure::new(RewindFailureReason::Unsupported, None))
+                {
+                    self.events.emit(event).await;
+                }
                 Ok(())
             }
             // Progress arrives as the `contextCompaction` item, mid-turn or on its own.
@@ -1120,6 +1223,12 @@ impl SessionActor for Actor {
                 json!({ "threadId": self.thread_id, "origin": "user" }),
                 PendingRequest::GoalChange,
             ),
+            SessionCommand::ReadAccountUsage { reply } => self.request(
+                "account/rateLimits/read",
+                json!({}),
+                PendingRequest::AccountUsage(reply),
+            ),
+            SessionCommand::MoveToBackground { .. } => Ok(()),
             SessionCommand::Shutdown => Ok(()),
         }
     }
@@ -1145,10 +1254,20 @@ impl SessionActor for Actor {
     }
 
     fn wake_at(&self) -> Option<std::time::Instant> {
-        self.retry_deadline
+        [self.retry_deadline, self.background_terminal_read]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     async fn wake(&mut self) -> Result<(), String> {
+        if self
+            .background_terminal_read
+            .is_some_and(|at| at <= std::time::Instant::now())
+        {
+            self.background_terminal_read = None;
+            return self.read_background_terminals();
+        }
         if self.retry.is_none()
             || self
                 .pending_requests
@@ -1160,6 +1279,7 @@ impl SessionActor for Actor {
         self.retry_deadline = None;
         let mut params = self.build_turn_params("", self.last_turn_options.as_ref(), &[]);
         params["input"] = json!([]);
+        self.continuing = true;
         self.request(
             "turn/start",
             params,
@@ -1225,28 +1345,27 @@ fn enrich_startup_error(
     }
 }
 
+type Spawned = (
+    ProcessTree<Child>,
+    BufWriter<ChildStdin>,
+    Receiver<ChildOutput>,
+    StderrTail,
+);
+
 fn spawn_server(
     binary_path: Option<&Path>,
     extra_args: &[String],
     launch_env: &LaunchEnv,
-) -> Result<
-    (
-        Child,
-        BufWriter<ChildStdin>,
-        Receiver<ChildOutput>,
-        StderrTail,
-    ),
-    AgentError,
-> {
+) -> Result<Spawned, AgentError> {
     // Absolute path: bare names break once a child sets its own cwd.
     let binary = crate::resolve_binary(binary_path, "codex")?;
-    let mut cmd = crate::process::command(&binary);
+    let mut cmd = crate::process::harness_command(&binary);
     cmd.arg("app-server")
         .args(extra_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // Per-provider environment (Settings → Providers): custom variables and the
+    // Per-provider environment (Settings → Harnesses): custom variables and the
     // `CODEX_HOME` override (the account-scoped "shadow home", when set).
     for (key, value) in launch_env.pairs(ProviderKind::Codex) {
         cmd.env(key, value);
@@ -1257,9 +1376,11 @@ fn spawn_server(
             log::warn!("could not create CODEX_HOME {}: {err}", home.display());
         }
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|err| AgentError::Spawn(err.to_string()))?;
+    crate::process::refuse_batch_line_breaks(cmd.get_program(), cmd.get_args())?;
+    let mut child = ProcessTree::new(
+        cmd.spawn()
+            .map_err(|err| AgentError::Spawn(err.to_string()))?,
+    );
     let stdin = BufWriter::new(
         child
             .stdin
@@ -1290,12 +1411,19 @@ fn spawn_server(
 
 struct OpenedThread {
     thread_id: String,
+    /// Why `thread/revert` refuses this thread, when it does: only paginated
+    /// threads that are written to disk can be reverted.
+    unrevertable: Option<RewindFailureReason>,
     model: Option<String>,
     next_id: i64,
     provider_commands: Vec<ProviderCommand>,
     permission_descriptor: OptionDescriptor,
     effective_permission: String,
 }
+
+/// Ids of the startup's `thread/turns/list` pages, clear of the ones
+/// [`initialize_and_open_thread`] numbers one by one.
+const FIRST_TURN_LIST_REQUEST: i64 = 1 << 32;
 
 async fn initialize_and_open_thread(
     opts: &SessionOptions,
@@ -1307,7 +1435,22 @@ async fn initialize_and_open_thread(
     let cwd = opts.cwd.to_string_lossy();
     let permission = requested_permission(&opts.option_selections);
     let (method, mut params) = if let Some(resume) = &opts.resume {
-        resume_request(resume, opts.fork, &cwd)?
+        let fork = match &opts.fork {
+            None => None,
+            Some(ForkPoint::Tail) => Some(None),
+            Some(ForkPoint::Before { checkpoint_id }) => {
+                let thread_id = resume_thread_id(resume)?;
+                Some(Some(
+                    turn_before(stdin, lines, thread_id, checkpoint_id).await?,
+                ))
+            }
+            Some(ForkPoint::Branch { .. }) => {
+                return Err(AgentError::Provider(
+                    "Codex keeps no branches to go on in".into(),
+                ));
+            }
+        };
+        resume_request(resume, fork, &cwd)?
     } else {
         (
             "thread/start",
@@ -1351,6 +1494,9 @@ async fn initialize_and_open_thread(
         .map(str::to_owned)
         .or_else(|| opts.model.clone());
     let effective_permission = effective_permission(&result);
+    let unrevertable = (result.pointer("/thread/ephemeral") == Some(&json!(true))
+        || result.pointer("/thread/historyMode") != Some(&json!("paginated")))
+    .then_some(RewindFailureReason::Unsupported);
 
     // Discover the session's skills for the composer's `$` menu. Supported since
     // codex 0.144.1 (verified live); a failure is non-fatal so older builds
@@ -1375,6 +1521,7 @@ async fn initialize_and_open_thread(
     next_id += 1;
     Ok(OpenedThread {
         thread_id,
+        unrevertable,
         model,
         next_id,
         provider_commands,
@@ -1383,21 +1530,80 @@ async fn initialize_and_open_thread(
     })
 }
 
+fn resume_thread_id(resume: &ResumeCursor) -> Result<&str, AgentError> {
+    resume.str_field(&["thread_id"]).ok_or_else(|| {
+        AgentError::Protocol("Codex resume cursor is missing string field `thread_id`".into())
+    })
+}
+
+/// `fork` is the thread's resume as a fork, through the turn it names when
+/// it names one.
 fn resume_request(
     resume: &ResumeCursor,
-    fork: bool,
+    fork: Option<Option<String>>,
     cwd: &str,
 ) -> Result<(&'static str, Value), AgentError> {
-    let thread_id = resume.str_field(&["thread_id"]).ok_or_else(|| {
-        AgentError::Protocol("Codex resume cursor is missing string field `thread_id`".into())
-    })?;
+    let mut params = json!({
+        "threadId": resume_thread_id(resume)?,
+        "cwd": cwd,
+    });
+    if let Some(Some(last_turn_id)) = &fork {
+        params["lastTurnId"] = json!(last_turn_id);
+    }
     Ok((
-        if fork { "thread/fork" } else { "thread/resume" },
-        json!({
-            "threadId": thread_id,
-            "cwd": cwd,
-        }),
+        if fork.is_some() {
+            "thread/fork"
+        } else {
+            "thread/resume"
+        },
+        params,
     ))
+}
+
+/// The turn before `turn_id`, which `thread/fork` keeps through: it has no
+/// parameter for a fork before a turn. `thread/turns/list` knows the turns of
+/// the rollout a Tcode turn may not show, such as a compaction's, newest
+/// first.
+async fn turn_before(
+    stdin: &mut BufWriter<ChildStdin>,
+    lines: &Receiver<ChildOutput>,
+    thread_id: &str,
+    turn_id: &str,
+) -> Result<String, AgentError> {
+    let mut cursor = Value::Null;
+    let mut found = false;
+    for id in FIRST_TURN_LIST_REQUEST.. {
+        send_json(
+            stdin,
+            &json!({"id": id, "method": "thread/turns/list", "params": {
+                "threadId": thread_id, "cursor": cursor, "sortDirection": "desc",
+            }}),
+        )?;
+        let page = wait_for_response(lines, id).await?;
+        for turn in page
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let id = turn.get("id").and_then(Value::as_str);
+            if found {
+                return id.map(str::to_owned).ok_or_else(|| {
+                    AgentError::Protocol(format!("Codex turn without an id: {turn}"))
+                });
+            }
+            found = id == Some(turn_id);
+        }
+        cursor = page.get("nextCursor").cloned().unwrap_or(Value::Null);
+        if cursor.as_str().is_none_or(str::is_empty) {
+            break;
+        }
+    }
+    Err(AgentError::Provider(if found {
+        "Codex cannot fork before a thread's first turn".into()
+    } else {
+        format!("turn {turn_id} is not in Codex thread {thread_id}")
+    }))
 }
 
 async fn request_permission_profiles(
@@ -1487,6 +1693,18 @@ fn parse_codex_skills(result: &Value) -> Vec<ProviderCommand> {
 /// Render a JSON-RPC error object with everything the server sent — message,
 /// code, and the `data` payload — falling back to the raw JSON when even the
 /// message is missing. Losing any of it makes provider failures undiagnosable.
+/// Why `thread/revert` refused, from its JSON-RPC error.
+fn revert_failure_reason(error: &Value) -> RewindFailureReason {
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+    if message.contains("ephemeral") || message.contains("paginated") {
+        RewindFailureReason::Unsupported
+    } else if message.contains("no rollout") {
+        RewindFailureReason::TargetNotFound
+    } else {
+        RewindFailureReason::Other
+    }
+}
+
 fn describe_rpc_error(error: &Value) -> String {
     let Some(message) = error.get("message").and_then(Value::as_str) else {
         return error.to_string();
@@ -1531,7 +1749,7 @@ async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Val
     }
 }
 
-fn stop_child(child: &mut Child, stdin: BufWriter<ChildStdin>) {
+fn stop_child(child: &mut ProcessTree<Child>, stdin: BufWriter<ChildStdin>) {
     drop(stdin);
     if child.try_wait().ok().flatten().is_none() {
         let _ = child.kill();
@@ -1546,7 +1764,7 @@ fn send_json(stdin: &mut BufWriter<ChildStdin>, value: &Value) -> Result<(), Age
 /// Wait briefly for a child that has already closed stdout to become waitable.
 /// Startup failures are rare, and preserving the real exit code is worth this
 /// bounded delay. A child that remains alive is still killed by `stop_child`.
-fn settle_child_exit(child: &mut Child) -> Option<std::process::ExitStatus> {
+fn settle_child_exit(child: &mut ProcessTree<Child>) -> Option<std::process::ExitStatus> {
     for _ in 0..50 {
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
@@ -1576,17 +1794,15 @@ impl Actor {
         let path = self.cwd.join(path);
         match smol::fs::read(&path).await {
             Ok(bytes) => {
-                *image = Some(crate::Attachment {
-                    media_type: match path.extension().and_then(|ext| ext.to_str()) {
+                *image = crate::tool_output::image(
+                    Some(match path.extension().and_then(|ext| ext.to_str()) {
                         Some("jpg" | "jpeg") => "image/jpeg",
                         Some("webp") => "image/webp",
                         Some("gif") => "image/gif",
                         _ => "image/png",
-                    }
-                    .into(),
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                    source_path: None,
-                });
+                    }),
+                    &base64::engine::general_purpose::STANDARD.encode(bytes),
+                );
                 self.items.insert(item.id.clone(), item.clone());
             }
             Err(error) => log::warn!("could not preserve image read {}: {error}", path.display()),
@@ -1741,6 +1957,80 @@ impl Actor {
         }
     }
 
+    /// Codex says nothing when a terminal ends, so the list is read when a
+    /// turn ends and again while any runs (`background_terminal_read`).
+    fn read_background_terminals(&mut self) -> Result<(), String> {
+        let thread_id = self.thread_id.clone();
+        self.request(
+            "thread/backgroundTerminals/list",
+            json!({ "threadId": thread_id }),
+            PendingRequest::BackgroundTerminalList,
+        )
+    }
+
+    async fn on_background_terminals(&mut self, result: &Value) {
+        let now = crate::now_unix_millis();
+        let tasks: Vec<crate::BackgroundTask> = result
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|terminal| {
+                let id = terminal.get("processId").and_then(Value::as_str)?;
+                let known = self.background_terminals.iter().find(|task| task.id == id);
+                Some(crate::BackgroundTask {
+                    id: id.to_owned(),
+                    name: terminal
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .unwrap_or(id)
+                        .to_owned(),
+                    kind: crate::BackgroundKind::Command,
+                    item_id: terminal
+                        .get("itemId")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    started_at: known.map_or(now, |known| known.started_at),
+                    started_reported: false,
+                })
+            })
+            .collect();
+        self.background_terminal_read = (!tasks.is_empty())
+            .then(|| std::time::Instant::now() + BACKGROUND_TERMINAL_READ_INTERVAL);
+        if tasks == self.background_terminals {
+            return;
+        }
+        // Codex returns a command's call once it yields and says nothing of
+        // its terminal going on but this list: the call it names went on in
+        // the background.
+        let backgrounded: Vec<String> = tasks
+            .iter()
+            .filter_map(|task| task.item_id.clone())
+            .filter(|item_id| {
+                !self
+                    .background_terminals
+                    .iter()
+                    .any(|known| known.item_id.as_ref() == Some(item_id))
+            })
+            .collect();
+        for item_id in backgrounded {
+            self.events
+                .emit(AgentEvent::ItemBackgrounded {
+                    item_id,
+                    parent_item_id: None,
+                })
+                .await;
+        }
+        self.background_terminals = tasks.clone();
+        let count = tasks.len();
+        self.events
+            .emit(AgentEvent::BackgroundTaskList { tasks })
+            .await;
+        self.events
+            .emit(AgentEvent::BackgroundTasksChanged { count })
+            .await;
+    }
+
     fn request(&mut self, method: &str, params: Value, kind: PendingRequest) -> Result<(), String> {
         let id = self.next_id;
         self.next_id += 1;
@@ -1837,6 +2127,36 @@ impl Actor {
                 .await;
         } else if let Some(id) = value.get("id").and_then(Value::as_i64) {
             let pending = self.pending_requests.remove(&id);
+            if let Some(PendingRequest::AccountUsage(reply)) = &pending {
+                let result = match value.get("error") {
+                    Some(error) => Err(describe_rpc_error(error)),
+                    None => value
+                        .get("result")
+                        .cloned()
+                        .ok_or_else(|| format!("response {id} omitted result")),
+                };
+                let _ = reply.try_send(result);
+                return;
+            }
+            if let Some(PendingRequest::Revert { checkpoint_id }) = pending {
+                self.finish_revert(checkpoint_id, &value).await;
+                return;
+            }
+            // An experimental API: a build without it simply lists nothing.
+            if let Some(PendingRequest::BackgroundTerminalList) = &pending {
+                match value.get("result") {
+                    Some(result) => self.on_background_terminals(result).await,
+                    None => log::debug!("Codex background terminals unavailable: {value}"),
+                }
+                return;
+            }
+            if let Some(PendingRequest::BackgroundTerminalStop) = &pending {
+                if value.get("error").is_some() {
+                    log::warn!("Codex background terminal stop failed: {value}");
+                }
+                let _ = self.read_background_terminals();
+                return;
+            }
             if let Some(PendingRequest::GoalSnapshot) = &pending {
                 // A build without goals, or with the feature off, rejects the
                 // request; that is simply a thread without a goal.
@@ -1929,6 +2249,51 @@ impl Actor {
                 }
             }
         }
+    }
+
+    /// `thread/revert` answered. The reverted thread's runtime was shut down
+    /// and reloaded: a turn it interrupted is over even when its end was not
+    /// relayed, and the server cancelled the requests it had open.
+    async fn finish_revert(&mut self, checkpoint_id: String, response: &Value) {
+        let event = if let Some(error) = response.get("error") {
+            AgentEvent::RewindFailed {
+                checkpoint_id,
+                mode: RewindMode::Conversation,
+                failure: RewindFailure::new(
+                    revert_failure_reason(error),
+                    describe_rpc_error(error),
+                ),
+            }
+        } else {
+            if let Some(turn_id) = self.active_turn.take() {
+                self.clear_retry().await;
+                self.events
+                    .emit(AgentEvent::TurnCompleted {
+                        turn_id,
+                        status: TurnStatus::Interrupted,
+                        usage: None,
+                    })
+                    .await;
+            }
+            self.interrupted = false;
+            self.async_questions = None;
+            self.pending_steers.clear();
+            self.approvals.clear();
+            self.guardian_denials.clear();
+            self.user_inputs.clear();
+            self.elicitations.clear();
+            AgentEvent::RewindCompleted {
+                checkpoint_id,
+                mode: RewindMode::Conversation,
+                prefill: None,
+                prefill_attachments: Vec::new(),
+                later_history: LaterHistory::Truncated,
+                files: None,
+                incomplete: None,
+                undo_token: None,
+            }
+        };
+        self.events.emit(event).await;
     }
 
     /// Codex echoes user input as a `userMessage` item only once the turn loop
@@ -2233,7 +2598,7 @@ impl Actor {
                     value.get("type").and_then(Value::as_str),
                     Some("contextCompaction")
                 )
-                && let Some(mut item) = map_item(value)
+                && let Some(mut item) = lifecycle_item(method, value)
             {
                 self.capture_read_image(&mut item).await;
                 let thread_id = thread_id.expect("child notification has a thread id");
@@ -2270,6 +2635,9 @@ impl Actor {
             }
             "turn/started" => {
                 if let Some(id) = params.pointer("/turn/id").and_then(Value::as_str) {
+                    if std::mem::take(&mut self.continuing) {
+                        self.continuations.insert(id.to_owned());
+                    }
                     self.active_turn = Some(id.into());
                     self.retry = None;
                     self.retry_deadline = None;
@@ -2286,6 +2654,8 @@ impl Actor {
                 }
             }
             "turn/completed" => {
+                self.background_terminal_read =
+                    Some(std::time::Instant::now() + BACKGROUND_TERMINAL_TURN_END_READ);
                 let turn = params.get("turn").unwrap_or(&Value::Null);
                 let id = turn
                     .get("id")
@@ -2332,7 +2702,34 @@ impl Actor {
                 }
                 self.active_turn = None;
                 self.async_questions = None;
+                if status == TurnStatus::Completed {
+                    // The turn ended without waiting on a subagent still at
+                    // work: it goes on in the background.
+                    let running: Vec<String> = self
+                        .subagents
+                        .keys()
+                        .filter(|id| {
+                            !self.backgrounded_subagents.contains(*id)
+                                && self.items.get(*id).is_some_and(|item| {
+                                    item.parent_item_id.is_none()
+                                        && item_status(&item.content) == ItemStatus::InProgress
+                                })
+                        })
+                        .cloned()
+                        .collect();
+                    for item_id in running {
+                        self.backgrounded_subagents.insert(item_id.clone());
+                        self.events
+                            .emit(AgentEvent::ItemBackgrounded {
+                                item_id,
+                                parent_item_id: None,
+                            })
+                            .await;
+                    }
+                }
                 let usage = self.usage_by_turn.remove(&id);
+                let checkpoint =
+                    (!id.is_empty() && !self.continuations.remove(&id)).then(|| id.clone());
                 self.events
                     .emit(AgentEvent::TurnCompleted {
                         turn_id: id,
@@ -2340,6 +2737,16 @@ impl Actor {
                         usage,
                     })
                     .await;
+                // A finished turn's prompt is a point `thread/revert` can go
+                // back to; a steer inside it is not.
+                if let Some(turn_id) = checkpoint {
+                    self.events
+                        .emit(AgentEvent::TurnCheckpoint {
+                            checkpoint_id: turn_id.clone(),
+                            turn_id,
+                        })
+                        .await;
+                }
             }
             "turn/diff/updated" => {
                 let turn_id = notification_turn_id(params, &self.active_turn).unwrap_or_default();
@@ -2396,7 +2803,7 @@ impl Actor {
                     }
                     _ => {}
                 }
-                if let Some(mut item) = item_value.and_then(map_item) {
+                if let Some(mut item) = item_value.and_then(|value| lifecycle_item(method, value)) {
                     self.capture_read_image(&mut item).await;
                     if let Some(subagent) = self.subagents.get(&item.id) {
                         let status = if method == "item/completed" {
@@ -2413,26 +2820,10 @@ impl Actor {
                             agent_type: subagent.agent_type.clone(),
                             description: subagent.description.clone(),
                             status,
-                            summary: summary.clone(),
+                            summary,
                             model: subagent.model.clone(),
                             effort: subagent.effort.clone(),
                         };
-                        if method == "item/completed" {
-                            self.events
-                                .emit(AgentEvent::ItemCompleted(ThreadItem {
-                                    id: subagent.child_item_id.clone(),
-                                    parent_item_id: Some(item.id.clone()),
-                                    content: ItemContent::Subagent {
-                                        agent_type: subagent.agent_type.clone(),
-                                        description: "child thread".into(),
-                                        status,
-                                        summary,
-                                        model: subagent.model.clone(),
-                                        effort: subagent.effort.clone(),
-                                    },
-                                }))
-                                .await;
-                        }
                     }
                     self.items.insert(item.id.clone(), item.clone());
                     let event = match method {
@@ -2528,6 +2919,8 @@ impl Actor {
                     .emit(AgentEvent::GoalUpdated { goal: None })
                     .await;
             }
+            // The `thread/revert` response settles the rewind.
+            "thread/reverted" => {}
             "thread/closed" => {
                 self.events
                     .emit(AgentEvent::Warning {
@@ -2626,7 +3019,6 @@ impl Actor {
         };
         let model = override_str("model");
         let effort = override_str("reasoning_effort").or_else(|| override_str("reasoningEffort"));
-        let child_item_id = format!("{parent_id}:{thread_id}");
         let needs_metadata = !self.subagents.contains_key(&parent_id);
         let subagent = self
             .subagents
@@ -2634,7 +3026,6 @@ impl Actor {
             .or_insert_with(|| CodexSubagent {
                 agent_type,
                 description,
-                child_item_id,
                 model,
                 effort,
             })
@@ -2670,30 +3061,6 @@ impl Actor {
             AgentEvent::ItemCompleted(parent)
         };
         self.events.emit(parent_event).await;
-
-        let child = ThreadItem {
-            id: subagent.child_item_id,
-            parent_item_id: Some(parent_id.clone()),
-            content: ItemContent::Subagent {
-                agent_type: subagent.agent_type,
-                description: match kind {
-                    "interacted" => "interacted with parent".into(),
-                    "completed" => "child thread completed".into(),
-                    "interrupted" => "child thread interrupted".into(),
-                    _ => "child thread started".into(),
-                },
-                status,
-                summary: None,
-                model: subagent.model,
-                effort: subagent.effort,
-            },
-        };
-        let event = match kind {
-            "started" => AgentEvent::ItemStarted(child),
-            "completed" | "interrupted" => AgentEvent::ItemCompleted(child),
-            _ => AgentEvent::ItemUpdated(child),
-        };
-        self.events.emit(event).await;
         if needs_metadata
             && let Err(error) = self.request(
                 "thread/read",
@@ -2725,29 +3092,11 @@ impl Actor {
         };
         model.clone_from(&subagent.model);
         effort.clone_from(&subagent.effort);
-        let mut child = parent.clone();
-        child.id.clone_from(&subagent.child_item_id);
-        child.parent_item_id = Some(parent_id.to_owned());
-        if let ItemContent::Subagent {
-            description,
-            status,
-            ..
-        } = &mut child.content
-        {
-            *description = match status {
-                ItemStatus::InProgress => "child thread started",
-                ItemStatus::Completed => "child thread completed",
-                ItemStatus::Interrupted => "child thread interrupted",
-                _ => "child thread",
-            }
-            .into();
-        }
-        // A metadata reply can follow completion. Update both labels without
+        // A metadata reply can follow completion. Update the label without
         // reopening the child or replacing its terminal status and summary.
         self.events
             .emit(AgentEvent::ItemUpdated(parent.clone()))
             .await;
-        self.events.emit(AgentEvent::ItemUpdated(child)).await;
     }
 
     /// Deliver `request_user_input_async` answers into the running turn. The
@@ -3143,14 +3492,18 @@ fn user_message_text(item: &Value) -> String {
 fn pending_name(request: Option<&PendingRequest>) -> &'static str {
     match request {
         Some(PendingRequest::TurnStart { .. }) => "turn/start",
+        Some(PendingRequest::BackgroundTerminalList) => "thread/backgroundTerminals/list",
+        Some(PendingRequest::BackgroundTerminalStop) => "thread/backgroundTerminals/stop",
         Some(PendingRequest::Interrupt) => "turn/interrupt",
         Some(PendingRequest::Steer { .. }) => "turn/steer",
         Some(PendingRequest::SubagentMetadata { .. }) => "thread/read",
         Some(PendingRequest::GuardianApproval { .. }) => "thread/approveGuardianDeniedAction",
         Some(PendingRequest::InjectItems) => "thread/inject_items",
+        Some(PendingRequest::Revert { .. }) => "thread/revert",
         Some(PendingRequest::Compact) => "thread/compact/start",
         Some(PendingRequest::GoalChange) => "thread/goal",
         Some(PendingRequest::GoalSnapshot) => "thread/goal/get",
+        Some(PendingRequest::AccountUsage(_)) => "account/rateLimits/read",
         None => "unknown",
     }
 }
@@ -3571,7 +3924,10 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             output: None,
             status: ItemStatus::Completed,
         },
-        "agentMessage" | "plan" | "proposed_plan" => ItemContent::AssistantMessage {
+        "plan" | "proposed_plan" => ItemContent::Plan {
+            markdown: string_field(item, "text"),
+        },
+        "agentMessage" => ItemContent::AssistantMessage {
             text: string_field(item, "text"),
             summarized: false,
         },
@@ -3599,40 +3955,36 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
                 .unwrap_or_default(),
             status: map_status(item.get("status").and_then(Value::as_str)),
         },
-        "mcpToolCall" | "dynamicToolCall" => ItemContent::ToolCall {
-            image_reads: if item.get("status").and_then(Value::as_str) == Some("completed")
-                && item.get("error").is_none_or(Value::is_null)
-                && item.get("success").and_then(Value::as_bool) != Some(false)
-                && item.pointer("/result/isError").and_then(Value::as_bool) != Some(true)
-                && crate::image_reads::is_read_tool(&string_field(item, "tool"))
-            {
-                crate::image_reads::content_images(
-                    item.pointer("/result/content")
-                        .or_else(|| item.get("contentItems"))
-                        .unwrap_or(&Value::Null),
-                )
-            } else {
-                Vec::new()
-            },
-            name: if provider_kind == "mcpToolCall" {
-                format!(
-                    "{}/{}",
-                    string_field(item, "server"),
+        "mcpToolCall" | "dynamicToolCall" => {
+            let result = item
+                .get(if provider_kind == "mcpToolCall" {
+                    "result"
+                } else {
+                    "contentItems"
+                })
+                .filter(|value| !value.is_null());
+            let ToolOutput { text, images } =
+                result.map(ToolOutput::from_content).unwrap_or_default();
+            ItemContent::ToolCall {
+                image_reads: images,
+                name: if provider_kind == "mcpToolCall" {
+                    format!(
+                        "{}/{}",
+                        string_field(item, "server"),
+                        string_field(item, "tool")
+                    )
+                } else {
                     string_field(item, "tool")
-                )
-            } else {
-                string_field(item, "tool")
-            },
-            input: item.get("arguments").cloned().unwrap_or(Value::Null),
-            output: if provider_kind == "mcpToolCall" {
-                tool_output(item)
-            } else {
-                item.get("contentItems")
-                    .filter(|v| !v.is_null())
-                    .map(Value::to_string)
-            },
-            status: map_status(item.get("status").and_then(Value::as_str)),
-        },
+                },
+                input: item.get("arguments").cloned().unwrap_or(Value::Null),
+                output: item
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or(result.map(|_| text)),
+                status: map_status(item.get("status").and_then(Value::as_str)),
+            }
+        }
         "collabAgentToolCall" => ItemContent::ToolCall {
             image_reads: Vec::new(),
             name: string_field(item, "tool"),
@@ -3651,6 +4003,16 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
         "webSearch" => ItemContent::WebSearch {
             query: string_field(item, "query"),
         },
+        // The display item of the `clock.sleep` call, which a rollout records
+        // as that call with its arguments.
+        "sleep" => ItemContent::ToolCall {
+            image_reads: Vec::new(),
+            name: "sleep".into(),
+            input: json!({ "duration_ms": item.get("durationMs").cloned().unwrap_or(Value::Null) }),
+            output: None,
+            status: map_status(item.get("status").and_then(Value::as_str)),
+        },
+        "imageGeneration" => image_generation(item),
         _ => ItemContent::Other {
             provider_kind: provider_kind.into(),
             summary: serde_json::to_string(item).unwrap_or_else(|_| provider_kind.into()),
@@ -3661,6 +4023,100 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
         parent_item_id: None,
         content,
     })
+}
+
+/// [`map_item`] for an `item/*` notification. A sleep carries no status of
+/// its own, so it has finished when it completes.
+fn lifecycle_item(method: &str, value: &Value) -> Option<ThreadItem> {
+    let mut item = map_item(value)?;
+    if method == "item/completed"
+        && value.get("status").is_none()
+        && let ItemContent::ToolCall { status, .. } = &mut item.content
+    {
+        *status = ItemStatus::Completed;
+    }
+    Some(item)
+}
+
+/// An `imageGeneration` item as the call of the hosted `image_generation`
+/// tool: the prompt the picture was generated from, the local images it was
+/// given, and the picture, kept where Codex saved it. A rollout records the
+/// same call with the same fields (`image_generation_call`), and the
+/// importer reads it through this.
+pub fn image_generation(item: &Value) -> ItemContent {
+    let text = |key: &str| {
+        item.get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+    };
+    let picture = text("result")
+        .and_then(|data| crate::tool_output::image(Some("image/png"), data))
+        .map(|picture| Attachment {
+            source_path: text("savedPath").map(str::to_owned),
+            ..picture
+        });
+    let mut input = serde_json::Map::new();
+    if let Some(prompt) = text("revisedPrompt") {
+        input.insert("revised_prompt".into(), prompt.into());
+    }
+    let inputs: Vec<Value> = item
+        .get("inputImages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|image| image.get("path").cloned())
+        .collect();
+    if !inputs.is_empty() {
+        input.insert("input_images".into(), Value::Array(inputs));
+    }
+    let failure = item.get("failure").filter(|failure| !failure.is_null());
+    let status = match map_status(item.get("status").and_then(Value::as_str)) {
+        _ if failure.is_some() => ItemStatus::Failed,
+        // A rollout keeps `generating` on a generation whose picture arrived.
+        ItemStatus::InProgress if picture.is_some() => ItemStatus::Completed,
+        status => status,
+    };
+    ItemContent::ToolCall {
+        image_reads: picture.into_iter().collect(),
+        name: "image_generation".into(),
+        input: Value::Object(input),
+        output: failure.map(Value::to_string),
+        status,
+    }
+}
+
+/// An item the adapter recorded as `Other` before it mapped its kind, as it
+/// maps it now. Its summary is the item as the app-server sent it (the
+/// importer wrote an image generation in the same shape); `completed` when
+/// it was recorded as completed.
+pub fn normalize_legacy_item(item: &mut ThreadItem, completed: bool) {
+    let ItemContent::Other {
+        provider_kind,
+        summary,
+    } = &item.content
+    else {
+        return;
+    };
+    if !matches!(
+        provider_kind.as_str(),
+        "sleep" | "imageView" | "imageGeneration"
+    ) {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(summary) else {
+        return;
+    };
+    if value.get("type").and_then(Value::as_str) != Some(provider_kind.as_str()) {
+        return;
+    }
+    let method = if completed {
+        "item/completed"
+    } else {
+        "item/updated"
+    };
+    if let Some(mapped) = lifecycle_item(method, &value) {
+        item.content = mapped.content;
+    }
 }
 
 fn collab_tool_input(item: &Value) -> Value {
@@ -3767,15 +4223,6 @@ fn notification_turn_id(params: &Value, active_turn: &Option<String>) -> Option<
         .and_then(Value::as_str)
         .map(str::to_owned)
         .or_else(|| active_turn.clone())
-}
-
-fn tool_output(item: &Value) -> Option<String> {
-    if let Some(message) = item.pointer("/error/message").and_then(Value::as_str) {
-        return Some(message.into());
-    }
-    item.get("result")
-        .filter(|v| !v.is_null())
-        .map(Value::to_string)
 }
 
 /// Map one `turn/plan/updated` step, falling back to `pending` status and
@@ -3955,6 +4402,17 @@ fn model_reroute(params: &Value) -> Option<(String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `CODEX_HOME` the user set in the profile's environment is where the
+    /// CLI keeps its sign-in and sessions, so it is where Tcode reads them.
+    #[test]
+    fn home_dir_follows_a_configured_codex_home() {
+        let launch_env = LaunchEnv {
+            env: vec![("CODEX_HOME".into(), "/configured".into())],
+            home: None,
+        };
+        assert_eq!(home_dir(&launch_env), Some(PathBuf::from("/configured")));
+    }
 
     #[test]
     fn native_permissions_apply_and_confirm_on_next_turn() {
@@ -4228,7 +4686,7 @@ mod tests {
     fn mcp_tool_consent_uses_native_options_without_preapproval() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            actor.handle_line(r#"{"method":"mcpServer/elicitation/request","id":0,"params":{"threadId":"thread-1","turnId":"turn-1","serverName":"tcode_report","mode":"form","_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],"tool_description":"Harmless permission probe: return PONG.","tool_params":{},"tool_params_display":[]},"message":"Allow the tcode_report MCP server to run tool \"probe\"?","requestedSchema":{"type":"object","properties":{}}}}"#).await;
+            actor.handle_line(r#"{"method":"mcpServer/elicitation/request","id":0,"params":{"threadId":"thread-1","turnId":"turn-1","serverName":"tcode_control","mode":"form","_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],"tool_description":"Harmless permission probe: return PONG.","tool_params":{},"tool_params_display":[]},"message":"Allow the tcode_control MCP server to run tool \"probe\"?","requestedSchema":{"type":"object","properties":{}}}}"#).await;
             let AgentEvent::ApprovalRequested(request) = events.recv().await.unwrap() else {
                 panic!("MCP consent")
             };
@@ -4259,7 +4717,7 @@ mod tests {
                 json!({"id":0,"result":{"action":"accept","content":{},"_meta":{"persist":"session"}}})
             );
             let config = crate::McpRegistration {
-                name: "tcode_report".into(),
+                name: "tcode_control".into(),
                 url: "http://127.0.0.1/mcp".into(),
                 bearer_token: "probe".into(),
             }
@@ -4365,8 +4823,8 @@ mod tests {
                 (
                     "approved",
                     ItemStatus::Completed,
-                    json!({"type":"mcpToolCall","server":"tcode_report","toolName":"report_result"}),
-                    "MCP tool: tcode_report/report_result",
+                    json!({"type":"mcpToolCall","server":"tcode_control","toolName":"report_result"}),
+                    "MCP tool: tcode_control/report_result",
                 ),
                 (
                     "approved",
@@ -4411,11 +4869,11 @@ mod tests {
     #[test]
     fn fork_request_uses_native_method_and_resume_thread_id() {
         let resume = ResumeCursor(json!({"thread_id": "thread-source"}));
-        let (method, params) = resume_request(&resume, true, "/workspace").unwrap();
+        let (method, params) = resume_request(&resume, Some(None), "/workspace").unwrap();
         assert_eq!(method, "thread/fork");
         assert_eq!(params["threadId"], "thread-source");
 
-        let (method, _) = resume_request(&resume, false, "/workspace").unwrap();
+        let (method, _) = resume_request(&resume, None, "/workspace").unwrap();
         assert_eq!(method, "thread/resume");
     }
 
@@ -4447,7 +4905,7 @@ mod tests {
                 bearer_token: "p".into(),
             },
             crate::McpRegistration {
-                name: "tcode_orchestrate".into(),
+                name: "tcode_control".into(),
                 url: "http://o".into(),
                 bearer_token: "o".into(),
             },
@@ -4462,7 +4920,7 @@ mod tests {
             assert_eq!(args.len(), count * 2);
             for (arg, (key, url, authorization)) in args.as_chunks::<2>().0.iter().zip([
                 ("mcp_servers.tcode_preview", "http://p", "Bearer p"),
-                ("mcp_servers.tcode_orchestrate", "http://o", "Bearer o"),
+                ("mcp_servers.tcode_control", "http://o", "Bearer o"),
                 ("mcp_servers.tcode_computer_use", "http://c", "Bearer c"),
             ]) {
                 assert_eq!(arg[0], "-c");
@@ -4505,7 +4963,7 @@ mod tests {
         let (event_tx, event_rx) = smol::channel::unbounded();
         (
             Actor {
-                child,
+                child: ProcessTree::new(child),
                 stderr_tail: StderrTail::default(),
                 stdin,
                 lines: line_rx,
@@ -4515,6 +4973,7 @@ mod tests {
                 model: Some("gpt-5-codex".into()),
                 effort: None,
                 service_tier: None,
+                thread_config: None,
                 requested_permission: "ask".into(),
                 effective_permission: "ask".into(),
                 permission_descriptor: permission_descriptor(&[], "ask", &Value::Null),
@@ -4527,6 +4986,9 @@ mod tests {
                 async_questions: None,
                 items: HashMap::new(),
                 subagents: HashMap::new(),
+                backgrounded_subagents: HashSet::new(),
+                background_terminals: Vec::new(),
+                background_terminal_read: None,
                 subagent_parent_by_thread: HashMap::new(),
                 seen_subagent_activities: HashSet::new(),
                 pending_steers: Vec::new(),
@@ -4538,6 +5000,8 @@ mod tests {
                 last_turn_options: None,
                 interrupted: false,
                 instructions: None,
+                continuing: false,
+                continuations: HashSet::new(),
             },
             event_rx,
         )
@@ -4887,6 +5351,10 @@ mod tests {
                             matches!(event, AgentEvent::TurnCompleted { turn_id, .. } if turn_id == "T1")
                         );
                         assert!(actor.active_turn.is_none());
+                        assert!(matches!(
+                            events.try_recv().unwrap(),
+                            AgentEvent::TurnCheckpoint { turn_id, .. } if turn_id == "T1"
+                        ));
                     }
                 }
             }
@@ -5015,6 +5483,10 @@ mod tests {
                 events.recv().await.unwrap(),
                 AgentEvent::TurnCompleted { .. }
             ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::TurnCheckpoint { .. }
+            ));
             let mut answers = serde_json::Map::new();
             answers.insert(
                 r#"["request_user_input_async","call_r",0]"#.into(),
@@ -5142,6 +5614,10 @@ mod tests {
             assert!(matches!(
                 events.recv().await.unwrap(),
                 AgentEvent::TurnCompleted { .. }
+            ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::TurnCheckpoint { .. }
             ));
             actor
                 .handle_command(SessionCommand::Steer {
@@ -5476,6 +5952,186 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A running app-server answers a usage read itself:
+    /// `account/rateLimits/read` goes out on the live connection and its
+    /// result reaches the asker, so no second server is started for it.
+    #[test]
+    fn a_usage_read_asks_the_running_app_server() {
+        smol::block_on(async {
+            let (mut actor, _events) = test_actor();
+            let (reply, answer) = smol::channel::bounded(1);
+            actor
+                .handle_command(SessionCommand::ReadAccountUsage { reply })
+                .await
+                .unwrap();
+            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                panic!("missing usage request")
+            };
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["method"], "account/rateLimits/read");
+            let result = json!({"rateLimits": {"planType": "pro"}});
+            actor
+                .handle_line(&json!({"id": request["id"], "result": result}).to_string())
+                .await;
+            assert_eq!(answer.recv().await.unwrap().unwrap(), result);
+        });
+    }
+
+    #[test]
+    fn background_terminals_are_listed_read_again_and_stopped() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            let next_request = async |actor: &mut Actor| {
+                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                    panic!("missing request")
+                };
+                serde_json::from_str::<Value>(&request).unwrap()
+            };
+            let answer = async |actor: &mut Actor, request: &Value, result: Value| {
+                let response = json!({"id": request["id"], "result": result}).to_string();
+                actor.handle_line(&response).await;
+            };
+
+            actor
+                .handle_notification(
+                    "turn/completed",
+                    &json!({"turn":{"id":"T1","status":"completed"}}),
+                )
+                .await;
+            while events.try_recv().is_ok() {}
+            actor.background_terminal_read = Some(std::time::Instant::now());
+            actor.wake().await.unwrap();
+            let list = next_request(&mut actor).await;
+            assert_eq!(list["method"], "thread/backgroundTerminals/list");
+            assert_eq!(list["params"], json!({"threadId": "thread-1"}));
+            // Recorded from 0.167.0.
+            let running = json!({"data":[{
+                "itemId":"call_1","processId":"98412","command":"sleep 40",
+                "cwd":"/tmp/project","osPid":null,"cpuPercent":null,"rssKb":null
+            }],"nextCursor":null});
+            answer(&mut actor, &list, running.clone()).await;
+            assert!(
+                actor.background_terminal_read.is_some(),
+                "it keeps watching"
+            );
+            assert!(
+                matches!(
+                    events.try_recv(),
+                    Ok(AgentEvent::ItemBackgrounded { item_id, parent_item_id: None })
+                        if item_id == "call_1"
+                ),
+                "the call that started it went on in the background"
+            );
+            let listed = events.try_recv().unwrap();
+            let AgentEvent::BackgroundTaskList { tasks } = &listed else {
+                panic!("expected the list: {listed:?}");
+            };
+            assert_eq!(
+                (
+                    tasks[0].id.as_str(),
+                    tasks[0].name.as_str(),
+                    tasks[0].item_id.as_deref()
+                ),
+                ("98412", "sleep 40", Some("call_1"))
+            );
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AgentEvent::BackgroundTasksChanged { count: 1 })
+            ));
+
+            actor.background_terminal_read = Some(std::time::Instant::now());
+            actor.wake().await.unwrap();
+            let again = next_request(&mut actor).await;
+            answer(&mut actor, &again, running).await;
+            assert!(events.try_recv().is_err(), "an unchanged list says nothing");
+
+            actor
+                .handle_command(SessionCommand::StopBackgroundTask {
+                    task_id: Some("98412".into()),
+                })
+                .await
+                .unwrap();
+            let terminate = next_request(&mut actor).await;
+            assert_eq!(terminate["method"], "thread/backgroundTerminals/terminate");
+            assert_eq!(
+                terminate["params"],
+                json!({"threadId": "thread-1", "processId": "98412"})
+            );
+            answer(&mut actor, &terminate, json!({"terminated": true})).await;
+
+            let list = next_request(&mut actor).await;
+            assert_eq!(list["method"], "thread/backgroundTerminals/list");
+            answer(&mut actor, &list, json!({"data":[],"nextCursor":null})).await;
+            assert!(actor.background_terminal_read.is_none());
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AgentEvent::BackgroundTaskList { tasks }) if tasks.is_empty()
+            ));
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AgentEvent::BackgroundTasksChanged { count: 0 })
+            ));
+
+            actor
+                .handle_command(SessionCommand::StopBackgroundTask { task_id: None })
+                .await
+                .unwrap();
+            let clean = next_request(&mut actor).await;
+            assert_eq!(clean["method"], "thread/backgroundTerminals/clean");
+            assert_eq!(clean["params"], json!({"threadId": "thread-1"}));
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn a_new_model_and_effort_go_out_with_the_next_turn() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            let select = |id: &str, value: Value| OptionSelection {
+                id: id.into(),
+                value,
+            };
+            actor
+                .handle_command(SessionCommand::ApplySettings {
+                    model: Some("gpt-5.5".into()),
+                    option_selections: vec![
+                        select("reasoningEffort", json!("high")),
+                        select("serviceTier", json!("fast")),
+                    ],
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AgentEvent::SettingsApplied { applied: true })
+            ));
+            let params = actor.build_turn_params("next", None, &[]);
+            assert_eq!(params["collaborationMode"]["settings"]["model"], "gpt-5.5");
+            assert_eq!(params["effort"], "high");
+            assert_eq!(params["serviceTier"], "fast");
+
+            // A context window is thread config, fixed when the thread starts.
+            actor
+                .handle_command(SessionCommand::ApplySettings {
+                    model: Some("gpt-5.4".into()),
+                    option_selections: vec![select("contextWindow", json!("272k"))],
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AgentEvent::SettingsApplied { applied: false })
+            ));
+            assert_eq!(
+                actor.build_turn_params("next", None, &[])["collaborationMode"]["settings"]["model"],
+                "gpt-5.5"
+            );
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
     #[test]
     fn capacity_failure_offers_native_continuation_after_ten_seconds() {
         smol::block_on(async {
@@ -5668,7 +6324,7 @@ mod tests {
     }
 
     #[test]
-    fn native_plan_items_stream_as_assistant_text() {
+    fn native_plan_items_stream_as_plans() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
             actor
@@ -5680,7 +6336,7 @@ mod tests {
             assert!(matches!(
                 events.recv().await.unwrap(),
                 AgentEvent::ItemStarted(ThreadItem {
-                    content: ItemContent::AssistantMessage { .. },
+                    content: ItemContent::Plan { .. },
                     ..
                 })
             ));
@@ -5695,7 +6351,7 @@ mod tests {
             );
             actor.handle_notification("item/completed", &json!({"item": {"type": "plan", "id": "native-plan", "text": "# Final native plan"}})).await;
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::AssistantMessage { text, .. }, .. }) if text == "# Final native plan")
+                matches!(events.recv().await.unwrap(), AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::Plan { markdown }, .. }) if markdown == "# Final native plan")
             );
             let _ = actor.child.kill();
             let _ = actor.child.wait();
@@ -5786,14 +6442,6 @@ mod tests {
                     content: ItemContent::Subagent { status: ItemStatus::InProgress, .. }
                 }) if id == "call_spawn"
             ));
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ItemStarted(ThreadItem {
-                    id,
-                    parent_item_id: Some(parent),
-                    content: ItemContent::Subagent { status: ItemStatus::InProgress, .. }
-                }) if id == "call_spawn:thread_child" && parent == "call_spawn"
-            ));
 
             actor
                 .handle_notification(
@@ -5810,14 +6458,10 @@ mod tests {
                 .await;
             assert!(matches!(
                 events.recv().await.unwrap(),
-                AgentEvent::ItemCompleted(ThreadItem { parent_item_id: Some(parent), content: ItemContent::Subagent { status: ItemStatus::Completed, .. }, .. })
-                    if parent == "call_spawn"
-            ));
-            assert!(matches!(
-                events.recv().await.unwrap(),
                 AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::Subagent { status: ItemStatus::Completed, .. }, .. })
                     if id == "call_spawn"
             ));
+            assert!(events.try_recv().is_err());
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -5849,21 +6493,65 @@ mod tests {
                         }}),
                     )
                     .await;
-                for _ in 0..2 {
-                    let event = events.try_recv().unwrap();
-                    let (AgentEvent::ItemStarted(item)
-                    | AgentEvent::ItemUpdated(item)
-                    | AgentEvent::ItemCompleted(item)) = event
-                    else {
-                        panic!("expected subagent snapshot");
-                    };
-                    assert!(
-                        matches!(item.content, ItemContent::Subagent { status, .. } if status == expected),
-                        "{kind} must preserve the child's actual work state: {item:?}"
-                    );
-                }
+                let event = events.try_recv().unwrap();
+                let (AgentEvent::ItemUpdated(item) | AgentEvent::ItemCompleted(item)) = event
+                else {
+                    panic!("expected subagent snapshot");
+                };
+                assert!(
+                    matches!(item.content, ItemContent::Subagent { status, .. } if status == expected),
+                    "{kind} must preserve the child's actual work state: {item:?}"
+                );
                 assert!(events.try_recv().is_err());
             }
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    /// The lead's turn ends while the child it spawned still works, as
+    /// Codex 0.166 reports a spawn the model did not wait on: the spawn goes
+    /// on in the background, said once, and a child that has finished is not.
+    #[test]
+    fn a_subagent_a_completed_turn_left_running_goes_on_in_the_background() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            let activity = |id: &str, child: &str, kind: &str| {
+                json!({"item": {
+                    "type": "subAgentActivity", "id": id,
+                    "agentThreadId": child, "agentPath": "/root/reply_ok",
+                    "kind": kind
+                }})
+            };
+            for (id, child, kind) in [
+                ("running", "child-a", "started"),
+                ("done", "child-b", "started"),
+                ("done-end", "child-b", "completed"),
+            ] {
+                actor
+                    .handle_notification("item/completed", &activity(id, child, kind))
+                    .await;
+            }
+            while events.try_recv().is_ok() {}
+            let turn_completed =
+                json!({"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}});
+            for _ in 0..2 {
+                actor
+                    .handle_notification("turn/completed", &turn_completed)
+                    .await;
+            }
+            let mut backgrounded = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                if let AgentEvent::ItemBackgrounded {
+                    item_id,
+                    parent_item_id,
+                } = event
+                {
+                    assert_eq!(parent_item_id, None);
+                    backgrounded.push(item_id);
+                }
+            }
+            assert_eq!(backgrounded, ["running"]);
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -5890,30 +6578,21 @@ mod tests {
                 actor
                     .handle_notification("item/started", &activity("started"))
                     .await;
-                for _ in 0..2 {
-                    let event = events.try_recv().unwrap();
-                    assert!(
-                        matches!(
-                            event,
-                            AgentEvent::ItemUpdated(ThreadItem {
-                                content: ItemContent::Subagent {
-                                    model: None,
-                                    effort: None,
-                                    ..
-                                },
+                let event = events.try_recv().unwrap();
+                assert!(
+                    matches!(
+                        event,
+                        AgentEvent::ItemUpdated(ThreadItem {
+                            content: ItemContent::Subagent {
+                                model: None,
+                                effort: None,
                                 ..
-                            }) | AgentEvent::ItemStarted(ThreadItem {
-                                content: ItemContent::Subagent {
-                                    model: None,
-                                    effort: None,
-                                    ..
-                                },
-                                ..
-                            })
-                        ),
-                        "unknown child metadata must not borrow the parent's model: {event:?}"
-                    );
-                }
+                            },
+                            ..
+                        })
+                    ),
+                    "unknown child metadata must not borrow the parent's model: {event:?}"
+                );
                 let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
                     panic!("expected thread metadata request");
                 };
@@ -5937,29 +6616,26 @@ mod tests {
                         .to_string(),
                     )
                     .await;
-                for (id, parent) in [("spawn", None), ("spawn:child", Some("spawn"))] {
-                    let AgentEvent::ItemUpdated(item) = events.try_recv().unwrap() else {
-                        panic!("expected label update");
-                    };
-                    assert_eq!(item.id, id);
-                    assert_eq!(item.parent_item_id.as_deref(), parent);
-                    assert!(matches!(item.content,
-                        ItemContent::Subagent { model: Some(model), effort: Some(effort), status, .. }
-                        if model == "gpt-5.6-sol" && effort == "high" && status == expected_status
-                    ));
-                }
+                let AgentEvent::ItemUpdated(item) = events.try_recv().unwrap() else {
+                    panic!("expected label update");
+                };
+                assert_eq!(item.id, "spawn");
+                assert_eq!(item.parent_item_id, None);
+                assert!(matches!(item.content,
+                    ItemContent::Subagent { model: Some(model), effort: Some(effort), status, .. }
+                    if model == "gpt-5.6-sol" && effort == "high" && status == expected_status
+                ));
                 assert!(events.try_recv().is_err());
                 if kind == "started" {
                     actor
                         .handle_notification("item/completed", &activity("completed"))
                         .await;
-                    for _ in 0..2 {
-                        assert!(
-                            matches!(events.try_recv().unwrap(), AgentEvent::ItemCompleted(ThreadItem {
-                            content: ItemContent::Subagent { model: Some(model), effort: Some(effort), status: ItemStatus::Completed, .. }, ..
-                        }) if model == "gpt-5.6-sol" && effort == "high")
-                        );
-                    }
+                    assert!(
+                        matches!(events.try_recv().unwrap(), AgentEvent::ItemCompleted(ThreadItem {
+                        content: ItemContent::Subagent { model: Some(model), effort: Some(effort), status: ItemStatus::Completed, .. }, ..
+                    }) if model == "gpt-5.6-sol" && effort == "high")
+                    );
+                    assert!(events.try_recv().is_err());
                 }
                 let _ = actor.child.kill();
                 let _ = actor.child.wait();
@@ -6030,18 +6706,6 @@ mod tests {
                 }) if id == "call_spawn" && effort == "high"
             ));
 
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ItemStarted(ThreadItem {
-                    id,
-                    parent_item_id: Some(parent),
-                    content: ItemContent::Subagent {
-                        status: ItemStatus::InProgress,
-                        ..
-                    }
-                }) if id == "call_spawn:thread_child" && parent == "call_spawn"
-            ));
-
             // Codex emits the instantaneous activity as item/started +
             // item/completed and may additionally fan out the legacy event.
             actor.handle_notification("item/completed", &started).await;
@@ -6081,17 +6745,6 @@ mod tests {
                     }
                 }) if id == "call_spawn"
             ));
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ItemCompleted(ThreadItem {
-                    parent_item_id: Some(parent),
-                    content: ItemContent::Subagent {
-                        status: ItemStatus::Completed,
-                        ..
-                    },
-                    ..
-                }) if parent == "call_spawn"
-            ));
             actor
                 .handle_notification("item/completed", &completed)
                 .await;
@@ -6118,17 +6771,7 @@ mod tests {
                     ..
                 }) if id == "call_spawn"
             ));
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ItemCompleted(ThreadItem {
-                    parent_item_id: Some(parent),
-                    content: ItemContent::Subagent {
-                        status: ItemStatus::Interrupted,
-                        ..
-                    },
-                    ..
-                }) if parent == "call_spawn"
-            ));
+            assert!(events.try_recv().is_err());
 
             let _ = actor.child.kill();
             let _ = actor.child.wait();
@@ -6180,30 +6823,64 @@ mod tests {
         assert_eq!(codex_service_tier(&explicit).as_deref(), Some("flex"));
     }
 
+    /// MCP results recorded from the app-server (each `result` as Tcode
+    /// stored it, base64 swapped for a 1x1 JPEG): the timeline keeps the text
+    /// the model read and moves image parts into `image_reads`, typed by their
+    /// bytes, whatever the tool.
     #[test]
-    fn image_read_results_exclude_failed_reads_and_image_generation() {
-        for (name, status, expected) in [
-            ("read_image", "completed", 1),
-            ("read_image", "failed", 0),
-            ("generate_image", "completed", 0),
-        ] {
-            for kind in ["mcpToolCall", "dynamicToolCall"] {
-                let mut wire = json!({"type":kind,"id":"read","server":"files","tool":name,"status":status,
-                    "result":{"content":[{"type":"image","mimeType":"image/png","data":"AQID"}]},
-                    "contentItems":[{"type":"inputImage","imageUrl":"data:image/png;base64,AQID"}]});
-                if kind == "dynamicToolCall" {
-                    wire.as_object_mut().unwrap().remove("result");
-                }
-                let item = map_item(&wire).unwrap();
-                let ItemContent::ToolCall { image_reads, .. } = item.content else {
-                    panic!("tool")
-                };
-                assert_eq!(image_reads.len(), expected, "{kind}, {name}, {status}");
-                if expected != 0 {
-                    assert_eq!(image_reads[0].data_base64, "AQID");
+    fn mcp_results_keep_their_text_and_move_images_into_image_reads() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            for line in include_str!("../tests/fixtures/codex/mcp_tool_results.jsonl").lines() {
+                actor.handle_line(line).await;
+            }
+            let mut completed = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                if let AgentEvent::ItemCompleted(ThreadItem {
+                    content:
+                        ItemContent::ToolCall {
+                            name,
+                            output,
+                            image_reads,
+                            status,
+                            ..
+                        },
+                    ..
+                }) = event
+                {
+                    let images: Vec<_> = image_reads
+                        .iter()
+                        .map(|image| (image.media_type.clone(), image.data_base64.len()))
+                        .collect();
+                    completed.push((name, output.unwrap(), images, status));
                 }
             }
-        }
+            assert_eq!(
+                completed,
+                [
+                    (
+                        "cua_repl/js".to_owned(),
+                        "The following is a diff from the previous accessibility tree for Window: \"\" with ~ and + representing changed and added elements, respectively. Removed elements are summarized by ID range.\nRemoved element IDs: 1-30\n+41 window Secondary Actions: Raise\nThe focused UI element is 41 window Secondary Actions: Raise".to_owned(),
+                        vec![("image/jpeg".to_owned(), 216)],
+                        ItemStatus::Completed,
+                    ),
+                    (
+                        "cua_repl/js".to_owned(),
+                        "Computer Use server error -10005: noWindowsAvailable".to_owned(),
+                        vec![],
+                        ItemStatus::Failed,
+                    ),
+                    (
+                        "codex_apps/github.search_installed_repositories_v2".to_owned(),
+                        "Action completed.\n{\"repositories\":[]}".to_owned(),
+                        vec![],
+                        ItemStatus::Completed,
+                    ),
+                ]
+            );
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
     }
 
     #[test]
@@ -6313,10 +6990,74 @@ mod tests {
             matches!(image.content, ItemContent::ImageRead { path, .. } if path == "/tmp/screenshot.png")
         );
 
-        let unknown = map_item(&json!({"type":"sleep","id":"sleep-1","durationMs":10})).unwrap();
+        let unknown = map_item(&json!({"type":"hookPrompt","id":"hook-1"})).unwrap();
         assert!(
-            matches!(unknown.content, ItemContent::Other { ref provider_kind, .. } if provider_kind == "sleep")
+            matches!(unknown.content, ItemContent::Other { ref provider_kind, .. } if provider_kind == "hookPrompt")
         );
+    }
+
+    /// A sleep and an image generation, as Codex sent them, arrive as the
+    /// calls a rollout records them as: the sleep finished once it
+    /// completes, the picture an image the call holds, kept where Codex
+    /// saved it. A row recorded before they were mapped reads back the same.
+    #[test]
+    fn sleeps_and_image_generations_arrive_as_their_calls() {
+        let sleep = json!({"type":"sleep","id":"call_wmvrnLAr0GTnBoYQog6Gvjq0","durationMs":20000});
+        let call = |status| ItemContent::ToolCall {
+            image_reads: Vec::new(),
+            name: "sleep".into(),
+            input: json!({"duration_ms": 20000}),
+            output: None,
+            status,
+        };
+        assert_eq!(
+            lifecycle_item("item/started", &sleep).unwrap().content,
+            call(ItemStatus::InProgress)
+        );
+        assert_eq!(
+            lifecycle_item("item/completed", &sleep).unwrap().content,
+            call(ItemStatus::Completed)
+        );
+
+        let picture = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        let saved = "/Users/me/.codex/generated_images/01a196f6-db20-7941-b9de-d73415937480/exec-89f575db-4c35-4d77-a024-611fdd5d1d50.png";
+        let generation = json!({"type":"imageGeneration","id":"exec-89f575db-4c35-4d77-a024-611fdd5d1d50","status":"completed","revisedPrompt":"Edit the reference image: keep the subject, make the background transparent.","result":picture,"transparentBackground":true,"failure":null,"savedPath":saved,"inputImages":[{"path":"/Users/me/project/assets/reference.png","sha256":"f5000811e1aa0c2f9f23baeb7fc932e2d4e41974204fb409ece85cd70197840d"}],"generationId":"695e31e3-b3a3-4def-afce-27493b36fb7e","startedAtMs":1_793_534_383_829_u64,"completedAtMs":1_793_534_414_873_u64});
+        let generated = ItemContent::ToolCall {
+            image_reads: vec![Attachment {
+                media_type: "image/png".into(),
+                data_base64: picture.into(),
+                source_path: Some(saved.into()),
+            }],
+            name: "image_generation".into(),
+            input: json!({
+                "revised_prompt": "Edit the reference image: keep the subject, make the background transparent.",
+                "input_images": ["/Users/me/project/assets/reference.png"],
+            }),
+            output: None,
+            status: ItemStatus::Completed,
+        };
+        assert_eq!(
+            lifecycle_item("item/completed", &generation)
+                .unwrap()
+                .content,
+            generated
+        );
+
+        for (value, content) in [
+            (sleep, call(ItemStatus::Completed)),
+            (generation, generated),
+        ] {
+            let mut legacy = ThreadItem {
+                id: "legacy".into(),
+                parent_item_id: None,
+                content: ItemContent::Other {
+                    provider_kind: value["type"].as_str().unwrap().into(),
+                    summary: value.to_string(),
+                },
+            };
+            normalize_legacy_item(&mut legacy, true);
+            assert_eq!(legacy.content, content);
+        }
     }
 
     #[test]
@@ -6973,6 +7714,10 @@ mod tests {
                     ..
                 }
             ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::TurnCheckpoint { .. }
+            ));
 
             let approval_line = include_str!("../tests/fixtures/codex/v2_messages.jsonl")
                 .lines()
@@ -7018,5 +7763,227 @@ mod tests {
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
+    }
+
+    /// The 0.166.0 `thread/revert` wire: a finished turn's native id is its
+    /// restore point; the revert names it as `beforeTurnId`; a turn it stops
+    /// ends interrupted before the rewind is reported; a refusal keeps
+    /// Codex's words and says why.
+    #[test]
+    fn a_rewind_reverts_the_thread_before_a_finished_turn() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            let next = || events.try_recv().unwrap();
+            actor
+                .handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"T1"}}}"#)
+                .await;
+            actor
+                .handle_line(r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"T1","status":"completed"}}}"#)
+                .await;
+            assert!(matches!(next(), AgentEvent::TurnStarted { .. }));
+            assert!(matches!(next(), AgentEvent::TurnCompleted { .. }));
+            assert_eq!(
+                serde_json::to_value(next()).unwrap(),
+                json!({"type": "turn_checkpoint", "turn_id": "T1", "checkpoint_id": "T1"})
+            );
+
+            actor
+                .handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"T2"}}}"#)
+                .await;
+            assert!(matches!(next(), AgentEvent::TurnStarted { .. }));
+            async fn revert(actor: &mut Actor) -> Value {
+                actor
+                    .handle_command(SessionCommand::Rewind {
+                        checkpoint_id: "T1".into(),
+                        mode: RewindMode::Conversation,
+                    })
+                    .await
+                    .unwrap();
+                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                    panic!("expected echoed request")
+                };
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["method"], "thread/revert");
+                assert_eq!(
+                    request["params"],
+                    json!({"threadId": "thread-1", "beforeTurnId": "T1"})
+                );
+                request["id"].clone()
+            }
+            let id = revert(&mut actor).await;
+            actor
+                .handle_line(
+                    &json!({"id": id, "result": {
+                        "thread": {"id": "thread-1", "historyMode": "paginated", "ephemeral": false, "turns": []},
+                        "turnsBackwardsCursor": null, "itemsBackwardsCursor": null
+                    }})
+                    .to_string(),
+                )
+                .await;
+            assert_eq!(
+                serde_json::to_value(next()).unwrap(),
+                json!({"type": "turn_completed", "turn_id": "T2", "status": "interrupted", "usage": null})
+            );
+            assert_eq!(
+                serde_json::to_value(next()).unwrap(),
+                json!({"type": "rewind_completed", "checkpoint_id": "T1", "mode": "conversation",
+                       "prefill": null, "later_history": "truncated"})
+            );
+
+            let id = revert(&mut actor).await;
+            actor
+                .handle_line(
+                    &json!({"id": id, "error": {
+                        "code": -32600, "message": "ephemeral threads do not support thread/revert"
+                    }})
+                    .to_string(),
+                )
+                .await;
+            assert!(matches!(
+                next(),
+                AgentEvent::RewindFailed { failure, .. }
+                    if failure.reason == RewindFailureReason::Unsupported
+                        && failure.detail.as_deref().is_some_and(|detail| detail.contains("ephemeral"))
+            ));
+            assert!(events.try_recv().is_err());
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    /// `thread/fork` keeps through a turn, so a fork before a turn asks
+    /// `thread/turns/list` (newest first, as 0.167.0 pages it, across pages)
+    /// for the turn before it. The first turn has none.
+    #[cfg(unix)]
+    #[test]
+    fn a_fork_before_a_turn_keeps_through_the_turn_before_it() {
+        use std::os::unix::fs::PermissionsExt;
+        for (before, forked) in [("turn-3", Some("turn-2")), ("turn-1", None), ("gone", None)] {
+            let dir =
+                std::env::temp_dir().join(format!("agent-codex-fork-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let bin = dir.join("codex");
+            let requests = dir.join("requests");
+            let script = format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{requests}'
+  id=$(printf '%s' "$line" | sed -n 's/^{{"id":\([0-9]*\).*/\1/p')
+  [ -z "$id" ] && continue
+  case "$line" in
+    *'"thread/turns/list"'*'"cursor":"older"'*) echo "{{\"id\":$id,\"result\":{{\"data\":[{{\"id\":\"turn-1\"}}]}}}}" ;;
+    *'"thread/turns/list"'*) echo "{{\"id\":$id,\"result\":{{\"data\":[{{\"id\":\"turn-3\"}},{{\"id\":\"turn-2\"}}],\"nextCursor\":\"older\"}}}}" ;;
+    *'"thread/fork"'*) echo "{{\"id\":$id,\"result\":{{\"thread\":{{\"id\":\"forked\",\"historyMode\":\"paginated\"}}}}}}" ;;
+    *'"initialize"'*) echo "{{\"id\":$id,\"result\":{{}}}}" ;;
+    *) echo "{{\"id\":$id,\"error\":{{\"code\":-32601,\"message\":\"no\"}}}}" ;;
+  esac
+done
+"#,
+                requests = requests.display()
+            );
+            std::fs::write(&bin, script).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+            smol::block_on(async {
+                let started = start(SessionOptions {
+                    cwd: dir.clone(),
+                    model: None,
+                    resume: Some(ResumeCursor(json!({"thread_id": "source"}))),
+                    fork: Some(ForkPoint::Before {
+                        checkpoint_id: before.into(),
+                    }),
+                    binary_path: Some(bin.clone()),
+                    option_selections: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    launch_env: LaunchEnv::default(),
+                    extra_args: Vec::new(),
+                    acp: None,
+                    instructions: None,
+                })
+                .await;
+                match forked {
+                    Some(forked) => {
+                        let handle = started.unwrap();
+                        let fork = std::fs::read_to_string(&requests)
+                            .unwrap()
+                            .lines()
+                            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                            .find(|request| request["method"] == "thread/fork")
+                            .unwrap();
+                        assert_eq!(fork["params"]["threadId"], "source");
+                        assert_eq!(fork["params"]["lastTurnId"], forked);
+                        let _ = handle.commands.send(SessionCommand::Shutdown).await;
+                    }
+                    None => assert!(matches!(started, Err(AgentError::Provider(_))), "{before}"),
+                }
+            });
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// Only a paginated thread written to disk can be reverted, so each
+    /// session says whether its thread can (0.166.0 `Thread.historyMode`,
+    /// `Thread.ephemeral`).
+    #[cfg(unix)]
+    #[test]
+    fn a_thread_says_whether_it_can_be_reverted() {
+        use std::os::unix::fs::PermissionsExt;
+        for (history_mode, unavailable) in [
+            ("paginated", None),
+            ("legacy", Some(RewindFailureReason::Unsupported)),
+        ] {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!("agent-codex-history-{nonce}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let bin = dir.join("codex");
+            let thread =
+                json!({"thread": {"id": "t", "historyMode": history_mode, "ephemeral": false}});
+            let script = format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{{"id":\([0-9]*\).*/\1/p')
+  [ -z "$id" ] && continue
+  case "$line" in
+    *'"thread/start"'*) echo "{{\"id\":$id,\"result\":{thread}}}" ;;
+    *'"initialize"'*) echo "{{\"id\":$id,\"result\":{{}}}}" ;;
+    *) echo "{{\"id\":$id,\"error\":{{\"code\":-32601,\"message\":\"no\"}}}}" ;;
+  esac
+done
+"#,
+                thread = thread.to_string().replace('"', "\\\"")
+            );
+            std::fs::write(&bin, script).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+            smol::block_on(async {
+                let handle = start(SessionOptions {
+                    cwd: dir.clone(),
+                    model: None,
+                    resume: None,
+                    fork: None,
+                    binary_path: Some(bin.clone()),
+                    option_selections: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    launch_env: LaunchEnv::default(),
+                    extra_args: Vec::new(),
+                    acp: None,
+                    instructions: None,
+                })
+                .await
+                .unwrap();
+                loop {
+                    if let AgentEvent::RewindAvailability {
+                        unavailable: reported,
+                    } = handle.events.recv().await.unwrap()
+                    {
+                        assert_eq!(reported, unavailable, "{history_mode}");
+                        break;
+                    }
+                }
+                let _ = handle.commands.send(SessionCommand::Shutdown).await;
+            });
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

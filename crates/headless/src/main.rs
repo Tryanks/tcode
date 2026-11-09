@@ -30,6 +30,10 @@ const STATIC_BUNDLE: Option<StaticBundle> = Some(&[
         "/tcode_web_bg.wasm",
         include_bytes!("../../web/dist/tcode_web_bg.wasm"),
     ),
+    (
+        "/NotoSansJP-Regular.otf",
+        include_bytes!("../../web/dist/NotoSansJP-Regular.otf"),
+    ),
 ]);
 #[cfg(not(feature = "web"))]
 const STATIC_BUNDLE: Option<StaticBundle> = None;
@@ -208,6 +212,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         log_traverse_status(std::iter::from_fn(|| traverse_events.recv_blocking().ok()))
     });
     let hosting = traverse_host.clone();
+    let hosting_events = traverse_host.clone();
     let server = serve(
         mux.clone(),
         BrowserConfig {
@@ -216,6 +221,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
             data_dir: remote_data_dir.clone(),
             static_bundle: STATIC_BUNDLE,
             hosting: Some(Arc::new(move |action| hosting.hosting(action))),
+            hosting_events: Some(Arc::new(move || hosting_events.hosting_events())),
         },
     )
     .map_err(|error| format!("could not listen for browsers: {error}"))?;
@@ -635,19 +641,48 @@ fn reject_unknown_options(args: &[String], options_with_values: &[&str]) -> Resu
     Ok(())
 }
 
+/// The ends of the pipe the interrupt handler writes one byte to, so
+/// [`wait_for_interrupt`] can sleep in `read` until a signal arrives.
+#[cfg(unix)]
+static INTERRUPT_PIPE: [std::sync::atomic::AtomicI32; 2] = [
+    std::sync::atomic::AtomicI32::new(-1),
+    std::sync::atomic::AtomicI32::new(-1),
+];
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn pipe(fds: *mut std::ffi::c_int) -> std::ffi::c_int;
+    fn read(fd: std::ffi::c_int, buf: *mut std::ffi::c_void, count: usize) -> isize;
+    fn write(fd: std::ffi::c_int, buf: *const std::ffi::c_void, count: usize) -> isize;
+}
+
 #[cfg(unix)]
 fn install_interrupt_handler() {
+    use std::sync::atomic::Ordering::Relaxed;
     type SignalHandler = extern "C" fn(i32);
     unsafe extern "C" {
         fn signal(signal: i32, handler: SignalHandler) -> SignalHandler;
     }
     extern "C" fn handle_interrupt(_: i32) {
-        INTERRUPTED.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Only the first signal writes, so the byte never meets a full pipe.
+        if !INTERRUPTED.swap(true, Relaxed) {
+            let fd = INTERRUPT_PIPE[1].load(Relaxed);
+            if fd >= 0 {
+                // SAFETY: write(2) is async-signal-safe; the buffer is static.
+                unsafe { write(fd, [1_u8].as_ptr().cast(), 1) };
+            }
+        }
     }
     const SIGINT: i32 = 2;
     const SIGTERM: i32 = 15;
+    let mut fds = [-1_i32; 2];
+    // SAFETY: pipe(2) fills the two-element array it is given.
+    if unsafe { pipe(fds.as_mut_ptr()) } == 0 {
+        INTERRUPT_PIPE[0].store(fds[0], Relaxed);
+        INTERRUPT_PIPE[1].store(fds[1], Relaxed);
+    }
     // SAFETY: installs process-global handlers with the C ABI expected by
-    // signal(3); the handler performs only a lock-free atomic store.
+    // signal(3); the handler performs only an atomic swap and write(2).
     unsafe {
         signal(SIGINT, handle_interrupt);
         signal(SIGTERM, handle_interrupt);
@@ -662,8 +697,15 @@ fn install_interrupt_handler() {}
 
 #[cfg(unix)]
 fn wait_for_interrupt() {
-    while !INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
-        std::thread::sleep(Duration::from_millis(100));
+    use std::sync::atomic::Ordering::Relaxed;
+    let fd = INTERRUPT_PIPE[0].load(Relaxed);
+    while !INTERRUPTED.load(Relaxed) {
+        let mut byte = 0_u8;
+        // SAFETY: reads at most one byte into a local.
+        if fd < 0 || unsafe { read(fd, (&raw mut byte).cast(), 1) } == 0 {
+            // No pipe, or its write end is gone: fall back to looking.
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 }
 

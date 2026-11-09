@@ -78,6 +78,9 @@ impl IndexedLog {
         let mut timeline = Timeline::default();
         let mut positions: Vec<u64> = Vec::new();
         let mut rewinds = Vec::new();
+        // Where each entry a rewind took out was recorded, for an undo that
+        // puts it back.
+        let mut removed = HashMap::new();
         for (record, &row) in log.records.iter().zip(&log.rows) {
             if reorders_entries(&record.event) {
                 let before: Vec<(String, u64)> = timeline
@@ -87,9 +90,14 @@ impl IndexedLog {
                     .zip(positions.iter().copied())
                     .collect();
                 timeline.apply_stored(record);
-                positions = reconcile(before, &timeline.entries, row);
-                if matches!(record.event, AgentEvent::RewindCompleted { .. }) {
-                    rewinds.push((row, timeline.turns.len()));
+                positions = reconcile(before, &timeline.entries, row, &mut removed);
+                // The divider ends the log so far and sits in the turn after
+                // the ones the cut kept.
+                if let (AgentEvent::RewindCompleted { .. }, Some(divider)) =
+                    (&record.event, timeline.entries.last())
+                    && matches!(divider.content, EntryContent::Rewound(_))
+                {
+                    rewinds.push((row, divider.turn));
                 }
             } else {
                 timeline.apply_stored(record);
@@ -138,25 +146,40 @@ impl IndexedLog {
 fn reorders_entries(event: &AgentEvent) -> bool {
     match event {
         AgentEvent::RewindCompleted { mode, .. } => mode.includes_conversation(),
-        AgentEvent::SteerAccepted { .. } | AgentEvent::SteerRejected { .. } => true,
+        AgentEvent::RewindUndone { .. }
+        | AgentEvent::SteerAccepted { .. }
+        | AgentEvent::SteerRejected { .. } => true,
         _ => false,
     }
 }
 
-fn reconcile(before: Vec<(String, u64)>, entries: &[Arc<TimelineEntry>], row: u64) -> Vec<u64> {
+/// The positions of `entries` after an event that moved or removed some:
+/// each keeps the position it had `before`, or had when it last left the
+/// fold (`removed`, which takes those that leave now); a new one is `row`'s.
+fn reconcile(
+    before: Vec<(String, u64)>,
+    entries: &[Arc<TimelineEntry>],
+    row: u64,
+    removed: &mut HashMap<String, VecDeque<u64>>,
+) -> Vec<u64> {
     let mut known: HashMap<String, VecDeque<u64>> = HashMap::new();
     for (id, position) in before {
         known.entry(id).or_default().push_back(position);
     }
-    entries
+    let positions = entries
         .iter()
         .map(|entry| {
             known
                 .get_mut(&entry.id)
                 .and_then(VecDeque::pop_front)
+                .or_else(|| removed.get_mut(&entry.id).and_then(VecDeque::pop_front))
                 .unwrap_or(row)
         })
-        .collect()
+        .collect();
+    for (id, left) in known {
+        removed.entry(id).or_default().extend(left);
+    }
+    positions
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -440,12 +463,15 @@ impl Activity {
                 ItemContent::WebSearch { .. } => self.count_tool("web_search"),
                 ItemContent::ImageRead { path, .. } => push_unique(&mut self.files, path.clone()),
                 ItemContent::AssistantMessage { text, .. }
+                | ItemContent::Plan { markdown: text }
                 | ItemContent::UserMessage { text, .. } => {
                     collect_references(text, &mut self.references);
                 }
                 ItemContent::Reasoning { .. } | ItemContent::Other { .. } => {}
             },
-            EntryContent::Steer { text, .. } => collect_references(text, &mut self.references),
+            EntryContent::Steer { text, .. } | EntryContent::Feedback { text } => {
+                collect_references(text, &mut self.references)
+            }
             EntryContent::Error { message, .. } => self.errors.push(head(message, HEAD_CHARS)),
             EntryContent::ProviderStartError { error } => {
                 self.errors.push(head(error, HEAD_CHARS));
@@ -454,7 +480,10 @@ impl Activity {
             | EntryContent::ModelChanged { .. }
             | EntryContent::ContextCompacted(_)
             | EntryContent::ControlAction(_)
-            | EntryContent::ContextWindowChanged { .. } => {}
+            | EntryContent::Rewound(_)
+            | EntryContent::RewindFailed { .. }
+            | EntryContent::ContextWindowChanged { .. }
+            | EntryContent::SettingsKept => {}
         }
     }
 
@@ -1193,6 +1222,7 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
                 with_attachments(visible(text, *context_len), attachments),
             ),
             ItemContent::AssistantMessage { text, .. } => ("assistant_message", text.clone()),
+            ItemContent::Plan { markdown } => ("plan", markdown.clone()),
             ItemContent::Reasoning { text } => ("reasoning", text.clone()),
             ItemContent::CommandExecution {
                 command,
@@ -1270,6 +1300,7 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
             "steer",
             with_attachments(visible(text, *context_len), attachments),
         ),
+        EntryContent::Feedback { text } => ("feedback", text.clone()),
         EntryContent::Error { message, .. } => ("error", message.clone()),
         EntryContent::ProviderStartError { error } => ("provider_start_error", error.clone()),
         EntryContent::ProviderRelay {
@@ -1299,12 +1330,42 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
         EntryContent::ContextWindowChanged { window } => {
             ("context_window_changed", format!("context window {window}"))
         }
+        EntryContent::SettingsKept => ("settings_kept", "settings kept".to_owned()),
         EntryContent::ControlAction(action) => (
             "control_action",
             match &action.detail {
                 Some(detail) => format!("{}: {} ({detail})", action.actor_title, action.action),
                 None => format!("{}: {}", action.actor_title, action.action),
             },
+        ),
+        EntryContent::Rewound(rewound) => (
+            "rewind",
+            format!(
+                "rewound {:?}: {} turn(s) removed{}",
+                rewound.mode,
+                rewound.removed_turns,
+                rewound
+                    .incomplete
+                    .as_ref()
+                    .map(|incomplete| format!(
+                        "; {:?} failed: {:?}",
+                        incomplete.requested, incomplete.failure.reason
+                    ))
+                    .unwrap_or_default()
+            ),
+        ),
+        EntryContent::RewindFailed { mode, failure } => (
+            "rewind_failed",
+            format!(
+                "{} failed: {:?}{}",
+                if mode.is_some() { "rewind" } else { "undo" },
+                failure.reason,
+                failure
+                    .detail
+                    .as_deref()
+                    .map(|detail| format!(" ({detail})"))
+                    .unwrap_or_default()
+            ),
         ),
     }
 }

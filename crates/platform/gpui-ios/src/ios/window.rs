@@ -120,7 +120,16 @@ impl IosWindow {
             raw_window_handle: raw_handles.window,
         };
         let bootstrap_surface = unsafe { instance.create_surface_unsafe(target) }?;
-        let context = WgpuContext::new(instance, &bootstrap_surface, None)?;
+        let drawable_size = size(
+            DevicePixels((f32::from(logical_size.width) * scale_factor).round() as i32),
+            DevicePixels((f32::from(logical_size.height) * scale_factor).round() as i32),
+        );
+        let surface_config = WgpuSurfaceConfig {
+            size: drawable_size,
+            transparent: false,
+            preferred_present_mode: Some(wgpu::PresentMode::Fifo),
+        };
+        let context = WgpuContext::new(instance, &bootstrap_surface, &surface_config, None)?;
         let surface_capabilities = bootstrap_surface.get_capabilities(&context.adapter);
         let surface_format = [
             wgpu::TextureFormat::Bgra8Unorm,
@@ -148,20 +157,7 @@ impl IosWindow {
                 .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE);
         drop(bootstrap_surface);
         let gpu_context = Rc::new(RefCell::new(Some(context)));
-        let drawable_size = size(
-            DevicePixels((f32::from(logical_size.width) * scale_factor).round() as i32),
-            DevicePixels((f32::from(logical_size.height) * scale_factor).round() as i32),
-        );
-        let renderer = WgpuRenderer::new(
-            gpu_context.clone(),
-            &raw_handles,
-            WgpuSurfaceConfig {
-                size: drawable_size,
-                transparent: false,
-                preferred_present_mode: Some(wgpu::PresentMode::Fifo),
-            },
-            None,
-        )?;
+        let renderer = WgpuRenderer::new(gpu_context.clone(), &raw_handles, surface_config, None)?;
         log::info!(
             "GPUI iOS Metal surface format selected: {surface_format:?}; scale factor: \
              {scale_factor:.2}; glass enabled: {glass_enabled}"
@@ -262,7 +258,10 @@ impl IosWindow {
         *self.raw_handles.borrow_mut() = raw_handles;
         self.surface_attached.set(true);
         self.resize_from_host(width, height, scale_factor);
-        self.schedule_forced_frame();
+        // The new drawable stays blank until a frame is drawn into it, even
+        // when no view changed.
+        self.forced_frame.set(true);
+        self.schedule_frame();
         self.report_visibility();
         log::info!("GPUI iOS Metal surface replaced at scale factor {scale_factor:.2}");
         Ok(())
@@ -321,11 +320,6 @@ impl IosWindow {
         }
     }
 
-    pub(crate) fn schedule_forced_frame(&self) {
-        self.forced_frame.set(true);
-        self.schedule_frame();
-    }
-
     pub(crate) fn display_link_tick(&self) -> bool {
         if self.current_visibility() != WindowVisibility::Visible {
             return false;
@@ -336,11 +330,12 @@ impl IosWindow {
         }
         if self.pacing.borrow_mut().begin_frame(now) {
             let force_render = self.forced_frame.replace(false);
-            let require_presentation = self.pacing.borrow().active(now);
             let mut callback = self.request_frame_callback.borrow_mut().take();
             if let Some(callback) = callback.as_mut() {
+                // Grace ticks keep the display link's frame-rate vote without
+                // re-presenting an unchanged scene; GPUI itself keeps presenting
+                // after high-rate input.
                 callback(RequestFrameOptions {
-                    require_presentation,
                     force_render,
                     signal_source: FrameRequestSource::NativeCallback,
                     ..Default::default()
@@ -440,7 +435,7 @@ impl IosWindow {
         if self.resize_callback.borrow().is_none() {
             *self.resize_callback.borrow_mut() = callback;
         }
-        self.schedule_forced_frame();
+        self.schedule_frame();
     }
 
     pub(crate) fn update_insets(&self, insets: WindowInsets) {
@@ -492,7 +487,7 @@ impl IosWindow {
         if self.appearance_callback.borrow().is_none() {
             *self.appearance_callback.borrow_mut() = callback;
         }
-        self.schedule_forced_frame();
+        self.schedule_frame();
     }
 
     pub(crate) fn with_input_handler<R>(
@@ -531,7 +526,6 @@ impl IosWindow {
         for input in self.keyboard.delete_backward() {
             self.dispatch_input(input);
         }
-        self.schedule_forced_frame();
     }
 
     pub(crate) fn key_event(
@@ -546,7 +540,6 @@ impl IosWindow {
             .keyboard
             .key_event(key, key_char, modifiers, down, repeat);
         let result = self.dispatch_input(input);
-        self.schedule_forced_frame();
         !result.propagate || result.default_prevented
     }
 }

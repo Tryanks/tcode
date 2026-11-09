@@ -36,7 +36,19 @@ struct RunningLogin {
     url: Option<String>,
 }
 
+/// A new profile's config directory, made for it in `profile-homes`.
+struct PreparedHome {
+    id: String,
+    home: PathBuf,
+    /// Writing its `.claude.json` or copying the user's configuration in.
+    seeded: Result<(), String>,
+}
+
 type SecretWrites = HashMap<String, HashMap<String, Arc<smol::lock::Mutex<SecretWrite>>>>;
+
+/// How long a running session has to answer a usage read before a process
+/// is started for it instead; the same bound a started one gets.
+const LIVE_USAGE_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct ProviderCatalog {
     pub model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
@@ -293,6 +305,7 @@ impl ProviderCatalog {
                 || self.tcode_update.checking,
             secret_names: self.provider_secret_names.clone(),
             plugins,
+            harnesses: Vec::new(),
         }
     }
 }
@@ -368,6 +381,19 @@ impl AppState {
         }
     }
 
+    /// A profile's name wherever threads and pickers show it: an unnamed
+    /// default account beside other accounts reads as who it is signed in as.
+    pub(crate) fn profile_display_name(&self, id: &str) -> String {
+        let email = self
+            .providers
+            .provider_snapshots
+            .get(id)
+            .and_then(|snapshot| snapshot.auth.as_ref())
+            .filter(|auth| auth.status == tcode_core::provider_status::AuthStatus::Authenticated)
+            .and_then(|auth| auth.email.as_deref());
+        self.settings.profile_display_name_as(id, email)
+    }
+
     /// Whether the on-launch provider version check is enabled (default on).
     pub fn provider_update_checks_enabled(&self) -> bool {
         !self.settings.provider_update_checks_disabled
@@ -385,7 +411,7 @@ impl AppState {
         profile
             .settings
             .binary_path
-            .or_else(|| agent::find_on_path(&default_program(profile.kind)))
+            .or_else(|| agent::find_on_path(profile.kind.harness().binary_name))
     }
 
     /// Re-run everything that depends on *how* a provider's CLI is launched
@@ -423,31 +449,67 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         let mut settings = self.settings.clone();
-        let target = if let Some(kind) = Settings::builtin_kind_from_id(id) {
+        let builtin = Settings::builtin_kind_from_id(id);
+        if let ProfileSettingsPatch::SetHarnessEnabled { enabled } = patch {
+            let Some(kind) = settings.resolved_profile(id).map(|profile| profile.kind) else {
+                return;
+            };
+            settings.provider_mut(kind).enabled = enabled;
+            for profile in settings.profiles.values_mut() {
+                if profile.kind == kind {
+                    profile.settings.enabled = enabled;
+                }
+            }
+            return self.update_settings(settings, cx);
+        }
+        let target = if let Some(kind) = builtin {
             settings.provider_mut(kind)
         } else if let Some(profile) = settings.profiles.get_mut(id) {
             &mut profile.settings
         } else {
             return;
         };
+        let text = |value: Option<String>| {
+            value
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
         match patch {
             ProfileSettingsPatch::SetEnabled { enabled } => target.enabled = enabled,
-            ProfileSettingsPatch::ReplaceConfiguration(configuration) => {
-                target.display_name = configuration.display_name;
-                target.accent_color = configuration.accent_color;
-                target.env = configuration.env;
-                target.binary_path = configuration.binary_path;
-                target.home_path = configuration.home_path;
-                target.launch_args = configuration.launch_args;
-                target.pi = configuration.pi;
-                target.custom_models = configuration.custom_models;
-                target.hidden_models = configuration.hidden_models;
+            ProfileSettingsPatch::SetHarnessEnabled { .. } => {}
+            ProfileSettingsPatch::SetDisplayName(name) => target.display_name = text(name),
+            ProfileSettingsPatch::SetAccentColor(color) => target.accent_color = text(color),
+            ProfileSettingsPatch::SetEnv(env) => target.env = named(env),
+            // The harness's own fields live on its built-in card.
+            ProfileSettingsPatch::SetSharedEnv(env) if builtin.is_some() => {
+                target.shared_env = named(env)
             }
+            ProfileSettingsPatch::SetToggle { id, enabled } if builtin.is_some() => {
+                target.set_toggle(&id, enabled)
+            }
+            ProfileSettingsPatch::SetHomePath(home) if builtin.is_some() => {
+                target.home_path = text(home.map(|home| home.display().to_string())).map(Into::into)
+            }
+            ProfileSettingsPatch::SetDefaultPermission(value) if builtin.is_some() => {
+                target.default_permission = text(value)
+            }
+            ProfileSettingsPatch::SetSharedEnv(_)
+            | ProfileSettingsPatch::SetToggle { .. }
+            | ProfileSettingsPatch::SetDefaultPermission(_)
+            | ProfileSettingsPatch::SetHomePath(_) => return,
+            ProfileSettingsPatch::SetBinaryPath(path) => {
+                target.binary_path =
+                    text(path.map(|path| path.display().to_string())).map(Into::into)
+            }
+            ProfileSettingsPatch::SetLaunchArgs(args) => target.launch_args = text(args),
+            ProfileSettingsPatch::SetCustomModels(models) => target.custom_models = models,
+            ProfileSettingsPatch::SetHiddenModels(models) => target.hidden_models = models,
         }
         self.update_settings(settings, cx);
     }
 
-    /// Store (or clear) one sensitive env value for a profile in `secrets.json`.
+    /// Store (or clear) one sensitive env value for a profile, a harness's
+    /// shared variables or an ACP agent in `secrets.json`.
     pub fn set_profile_secret(
         &mut self,
         id: &str,
@@ -456,6 +518,15 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         self.providers.invalidate_profile_reads(id);
+        if let Some(kind) = ProviderKind::NATIVE
+            .into_iter()
+            .find(|kind| Settings::harness_secret_id(*kind) == id)
+        {
+            for profile in self.settings.profiles_for_kind(kind) {
+                self.providers.invalidate_profile_reads(&profile.id);
+            }
+            self.providers.invalidate_versions();
+        }
         if Settings::builtin_kind_from_id(id).is_some() {
             self.providers.invalidate_versions();
         }
@@ -492,87 +563,97 @@ impl AppState {
         }
     }
 
-    /// Create a first-class *third-party* Claude Code profile from the Add-agent
-    /// dialog: a named endpoint (Kimi preset or a custom Anthropic-compatible
-    /// URL). Wires the three env vars, registers the model as a custom slug so it
-    /// shows in the picker, gives the profile its own `CLAUDE_CONFIG_DIR`
-    /// (seeded so `claude` runs non-interactively and never touches the
-    /// official `~/.claude`), and stores the API key in `secrets.json`.
+    /// Create an endpoint profile of `provider`: a named API endpoint (a
+    /// preset or any compatible URL) written as the harness's own endpoint
+    /// variables, its model registered as a custom slug so the picker shows
+    /// it, in a config directory of its own seeded so the CLI runs without
+    /// first-run prompts, with the key stored in `secrets.json`.
     pub fn create_third_party_profile(
         &mut self,
-        name: &str,
-        base_url: &str,
-        model: Option<&str>,
-        api_key: &str,
+        provider: ProviderKind,
+        new: NewEndpointProfile<'_>,
         inherit_config: bool,
         cx: &mut HostCx,
     ) {
+        let NewEndpointProfile {
+            name,
+            base_url,
+            model,
+            api_key,
+        } = new;
+        let Some(endpoint) = provider
+            .harness()
+            .endpoint
+            .filter(|endpoint| endpoint.profiles)
+        else {
+            return;
+        };
+        let Some(key_env) = endpoint.key_envs.first().copied() else {
+            return;
+        };
         let name = name.trim();
         let name = if name.is_empty() { "Third-party" } else { name };
-        let id = self.settings.allocate_profile_id(name);
-        let home = self.store.root().join("profile-homes").join(&id);
+        let model = model.map(str::trim).filter(|m| !m.is_empty());
 
         let mut env = vec![EnvVar {
-            name: "ANTHROPIC_BASE_URL".into(),
+            name: endpoint.base_url_env.into(),
             value: base_url.trim().to_string(),
             sensitive: false,
         }];
-        if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        if let (Some(model), Some(model_env)) = (model, endpoint.model_env) {
             env.push(EnvVar {
-                name: "ANTHROPIC_MODEL".into(),
+                name: model_env.into(),
                 value: model.to_string(),
                 sensitive: false,
             });
         }
         env.push(EnvVar {
-            name: "ANTHROPIC_API_KEY".into(),
+            name: key_env.into(),
             value: String::new(),
             sensitive: true,
         });
-        let custom_models = model
-            .map(str::trim)
-            .filter(|m| !m.is_empty())
-            .map(|m| vec![m.to_string()])
-            .unwrap_or_default();
-
-        let profile = ProviderProfile {
-            kind: ProviderKind::ClaudeCode,
-            settings: ProviderSettings {
-                display_name: Some(name.to_string()),
-                env,
-                custom_models,
-                home_path: Some(home.clone()),
-                ..ProviderSettings::default()
-            },
+        let settings = ProviderSettings {
+            display_name: Some(name.to_string()),
+            env,
+            custom_models: model.map(|m| vec![m.to_string()]).unwrap_or_default(),
+            ..ProviderSettings::default()
         };
         let api_key = api_key.trim().to_string();
-        // Seeding onboarding starts the CLI straight into API-key mode.
-        let prepared = self.prepare_claude_home(
-            home,
-            r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#,
-            inherit_config,
-            cx,
-        );
+        let prepared = self.prepare_account_home(provider, name, true, inherit_config, cx);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let prepared = prepared.await;
             host_cx.enqueue(move |state, cx| {
+                let PreparedHome { id, home, seeded } = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        return state.report_error(RuntimeError::ProfileConfig { error }, cx);
+                    }
+                };
                 if state.settings.profiles.contains_key(&id) {
                     return;
                 }
-                if let Err(error) = prepared {
+                if let Err(error) = seeded {
                     state.report_error(RuntimeError::ProfileConfig { error }, cx);
                 }
+                let profile = ProviderProfile {
+                    kind: provider,
+                    settings: ProviderSettings {
+                        home_path: Some(home),
+                        ..settings
+                    },
+                };
                 let mut settings = state.settings.clone();
                 settings.profiles.insert(id.clone(), profile);
                 state.update_settings(settings, cx);
-                state.set_profile_secret(&id, "ANTHROPIC_API_KEY", Some(&api_key), cx);
+                state.set_profile_secret(&id, key_env, Some(&api_key), cx);
             });
         });
     }
 
     /// Add a profile for another account of `provider` in its own config
     /// directory and start its sign-in. Resolves to the new profile's id.
+    /// The account runs its harness's binary.
     pub fn create_account_profile(
         &mut self,
         provider: ProviderKind,
@@ -586,38 +667,37 @@ impl AppState {
         } else {
             name
         };
-        let id = self.settings.allocate_profile_id(name);
-        let home = self.store.root().join("profile-homes").join(&id);
-        let profile = ProviderProfile {
-            kind: provider,
-            settings: ProviderSettings {
-                display_name: Some(name.to_string()),
-                home_path: Some(home.clone()),
-                // Another account runs the same CLI the default one does.
-                binary_path: self.settings.provider(provider).binary_path,
-                ..ProviderSettings::default()
-            },
+        let settings = ProviderSettings {
+            display_name: Some(name.to_string()),
+            ..ProviderSettings::default()
         };
-        let prepared = self.prepare_claude_home(
-            home,
-            r#"{"hasCompletedOnboarding":true}"#,
-            inherit_config,
-            cx,
-        );
+        let prepared = self.prepare_account_home(provider, name, false, inherit_config, cx);
         let host_cx = cx.clone();
         cx.spawn_background(async move {
             let prepared = prepared.await;
             host_cx
                 .enqueue_and_wait(move |state, cx| {
+                    let PreparedHome { id, home, seeded } =
+                        prepared.map_err(|message| ProtocolError {
+                            code: "profile_config".into(),
+                            message,
+                        })?;
                     if state.settings.profiles.contains_key(&id) {
                         return Err(ProtocolError {
                             code: "profile_exists".into(),
                             message: "A profile with this name was just added.".into(),
                         });
                     }
-                    if let Err(error) = prepared {
+                    if let Err(error) = seeded {
                         state.report_error(RuntimeError::ProfileConfig { error }, cx);
                     }
+                    let profile = ProviderProfile {
+                        kind: provider,
+                        settings: ProviderSettings {
+                            home_path: Some(home),
+                            ..settings
+                        },
+                    };
                     let mut settings = state.settings.clone();
                     settings.profiles.insert(id.clone(), profile);
                     state.update_settings(settings, cx);
@@ -632,35 +712,57 @@ impl AppState {
         })
     }
 
-    /// Create a new Claude profile's config directory with `seed` as its
-    /// `.claude.json`, and with `inherit` the user's configuration from the
-    /// built-in profile's config directory.
-    fn prepare_claude_home(
+    /// Make a new profile's config directory in `profile-homes`, named for
+    /// the first id `name` may take that no directory there already has: one
+    /// that is there is the config directory of an account whose profile the
+    /// settings no longer hold, and stays that account's. The harness seeds
+    /// it (for an endpoint profile when `api_key`) and, with `inherit`,
+    /// copies in the user's configuration from the built-in profile's config
+    /// directory. Fails only when no directory could be made.
+    fn prepare_account_home(
         &self,
-        home: PathBuf,
-        seed: &'static str,
+        provider: ProviderKind,
+        name: &str,
+        api_key: bool,
         inherit: bool,
         cx: &HostCx,
-    ) -> impl std::future::Future<Output = Result<(), String>> + use<> {
-        let builtin = inherit.then(|| {
-            self.prepare_profile_env(Settings::builtin_profile_id(ProviderKind::ClaudeCode), cx)
-        });
+    ) -> impl std::future::Future<Output = Result<PreparedHome, String>> + use<> {
+        let mut ids = self.settings.profile_id_candidates(name);
+        let homes = self.store.root().join("profile-homes");
+        let builtin =
+            inherit.then(|| self.prepare_profile_env(Settings::builtin_profile_id(provider), cx));
         let host_cx = cx.clone();
         async move {
             let source = match builtin {
-                Some(launch_env) => agent::claude::config_dir(&launch_env.await?),
-                None => None,
+                Some(launch_env) => launch_env
+                    .await
+                    .map(|launch_env| agent::harness::config_dir(provider, &launch_env)),
+                None => Ok(None),
             };
             host_cx
                 .unblock(move || {
-                    std::fs::create_dir_all(&home)?;
-                    std::fs::write(home.join(".claude.json"), seed)?;
-                    source.map_or(Ok(()), |source| {
-                        agent::claude::inherit_config(&source, &home)
-                    })
+                    std::fs::create_dir_all(&homes).map_err(|error| error.to_string())?;
+                    let (id, home) = loop {
+                        let id = ids.next().expect("profile ids never run out");
+                        let home = homes.join(&id);
+                        match std::fs::create_dir(&home) {
+                            Ok(()) => break (id, home),
+                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                            Err(error) => return Err(error.to_string()),
+                        }
+                    };
+                    let inherit_from = source.as_ref().ok().cloned().flatten();
+                    let seeded = agent::harness::prepare_account_home(
+                        provider,
+                        &home,
+                        inherit_from.as_deref(),
+                        api_key,
+                    )
+                    .map_err(|error| error.to_string())
+                    .and(source.map(drop));
+                    Ok(PreparedHome { id, home, seeded })
                 })
                 .await
-                .map_err(|error: std::io::Error| error.to_string())
         }
     }
 
@@ -675,6 +777,10 @@ impl AppState {
         let Some(profile) = settings.profiles.remove(id) else {
             return;
         };
+        // A later profile of the same name gets this id and owns none of its stars.
+        settings.favorite_models.retain(|favorite| {
+            !matches!(favorite, FavoriteModel::Row { profile_id: Some(starred), .. } if starred == id)
+        });
         self.enqueue_store_write(StoreWrite::ClearProfileSecrets(id.to_string()), cx);
         self.providers.provider_secret_names.remove(id);
         self.providers.secret_writes.remove(id);
@@ -781,7 +887,7 @@ impl AppState {
                     return;
                 }
                 let snapshots = &mut state.providers.provider_snapshots;
-                match snapshot {
+                match snapshot.map(|snapshot| endpoint_profile_snapshot(&profile, snapshot)) {
                     Ok(snapshot) => {
                         let login = snapshots
                             .remove(&profile_id)
@@ -833,13 +939,14 @@ impl AppState {
         self.set_provider_login(profile_id, Some(ProviderLogin::Starting));
         let binary = self
             .resolve_profile_binary(profile_id)
-            .unwrap_or_else(|| default_program(profile.kind).into());
+            .unwrap_or_else(|| profile.kind.harness().binary_name.into());
         let launch_env = self.prepare_profile_env(profile_id, cx);
         let profile_id = profile_id.to_owned();
+        let provider = profile.kind;
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let started = match launch_env.await {
-                Ok(launch_env) => provider_login::start_login(&binary, &launch_env)
+                Ok(launch_env) => provider_login::start_login(provider, &binary, &launch_env)
                     .map_err(|error| error.to_string()),
                 Err(error) => Err(error),
             };
@@ -892,6 +999,13 @@ impl AppState {
         };
         match event {
             LoginEvent::Url(url) => login.url = Some(url),
+            LoginEvent::DeviceCode(code) => {
+                let url = login.url.clone();
+                self.set_provider_login(
+                    profile_id,
+                    Some(ProviderLogin::AwaitingDevice { url, code }),
+                );
+            }
             LoginEvent::AwaitingCode => {
                 let url = login.url.clone();
                 self.set_provider_login(profile_id, Some(ProviderLogin::AwaitingCode { url }));
@@ -945,13 +1059,14 @@ impl AppState {
         self.cancel_provider_login(profile_id);
         let binary = self
             .resolve_profile_binary(profile_id)
-            .unwrap_or_else(|| default_program(profile.kind).into());
+            .unwrap_or_else(|| profile.kind.harness().binary_name.into());
         let launch_env = self.prepare_profile_env(profile_id, cx);
         let profile_id = profile_id.to_owned();
+        let provider = profile.kind;
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let result = match launch_env.await {
-                Ok(launch_env) => provider_login::logout(&binary, &launch_env).await,
+                Ok(launch_env) => provider_login::logout(provider, &binary, &launch_env).await,
                 Err(error) => Err(error),
             };
             host_cx.enqueue(move |state, cx| match result {
@@ -966,76 +1081,143 @@ impl AppState {
     fn provider_account_changed(&mut self, profile_id: &str, cx: &mut HostCx) {
         self.providers.invalidate_profile_reads(profile_id);
         if let Some(profile) = self.settings.resolved_profile(profile_id) {
-            self.refresh_profile_status(profile, cx);
-            self.refresh_provider_usage_if_stale(cx);
+            self.refresh_profile_status(profile.clone(), cx);
+            self.refresh_profile_usage(profile, true, None, cx);
         }
     }
 
     /// Fetch account usage / rate-limit windows for every usage-capable profile.
     pub fn refresh_provider_usage(&mut self, cx: &mut HostCx) {
-        self.refresh_provider_usage_inner(cx, false);
-    }
-
-    /// Refresh usage unless the profile already has a result from the last two
-    /// minutes. Called after turns to avoid repeatedly polling provider CLIs.
-    pub fn refresh_provider_usage_if_stale(&mut self, cx: &mut HostCx) {
-        self.refresh_provider_usage_inner(cx, true);
-    }
-
-    fn refresh_provider_usage_inner(&mut self, cx: &mut HostCx, stale_only: bool) {
-        let now = now_secs();
         for profile in self.all_profiles() {
-            let supported = profile.supports_account_usage();
-            let profile_id = profile.id.clone();
-            let provider = profile.kind;
-            if !supported
-                || self
-                    .providers
-                    .provider_snapshots
-                    .get(&profile_id)
-                    .is_some_and(|snapshot| !snapshot.installed)
-                || self.providers.usage_checking.contains(&profile_id)
-                || stale_only
-                    && self
-                        .providers
-                        .provider_usage
-                        .get(&profile_id)
-                        .is_some_and(|usage| now.saturating_sub(usage.fetched_at) < 120)
-            {
-                continue;
-            }
-            self.providers.usage_checking.insert(profile_id.clone());
-            let revision = self
-                .providers
-                .profile_revisions
-                .get(&profile_id)
-                .copied()
-                .unwrap_or(0);
-            let binary = self.resolve_profile_binary(&profile_id);
-            let launch_env = self.prepare_profile_env(&profile_id, cx);
-            let host_cx = cx.clone();
-            HostCx::spawn_detached(cx, async move {
-                let launch_env = match launch_env.await {
-                    Ok(env) => env,
-                    Err(error) => {
-                        host_cx.enqueue(move |state, cx| {
-                            state.providers.complete_usage(profile_id, revision, None);
-                            state.report_error(RuntimeError::PersistSettings { error }, cx);
-                        });
-                        return;
-                    }
-                };
-                let usage = tcode_services::provider_usage::fetch_provider_usage(
-                    provider, binary, launch_env,
-                )
-                .await;
-                host_cx.enqueue(move |state, _cx| {
-                    if state.settings.resolved_profile(&profile_id).as_ref() == Some(&profile) {
-                        state.providers.complete_usage(profile_id, revision, usage);
-                    }
-                });
-            });
+            self.refresh_profile_usage(profile, false, None, cx);
         }
+    }
+
+    /// After a thread's turn: the usage of the profile it ran on, unless that
+    /// already has a result from the last two minutes. A turn moves no other
+    /// profile's usage, and the thread's own harness answers when it can.
+    pub(super) fn refresh_session_usage_if_stale(&mut self, session_id: &str, cx: &mut HostCx) {
+        let Some(session) = self.resident(session_id) else {
+            return;
+        };
+        let Some(profile) = self.settings.resolved_profile(
+            session
+                .meta
+                .profile_id
+                .as_deref()
+                .unwrap_or_else(|| Settings::builtin_profile_id(session.meta.provider)),
+        ) else {
+            return;
+        };
+        // A process still running under the account the thread switched away from
+        // answers for that account, not this one.
+        let live = match &session.runtime {
+            Runtime::Live(commands)
+                if session.meta.provider == profile.kind
+                    && session.live_profile_id == session.meta.profile_id =>
+            {
+                Some(commands.clone())
+            }
+            _ => None,
+        };
+        self.refresh_profile_usage(profile, true, live, cx);
+    }
+
+    /// `live` is a running session of the profile to ask first; a session
+    /// that cannot answer leaves the read to a process started for it.
+    fn refresh_profile_usage(
+        &mut self,
+        profile: ResolvedProfile,
+        stale_only: bool,
+        live: Option<smol::channel::Sender<SessionCommand>>,
+        cx: &mut HostCx,
+    ) {
+        let profile_id = profile.id.clone();
+        let provider = profile.kind;
+        if !profile.supports_account_usage()
+            || self
+                .providers
+                .provider_snapshots
+                .get(&profile_id)
+                .is_some_and(|snapshot| !snapshot.installed && !snapshot.checking)
+            || self.providers.usage_checking.contains(&profile_id)
+            || stale_only
+                && self
+                    .providers
+                    .provider_usage
+                    .get(&profile_id)
+                    .is_some_and(|usage| now_secs().saturating_sub(usage.fetched_at) < 120)
+        {
+            return;
+        }
+        self.providers.usage_checking.insert(profile_id.clone());
+        let revision = self
+            .providers
+            .profile_revisions
+            .get(&profile_id)
+            .copied()
+            .unwrap_or(0);
+        let answer = live.and_then(|commands| {
+            let (reply, answer) = smol::channel::bounded(1);
+            commands
+                .try_send(SessionCommand::ReadAccountUsage { reply })
+                .is_ok()
+                .then_some(answer)
+        });
+        let binary = self.resolve_profile_binary(&profile_id);
+        let launch_env = self.prepare_profile_env(&profile_id, cx);
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let answered = match answer {
+                Some(answer) => smol::future::or(async { answer.recv().await.ok() }, async {
+                    smol::Timer::after(LIVE_USAGE_TIMEOUT).await;
+                    None
+                })
+                .await
+                .and_then(|payload| {
+                    tcode_services::provider_usage::usage_from_payload(provider, payload)
+                }),
+                None => None,
+            };
+            let launch_env = launch_env.await;
+            let usage = match answered {
+                Some(usage) => Some(usage),
+                None => {
+                    let launch_env = match &launch_env {
+                        Ok(env) => env.clone(),
+                        Err(error) => {
+                            let error = error.clone();
+                            host_cx.enqueue(move |state, cx| {
+                                state.providers.complete_usage(profile_id, revision, None);
+                                state.report_error(RuntimeError::PersistSettings { error }, cx);
+                            });
+                            return;
+                        }
+                    };
+                    tcode_services::provider_usage::fetch_provider_usage(
+                        provider, binary, launch_env,
+                    )
+                    .await
+                }
+            };
+            // Claude Code reports `max` for both the Max and the Ultra plan;
+            // its account file names which one.
+            let usage = usage.map(|mut usage| {
+                if provider == ProviderKind::ClaudeCode
+                    && let Ok(launch_env) = &launch_env
+                    && let Some(name) =
+                        tcode_services::provider_auth::claude_account_plan_name(launch_env)
+                {
+                    usage.plan = Some(name);
+                }
+                usage
+            });
+            host_cx.enqueue(move |state, _cx| {
+                if state.settings.resolved_profile(&profile_id).as_ref() == Some(&profile) {
+                    state.providers.complete_usage(profile_id, revision, usage);
+                }
+            });
+        });
     }
 
     /// Check every provider and the running tcode build in the background,
@@ -1048,25 +1230,18 @@ impl AppState {
             .insert(round, VersionCheckRound::default());
         for provider in ProviderKind::NATIVE {
             let binary = self.resolve_provider_binary(provider);
-            let status = self
-                .providers
-                .provider_versions
-                .entry(provider)
-                .or_default();
+            let providers = &mut *self.providers;
+            let status = providers.provider_versions.entry(provider).or_default();
             if status.checking || status.updating {
                 continue;
             }
             status.checking = true;
-            self.providers
-                .version_rounds
-                .get_mut(&round)
-                .unwrap()
-                .pending += 1;
+            providers.version_rounds.get_mut(&round).unwrap().pending += 1;
             let revision = status.revision;
             let program = binary
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| default_program(provider));
+                .unwrap_or_else(|| provider.harness().binary_name.to_owned());
             let launch_env = self.prepare_profile_env(Settings::builtin_profile_id(provider), cx);
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
@@ -1274,8 +1449,13 @@ impl AppState {
             let env = host_cx
                 .unblock(move || {
                     let profile_id = Settings::builtin_profile_id(provider);
-                    let secrets = settings_store.profile_secrets(profile_id);
-                    launch_env_for_profile(&settings, profile_id, secrets).pairs(provider)
+                    launch_env_for_profile(
+                        &settings,
+                        profile_id,
+                        settings_store.profile_secrets(&Settings::harness_secret_id(provider)),
+                        settings_store.profile_secrets(profile_id),
+                    )
+                    .pairs(provider)
                 })
                 .await;
             let current = provider_updates::resolve_installation(provider, &binary, &env).await;
@@ -1365,21 +1545,46 @@ impl AppState {
                 cx,
             )
         });
-        let acp_env = (meta.provider == ProviderKind::Acp).then(|| {
-            meta.acp_agent_id
-                .as_deref()
-                .and_then(|id| self.settings.acp_agent(id))
-                .map(|agent| agent.env.clone())
-                .unwrap_or_default()
-        });
+        let acp = (meta.provider == ProviderKind::Acp)
+            .then(|| {
+                meta.acp_agent_id
+                    .as_deref()
+                    .and_then(|id| self.settings.acp_agent(id))
+            })
+            .flatten()
+            .map(|agent| {
+                let id = Settings::acp_secret_id(&agent.id);
+                let names = agent
+                    .env
+                    .iter()
+                    .filter(|var| var.sensitive)
+                    .map(|var| var.name.clone())
+                    .collect();
+                let writes = self.pending_secret_writes(&id, &names);
+                (id, agent.env.clone(), writes)
+            });
+        let store = self.settings_store.clone();
+        let host_cx = cx.clone();
         async move {
-            match native {
-                Some(env) => env.await,
-                None => Ok(LaunchEnv {
-                    env: acp_env.unwrap_or_default(),
-                    home: None,
-                }),
+            if let Some(env) = native {
+                return env.await;
             }
+            let Some((id, env, writes)) = acp else {
+                return Ok(LaunchEnv::default());
+            };
+            await_secret_writes(writes).await?;
+            let secrets = if env.iter().any(|var| var.sensitive) {
+                host_cx
+                    .unblock(move || store.try_profile_secrets(&id))
+                    .await
+                    .map_err(|error| error.to_string())?
+            } else {
+                Default::default()
+            };
+            Ok(LaunchEnv {
+                env: env_pairs(&env, &secrets),
+                home: None,
+            })
         }
     }
 
@@ -1394,55 +1599,84 @@ impl AppState {
         let settings = self.settings.clone();
         let store = self.settings_store.clone();
         let host_cx = cx.clone();
-        let sensitive: HashSet<_> = settings
-            .resolved_profile(&profile_id)
-            .into_iter()
-            .flat_map(|profile| profile.settings.env)
-            .filter(|var| var.sensitive && !var.name.trim().is_empty())
-            .map(|var| var.name)
-            .collect();
+        let profile = settings.resolved_profile(&profile_id);
+        let harness_id = profile
+            .as_ref()
+            .map(|profile| Settings::harness_secret_id(profile.kind));
+        let sensitive = |env: &[EnvVar]| -> HashSet<String> {
+            env.iter()
+                .filter(|var| var.sensitive && !var.name.trim().is_empty())
+                .map(|var| var.name.clone())
+                .collect()
+        };
+        let own = profile
+            .as_ref()
+            .map(|profile| sensitive(&profile.settings.env))
+            .unwrap_or_default();
+        let shared = profile
+            .as_ref()
+            .map(|profile| sensitive(&profile.shared_env))
+            .unwrap_or_default();
         let writes: Vec<_> = self
-            .providers
-            .secret_writes
-            .get(&profile_id)
+            .pending_secret_writes(&profile_id, &own)
             .into_iter()
-            .flat_map(|writes| writes.iter())
-            .filter(|(name, _)| sensitive.contains(*name))
-            .map(|(_, write)| write.clone())
+            .chain(
+                harness_id
+                    .as_deref()
+                    .map(|id| self.pending_secret_writes(id, &shared))
+                    .unwrap_or_default(),
+            )
             .collect();
         async move {
-            for write in writes {
-                let mut write = write.lock().await;
-                if write.result.is_none() {
-                    write.result = Some(write.completion.recv().await.unwrap_or_else(|_| {
-                        Err(
-                            "the session store writer stopped before saving provider credentials"
-                                .to_owned(),
-                        )
-                    }));
-                }
-                write
-                    .result
-                    .as_ref()
-                    .expect("completed secret write")
-                    .clone()?;
-            }
-            if sensitive.is_empty() {
+            await_secret_writes(writes).await?;
+            if own.is_empty() && shared.is_empty() {
                 return Ok(launch_env_for_profile(
                     &settings,
                     &profile_id,
+                    Default::default(),
                     Default::default(),
                 ));
             }
             host_cx
                 .unblock(move || {
-                    let secrets = store
-                        .try_profile_secrets(&profile_id)
-                        .map_err(|error| error.to_string())?;
-                    Ok(launch_env_for_profile(&settings, &profile_id, secrets))
+                    let read = |id: &str, names: &HashSet<String>| {
+                        if names.is_empty() {
+                            return Ok(Default::default());
+                        }
+                        store
+                            .try_profile_secrets(id)
+                            .map_err(|error| error.to_string())
+                    };
+                    let secrets = read(&profile_id, &own)?;
+                    let shared_secrets = match &harness_id {
+                        Some(id) => read(id, &shared)?,
+                        None => Default::default(),
+                    };
+                    Ok(launch_env_for_profile(
+                        &settings,
+                        &profile_id,
+                        shared_secrets,
+                        secrets,
+                    ))
                 })
                 .await
         }
+    }
+
+    /// The secret writes still landing for `id` among `names`.
+    fn pending_secret_writes(
+        &self,
+        id: &str,
+        names: &HashSet<String>,
+    ) -> Vec<Arc<smol::lock::Mutex<SecretWrite>>> {
+        self.providers
+            .secret_writes
+            .get(id)
+            .into_iter()
+            .flat_map(|writes| writes.iter())
+            .filter(|(name, _)| names.contains(*name))
+            .map(|(_, write)| write.clone())
+            .collect()
     }
 
     /// The cached model catalog for `provider` (empty when never fetched).
@@ -1485,53 +1719,163 @@ pub(super) fn normalized_selections(
     out
 }
 
+/// What a new endpoint profile is made of.
+pub struct NewEndpointProfile<'a> {
+    pub name: &'a str,
+    pub base_url: &'a str,
+    pub model: Option<&'a str>,
+    pub api_key: &'a str,
+}
+
+/// Variables as saved: trimmed names, without a row that has none.
+pub(super) fn named(env: Vec<EnvVar>) -> Vec<EnvVar> {
+    env.into_iter()
+        .map(|var| EnvVar {
+            name: var.name.trim().to_owned(),
+            ..var
+        })
+        .filter(|var| !var.name.is_empty())
+        .collect()
+}
+
+/// Wait for credential writes a launch reads to land.
+async fn await_secret_writes(
+    writes: Vec<Arc<smol::lock::Mutex<SecretWrite>>>,
+) -> Result<(), String> {
+    for write in writes {
+        let mut write = write.lock().await;
+        if write.result.is_none() {
+            write.result = Some(write.completion.recv().await.unwrap_or_else(|_| {
+                Err(
+                    "the session store writer stopped before saving provider credentials"
+                        .to_owned(),
+                )
+            }));
+        }
+        write
+            .result
+            .as_ref()
+            .expect("completed secret write")
+            .clone()?;
+    }
+    Ok(())
+}
+
+/// A profile's launch environment: its harness's shared variables, then its
+/// own, whose values win.
+impl AppState {
+    /// The MCP servers `profile_id`'s harness is configured with in its own
+    /// files, as a host task: the read happens off the state.
+    pub(crate) fn native_mcp_servers(
+        &self,
+        profile_id: String,
+        cx: &HostCx,
+    ) -> crate::host::HostTask<Result<Vec<agent::NativeMcpServer>, String>> {
+        let settings = self.settings.clone();
+        let secrets = self.settings_store.clone();
+        cx.unblock(move || {
+            let profile = settings
+                .resolved_profile(&profile_id)
+                .ok_or("unknown profile")?;
+            let provider = profile.kind;
+            let binary_path = profile.settings.binary_path;
+            let launch_env = launch_env_for_profile(
+                &settings,
+                &profile_id,
+                secrets.profile_secrets(&Settings::harness_secret_id(provider)),
+                secrets.profile_secrets(&profile_id),
+            );
+            agent::native_mcp::servers(provider, binary_path, &launch_env)
+                .unwrap_or_else(|| Err("no MCP configuration to read".to_owned()))
+        })
+    }
+}
+
 pub(super) fn launch_env_for_profile(
     settings: &Settings,
     profile_id: &str,
+    shared_secrets: std::collections::BTreeMap<String, String>,
     secrets: std::collections::BTreeMap<String, String>,
 ) -> LaunchEnv {
     let Some(profile) = settings.resolved_profile(profile_id) else {
         return LaunchEnv::default();
     };
-    let profile_settings = profile.settings;
-    let env = profile_settings
-        .env
-        .iter()
+    let mut env = env_pairs(&profile.shared_env, &shared_secrets);
+    env.extend(env_pairs(&profile.settings.env, &secrets));
+    LaunchEnv {
+        env,
+        home: profile.settings.home_path.clone(),
+    }
+}
+
+/// Variables as `KEY=VALUE` pairs. Sensitive rows keep their value only in
+/// secrets.json; a row whose secret was never saved contributes nothing.
+pub(super) fn env_pairs(
+    env: &[EnvVar],
+    secrets: &std::collections::BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    env.iter()
         .filter(|var| !var.name.trim().is_empty())
         .filter_map(|var| {
             let value = if var.sensitive {
-                // Sensitive rows keep their value only in secrets.json; a row
-                // whose secret was never saved contributes nothing.
                 secrets.get(&var.name).cloned()?
             } else {
                 var.value.clone()
             };
             Some((var.name.trim().to_string(), value))
         })
-        .collect();
-    LaunchEnv {
-        env,
-        home: profile_settings.home_path.clone(),
-    }
+        .collect()
 }
 
+/// An endpoint profile signed out is one without its API key: the CLI's own
+/// advice to sign in does not apply to it.
+fn endpoint_profile_snapshot(
+    profile: &ResolvedProfile,
+    snapshot: ProviderSnapshot,
+) -> ProviderSnapshot {
+    let signed_out = snapshot.auth.as_ref().is_some_and(|auth| {
+        auth.status == tcode_core::provider_status::AuthStatus::Unauthenticated
+    });
+    if signed_out && profile.is_endpoint_profile() {
+        return ProviderSnapshot {
+            diagnostic: Some(ProviderProbeDiagnostic::MissingApiKey),
+            message: None,
+            ..snapshot
+        };
+    }
+    snapshot
+}
+
+/// The names of the secrets saved for every profile, harness and ACP agent
+/// whose variables still name them.
 pub(super) fn provider_secret_names(
     settings: &Settings,
     settings_store: &SettingsStore,
 ) -> HashMap<String, HashSet<String>> {
-    ProviderKind::NATIVE
+    let names = |id: String, env: &[EnvVar]| {
+        let saved = settings_store.profile_secrets(&id);
+        let names = env
+            .iter()
+            .filter(|var| var.sensitive && saved.contains_key(&var.name))
+            .map(|var| var.name.clone())
+            .collect();
+        (id, names)
+    };
+    let profiles = ProviderKind::NATIVE
         .into_iter()
         .flat_map(|kind| settings.profiles_for_kind(kind))
-        .map(|profile| {
-            let id = profile.id;
-            let names = launch_env_for_profile(settings, &id, settings_store.profile_secrets(&id))
-                .env
-                .into_iter()
-                .map(|(name, _)| name)
-                .collect();
-            (id, names)
-        })
-        .collect()
+        .map(|profile| names(profile.id, &profile.settings.env));
+    let harnesses = ProviderKind::NATIVE.into_iter().map(|kind| {
+        names(
+            Settings::harness_secret_id(kind),
+            &settings.provider(kind).shared_env,
+        )
+    });
+    let agents = settings
+        .acp_agents
+        .values()
+        .map(|agent| names(Settings::acp_secret_id(&agent.id), &agent.env));
+    profiles.chain(harnesses).chain(agents).collect()
 }
 
 /// Whether tcode's computer-use server is offered to a session of `provider`.
@@ -1556,8 +1900,6 @@ pub(super) fn session_provider_settings(
 #[derive(Default)]
 pub(super) struct McpServers {
     pub(super) preview: Option<agent::McpRegistration>,
-    pub(super) orchestrate: Option<agent::McpRegistration>,
-    pub(super) orchestrate_report: Option<agent::McpRegistration>,
     pub(super) computer_use: Option<agent::McpRegistration>,
     pub(super) control: Option<agent::McpRegistration>,
 }
@@ -1583,7 +1925,7 @@ pub(super) fn session_options(
         cwd: meta.cwd.clone(),
         model: meta.model.clone(),
         resume: meta.resume_cursor.clone(),
-        fork: meta.pending_fork,
+        fork: meta.pending_fork.clone(),
         binary_path: provider_settings.binary_path.clone(),
         option_selections: meta.option_selections.clone(),
         mcp_servers: [
@@ -1591,13 +1933,6 @@ pub(super) fn session_options(
                 .caps()
                 .mcp_servers
                 .then_some(servers.preview)
-                .flatten(),
-            meta.orchestrate_enabled
-                .then_some(servers.orchestrate)
-                .flatten(),
-            meta.parent_session_id
-                .is_some()
-                .then_some(servers.orchestrate_report)
                 .flatten(),
             computer_use_attaches(meta.provider, settings)
                 .then_some(servers.computer_use)
@@ -1844,14 +2179,14 @@ mod provider_lifecycle_tests {
         let test_store = TestStore::new("tcode-usage-secret-race");
         let state = cx.new_entity(TestClientState::new((*test_store).clone()));
         state.update(cx, |state, cx| {
-            std::mem::swap(&mut state.providers, &mut catalog);
+            std::mem::swap(&mut *state.providers, &mut catalog);
             state.set_profile_secret(
                 "claude",
                 "CLAUDE_CODE_OAUTH_TOKEN",
                 Some("fixture-replacement"),
                 cx,
             );
-            std::mem::swap(&mut state.providers, &mut catalog);
+            std::mem::swap(&mut *state.providers, &mut catalog);
         });
         assert!(!catalog.provider_usage.contains_key("claude"));
         catalog.usage_checking.insert("claude".into());

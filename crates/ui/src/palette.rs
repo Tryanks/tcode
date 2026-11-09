@@ -1,16 +1,23 @@
 //! Command palette with action, thread-title and message-content search.
 //!
 //! Rendered by [`crate::AppShell`] as a full-window overlay only while
-//! [`crate::WindowState::palette_open`] is set. Sources:
+//! [`crate::WindowState::palette_mounted`] holds, over every host the window
+//! is open on. Sources:
 //! - Threads: fuzzy match over session titles (enter opens the thread).
 //! - Messages: debounced full-text search over persisted conversation events.
 //! - Actions: "New thread…" per project, "Open settings", "Toggle theme",
 //!   "Toggle diff panel".
 //!
-//! Title and action search use [`fuzzy_score`]; message search runs through the host.
+//! Title and action search use [`fuzzy_score`]; message search runs through
+//! each host. Threads and messages are listed host by host, never ranked
+//! across hosts.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
+
+/// How long a result takes to come into the list as the query changes.
+const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
 
 use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
@@ -26,12 +33,14 @@ use gpui::{
 use gpui_base::{h_flex, v_flex};
 use tcode_protocol::{SessionSearchHit, ThreadExportFormat};
 
-use crate::provider_card::provider_glyph;
+use crate::provider_card::profile_glyph;
 use crate::settings::ThemeMode;
-use crate::settings_page::apply_theme;
-use crate::store::{StoreChange, TopicKind, WorkspaceStore};
+use crate::store::{HostKey, StoreChange, ThreadKey, TopicKind, WorkspaceStore};
 use crate::time::{humanize_ago, now_secs};
 use crate::window_state::WindowState;
+
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// How far below the window's top the desktop palette hangs. See the host's
 /// note in [`CommandPalette`]'s render on why it does not use `overlay::Dialog`.
@@ -67,30 +76,52 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
 /// A concrete action a palette row triggers.
 #[derive(Clone)]
 enum Action {
-    ChangeProjectIcon(tcode_core::project::Project),
+    ChangeProjectIcon(HostKey, tcode_core::project::Project),
     NewThread {
+        host: HostKey,
         cwd: std::path::PathBuf,
         project_id: String,
     },
-    QuickChat,
+    QuickChat(HostKey),
     OpenSettings,
     ToggleTheme,
     ToggleDiff,
     ToggleTerminal,
     OpenPreview,
-    CheckUpdates,
-    MergeWorktree {
-        session_id: String,
-    },
+    CheckUpdates(HostKey),
+    MergeWorktree(ThreadKey),
     ExportThread {
-        session_id: String,
+        thread: ThreadKey,
         cwd: std::path::PathBuf,
         format: ThreadExportFormat,
     },
     OpenThread {
-        session_id: String,
+        thread: ThreadKey,
         turn: Option<usize>,
     },
+    /// A pane command or layout, which the shell answers.
+    Pane(Rc<dyn gpui::Action>),
+}
+
+impl Action {
+    /// The host whose state the row shows.
+    fn host(&self) -> Option<&HostKey> {
+        match self {
+            Self::ChangeProjectIcon(host, _)
+            | Self::NewThread { host, .. }
+            | Self::QuickChat(host)
+            | Self::CheckUpdates(host) => Some(host),
+            Self::MergeWorktree(thread)
+            | Self::ExportThread { thread, .. }
+            | Self::OpenThread { thread, .. } => Some(&thread.host),
+            Self::OpenSettings
+            | Self::ToggleTheme
+            | Self::ToggleDiff
+            | Self::ToggleTerminal
+            | Self::OpenPreview
+            | Self::Pane(_) => None,
+        }
+    }
 }
 
 /// One rendered palette row.
@@ -100,8 +131,9 @@ struct Item {
     label: String,
     /// Optional muted subtitle (e.g. a thread's project).
     subtitle: Option<String>,
-    /// Thread rows carry their provider glyph + last-activity time (right side).
-    provider: Option<ProviderKind>,
+    /// Thread rows carry the glyph of the provider and profile they run on +
+    /// last-activity time (right side).
+    provider: Option<(ProviderKind, Option<String>)>,
     updated_at: Option<u64>,
     action: Action,
 }
@@ -109,6 +141,14 @@ struct Item {
 struct Group {
     label: String,
     items: Vec<Item>,
+    /// The host whose message hits the group lists.
+    hits_of: Option<HostKey>,
+}
+
+/// A host the palette lists, and its subscription.
+struct PaletteHost {
+    store: Entity<WorkspaceStore>,
+    _subscription: Subscription,
 }
 
 enum Row {
@@ -125,68 +165,128 @@ struct Results {
 }
 
 pub struct CommandPalette {
-    store: Entity<WorkspaceStore>,
+    /// Every host the window is open on, in the window's order.
+    hosts: Vec<PaletteHost>,
     window_state: Entity<WindowState>,
     query: Entity<InputState>,
     focus_handle: FocusHandle,
     selected: usize,
     pub(crate) outside_dismissal: crate::overlay::OutsideDismissal,
-    content_hits: Vec<SessionSearchHit>,
+    content_hits: HashMap<HostKey, Vec<SessionSearchHit>>,
     search_generation: u64,
     results: Option<Rc<Results>>,
     list_state: ListState,
-    _search_task: Option<Task<()>>,
+    /// The rows a search of the messages brought, by index, folding in
+    /// below what the query listed.
+    arrived: crate::motion::list_rows::ListRows<(), ()>,
+    /// The hosts whose messages' hits for the query shown the next rebuild
+    /// brings.
+    hits_arrived: Vec<HostKey>,
+    /// Moving the selection scrolls it into view gradually.
+    list_scroll: crate::motion::ListScroll,
+    /// Whether [`Self::open`] has run since the palette last showed closed:
+    /// the host opens it on mount, and a palette reopened while it leaves is
+    /// still mounted, so it opens itself.
+    opened: bool,
+    _search_tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
+    /// The card's move between the centred card and the bottom sheet when
+    /// the window turns compact or wide, which draws the palette under
+    /// another parent.
+    motion: crate::motion::owned::Owned,
 }
 
 impl CommandPalette {
     pub fn new(
-        store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let query = cx.new(|cx| InputState::new(window, cx));
 
-        let subscriptions = vec![
-            cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
-                if matches!(
-                    change.topic,
-                    TopicKind::Index | TopicKind::Settings | TopicKind::ActiveSession
-                ) {
-                    this.invalidate_results(false, cx);
+        let subscriptions = vec![cx.subscribe_in(
+            &query,
+            window,
+            |this, _query, event, window, cx| match event {
+                InputEvent::Change => {
+                    this.selected = 0;
+                    this.schedule_content_search(cx);
+                    this.invalidate_results(true, cx);
                 }
-            }),
-            cx.subscribe_in(
-                &query,
-                window,
-                |this, _query, event, window, cx| match event {
-                    InputEvent::Change => {
-                        this.selected = 0;
-                        this.schedule_content_search(cx);
-                        this.invalidate_results(true, cx);
-                    }
-                    InputEvent::PressEnter { .. } => {
-                        this.activate_selected(window, cx);
-                    }
-                    _ => {}
-                },
-            ),
-        ];
+                InputEvent::PressEnter { .. } => {
+                    this.activate_selected(window, cx);
+                }
+                _ => {}
+            },
+        )];
 
         Self {
-            store,
+            hosts: Vec::new(),
             window_state,
             query,
             focus_handle: cx.focus_handle(),
             selected: 0,
             outside_dismissal: crate::overlay::OutsideDismissal::default(),
-            content_hits: Vec::new(),
+            motion: Default::default(),
+            content_hits: HashMap::new(),
             search_generation: 0,
             results: None,
             list_state: ListState::new(0, ListAlignment::Top, px(120.)),
-            _search_task: None,
+            arrived: crate::motion::list_rows::ListRows::over(ARRIVE),
+            hits_arrived: Vec::new(),
+            list_scroll: Default::default(),
+            opened: false,
+            _search_tasks: Vec::new(),
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// List the hosts of `stores`, in that order. A host still listed keeps
+    /// its subscription and its messages' hits.
+    pub(crate) fn set_stores(
+        &mut self,
+        stores: Vec<Entity<WorkspaceStore>>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut kept = std::mem::take(&mut self.hosts);
+        self.hosts = stores
+            .into_iter()
+            .map(
+                |store| match kept.iter().position(|host| host.store == store) {
+                    Some(index) => kept.swap_remove(index),
+                    None => PaletteHost {
+                        _subscription: cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
+                            if matches!(change.topic, TopicKind::Index | TopicKind::Settings) {
+                                this.invalidate_results(false, cx);
+                            }
+                        }),
+                        store,
+                    },
+                },
+            )
+            .collect();
+        let listed: Vec<HostKey> = self
+            .hosts
+            .iter()
+            .map(|host| host.store.read(cx).host_key())
+            .collect();
+        self.content_hits.retain(|host, _| listed.contains(host));
+        self.invalidate_results(false, cx);
+    }
+
+    fn store_of(&self, host: &HostKey, cx: &gpui::App) -> Option<Entity<WorkspaceStore>> {
+        self.hosts
+            .iter()
+            .find(|listed| listed.store.read(cx).host_key() == *host)
+            .map(|listed| listed.store.clone())
+    }
+
+    /// The store a command about the current pane acts on, with the pane's
+    /// thread there.
+    fn current(&self, cx: &gpui::App) -> Option<(Entity<WorkspaceStore>, Option<String>)> {
+        match crate::shell::current_thread(cx) {
+            Some(thread) => Some((self.store_of(&thread.host, cx)?, Some(thread.session_id))),
+            None => Some((crate::shell::current_store(cx)?, None)),
         }
     }
 
@@ -206,6 +306,7 @@ impl CommandPalette {
         self.selected = 0;
         self.content_hits.clear();
         self.invalidate_results(true, cx);
+        self.opened = true;
     }
 
     #[cfg(test)]
@@ -213,47 +314,55 @@ impl CommandPalette {
         self.query.read(cx).focus_handle(cx)
     }
 
-    /// Debounce, then ask the host for content hits. The index, cache and
+    /// Debounce, then ask each host for content hits. The index, cache and
     /// session metadata are host-owned; this keeps only the debounce and the
     /// generation guard that discards an answer a newer query superseded.
     fn schedule_content_search(&mut self, cx: &mut Context<Self>) {
         self.search_generation = self.search_generation.wrapping_add(1);
         let generation = self.search_generation;
         self.content_hits.clear();
+        self._search_tasks.clear();
 
         let raw = self.query.read(cx).value().to_string();
         let query = raw.trim();
         if query.is_empty() || query.starts_with('>') {
-            self._search_task = None;
             return;
         }
-        let query = query.to_string();
-        let store = self.store.clone();
-        self._search_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(150))
-                .await;
-            let hits = store
-                .update(cx, |store, cx| store.search_session_content(query, 50, cx))
-                .await;
-            let _ = this.update(cx, |palette, cx| {
-                palette.apply_content_hits(generation, hits, cx);
-            });
-        }));
+        for host in &self.hosts {
+            let query = query.to_string();
+            let store = host.store.clone();
+            self._search_tasks.push(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                let (host, hits) = store.update(cx, |store, cx| {
+                    (
+                        store.host_key(),
+                        store.search_session_content(query, 50, cx),
+                    )
+                });
+                let hits = hits.await;
+                let _ = this.update(cx, |palette, cx| {
+                    palette.apply_content_hits(generation, host, hits, cx);
+                });
+            }));
+        }
     }
 
-    /// Adopt an answer only while it still belongs to the current query. The
-    /// host may answer an earlier keystroke after a later one.
+    /// Adopt `host`'s answer only while it still belongs to the current
+    /// query. A host may answer an earlier keystroke after a later one.
     fn apply_content_hits(
         &mut self,
         generation: u64,
+        host: HostKey,
         hits: Vec<SessionSearchHit>,
         cx: &mut Context<Self>,
     ) {
         if self.search_generation != generation {
             return;
         }
-        self.content_hits = hits;
+        self.content_hits.insert(host.clone(), hits);
+        self.hits_arrived.push(host);
         self.invalidate_results(false, cx);
     }
 
@@ -262,22 +371,39 @@ impl CommandPalette {
     fn invalidate_results(&mut self, scroll_to_top: bool, cx: &mut Context<Self>) {
         self.results = None;
         if scroll_to_top {
+            self.list_scroll.cancel();
             self.list_state.scroll_to(gpui::ListOffset::default());
         }
         cx.notify();
     }
 
-    fn results(&mut self, cx: &Context<Self>) -> Rc<Results> {
+    fn results(&mut self, window: &Window, cx: &Context<Self>) -> Rc<Results> {
         if let Some(results) = &self.results {
             return results.clone();
         }
+        // A host's messages' hits come after the rows a keystroke listed,
+        // and fold in under them; a keystroke replaces the rows at once.
+        self.arrived.clear();
+        let arrived = std::mem::take(&mut self.hits_arrived);
+        let at = cx.background_executor().now();
         let mut rows = Vec::new();
         let mut items = Vec::new();
-        for group in self.groups(cx) {
+        for group in self.groups(window, cx) {
+            let start = rows.len();
             rows.push(Row::Caption(group.label));
             for item in group.items {
                 rows.push(Row::Item(items.len()));
                 items.push(item);
+            }
+            if !cx.reduce_motion() && group.hits_of.is_some_and(|host| arrived.contains(&host)) {
+                for index in start..rows.len() {
+                    self.arrived.arrive(
+                        index as u64,
+                        crate::motion::list_rows::Arrival::Appended,
+                        (),
+                        at,
+                    );
+                }
             }
         }
         let top = self.list_state.logical_scroll_top();
@@ -298,7 +424,7 @@ impl CommandPalette {
 
     /// Build the grouped result list for the current query. A leading `>`
     /// restricts results to Actions.
-    fn groups(&self, cx: &Context<Self>) -> Vec<Group> {
+    fn groups(&self, window: &Window, cx: &Context<Self>) -> Vec<Group> {
         let raw = self.query.read(cx).value().to_string();
         let actions_only = raw.trim_start().starts_with('>');
         // Strip the `>` prefix so the remainder still fuzzy-matches action labels.
@@ -310,7 +436,14 @@ impl CommandPalette {
         } else {
             raw
         };
-        let store = self.store.read(cx);
+        let several = crate::shell::several_hosts(cx);
+        // What a row names when the window is over several hosts.
+        let on_host = |store: &WorkspaceStore| several.then(|| store.host_title());
+        let hosts: Vec<&PaletteHost> = self
+            .hosts
+            .iter()
+            .filter(|host| !(several && crate::sidebar::host_down(host.store.read(cx))))
+            .collect();
 
         let mut actions: Vec<(i32, Item)> = Vec::new();
         let mut push_action = |label: String, icon: IconName, action: Action| {
@@ -328,28 +461,56 @@ impl CommandPalette {
                 ));
             }
         };
-        if store.scope().is_full() {
-            push_action(
-                crate::tr!("sidebar.quick_chat").into_owned(),
-                IconName::Plus,
-                Action::QuickChat,
-            );
-        }
-        for project in store.projects() {
-            push_action(
-                crate::tr!("palette.new_thread", project = project.name.clone()).into_owned(),
-                IconName::Plus,
-                Action::NewThread {
-                    cwd: project.root.clone(),
-                    project_id: project.id.clone(),
-                },
-            );
+        for host in &hosts {
+            let store = host.store.read(cx);
+            let key = store.host_key();
+            let named = on_host(store);
             if store.scope().is_full() {
                 push_action(
-                    crate::tr!("project_icon.action", project = project.name.clone()).into_owned(),
-                    IconName::Folder,
-                    Action::ChangeProjectIcon(project),
+                    match &named {
+                        Some(host) => crate::tr!("palette.quick_chat_on", host = host.clone()),
+                        None => crate::tr!("sidebar.quick_chat"),
+                    }
+                    .into_owned(),
+                    IconName::Plus,
+                    Action::QuickChat(key.clone()),
                 );
+            }
+            for project in store.projects() {
+                push_action(
+                    match &named {
+                        Some(host) => crate::tr!(
+                            "palette.new_thread_on",
+                            project = project.name.clone(),
+                            host = host.clone()
+                        ),
+                        None => crate::tr!("palette.new_thread", project = project.name.clone()),
+                    }
+                    .into_owned(),
+                    IconName::Plus,
+                    Action::NewThread {
+                        host: key.clone(),
+                        cwd: project.root.clone(),
+                        project_id: project.id.clone(),
+                    },
+                );
+                if store.scope().is_full() {
+                    push_action(
+                        match &named {
+                            Some(host) => crate::tr!(
+                                "project_icon.action_on",
+                                project = project.name.clone(),
+                                host = host.clone()
+                            ),
+                            None => {
+                                crate::tr!("project_icon.action", project = project.name.clone())
+                            }
+                        }
+                        .into_owned(),
+                        IconName::Folder,
+                        Action::ChangeProjectIcon(key.clone(), project),
+                    );
+                }
             }
         }
         push_action(
@@ -372,33 +533,138 @@ impl CommandPalette {
             IconName::SquareTerminal,
             Action::ToggleTerminal,
         );
-        if store.offers_preview() {
+        let current = self.current(cx);
+        if current
+            .as_ref()
+            .is_some_and(|(store, _)| store.read(cx).offers_preview())
+        {
             push_action(
                 crate::tr!("palette.open_preview").into_owned(),
                 IconName::Globe,
                 Action::OpenPreview,
             );
         }
-        if store.scope().is_full() {
+        let pane = |action: Box<dyn gpui::Action>| Action::Pane(action.into());
+        if let Some(panes) = crate::shell::pane_controls(window, cx) {
+            use crate::panes::{
+                CloseOtherPanes, ClosePane, FocusPane, MoveThreadToPane, SplitDown, SplitRight,
+                SwapPane, ZoomPane,
+            };
+            if panes.split_right {
+                push_action(
+                    crate::tr!("panes.split_right").into_owned(),
+                    IconName::Columns2,
+                    pane(Box::new(SplitRight)),
+                );
+            }
+            if panes.split_down {
+                push_action(
+                    crate::tr!("panes.split_down").into_owned(),
+                    IconName::Rows2,
+                    pane(Box::new(SplitDown)),
+                );
+            }
+            if panes.close {
+                push_action(
+                    crate::tr!("panes.close").into_owned(),
+                    IconName::Close,
+                    pane(Box::new(ClosePane)),
+                );
+            }
+            if panes.close_others {
+                push_action(
+                    crate::tr!("panes.close_others").into_owned(),
+                    IconName::Close,
+                    pane(Box::new(CloseOtherPanes)),
+                );
+            }
+            if panes.zoom {
+                let (label, icon) = if panes.zoomed {
+                    (crate::tr!("panes.unzoom"), IconName::Minimize2)
+                } else {
+                    (crate::tr!("panes.zoom"), IconName::Maximize2)
+                };
+                push_action(label.into_owned(), icon, pane(Box::new(ZoomPane)));
+            }
+            if panes.zoom && !panes.zoomed {
+                let moves = [
+                    (
+                        crate::tr!("panes.focus_left"),
+                        IconName::ArrowLeft,
+                        FocusPane::Left,
+                    ),
+                    (
+                        crate::tr!("panes.focus_right"),
+                        IconName::ArrowRight,
+                        FocusPane::Right,
+                    ),
+                    (
+                        crate::tr!("panes.focus_up"),
+                        IconName::ArrowUp,
+                        FocusPane::Up,
+                    ),
+                    (
+                        crate::tr!("panes.focus_down"),
+                        IconName::ArrowDown,
+                        FocusPane::Down,
+                    ),
+                    (
+                        crate::tr!("panes.focus_next"),
+                        IconName::ChevronRight,
+                        FocusPane::Next,
+                    ),
+                    (
+                        crate::tr!("panes.focus_previous"),
+                        IconName::ChevronLeft,
+                        FocusPane::Previous,
+                    ),
+                ];
+                for (label, icon, action) in moves {
+                    push_action(label.into_owned(), icon, pane(Box::new(action)));
+                }
+            }
+            for side in panes.sides() {
+                let swap = SwapPane(side);
+                push_action(swap.label().into_owned(), side.icon(), pane(Box::new(swap)));
+            }
+            if panes.moves {
+                for side in panes.sides() {
+                    let to = MoveThreadToPane(side);
+                    push_action(to.label().into_owned(), side.icon(), pane(Box::new(to)));
+                }
+            }
+        }
+        for layout in crate::shell::pane_layouts(window, cx) {
             push_action(
-                crate::tr!("palette.check_updates").into_owned(),
-                IconName::Inbox,
-                Action::CheckUpdates,
+                layout.label().into_owned(),
+                layout.icon(),
+                pane(Box::new(layout)),
             );
         }
-        if let Some(session_id) = store.active_session_id()
-            && let Some(meta) = store
-                .sidebar_sessions()
-                .into_iter()
-                .find(|meta| meta.id == session_id)
+        for host in &hosts {
+            let store = host.store.read(cx);
+            if store.scope().is_full() {
+                push_action(
+                    match on_host(store) {
+                        Some(host) => crate::tr!("palette.check_updates_on", host = host),
+                        None => crate::tr!("palette.check_updates"),
+                    }
+                    .into_owned(),
+                    IconName::Inbox,
+                    Action::CheckUpdates(store.host_key()),
+                );
+            }
+        }
+        if let Some((store, Some(session_id))) = &current
+            && let store = store.read(cx)
+            && let Some(meta) = store.thread_meta(session_id)
         {
+            let thread = store.thread_key(&meta.id);
             if meta.worktree.is_some() {
                 push_action(
                     crate::tr!("palette.merge_worktree").into_owned(),
                     IconName::Inbox,
-                    Action::MergeWorktree {
-                        session_id: meta.id.clone(),
-                    },
+                    Action::MergeWorktree(thread.clone()),
                 );
             }
             for (label, format) in [
@@ -415,7 +681,7 @@ impl CommandPalette {
                     label,
                     IconName::Inbox,
                     Action::ExportThread {
-                        session_id: meta.id.clone(),
+                        thread: thread.clone(),
                         cwd: meta.cwd.clone(),
                         format,
                     },
@@ -429,11 +695,16 @@ impl CommandPalette {
             groups.push(Group {
                 label: crate::tr!("palette.actions").into_owned(),
                 items: actions.into_iter().map(|(_, i)| i).collect(),
+                hits_of: None,
             });
         }
+        if actions_only {
+            return groups;
+        }
 
-        // Threads (fuzzy over titles) — suppressed in `>`-actions-only mode.
-        if !actions_only {
+        // Threads (fuzzy over titles), each host's ranked on its own.
+        for host in &hosts {
+            let store = host.store.read(cx);
             let mut threads: Vec<(i32, Item)> = Vec::new();
             for group in store.grouped_sessions() {
                 for meta in &group.sessions {
@@ -444,10 +715,10 @@ impl CommandPalette {
                                 icon: IconName::SquareTerminal,
                                 label: meta.title.clone(),
                                 subtitle: Some(crate::project_icon::label(&group.project)),
-                                provider: Some(meta.provider),
+                                provider: Some((meta.provider, meta.profile_id.clone())),
                                 updated_at: Some(meta.updated_at),
                                 action: Action::OpenThread {
-                                    session_id: meta.id.clone(),
+                                    thread: store.thread_key(&meta.id),
                                     turn: None,
                                 },
                             },
@@ -458,69 +729,86 @@ impl CommandPalette {
             threads.sort_by_key(|b| std::cmp::Reverse(b.0));
             if !threads.is_empty() {
                 groups.push(Group {
-                    label: crate::tr!("palette.threads").into_owned(),
+                    label: match on_host(store) {
+                        Some(host) => crate::tr!("palette.threads_on", host = host),
+                        None => crate::tr!("palette.threads"),
+                    }
+                    .into_owned(),
                     items: threads.into_iter().map(|(_, i)| i).collect(),
+                    hits_of: None,
                 });
             }
+        }
 
-            if !query.trim().is_empty() && !self.content_hits.is_empty() {
-                let sessions = store.sidebar_sessions();
-                let messages = self
-                    .content_hits
-                    .iter()
-                    .map(|hit| {
-                        let meta = sessions.iter().find(|meta| meta.id == hit.session_id);
-                        Item {
-                            icon: IconName::Search,
-                            label: hit.session_title.clone(),
-                            subtitle: Some(hit.snippet.clone()),
-                            provider: meta.map(|meta| meta.provider),
-                            updated_at: meta.map(|meta| meta.updated_at),
-                            action: Action::OpenThread {
-                                session_id: hit.session_id.clone(),
-                                turn: Some(hit.turn),
-                            },
-                        }
-                    })
-                    .collect();
-                groups.push(Group {
-                    label: crate::tr!("palette.messages").into_owned(),
-                    items: messages,
-                });
-            }
+        if query.trim().is_empty() {
+            return groups;
+        }
+        for host in &hosts {
+            let store = host.store.read(cx);
+            let key = store.host_key();
+            let Some(hits) = self.content_hits.get(&key).filter(|hits| !hits.is_empty()) else {
+                continue;
+            };
+            let sessions = store.sidebar_sessions();
+            let messages = hits
+                .iter()
+                .map(|hit| {
+                    let meta = sessions.iter().find(|meta| meta.id == hit.session_id);
+                    Item {
+                        icon: IconName::Search,
+                        label: hit.session_title.clone(),
+                        subtitle: Some(hit.snippet.clone()),
+                        provider: meta.map(|meta| (meta.provider, meta.profile_id.clone())),
+                        updated_at: meta.map(|meta| meta.updated_at),
+                        action: Action::OpenThread {
+                            thread: store.thread_key(&hit.session_id),
+                            turn: Some(hit.turn),
+                        },
+                    }
+                })
+                .collect();
+            groups.push(Group {
+                label: match on_host(store) {
+                    Some(host) => crate::tr!("palette.messages_on", host = host),
+                    None => crate::tr!("palette.messages"),
+                }
+                .into_owned(),
+                items: messages,
+                hits_of: Some(key),
+            });
         }
         groups
     }
 
     fn activate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let results = self.results(cx);
+        let results = self.results(window, cx);
         if let Some(item) = results.items.get(self.selected) {
             self.activate(item.action.clone(), window, cx);
         }
     }
 
     fn activate(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        let store = action.host().and_then(|host| self.store_of(host, cx));
         match action {
-            Action::ChangeProjectIcon(project) => {
+            Action::ChangeProjectIcon(_, project) => {
                 self.close(cx);
-                crate::project_icon::open(self.store.clone(), project, window, cx);
+                if let Some(store) = store {
+                    crate::project_icon::open(store, project, window, cx);
+                }
             }
-            Action::NewThread { cwd, project_id } => {
+            Action::NewThread {
+                cwd, project_id, ..
+            } => {
                 self.close(cx);
-                self.store.update(cx, |store, cx| {
-                    store.start_draft(project_id, cwd, cx);
-                });
-                // Draft selection arrives asynchronously and can reuse an
-                // already selected draft. Navigation is a separate intent.
-                self.window_state
-                    .update(cx, |state, cx| state.open_thread(cx));
+                if let Some(store) = store {
+                    store.update(cx, |store, cx| store.start_draft(project_id, cwd, cx));
+                }
             }
-            Action::QuickChat => {
+            Action::QuickChat(_) => {
                 self.close(cx);
-                self.store
-                    .update(cx, |store, cx| store.start_scratch_draft(cx));
-                self.window_state
-                    .update(cx, |state, cx| state.open_thread(cx));
+                if let Some(store) = store {
+                    store.update(cx, |store, cx| store.start_scratch_draft(cx));
+                }
             }
             Action::OpenSettings => {
                 // open_settings also clears palette_open.
@@ -533,71 +821,84 @@ impl CommandPalette {
                 } else {
                     ThemeMode::Dark
                 };
-                self.store.update(cx, |store, _cx| {
-                    store.set_client_theme(Some(next));
-                });
-                apply_theme(next, window, cx);
+                crate::device::DevicePreferences::set_theme(next, window, cx);
                 self.close(cx);
             }
             Action::ToggleDiff => {
-                self.store
-                    .update(cx, |store, cx| store.toggle_diff_panel(cx));
+                if let Some((store, Some(session_id))) = self.current(cx) {
+                    store.update(cx, |store, cx| {
+                        store.toggle_tab_panel_for(&session_id, tcode_core::ui::RightTab::Diff, cx)
+                    });
+                }
                 self.close(cx);
             }
             Action::ToggleTerminal => {
-                self.store
-                    .update(cx, |store, cx| store.toggle_terminal_panel(cx));
+                if let Some((store, session_id)) = self.current(cx) {
+                    store.update(cx, |store, cx| {
+                        store.toggle_terminal_panel_for(session_id.unwrap_or_default(), cx)
+                    });
+                }
                 self.close(cx);
             }
             Action::OpenPreview => {
-                self.store
-                    .update(cx, |store, cx| store.open_preview_panel(cx));
+                if let Some((store, session_id)) = self.current(cx) {
+                    store.update(cx, |store, cx| {
+                        store.open_preview_panel_for(session_id.as_deref(), cx)
+                    });
+                }
                 self.close(cx);
             }
-            Action::CheckUpdates => {
-                self.store
-                    .update(cx, |store, _cx| store.check_provider_versions());
+            Action::CheckUpdates(_) => {
+                if let Some(store) = store {
+                    store.update(cx, |store, _cx| store.check_provider_versions());
+                }
                 self.close(cx);
             }
-            Action::MergeWorktree { session_id } => {
-                self.store.update(cx, |store, _cx| {
-                    store.merge_worktree(session_id);
-                });
+            Action::MergeWorktree(thread) => {
+                if let Some(store) = store {
+                    store.update(cx, |store, _cx| store.merge_worktree(thread.session_id));
+                }
                 self.close(cx);
             }
             Action::ExportThread {
-                session_id,
+                thread,
                 cwd,
                 format,
             } => {
                 self.close(cx);
-                crate::thread_export::prompt_thread_export(
-                    self.store.clone(),
-                    session_id,
-                    cwd,
-                    format,
-                    window,
-                    cx,
-                );
+                if let Some(store) = store {
+                    crate::thread_export::prompt_thread_export(
+                        store,
+                        thread.session_id,
+                        cwd,
+                        format,
+                        window,
+                        cx,
+                    );
+                }
             }
-            Action::OpenThread { session_id, turn } => {
-                self.store.update(cx, |store, cx| {
-                    if let Some(turn) = turn {
-                        store.select_session_at_turn(session_id, turn);
-                        cx.notify();
-                    } else {
-                        store.select_session(session_id);
-                    }
-                });
+            Action::Pane(action) => {
                 self.close(cx);
-                self.window_state
-                    .update(cx, |state, cx| state.open_thread(cx));
+                crate::shell::select_current_pane(window, cx);
+                window.dispatch_action(action.boxed_clone(), cx);
+            }
+            Action::OpenThread { thread, turn } => {
+                if let Some(store) = store {
+                    store.update(cx, |store, cx| {
+                        if let Some(turn) = turn {
+                            store.show_thread_at_turn(thread.session_id, turn, cx);
+                        } else {
+                            store.show_thread(thread.session_id, cx);
+                        }
+                    });
+                }
+                self.close(cx);
             }
         }
     }
 
-    fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let results = self.results(cx);
+    fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let results = self.results(window, cx);
         let total = results.items.len();
         let selected = match ev.keystroke.key.as_str() {
             "down" if total > 0 => (self.selected + 1).min(total - 1),
@@ -612,7 +913,7 @@ impl CommandPalette {
             .iter()
             .position(|row| matches!(row, Row::Item(index) if *index == selected))
         {
-            self.list_state.scroll_to_reveal_item(row);
+            self.list_scroll.reveal(&self.list_state, row, cx);
         }
         cx.notify();
     }
@@ -624,12 +925,15 @@ impl CommandPalette {
         row: &Row,
         items: &[Item],
         compact: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let index = match row {
             Row::Caption(label) => {
+                let caption = label.clone();
                 return div()
+                    .debug_selector(move || format!("palette-caption-{caption}"))
                     .px_2()
                     .pt_1()
                     .pb_1()
@@ -640,8 +944,15 @@ impl CommandPalette {
             Row::Item(index) => *index,
         };
         let item = &items[index];
+        let store = item.action.host().and_then(|host| self.store_of(host, cx));
         let is_sel = index == self.selected;
         let action = item.action.clone();
+        let key = match &item.action {
+            Action::Pane(action) => {
+                crate::widgets::kbd::Kbd::binding_for_action(action.as_ref(), None, window)
+            }
+            _ => None,
+        };
         // Every result takes the two-line row, so the list's uniform height
         // hint holds whether or not a result has a subtitle.
         let row = crate::material::selectable_row_two_line(
@@ -655,10 +966,14 @@ impl CommandPalette {
             .child(
                 row.debug_selector({
                     let action = action.clone();
+                    let hosts = self.hosts.len();
                     move || match &action {
-                        Action::NewThread { project_id, .. } => {
-                            format!("palette-new-thread-{project_id}")
-                        }
+                        Action::NewThread {
+                            host, project_id, ..
+                        } => format!(
+                            "palette-new-thread-{}",
+                            crate::sidebar::named(hosts, host, project_id)
+                        ),
                         _ => format!("palette-row-{index}"),
                     }
                 })
@@ -669,16 +984,17 @@ impl CommandPalette {
                 .flex_none()
                 .w_full()
                 .cursor_pointer()
-                .child(match &item.action {
-                    Action::ChangeProjectIcon(project) => {
-                        crate::project_icon::artwork(project, 16.).into_any_element()
+                .child(match (&item.action, &store) {
+                    (Action::ChangeProjectIcon(_, project), Some(store)) => {
+                        crate::project_icon::artwork(store.read(cx).image_host(), project, 16.)
+                            .into_any_element()
                     }
-                    Action::NewThread { project_id, .. } => self
-                        .store
+                    (Action::NewThread { project_id, .. }, Some(store)) => store
                         .read(cx)
                         .project(project_id)
                         .map(|project| {
-                            crate::project_icon::artwork(project, 16.).into_any_element()
+                            crate::project_icon::artwork(store.read(cx).image_host(), project, 16.)
+                                .into_any_element()
                         })
                         .unwrap_or_else(|| {
                             Icon::new(item.icon.clone())
@@ -708,18 +1024,34 @@ impl CommandPalette {
                             )
                         }),
                 )
-                .when_some(item.provider, |this, provider| {
+                .when_some(
+                    item.provider.clone().zip(store),
+                    |this, ((provider, profile_id), store)| {
+                        this.child(
+                            h_flex()
+                                .flex_none()
+                                .gap_1p5()
+                                .items_center()
+                                .text_secondary(compact, cx)
+                                .when_some(item.updated_at, |this, at| {
+                                    let ago = now_secs().saturating_sub(at);
+                                    this.child(div().child(humanize_ago(ago)))
+                                })
+                                .child(profile_glyph(
+                                    store.read(cx),
+                                    provider,
+                                    profile_id.as_deref(),
+                                )),
+                        )
+                    },
+                )
+                .when_some(key, |this, key| {
                     this.child(
-                        h_flex()
+                        div()
                             .flex_none()
-                            .gap_1p5()
-                            .items_center()
+                            .debug_selector(move || format!("palette-row-{index}-key"))
                             .text_secondary(compact, cx)
-                            .when_some(item.updated_at, |this, at| {
-                                let ago = now_secs().saturating_sub(at);
-                                this.child(div().child(humanize_ago(ago)))
-                            })
-                            .child(provider_glyph(provider)),
+                            .child(key.appearance(false)),
                     )
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -732,22 +1064,59 @@ impl CommandPalette {
 
 impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = self.window_state.read(cx).compact;
-        let open = self.window_state.read(cx).palette_open;
-        let presence = gpui_base::motion::Presence::new("palette-presence", open)
-            .transition(gpui_base::motion::Transition::new(crate::edge_back::SETTLE))
-            .sample(window, cx);
-        if !open && (!compact || !presence.should_render() || presence.progress == 0.) {
+        let (compact, open, focus_query) = {
+            let state = self.window_state.read(cx);
+            (
+                state.compact,
+                state.palette_open,
+                state.palette_focuses_query,
+            )
+        };
+        if !open {
+            self.opened = false;
+            // A leaving palette takes no keys.
+            if self.focus_handle.contains_focused(window, cx) {
+                window.blur(cx);
+            }
+        } else if !self.opened {
+            self.open(focus_query, window, cx);
+        }
+        // The palette's own clock: the window turning compact or wide draws
+        // it under another parent, where an element's clock would bring an
+        // open palette in again from nothing.
+        let presence = self.motion.appear("presence", open, APPEAR, window, cx);
+        if !open && presence == 0. {
+            if self.window_state.read(cx).palette_leaving() {
+                // Its host unmounts it once the window says it has left.
+                let state = self.window_state.clone();
+                window.defer(cx, move |_, cx| {
+                    state.update(cx, |state, cx| state.palette_left(cx));
+                });
+            }
             return div().into_any_element();
         }
-        let results = self.results(cx);
+        let exiting = !open;
+        let results = self.results(window, cx);
+        // Rows are keyed by their index.
+        for row in self.arrived.settle(window, cx) {
+            let row = row as usize;
+            if row < results.rows.len() {
+                self.list_state.remeasure_items(row..row + 1);
+            }
+        }
+        self.list_scroll.step(&self.list_state, window, cx);
         let total = results.items.len();
         if total > 0 && self.selected >= total {
             self.selected = total - 1;
         }
         let muted = cx.theme().muted_foreground;
         let viewport = window.viewport_size();
-        let insets = crate::window_seam::content_insets(window);
+        let insets = crate::window_seam::content_insets_gliding(
+            "palette-seam",
+            Some(&self.motion),
+            window,
+            cx,
+        );
         // A sheet stops a window strip short of the top; the desktop card hangs
         // `DESKTOP_TOP_OFFSET` down and keeps a section gap clear below.
         let reserve = if compact {
@@ -757,6 +1126,9 @@ impl Render for CommandPalette {
         };
         let available = (viewport.height - insets.top - insets.bottom - reserve).max(px(0.));
         let height = px(crate::overlay::DIALOG_LIST_HEIGHT).min(available);
+        // The sheet reaches the screen's bottom edge, under the home
+        // indicator and behind the keyboard; what it holds stays above them.
+        let pad = if compact { insets.bottom } else { px(0.) };
         let dismissal = self.outside_dismissal.clone();
 
         let body = if total == 0 {
@@ -785,8 +1157,22 @@ impl Render for CommandPalette {
                     .child(
                         list(
                             self.list_state.clone(),
-                            cx.processor(move |this, ix: usize, _, cx| {
-                                this.render_row(&results.rows[ix], &results.items, compact, cx)
+                            cx.processor(move |this, ix: usize, window, cx| {
+                                let row = this.render_row(
+                                    &results.rows[ix],
+                                    &results.items,
+                                    compact,
+                                    window,
+                                    cx,
+                                );
+                                this.arrived.around(ix as u64, cx).draw(
+                                    "palette-row",
+                                    ix as u64,
+                                    crate::motion::list_rows::Glide::Rest,
+                                    row,
+                                    |_, _| div().into_any_element(),
+                                    window,
+                                )
                             }),
                         )
                         .size_full(),
@@ -802,13 +1188,30 @@ impl Render for CommandPalette {
             .into_any_element()
         };
 
-        let surface = v_flex().h(height).overflow_hidden();
+        // Turning compact or wide, the card glides from where and as large
+        // as the other form drew it to the sheet or the card.
+        let width = if compact {
+            viewport.width
+        } else {
+            crate::sizing::fit_viewport(640., viewport.width)
+        };
+        let glide = self.motion.glide_state("card-size");
+        let size = glide.toward(u64::from(compact), gpui::size(width, height + pad), cx);
+        // The card is placed against the window, and its host lays the
+        // palette out in a different place in each layout.
+        let reflow = self
+            .motion
+            .reflow("card-place", u64::from(compact))
+            .in_window();
+        // The card is laid out at exactly this size.
+        glide.painted_at(size, window);
+        let surface = v_flex().h(size.height).pb(pad).overflow_hidden();
         let card = if compact {
-            crate::material::sheet_contour(surface.w(viewport.width), cx)
+            crate::material::sheet_contour(surface.w(size.width), cx)
         } else {
             crate::material::overlay_contour(
                 surface
-                    .w(crate::sizing::fit_viewport(640., viewport.width))
+                    .w(size.width)
                     .rounded(crate::material::radius_overlay(cx)),
                 cx,
             )
@@ -877,9 +1280,9 @@ impl Render for CommandPalette {
             let progress = if open {
                 progress
             } else {
-                progress.max(1. - presence.progress)
+                progress.max(1. - presence)
             };
-            return gpui_base::Sheet::new(cx)
+            let sheet = gpui_base::Sheet::new(cx)
                 .focus_handle(self.focus_handle.clone())
                 .request_close(move |_, cx| {
                     dismissal.dismissed();
@@ -895,24 +1298,44 @@ impl Render for CommandPalette {
                     div()
                         .absolute()
                         .left_0()
-                        .bottom(
-                            insets.bottom
-                                - crate::edge_back::BackProgress::offset(progress, height),
-                        )
-                        .child(card),
-                )
-                .into_any_element();
+                        .bottom(-crate::edge_back::BackProgress::offset(
+                            progress,
+                            height + pad,
+                        ))
+                        .child(reflow.part("card", card)),
+                );
+            return reflow.render(sheet);
         }
-        gpui_base::Dialog::new(cx)
+        // A leaving palette keeps the open one's element tree and is inert:
+        // not topmost, no Escape, no backdrop press, and an occluding scrim
+        // and a shield over the card keep the pointer from it.
+        let card = card
+            .relative()
+            .top(crate::motion::lift(presence))
+            .opacity(presence)
+            .when(exiting, |card| {
+                card.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .on_scroll(|_, _, cx| cx.stop_propagation()),
+                )
+            });
+        let dialog = gpui_base::Dialog::new(cx)
+            .layer(0, !exiting)
+            .close_on_escape(!exiting)
+            .close_on_backdrop_press(!exiting)
             // gpui-base's backdrop parent dismisses but does not block; the scrim stops wheels without occluding it.
             .backdrop(
                 div()
                     .absolute()
                     .size_full()
-                    .bg(crate::material::scrim(1., cx))
+                    .bg(crate::material::scrim(presence, cx))
+                    .when(exiting, |scrim| scrim.occlude())
                     .on_scroll(|_, _, cx| cx.stop_propagation()),
             )
-            .popup(card)
+            .popup(reflow.part("card", card))
             // Enter belongs to the query input, which runs the selected item.
             .on_ok(|_, _, _| false)
             .request_close(move |_, _, cx| {
@@ -924,8 +1347,8 @@ impl Render for CommandPalette {
             .when(compact, |host| host.justify_end().pb(insets.bottom))
             .when(!compact, |host| {
                 host.justify_start().pt(insets.top + px(DESKTOP_TOP_OFFSET))
-            })
-            .into_any_element()
+            });
+        reflow.render(dialog)
     }
 }
 
@@ -950,9 +1373,19 @@ mod tests {
 
     impl PaletteHarness {
         fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-            let window_state = cx.new(|_| WindowState::new(false));
+            // A wide window draws the palette only on an attached
+            // workspace's Chat route.
+            let window_state = cx.new(|cx| {
+                let mut state = WindowState::default();
+                state.enter_workspace(cx);
+                state
+            });
             Self {
-                palette: cx.new(|cx| CommandPalette::new(store, window_state.clone(), window, cx)),
+                palette: cx.new(|cx| {
+                    let mut palette = CommandPalette::new(window_state.clone(), window, cx);
+                    palette.set_stores(vec![store], cx);
+                    palette
+                }),
                 window_state,
                 page_scroll: gpui::ScrollHandle::new(),
             }
@@ -961,7 +1394,7 @@ mod tests {
 
     impl Render for PaletteHarness {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let open = self.window_state.read(cx).palette_open;
+            let open = self.window_state.read(cx).palette_mounted();
             div()
                 .relative()
                 .size_full()
@@ -1041,7 +1474,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -1059,10 +1491,10 @@ mod tests {
             query.read(cx).focus_handle(cx).focus(window, cx);
         });
 
-        cx.update(|_, cx| {
+        cx.update(|window, cx| {
             palette.update(cx, |palette, cx| {
                 assert!(palette.query.read(cx).value().is_empty());
-                let items = &palette.results(cx).items;
+                let items = &palette.results(window, cx).items;
                 assert!(
                     items
                         .iter()
@@ -1097,8 +1529,8 @@ mod tests {
         for _ in 0..10 {
             dispatch_palette_key(&palette, cx, "down");
         }
-        cx.update(|_, cx| {
-            let total = palette.update(cx, |palette, cx| palette.results(cx).items.len());
+        cx.update(|window, cx| {
+            let total = palette.update(cx, |palette, cx| palette.results(window, cx).items.len());
             assert_eq!(palette.read(cx).selected, total - 1);
         });
 
@@ -1123,7 +1555,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -1158,7 +1589,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -1174,12 +1604,13 @@ mod tests {
             let harness = harness.read(cx);
             (harness.palette.clone(), harness.window_state.clone())
         });
+        let settle = crate::test_frames::draw_settled;
         let open = |cx: &mut VisualTestContext, focus_query: bool| {
             cx.update(|window, cx| {
                 window_state.update(cx, |state, cx| state.open_palette(cx));
                 palette.update(cx, |palette, cx| palette.open(focus_query, window, cx));
             });
-            cx.update(|window, cx| window.draw(cx).clear(cx));
+            settle(cx);
             assert!(cx.debug_bounds("palette-card").is_some());
         };
         let is_open = |cx: &mut VisualTestContext| {
@@ -1194,6 +1625,11 @@ mod tests {
         });
         cx.simulate_keystrokes("escape");
         assert!(!is_open(cx), "Escape reaches the dialog through the query");
+        assert!(
+            cx.debug_bounds("palette-card").is_some(),
+            "the palette leaves on screen"
+        );
+        settle(cx);
         assert!(cx.debug_bounds("palette-card").is_none());
 
         let page_scroll = harness.read_with(cx, |harness, _| harness.page_scroll.clone());
@@ -1222,6 +1658,8 @@ mod tests {
         assert!(is_open(cx), "the wheel leaves the palette open");
         cx.simulate_click(gpui::point(px(10.), px(10.)), gpui::Modifiers::default());
         assert!(!is_open(cx), "a backdrop press closes the palette");
+        settle(cx);
+        assert!(cx.debug_bounds("palette-card").is_none());
 
         drop(palette);
         driver.shutdown(cx, &workspace_store, &host);
@@ -1294,7 +1732,7 @@ mod tests {
         let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
             pump_link
-                .pump_with_timer(|| executor.timer(Duration::from_millis(25)))
+                .pump_with_timer(|delay| executor.timer(delay))
                 .await;
         });
         let store = cx.new(|cx| {
@@ -1303,16 +1741,19 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, _| store.select_session("thread-0".into()));
-        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        store.update(cx, |store, cx| store.show_alone("thread-0".into(), cx));
+        let window_state = cx.new(|_| WindowState::default().with_compact(true));
         window_state.update(cx, |state, cx| state.open_palette(cx));
         let (sheet, cx) = cx.add_window_view(|window, cx| Sheet {
-            palette: cx.new(|cx| CommandPalette::new(store.clone(), window_state, window, cx)),
+            palette: cx.new(|cx| {
+                let mut palette = CommandPalette::new(window_state, window, cx);
+                palette.set_stores(vec![store.clone()], cx);
+                palette
+            }),
         });
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
@@ -1337,7 +1778,9 @@ mod tests {
             });
             draw(cx);
         }
-        let last = palette.update(cx, |palette, cx| palette.results(cx).items.len() - 1);
+        let last = palette.update_in(cx, |palette, window, cx| {
+            palette.results(window, cx).items.len() - 1
+        });
         assert!(
             cx.debug_bounds(format!("palette-row-{last}").leak())
                 .is_some()
@@ -1348,6 +1791,11 @@ mod tests {
             dispatch_palette_key(&palette, cx, "down");
         }
         draw(cx);
+        assert!(
+            cx.debug_bounds("palette-row-5").is_none(),
+            "the list glides to the selection rather than jumping"
+        );
+        crate::test_frames::draw_settled(cx);
         assert!(
             cx.debug_bounds("palette-row-5").is_some(),
             "the keyboard selection scrolls into view"
@@ -1367,7 +1815,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -1404,15 +1851,26 @@ mod tests {
         });
         cx.update(|_, cx| {
             palette.update(cx, |palette, cx| {
-                palette.apply_content_hits(stale, vec![hit("answer for `first`")], cx);
+                palette.apply_content_hits(
+                    stale,
+                    HostKey::Local,
+                    vec![hit("answer for `first`")],
+                    cx,
+                );
                 assert!(
                     palette.content_hits.is_empty(),
                     "an answer for a superseded query must not be shown"
                 );
                 let current = palette.search_generation;
-                palette.apply_content_hits(current, vec![hit("answer for `second`")], cx);
-                assert_eq!(palette.content_hits.len(), 1);
-                assert_eq!(palette.content_hits[0].snippet, "answer for `second`");
+                palette.apply_content_hits(
+                    current,
+                    HostKey::Local,
+                    vec![hit("answer for `second`")],
+                    cx,
+                );
+                let hits = &palette.content_hits[&HostKey::Local];
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].snippet, "answer for `second`");
             });
         });
 

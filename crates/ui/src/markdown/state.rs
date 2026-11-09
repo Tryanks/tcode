@@ -2,13 +2,14 @@
 //! Apache-2.0 `text/state.rs` implementation.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
 };
 
+use crate::theme::ActiveTheme as _;
 use crate::widgets::copy::CopiedMark;
 use gpui::{
     Bounds, ClipboardItem, Context, FocusHandle, ImageSource, IntoElement, ListAlignment,
@@ -17,11 +18,18 @@ use gpui::{
 };
 use gpui_base::{ElementExt as _, v_flex};
 
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
+
 use super::{
     link_target::{LinkTarget, LinkTargetCache},
+    mermaid,
     nodes::{BlockNode, TextPosition},
     render::{self, RootItem},
     selection::{Membership, RunOrigin, SelectionDocument},
+    stream_fade::{FadeFrame, Fades, StreamFade},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,12 +76,24 @@ pub struct MarkdownState {
     pub(super) bounds: Bounds<Pixels>,
     pub(super) compact_headings: bool,
     pub(super) base_dir: Option<PathBuf>,
+    pub(super) image_host: crate::store::ImageHost,
     pub(super) image_resolver: Option<ImageResolver>,
     link_targets: LinkTargetCache,
+    /// The block the pointer is over, whose actions (a formula's, a
+    /// diagram's) fade in.
+    pub(super) hover: crate::motion::ListHover,
     pub(super) pending_context: Option<PendingContextTarget>,
     /// Keyed by the copied code block's root path.
     pub(super) copied: CopiedMark,
     pub(super) math_sources: std::collections::HashSet<String>,
+    /// The Mermaid fences a reader switched to their source.
+    pub(super) diagram_sources: std::collections::HashSet<String>,
+    /// The Mermaid fences' diagrams and the renders on their way.
+    pub(super) diagrams: mermaid::Diagrams,
+    /// The text is still arriving: an open fence is not yet its whole source.
+    pub(super) streaming: bool,
+    /// The latest append was not watched arriving word by word.
+    last_append_burst: bool,
     /// Window position of the last left mouse-down that landed on a link;
     /// a mouse-up nearby is a click, anything farther is a drag-selection.
     pub(super) link_press_origin: Option<Point<Pixels>>,
@@ -81,10 +101,21 @@ pub struct MarkdownState {
     parsed: Rc<BlockNode>,
     items: Rc<[RootItem]>,
     root_block_starts: Option<Vec<usize>>,
-    has_potential_link_reference_definition: bool,
+    /// The text defines a link reference, so an append is parsed with the
+    /// whole text: a definition reaches links in blocks the tail does not hold.
+    defines_links: bool,
     pub(super) list_state: ListState,
     item_heights: Rc<RefCell<render::ItemHeights>>,
     image_sizes: HashMap<String, Size<Pixels>>,
+    /// The glides of parts whose size changes at rest (a picture that
+    /// decoded, a formula shown as its source), by render path. Kept here,
+    /// not in element state, because the document measures its blocks under
+    /// other element ids than it paints them, and both must size alike.
+    glides: RefCell<HashMap<String, crate::motion::GlideState>>,
+    /// The clocks of the document's other motion (a picture fading in over
+    /// its stand-in), by render path: kept with the document, not in element
+    /// state, so they carry on when its view is drawn under a new parent.
+    motion: crate::motion::owned::Owned,
     layout_revision: usize,
     /// The document this view's text is selected in, when it is selectable.
     pub(super) selection: Option<Membership>,
@@ -95,6 +126,18 @@ pub struct MarkdownState {
     own_selection_focus_out: Option<gpui::Subscription>,
     /// The runs of text painted last frame, which selection ends hit-test.
     pub(super) runs: Rc<RefCell<Vec<PaintedRun>>>,
+    /// Whether the document has been drawn in its scene: text appended
+    /// before then was never seen arriving, so it does not fade in.
+    drawn: bool,
+    /// The scene the document is drawn in: in a new one it starts at rest,
+    /// as one never drawn does, whatever it was revealing.
+    scene: crate::motion::InScene,
+    stream_fade: StreamFade,
+    /// The fades this frame paints, sampled when the document renders.
+    fade_frame: Option<Rc<FadeFrame>>,
+    /// The document's height below the bottom of the line the reveal has
+    /// reached, as last placed.
+    unrevealed: Cell<Pixels>,
     #[cfg(test)]
     last_reparse_bytes: usize,
 }
@@ -113,8 +156,10 @@ impl MarkdownState {
         cx: &mut Context<Self>,
     ) -> Self {
         let owner = cx.entity_id();
-        cx.on_release(move |_, cx| render::clear_code_measurements(owner, cx))
-            .detach();
+        cx.on_release(move |_, cx| {
+            render::clear_code_measurements(owner, cx);
+        })
+        .detach();
         let parsed = parsed_document.root;
         let items = root_items(&parsed);
         Self {
@@ -122,44 +167,81 @@ impl MarkdownState {
             bounds: Bounds::default(),
             compact_headings: false,
             base_dir: None,
+            image_host: crate::store::ImageHost::NONE,
             image_resolver: None,
             link_targets: LinkTargetCache::default(),
+            hover: crate::motion::ListHover::new(crate::material::HOVER),
             pending_context: None,
             copied: CopiedMark::default(),
             math_sources: Default::default(),
+            diagram_sources: Default::default(),
+            diagrams: mermaid::Diagrams::default(),
+            streaming: false,
+            last_append_burst: false,
             link_press_origin: None,
             text: text.to_string(),
             parsed: Rc::new(parsed),
             root_block_starts: parsed_document.root_starts,
-            has_potential_link_reference_definition: contains_potential_link_reference_definition(
-                text,
-            ),
+            defines_links: parsed_document.defines_links,
             // Measure every item once so the list has a stable total height,
             // then construct/layout/paint only the visible items on warm frames.
             list_state: ListState::new(items.len(), ListAlignment::Top, px(1000.)).measure_all(),
             item_heights: Rc::new(RefCell::new(render::ItemHeights::new(items.len()))),
             items,
             image_sizes: HashMap::new(),
+            glides: RefCell::default(),
+            motion: Default::default(),
             layout_revision: 0,
             selection: None,
             owns_selection: false,
             own_selection_focus_out: None,
             runs: Rc::default(),
+            drawn: false,
+            scene: Default::default(),
+            stream_fade: StreamFade::default(),
+            fade_frame: None,
+            unrevealed: Cell::new(px(0.)),
             #[cfg(test)]
             last_reparse_bytes: text.len(),
         }
     }
 
-    /// Append text, synchronously reparse the one canonical source, and repaint.
+    /// Draw the document in `epoch`'s scenes.
+    pub(crate) fn set_scene(&mut self, epoch: &crate::motion::Epoch) {
+        self.scene = crate::motion::InScene::new(epoch);
+    }
+
+    /// A new scene started since the document was last reached: it has not
+    /// been drawn in it.
+    fn enter_scene(&mut self) {
+        if self.scene.entered() {
+            self.drawn = false;
+            self.stream_fade.clear();
+            self.fade_frame = None;
+        }
+    }
+
+    /// Append text, synchronously reparse the one canonical source, and
+    /// repaint. While the text is streaming into a document that has been
+    /// drawn in its scene, what this adds fades in; anything else -- a thread opening, a
+    /// client catching up, a message rebuilt -- appears as it is.
     pub fn push_str(&mut self, text: &str, cx: &mut Context<Self>) {
         if text.is_empty() {
             return;
         }
-        self.has_potential_link_reference_definition |=
-            contains_potential_link_reference_definition(text)
-                || self.text.ends_with(']') && text.starts_with(':');
         self.text.push_str(text);
         self.reparse_append(cx);
+    }
+
+    /// Whether the text is still arriving. While it is, appends fade in and a
+    /// Mermaid fence that has not closed is drawn from its whole statements
+    /// so far; once it is not, every fence is drawn from its whole source.
+    pub fn set_streaming(&mut self, streaming: bool, cx: &mut Context<Self>) {
+        if self.streaming == streaming {
+            return;
+        }
+        self.streaming = streaming;
+        cx.notify();
     }
 
     /// Replace the canonical source and synchronously reparse it.
@@ -168,10 +250,10 @@ impl MarkdownState {
             return;
         }
         self.math_sources.clear();
+        self.diagram_sources.clear();
+        self.diagrams = mermaid::Diagrams::default();
         self.text.clear();
         self.text.push_str(text);
-        self.has_potential_link_reference_definition =
-            contains_potential_link_reference_definition(text);
         self.reparse_reset(cx);
     }
 
@@ -203,7 +285,7 @@ impl MarkdownState {
         window: &mut Window,
         cx: &mut gpui::App,
     ) {
-        if self.own_selection_focus_out.is_some() {
+        if !self.wants_focus_out_watch() {
             return;
         }
         let Some(document) = self.own_document() else {
@@ -216,6 +298,23 @@ impl MarkdownState {
         ));
     }
 
+    /// Whether the view selects on its own and does not yet clear that
+    /// selection when the focus leaves it.
+    pub(super) fn wants_focus_out_watch(&self) -> bool {
+        self.own_selection_focus_out.is_none() && self.owns_selection && self.selection.is_some()
+    }
+
+    /// Whether the view's text is entry `entry` of `document`'s selection.
+    pub(crate) fn is_selection_entry(
+        &self,
+        document: &gpui::Entity<SelectionDocument>,
+        entry: u64,
+    ) -> bool {
+        self.selection
+            .as_ref()
+            .is_some_and(|m| m.document == *document && m.entry == entry)
+    }
+
     /// Make this view's text entry `entry` of `document`'s selection.
     pub fn set_selection_entry(
         &mut self,
@@ -223,11 +322,7 @@ impl MarkdownState {
         entry: u64,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .selection
-            .as_ref()
-            .is_some_and(|m| m.document == *document && m.entry == entry)
-        {
+        if self.is_selection_entry(document, entry) {
             return;
         }
         self.selection = Some(Membership {
@@ -271,6 +366,13 @@ impl MarkdownState {
         cx.notify();
     }
 
+    pub(crate) fn set_image_host(&mut self, host: crate::store::ImageHost, cx: &mut Context<Self>) {
+        if self.image_host != host {
+            self.image_host = host;
+            cx.notify();
+        }
+    }
+
     pub fn set_image_resolver(&mut self, resolver: Option<ImageResolver>, cx: &mut Context<Self>) {
         self.image_resolver = resolver;
         cx.notify();
@@ -288,7 +390,12 @@ impl MarkdownState {
     /// does not depend on the width it lays out at.
     pub(super) fn image_source(&self, uri: &SharedUri) -> ImageSource {
         self.resolve_image(uri, |path| {
-            crate::store::image_preview(path, crate::store::MAX_PREVIEW_PIXELS as f32, false)
+            crate::store::image_preview(
+                self.image_host,
+                path,
+                crate::store::MAX_PREVIEW_PIXELS as f32,
+                false,
+            )
         })
     }
 
@@ -296,6 +403,7 @@ impl MarkdownState {
     pub(super) fn opened_image_source(&self, uri: &SharedUri) -> crate::image_viewer::ViewerSource {
         self.resolve_image(uri, |path| {
             crate::image_viewer::ViewerSource::original(
+                self.image_host,
                 tcode_protocol::OriginalTarget::File { path },
                 self.image_source(uri),
             )
@@ -335,13 +443,27 @@ impl MarkdownState {
                     .unwrap_or(&path);
                 return host_file(PathBuf::from(path));
             }
-            return ImageSource::from(uri.clone()).into();
+            return crate::store::remote_image(uri.clone()).into();
         }
         let path = match self.base_dir() {
             Some(base_dir) => base_dir.join(path),
             None => path,
         };
         host_file(path)
+    }
+
+    /// The glide of the part at render `path`, whose size changes at rest.
+    pub(super) fn glide(&self, path: &str) -> crate::motion::GlideState {
+        self.glides
+            .borrow_mut()
+            .entry(path.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// The clocks of the document's motion, kept with the document.
+    pub(super) fn motion(&self) -> crate::motion::owned::Owned {
+        self.motion.clone()
     }
 
     pub(super) fn image_layout(&self, path: &str) -> (usize, Option<Size<Pixels>>) {
@@ -399,6 +521,34 @@ impl MarkdownState {
             ..self.items.partition_point(|item| item.block <= block)
     }
 
+    /// Switch Mermaid fence `path` between its diagram and its source.
+    pub(super) fn set_diagram_source(&mut self, path: &str, source: bool, cx: &mut Context<Self>) {
+        let showing_source = self.diagram_sources.contains(path);
+        if showing_source == source {
+            return;
+        }
+        // The fence's text becomes its code or its picture, so a selection's
+        // runs in it would land elsewhere.
+        if let Some(membership) = &self.selection {
+            membership
+                .document
+                .update(cx, |document, cx| document.clear(cx));
+        }
+        self.diagrams.toggle(
+            path,
+            showing_source,
+            cx.background_executor().now(),
+            cx.reduce_motion(),
+        );
+        if source {
+            self.diagram_sources.insert(path.into());
+        } else {
+            self.diagram_sources.remove(path);
+        }
+        let items = self.items_of(path);
+        self.remeasure(items, cx);
+    }
+
     /// Measure `items` again; the blocks after them move.
     fn remeasure(&mut self, items: Range<usize>, cx: &mut Context<Self>) {
         self.item_heights.borrow_mut().invalidate(items.clone());
@@ -429,8 +579,15 @@ impl MarkdownState {
 
     fn reparse_append(&mut self, cx: &mut Context<Self>) {
         self.prepare_reparse();
-        let reparse_start = self.incremental_reparse_start();
-        let parsed_document = super::parse::parse_document(&self.text[reparse_start..]);
+        let mut reparse_start = self.incremental_reparse_start();
+        let mut parsed_document = super::parse::parse_document(&self.text[reparse_start..]);
+        if reparse_start > 0 && parsed_document.defines_links {
+            reparse_start = 0;
+            parsed_document = super::parse::parse_document(&self.text);
+        }
+        if reparse_start == 0 {
+            self.defines_links = parsed_document.defines_links;
+        }
         #[cfg(test)]
         {
             self.last_reparse_bytes = self.text.len() - reparse_start;
@@ -463,7 +620,10 @@ impl MarkdownState {
                 .min(old_block_count.saturating_sub(1));
             self.root_block_starts = parsed_document.root_starts;
             let old_suffix = old_blocks.split_off(unchanged);
-            (tail_children, unchanged, old_suffix)
+            // The blocks that parsed alike stay, with what they prepared.
+            let mut blocks = old_blocks;
+            blocks.extend(tail_children.into_iter().skip(unchanged));
+            (blocks, unchanged, old_suffix)
         } else {
             let old_prefix_count = old_blocks.len() - 1;
             let old_suffix = old_blocks.split_off(old_prefix_count);
@@ -486,6 +646,18 @@ impl MarkdownState {
         for (old, new) in old_suffix.iter().zip(&blocks[unchanged..]) {
             new.reuse_highlights(old);
         }
+        self.enter_scene();
+        self.last_append_burst = if self.drawn && self.streaming {
+            self.stream_fade.record(
+                &old_suffix,
+                &blocks[unchanged..],
+                unchanged,
+                cx.background_executor().now(),
+            )
+        } else {
+            self.stream_fade.clear();
+            self.drawn
+        };
 
         // An append can only affect the old trailing block and blocks added
         // after it. Keep the measured items before it, and those of its items
@@ -526,7 +698,7 @@ impl MarkdownState {
     }
 
     fn incremental_reparse_start(&self) -> usize {
-        if self.has_potential_link_reference_definition {
+        if self.defines_links {
             return 0;
         }
         let block_count = match &*self.parsed {
@@ -541,13 +713,16 @@ impl MarkdownState {
     }
 
     fn reparse_reset(&mut self, cx: &mut Context<Self>) {
+        self.stream_fade.clear();
         self.image_sizes.clear();
+        self.glides.borrow_mut().clear();
         render::clear_code_measurements(cx.entity_id(), cx);
         self.prepare_reparse();
         let parsed_document = super::parse::parse_document(&self.text);
         self.items = root_items(&parsed_document.root);
         self.parsed = Rc::new(parsed_document.root);
         self.root_block_starts = parsed_document.root_starts;
+        self.defines_links = parsed_document.defines_links;
         #[cfg(test)]
         {
             self.last_reparse_bytes = self.text.len();
@@ -558,6 +733,12 @@ impl MarkdownState {
         self.list_state.reset(self.items.len());
         self.item_heights.borrow_mut().reset(self.items.len());
         cx.notify();
+    }
+
+    /// Whether a Mermaid fence's first picture is still being drawn: the
+    /// document shows the fence's code until it is.
+    pub(crate) fn drawing_first_diagrams(&self) -> bool {
+        self.diagrams.opening()
     }
 
     pub(super) fn is_selectable(&self) -> bool {
@@ -579,8 +760,92 @@ impl MarkdownState {
             .run_range(membership.entry, origin, len)
     }
 
-    pub(super) fn begin_frame(&self) {
+    /// The fades the run of `len` bytes at `origin` paints this frame.
+    pub(super) fn fades(&self, origin: &RunOrigin, len: usize) -> Fades {
+        self.fade_frame.as_ref().map_or_else(Vec::new, |frame| {
+            frame.run(&origin.path, origin.line, origin.base, len)
+        })
+    }
+
+    /// Whether the text is revealing: words fading in, or waiting to.
+    pub(crate) fn revealing(&self) -> bool {
+        !self.stream_fade.is_empty() || self.fade_frame.is_some()
+    }
+
+    /// Show the text as it is from the next frame: a reader who did not
+    /// watch it arrive is not shown it arriving. What is appended after
+    /// reveals as ever.
+    pub(crate) fn settle(&mut self, cx: &mut Context<Self>) {
+        self.stream_fade.clear();
+        self.fade_frame = None;
+        cx.notify();
+    }
+
+    /// While the reveal has words waiting: the document's height it has not
+    /// reached, as of the last frame, and when it will have.
+    pub(crate) fn unrevealed(&self, now: Instant) -> Option<(Pixels, Instant)> {
+        let drains_at = self.stream_fade.drains_at().filter(|at| *at > now)?;
+        Some((self.unrevealed.get(), drains_at))
+    }
+
+    /// Note, once the frame's text is placed, how far below the reveal the
+    /// document ends. The frontier's run gives the bottom of its line; the
+    /// reveal overtakes what is painted only for a frame or two, when the
+    /// top of its item still bounds it from above, so its row never opens
+    /// past the text. A diagram or a formula has no line: it comes whole.
+    pub(super) fn measure_unrevealed(&self) {
+        let unrevealed = self
+            .fade_frame
+            .as_ref()
+            .and_then(|frame| frame.frontier())
+            .map_or(px(0.), |(path, line, offset)| {
+                let heights = self.item_heights.borrow();
+                let runs = self.runs.borrow();
+                let painted = runs
+                    .iter()
+                    .filter(|run| *run.origin.path == *path && run.origin.line == line)
+                    .filter(|run| {
+                        (run.origin.base..=run.origin.base + run.text.len()).contains(&offset)
+                    })
+                    .find_map(|run| {
+                        let top = run.layout.position_for_index(offset - run.origin.base)?.y;
+                        Some(top + run.layout.line_height() - self.bounds.top())
+                    });
+                let item = render::item_at(&self.items, path, line);
+                let bottom = painted.unwrap_or_else(|| {
+                    let whole = render::draws_no_text(&self.parsed, &self.items[item]);
+                    heights.top_of(item + usize::from(whole))
+                });
+                (heights.total() - bottom).max(px(0.))
+            });
+        self.unrevealed.set(unrevealed);
+    }
+
+    /// Forget the runs painted when the view was last built: it is being
+    /// built again and paints them anew. A view drawn again from last frame
+    /// paints nothing, and its runs stand where they were painted.
+    fn begin_frame(&self) {
         self.runs.borrow_mut().clear();
+    }
+
+    /// Tell the selection's document where its ends are, in the runs the view
+    /// painted: each frame the view is drawn, built again or not.
+    pub(super) fn register_edges(&self, cx: &gpui::App) {
+        let Some(membership) = &self.selection else {
+            return;
+        };
+        let document = membership.document.read(cx);
+        for run in self.runs.borrow().iter() {
+            if let Some(selected) = self.selected_range(&run.origin, run.text.len(), cx) {
+                document.register_edge(
+                    membership.entry,
+                    &run.origin,
+                    &selected,
+                    &run.layout,
+                    run.visible,
+                );
+            }
+        }
     }
 
     pub(super) fn register_run(&self, run: PaintedRun) {
@@ -663,12 +928,57 @@ fn root_items(root: &BlockNode) -> Rc<[RootItem]> {
     items.into()
 }
 
-fn contains_potential_link_reference_definition(source: &str) -> bool {
-    source.contains("]:")
-}
-
 impl Render for MarkdownState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.begin_frame();
+        self.enter_scene();
+        let first_draw = !self.drawn;
+        self.drawn = true;
+        let root = self.parsed.clone();
+        let diagrams = self.diagrams.sync(
+            &root,
+            &mermaid::Env {
+                streaming: self.streaming,
+                // The mode a glide is heading for, from its first frame, so
+                // the new picture is drawn while the palette still glides
+                // and cross-fades in as it does.
+                dark: cx.theme().mode.is_dark(),
+                now: cx.background_executor().now(),
+                still: first_draw || cx.reduce_motion(),
+                burst: self.last_append_burst,
+                sources: &self.diagram_sources,
+            },
+            cx,
+        );
+        for path in diagrams.remeasure {
+            let items = self.items_of(&path);
+            self.item_heights.borrow_mut().invalidate(items.clone());
+            self.list_state.remeasure_items(items);
+        }
+        // A part on its way to a new size is measured again each frame, so
+        // the blocks after it follow it down.
+        let now = cx.background_executor().now();
+        let gliding: Vec<String> = self
+            .glides
+            .borrow()
+            .iter()
+            .filter(|(_, glide)| glide.moving(now))
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in &gliding {
+            let items = self.items_of(path);
+            self.item_heights.borrow_mut().invalidate(items.clone());
+            self.list_state.remeasure_items(items);
+        }
+        if diagrams.moving || !gliding.is_empty() {
+            window.request_animation_frame();
+        }
+        self.fade_frame = self
+            .stream_fade
+            .frame(cx.background_executor().now(), cx.reduce_motion());
+        if self.fade_frame.is_some() {
+            window.request_animation_frame();
+        }
         let state = cx.entity();
         v_flex()
             .w_full()
@@ -693,6 +1003,8 @@ pub(super) struct PaintedRun {
     pub(super) text: SharedString,
     pub(super) layout: gpui::TextLayout,
     pub(super) bounds: Bounds<Pixels>,
+    /// The clip it was painted under, out of which an end gets no handle.
+    pub(super) visible: Bounds<Pixels>,
 }
 
 #[cfg(test)]
@@ -739,6 +1051,9 @@ mod tests {
             "| left | center | right |\n| :--- | :---: | ---: |\n| a | b | c |\n",
             "An earlier [reference] is resolved later.\n\n[reference]: https://example.com \"title\"\n",
             "An earlier [reference].\n\n[reference]: https://example.com\n\nTail grows",
+            "An earlier [reference] is defined in a quote.\n\n> [reference]: https://example.com\n",
+            "```python\ndef f(x) -> list[str]:\n    return x\n```\n\nA [label] after code.\n\nMore.\n",
+            "A [gone] link.\n\n[gone]: /url \"title\" stops being a definition\n",
         ];
 
         for document in documents {
@@ -781,9 +1096,11 @@ mod tests {
     fn append_reparses_only_the_last_root_block(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(super::super::init);
-        let document = (0..120)
-            .map(|ix| format!("## Closed block {ix}\n\nParagraph {ix}.\n\n"))
-            .collect::<String>();
+        // Code reading `]:` defines no link.
+        let document = "```python\ndef f(x) -> list[str]:\n    pass\n```\n\n".to_string()
+            + &(0..120)
+                .map(|ix| format!("## Closed block {ix}\n\nParagraph {ix}.\n\n"))
+                .collect::<String>();
         assert!(document.len() > 2_000);
         let state = cx.update(|cx| cx.new(|cx| MarkdownState::new(&document, cx)));
 
@@ -888,6 +1205,57 @@ mod tests {
         let (view, cx) = cx.add_window_view(|_, cx| SelectAllRoot::new(&text, cx));
         cx.update(|window, cx| _ = window.draw(cx));
         (view, cx)
+    }
+
+    /// A code block streaming in fades in what each append adds and
+    /// nothing it held already, however long the block: the rest of a line
+    /// being written, then the lines after it.
+    /// A formula streaming into a reply is laid out anew as its source
+    /// grows, while the words fading in were measured on its last layout.
+    #[gpui::test]
+    fn a_formula_streaming_in_draws_while_its_words_fade(cx: &mut TestAppContext) {
+        let (view, cx) = open("", cx);
+        let markdown = view.read_with(cx, |root, _| root.markdown.clone());
+        markdown.update(cx, |state, cx| state.set_streaming(true, cx));
+        for piece in ["Tower: $e^{e^{e^{x}}}", "$ and $\\sqrt{1+x}$ done.\n"] {
+            markdown.update(cx, |state, cx| state.push_str(piece, cx));
+            crate::test_frames::draw(cx);
+        }
+    }
+
+    #[gpui::test]
+    fn a_streaming_code_block_fades_in_only_what_an_append_adds(cx: &mut TestAppContext) {
+        let (view, cx) = open("", cx);
+        let markdown = view.read_with(cx, |root, _| root.markdown.clone());
+        markdown.update(cx, |state, cx| state.set_streaming(true, cx));
+        let faded = |line: u32, cx: &mut VisualTestContext| {
+            let origin = RunOrigin::new(Rc::from([0u32])).line(line);
+            markdown.read_with(cx, |state, _| state.fades(&origin, 64))
+        };
+        let lines = (0..40)
+            .map(|ix| format!("let line_{ix} = {ix};\n"))
+            .collect::<String>();
+        markdown.update(cx, |state, cx| {
+            state.push_str(&format!("```rust\n{lines}let parti"), cx)
+        });
+        crate::test_frames::draw_settled(cx);
+
+        markdown.update(cx, |state, cx| {
+            state.push_str("al = 1;\nlet next = 2;\n", cx)
+        });
+        crate::test_frames::draw(cx);
+        for line in 0..40 {
+            assert_eq!(faded(line, cx), Vec::new(), "line {line} faded again");
+        }
+        let partial = faded(40, cx);
+        assert!(
+            partial
+                .iter()
+                .all(|(range, _)| range.start >= "let parti".len()),
+            "the part of the line shown before faded again: {partial:?}"
+        );
+        assert!(!partial.is_empty(), "the rest of the line fades in");
+        assert!(!faded(41, cx).is_empty(), "the line after it fades in");
     }
 
     #[gpui::test]

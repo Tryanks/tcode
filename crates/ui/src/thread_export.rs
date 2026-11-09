@@ -65,7 +65,7 @@ fn open_delivery_dialog(
     let summary = crate::tr!(
         "export.ready",
         name = name.clone(),
-        size = format_size(artifact.bytes.len())
+        size = format_size(artifact.bytes.len() as u64)
     )
     .into_owned();
     let can_download = store.read(cx).supports_artifact_delivery();
@@ -77,6 +77,7 @@ fn open_delivery_dialog(
         let download_store = store.clone();
         let directory = directory.clone();
         builder
+            .sheet()
             .title(crate::tr!("export.title").into_owned())
             .content(move |content, _, cx| {
                 content.child(
@@ -219,7 +220,7 @@ fn save_to_disk(
 ) {
 }
 
-pub fn format_size(bytes: usize) -> String {
+pub fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
     } else if bytes < 1024 * 1024 {

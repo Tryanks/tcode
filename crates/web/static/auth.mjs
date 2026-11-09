@@ -41,9 +41,13 @@ export async function authorizeBrowser() {
   const saved = hosts.find(host => host.host_id === last && host.origin === location.origin);
   if (saved) return; // The normal hello verifies it; rejection returns to login.
 
-  const zh = navigator.language.toLowerCase().startsWith('zh');
+  const browserLanguage = navigator.language.toLowerCase();
   const translations = __AUTH_LOCALES__;
-  const text = translations[zh ? 'zh-CN' : 'en'];
+  const language =
+    browserLanguage.startsWith('zh') ? 'zh-CN' : browserLanguage.startsWith('ja') ? 'ja' : 'en';
+  const text = translations[language];
+  // The browser picks Han glyph forms by the document's language.
+  document.documentElement.lang = language;
   const loading = document.getElementById('loading');
   loading.hidden = true;
   const form = document.createElement('form');

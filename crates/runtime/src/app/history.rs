@@ -3,7 +3,9 @@ use agent::DeltaKind;
 use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::LazyLock;
-use tcode_core::session::{TurnSnapshots, drop_turn_diffs};
+use tcode_core::session::{
+    ItemStreams, SupersededStream, TurnSnapshots, TurnStarts, drop_turn_diffs,
+};
 use tcode_protocol::{
     CommandResponse, HostMessage, MAX_SESSION_HISTORY_BYTES, OUTPUT_PREVIEW_BYTES,
     SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, Subscription,
@@ -70,7 +72,7 @@ fn oversized_output(event: &AgentEvent) -> bool {
     }
 }
 
-const HISTORY_PREVIEW_POLICY: u32 = 1;
+const HISTORY_PREVIEW_POLICY: u32 = 2;
 static HISTORY_PREVIEW_VERSION: LazyLock<String> =
     LazyLock::new(|| format!("history-preview-{HISTORY_PREVIEW_POLICY}-{OUTPUT_PREVIEW_BYTES}"));
 const HISTORY_PREVIEW_CACHE_BYTES: usize = 16 * 1024;
@@ -382,14 +384,33 @@ impl LogView<'_> {
         }
     }
 
-    /// The window answering a subscription: the records from its cursor on,
-    /// or without one a baseline: the tail from a turn start about
-    /// [`BASELINE_RECORDS`] rows back, cut to the byte budget from its newest
-    /// end.
+    /// The window answering a subscription, which always reaches the end of
+    /// the log: the records from its cursor on when they fit one reply, and
+    /// otherwise, or without a cursor, a baseline: the tail from a turn start
+    /// about [`BASELINE_RECORDS`] rows back, cut to the byte budget from its
+    /// newest end. A client that missed more than a reply holds gets the
+    /// thread as a fresh subscriber does, in one reply, rather than every
+    /// record it missed over as many round trips.
     fn events_window(&self, subscription: &Subscription) -> ServerEvent {
+        let continuation = subscription
+            .after
+            .filter(|after| *after <= self.end)
+            .map(|after| self.window(&subscription.topic, Some(after)));
+        match continuation {
+            Some(ServerEvent::SessionSnapshot { end, total, .. }) if end < total => {
+                self.window(&subscription.topic, None)
+            }
+            Some(window) => window,
+            None => self.window(&subscription.topic, None),
+        }
+    }
+
+    /// The records from `after` on, as many as fit one reply, or without it
+    /// the baseline [`Self::events_window`] describes.
+    fn window(&self, topic: &Topic, after: Option<u64>) -> ServerEvent {
         let empty = HostMessage::Event(EventEnvelope {
             request_id: Some(u64::MAX),
-            topic: subscription.topic.clone(),
+            topic: topic.clone(),
             event: ServerEvent::SessionSnapshot {
                 from: u64::MAX,
                 end: u64::MAX,
@@ -400,7 +421,6 @@ impl LogView<'_> {
             },
         });
         let total = self.end;
-        let after = subscription.after.filter(|after| *after <= total);
         let from = after
             .unwrap_or_else(|| self.turn_aligned_start(total.saturating_sub(BASELINE_RECORDS)));
         let first = self.index(from);
@@ -491,14 +511,16 @@ pub(super) struct SessionLog {
     retained_bytes: usize,
     /// The stored row each record is in, ascending.
     rows: Vec<u64>,
-    /// The rows of the records that opened a turn in `fold`, ascending.
-    turn_starts: Vec<u64>,
+    /// The rows of the records that opened the turns `fold` holds.
+    turn_starts: TurnStarts,
     /// `Timeline::fold_events(records)`, extended by every push so an append
     /// can tell whether it opens a turn, and cloned by timeline loads instead
     /// of folding the records again.
     fold: Timeline,
     /// The record index of each turn's latest snapshot.
     snapshots: TurnSnapshots<usize>,
+    /// Item streams, by the row each record is in.
+    streams: ItemStreams<u64>,
     /// The stored row the next append takes.
     next_row: u64,
     /// The end flushed by the release barrier in flight, if any.
@@ -511,9 +533,10 @@ impl SessionLog {
             records: Vec::new(),
             retained_bytes: 0,
             rows: Vec::new(),
-            turn_starts: Vec::new(),
+            turn_starts: TurnStarts::default(),
             fold: Timeline::default(),
             snapshots: TurnSnapshots::default(),
+            streams: ItemStreams::default(),
             next_row: log.next_row,
             release_barrier: None,
         };
@@ -523,21 +546,24 @@ impl SessionLog {
         session_log
     }
 
-    pub(super) fn push(&mut self, record: SessionEventRecord) {
+    /// Append the record the store is about to append, returning the rows of
+    /// the streamed deltas it supersedes. The log keeps them: its fold is the
+    /// same either way.
+    pub(super) fn push(&mut self, record: SessionEventRecord) -> Option<SupersededStream<u64>> {
         let row = self.next_row;
         self.next_row += 1;
-        self.push_at(record, row);
+        self.push_at(record, row)
     }
 
-    fn push_at(&mut self, record: SessionEventRecord, row: u64) {
-        let turns = self.fold.turns.len();
+    fn push_at(&mut self, record: SessionEventRecord, row: u64) -> Option<SupersededStream<u64>> {
         let index = self.records.len();
-        let superseded = self
-            .snapshots
-            .apply_at(&mut self.fold, record.ts, &record.event, index);
-        if self.fold.turns.len() > turns {
-            self.turn_starts.push(row);
-        }
+        let (change, superseded) =
+            self.snapshots
+                .apply_at(&mut self.fold, record.ts, &record.event, index);
+        let stream = self
+            .streams
+            .follow(&mut self.fold, record.ts, &record.event, row);
+        self.turn_starts.apply(&change, row);
         self.retained_bytes += wire_len(&record) + 1;
         self.records.push(record);
         self.rows.push(row);
@@ -546,6 +572,7 @@ impl SessionLog {
             drop_turn_diffs(&mut self.records[earlier].event);
             self.retained_bytes += wire_len(&self.records[earlier]);
         }
+        stream
     }
 
     pub(super) fn retained_bytes(&self) -> usize {
@@ -588,7 +615,7 @@ impl SessionLog {
             rows: &self.rows,
             end: self.next_row,
             covered_end: self.next_row,
-            turn_starts: &self.turn_starts,
+            turn_starts: self.turn_starts.rows(),
             turns: self.fold.turns.len() as u64,
         }
     }
@@ -746,16 +773,17 @@ impl Tail {
                 tail.records.push(record);
                 tail.rows.push(row);
                 if bytes > SESSION_WINDOW_BYTES {
-                    if after.is_some() {
-                        tail.covered_end = row + 1;
-                    } else {
-                        tail.from = row;
-                    }
+                    tail.from = row;
                     return false;
                 }
                 true
             },
         )?;
+        if after.is_some() && bytes > SESSION_WINDOW_BYTES {
+            // More follows the cursor than one reply holds: the subscriber
+            // gets the baseline instead (`LogView::events_window`).
+            return Self::read_cut(read, None, page);
+        }
         if after.is_none() {
             tail.records.reverse();
             tail.rows.reverse();
@@ -922,7 +950,12 @@ impl AppState {
                 for query in hydration.queries {
                     query(Err(&error));
                 }
-                if hydration.timeline.is_some() {
+                // A message whose handoff waited for this log waits on.
+                let handoff_waits = self
+                    .resident(&session_id)
+                    .and_then(ActiveSession::handoff_message)
+                    .is_some();
+                if hydration.timeline.is_some() || handoff_waits {
                     self.report_error(
                         RuntimeError::External(format!(
                             "could not load thread {session_id}: {error}"
@@ -974,7 +1007,16 @@ impl AppState {
         });
         self.event_records.insert(session_id.clone(), log);
         if let Some((load, cursor, fold)) = folded {
-            self.fold_timeline(session_id, load, cursor, fold, cx);
+            self.fold_timeline(session_id.clone(), load, cursor, fold, cx);
+        }
+        // A message whose handoff waited for this log goes now.
+        if self
+            .resident(&session_id)
+            .and_then(ActiveSession::handoff_message)
+            .is_some()
+            && self.dispatch_next_queued(&session_id, cx).is_err()
+        {
+            self.report_error(RuntimeError::ProcessGone, cx);
         }
     }
 
@@ -1369,7 +1411,7 @@ impl AppState {
         session_id: &str,
         item_id: String,
         cx: &mut HostCx,
-    ) -> HostTask<Result<String, ProtocolError>> {
+    ) -> HostTask<Result<(String, bool), ProtocolError>> {
         let scoped = matches!(cx.principal, tcode_protocol::Principal::Space { .. });
         let read_id = session_id.to_owned();
         self.query_item(
@@ -1382,9 +1424,11 @@ impl AppState {
                     .rev()
                     .find(|entry| entry.id == item_id)
                     .and_then(|entry| match &entry.content {
-                        EntryContent::Item(ItemContent::CommandExecution { output, .. }) => {
-                            Some(output.clone())
-                        }
+                        EntryContent::Item(ItemContent::CommandExecution {
+                            output,
+                            status,
+                            ..
+                        }) => Some((output.clone(), *status == agent::ItemStatus::InProgress)),
                         _ => None,
                     })
                     .ok_or_else(|| {
@@ -1502,7 +1546,7 @@ mod tests {
             store.turn_index("fixture").unwrap(),
             Some(TurnIndex {
                 turns: log.fold.turns.len() as u64,
-                starts: log.turn_starts,
+                starts: log.turn_starts.rows().to_vec(),
             })
         );
         store.close().unwrap();
@@ -1510,7 +1554,7 @@ mod tests {
     }
 
     #[test]
-    fn cold_continuation_covers_only_the_rows_it_read() {
+    fn a_cursor_whose_rest_overflows_a_reply_gets_the_tail_cold_or_resident() {
         let root = std::env::temp_dir().join(format!("cold-cursor-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
         let oversized = serde_json::to_string(&AgentEvent::Warning {
@@ -1539,49 +1583,43 @@ mod tests {
             known_index: None,
         };
         let resident = SessionLog::new(store.read_log("thread").unwrap());
-        let mut cold_records = Vec::new();
-        let mut resident_records = Vec::new();
-        for cold in [false, true] {
-            subscription.after = Some(0);
-            let collected = if cold {
-                &mut cold_records
-            } else {
-                &mut resident_records
-            };
-            loop {
-                let window = if cold {
-                    Tail::read_cut(&cut, subscription.after, None)
-                        .unwrap()
-                        .unwrap()
-                        .view()
-                        .events_window(&subscription)
-                } else {
-                    resident.events_window(&subscription)
-                };
-                let ServerEvent::SessionSnapshot {
-                    from,
-                    end,
-                    total,
-                    records,
-                    ..
-                } = window
-                else {
-                    panic!("snapshot");
-                };
-                assert_eq!(from, subscription.after.unwrap());
-                assert!(end > from && end <= total);
-                collected.extend(records);
-                if end == total {
-                    break;
-                }
-                subscription.after = Some(end);
-            }
-        }
-        assert_eq!(cold_records, resident_records);
-        assert_eq!(cold_records.len(), 3);
-        assert!(matches!(&cold_records[1].event, AgentEvent::Delta { text, .. } if text == "ab"));
-        assert!(
-            matches!(&cold_records[2].event, AgentEvent::Warning { message } if message == "last")
+        // The record after the cursor alone overflows a reply, so both the
+        // cold read and the resident log answer with the tail, in one reply
+        // that reaches the end of the log.
+        let cold = Tail::read_cut(&cut, subscription.after, None)
+            .unwrap()
+            .unwrap()
+            .view()
+            .events_window(&subscription);
+        assert_eq!(cold, resident.events_window(&subscription));
+        let ServerEvent::SessionSnapshot {
+            from,
+            end,
+            total,
+            total_turns,
+            records,
+            ..
+        } = cold
+        else {
+            panic!("snapshot");
+        };
+        assert!(from > 0, "the tail, not the continuation");
+        assert_eq!(end, total);
+        assert_eq!(records.len(), 2);
+        assert!(matches!(&records[0].event, AgentEvent::Delta { text, .. } if text == "ab"));
+        assert!(matches!(&records[1].event, AgentEvent::Warning { message } if message == "last"));
+        subscription.after = Some(from);
+        assert_eq!(
+            resident.events_window(&subscription),
+            ServerEvent::SessionSnapshot {
+                from,
+                end,
+                records,
+                total,
+                total_turns,
+                truncated: false,
+            },
+            "a cursor whose rest fits one reply continues"
         );
         drop(cut);
         store.close().unwrap();

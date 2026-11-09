@@ -3,6 +3,7 @@
 //! progress and the words every answer gets. The host owns every write and its state; the map
 //! reads only the stored topology and links, and each confirmation reads GitHub fresh.
 
+use crate::widgets::TooltipTrigger as _;
 use std::rc::Rc;
 
 use gpui::{
@@ -46,6 +47,21 @@ use crate::{
         tooltip::Tooltip,
     },
 };
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Whether a stack write is offered, and why not when it is shown disabled.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,26 +357,62 @@ pub(super) fn operation_chip(
     cx: &App,
 ) -> AnyElement {
     let (icon, color, label, tooltip) = chip_words(operation, cx);
+    // A stack write's chip recolours, and its glyph and words cross-fade, as the write moves
+    // from step to step; the chip stays where it is.
+    let glyph = match operation.kind {
+        StackOperationKind::Rebasing { .. } => None,
+        _ => Some(crate::icon::IconNamed::path(icon)),
+    };
+    let chip_id = SharedString::from(format!("pr-stack-operation-{}", operation.stack));
     let chip = || {
+        let (id, glyph, label) = (chip_id.clone(), glyph.clone(), label.clone());
         h_flex()
-            .id(SharedString::from(format!(
-                "pr-stack-operation-{}",
-                operation.stack
-            )))
+            .id(chip_id.clone())
             .flex_none()
-            .gap_1()
-            .items_center()
-            .px_2()
-            .py_0p5()
             .rounded(material::radius_chip(cx))
-            .bg(color.opacity(0.1))
             .text_secondary(compact, cx)
-            .text_color(color)
-            .child(match operation.kind {
-                StackOperationKind::Rebasing { .. } => Spinner::new().into_any_element(),
-                _ => Icon::new(icon).into_any_element(),
-            })
-            .child(label.clone())
+            .child(crate::motion::Sampled::new(move |window, cx| {
+                let color = gpui_base::motion::transition(
+                    (gpui::ElementId::from(id.clone()), "color"),
+                    color,
+                    gpui_base::motion::Transition::new(GLIDE),
+                    window,
+                    cx,
+                );
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .px_2()
+                    .py_0p5()
+                    .rounded(material::radius_chip(cx))
+                    .bg(color.opacity(0.1))
+                    .text_color(color)
+                    .child(crate::motion::cross_fade(
+                        (gpui::ElementId::from(id.clone()), "glyph"),
+                        glyph,
+                        CHANGE,
+                        window,
+                        cx,
+                        |glyph, _, _| match glyph {
+                            Some(path) => Icon::empty().path(path.clone()).into_any_element(),
+                            None => Spinner::new().into_any_element(),
+                        },
+                    ))
+                    .child(crate::motion::cross_fade(
+                        (gpui::ElementId::from(id), "label"),
+                        label,
+                        CHANGE,
+                        window,
+                        cx,
+                        |label, _, _| {
+                            div()
+                                .whitespace_nowrap()
+                                .child(label.clone())
+                                .into_any_element()
+                        },
+                    ))
+                    .into_any_element()
+            }))
     };
     let (StackOperationKind::Merging {
         id,
@@ -388,7 +440,7 @@ pub(super) fn operation_chip(
             .child(chip())
             .into_any_element(),
             None => chip()
-                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
                 .into_any_element(),
         };
     };
@@ -648,7 +700,21 @@ pub(super) fn map_selector(
                     )
                     .into_owned(),
                 )
-                .children(status.map(|(icon, color, _)| Icon::new(icon).text_color(color)))
+                // The running write's glyph fades in and out beside the position.
+                .child({
+                    let status =
+                        status.map(|(icon, color, _)| (crate::icon::IconNamed::path(icon), color));
+                    crate::motion::Sampled::new(move |window, cx| {
+                        match crate::motion::shown("pr-layer-status", status, SHOW, window, cx) {
+                            Some(shown) => {
+                                let (path, color) = shown.value.clone();
+                                shown.fade(Icon::empty().path(path).text_color(color))
+                            }
+                            // Out of flow, so an absent glyph takes no gap.
+                            None => div().absolute().into_any_element(),
+                        }
+                    })
+                })
                 .child(Icon::new(IconName::ChevronDown).text_color(muted)),
         );
     let popover = Popover::new("pr-layer-popover").trigger(trigger);
@@ -658,15 +724,14 @@ pub(super) fn map_selector(
         popover
     };
     popover
-        .content(move |_, _, cx| {
-            let popover = cx.entity();
+        .content(move |_, window, cx| {
             map_content(
                 &view,
                 &offer,
                 target.as_ref(),
                 action.as_ref(),
                 compact,
-                popover,
+                window,
                 cx,
             )
         })
@@ -679,16 +744,16 @@ fn map_content(
     target: Option<&Target>,
     action: Option<&PullRequestActionState>,
     compact: bool,
-    popover: Entity<gpui_base::PopoverState>,
+    window: &mut Window,
     cx: &mut Context<gpui_base::PopoverState>,
 ) -> AnyElement {
+    let popover = cx.entity();
     let map = offer.map();
     let theme = cx.theme().clone();
     let muted = theme.muted_foreground;
     let mono = theme.mono_font_family.clone();
     let selected_number = offer.key.number;
-    let store = view.read(cx).store().clone();
-    let collapsed = store.read(cx).stack_note_collapsed();
+    let collapsed = crate::device::DevicePreferences::stack_note_collapsed(cx);
     let head = h_flex()
         .px_2()
         .py_1()
@@ -718,17 +783,11 @@ fn map_content(
                 .icon(IconName::CircleQuestionMark)
                 .aria_label(tr("about"))
                 .tooltip(tr("about"))
-                .on_click({
-                    let store = store.clone();
-                    move |_, _, cx| {
-                        store.update(cx, |store, cx| {
-                            let collapsed = store.stack_note_collapsed();
-                            store.set_stack_note_collapsed(!collapsed, cx)
-                        })
-                    }
+                .on_click(move |_, _, cx| {
+                    crate::device::DevicePreferences::set_stack_note_collapsed(!collapsed, cx)
                 }),
         );
-    let note = (!collapsed).then(|| {
+    let note = crate::widgets::Collapsible::new("pr-stack-note", !collapsed).content(
         v_flex()
             .px_2()
             .pb_1()
@@ -743,16 +802,24 @@ fn map_content(
                     .icon(IconName::ExternalLink)
                     .label(tr("docs_link"))
                     .on_click(|_, _, cx| cx.open_url(core_pr::STACKS_DOCS_URL)),
-            )
-    });
-    let operation = offer.operation.as_ref().map(|operation| {
-        h_flex().px_2().py_1().child(operation_chip(
+            ),
+    );
+    // The running write's row folds in when it starts and out when it is done.
+    let operation = crate::motion::shown(
+        "pr-map-operation",
+        offer.operation.clone(),
+        SHOW,
+        window,
+        cx,
+    )
+    .map(|shown| {
+        shown.fold(h_flex().px_2().py_1().child(operation_chip(
             target.cloned(),
-            operation,
+            &shown.value,
             &offer.links,
             compact,
             cx,
-        ))
+        )))
     });
     let rows = map.rows.iter().rev().map(|row| {
         let number = row.layer.number;
@@ -987,7 +1054,7 @@ fn map_content(
         .gap_0p5()
         .overflow_y_scroll()
         .child(head)
-        .children(note)
+        .child(note)
         .children(operation)
         .children(rows)
         .child(base)
@@ -1016,9 +1083,8 @@ pub(super) fn caption(
                 .id(SharedString::from(format!("pr-stack-{}", stack.id)))
                 .gap_2()
                 .items_center()
-                .tooltip(|window, cx| {
+                .with_tooltip(|_, _| {
                     Tooltip::new(crate::tr!("pull_requests.stack_tooltip").into_owned())
-                        .build(window, cx)
                 })
                 .child(Icon::new(IconName::Layers))
                 .child(
@@ -1035,9 +1101,20 @@ pub(super) fn caption(
                             .into_owned(),
                         )),
                 )
-                .children(
-                    operation.map(|operation| operation_chip(None, operation, links, compact, cx)),
-                ),
+                // The stack's write fades in beside its caption when it starts, and out after.
+                .child({
+                    let (operation, links) = (operation.cloned(), links.to_vec());
+                    let id = SharedString::from(format!("pr-stack-caption-operation-{}", stack.id));
+                    crate::motion::Sampled::new(move |window, cx| {
+                        match crate::motion::shown(id, operation, SHOW, window, cx) {
+                            Some(shown) => {
+                                shown.fade(operation_chip(None, &shown.value, &links, compact, cx))
+                            }
+                            // Out of flow, so an absent chip takes no gap.
+                            None => div().absolute().into_any_element(),
+                        }
+                    })
+                }),
         )
         .child(
             h_flex()
@@ -1512,6 +1589,9 @@ fn line(icon: IconName, color: Hsla, text: String) -> AnyElement {
         .into_any_element()
 }
 
+/// A note of the merge confirmation: its glyph and colour, if it has one, and its words.
+type MergeNote = (Option<(IconName, Hsla)>, String);
+
 /// The text role of a confirmation's notes.
 fn notes(cx: &App) -> gpui::Div {
     v_flex()
@@ -1588,7 +1668,7 @@ fn layer_row(
                     .text_meta_mono(false, cx)
                     .child(head.as_deref().map(short).unwrap_or_else(|| "—".into()))
                     .when_some(head, |cell, head| {
-                        cell.tooltip(move |window, cx| Tooltip::new(head.clone()).build(window, cx))
+                        cell.with_tooltip(move |_, _| Tooltip::new(head.clone()))
                     }),
             )
         })
@@ -1784,7 +1864,22 @@ impl MergeStackDialog {
 }
 
 impl Render for MergeStackDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // What the dialog read — the scope, or why it could not — fades in in place of what it
+        // showed while it read.
+        let phase = match &self.state {
+            None => 0,
+            Some(Ok(_)) => 1,
+            Some(Err(_)) => 2,
+        };
+        let read = crate::motion::appear(
+            SharedString::from(format!("pr-stack-merge-phase-{phase}")),
+            true,
+            APPEAR,
+            window,
+            cx,
+        )
+        .progress;
         let target = &self.target;
         let key = &target.offer.key;
         let theme = cx.theme().clone();
@@ -1851,28 +1946,36 @@ impl Render for MergeStackDialog {
             .method
             .filter(|method| state.is_some() && Some(*method) != self.project_default)
             .zip(self.project.clone())
-            .map(|(method, (_, project))| {
-                let view = view.clone();
-                Checkbox::new("pr-stack-merge-default")
-                    .label(
-                        crate::tr!(
-                            "pull_requests.merge.make_default",
-                            method = super::lifecycle::segment_label(method),
-                            project = project
-                        )
-                        .into_owned(),
+            .map(|(method, (_, project))| (method, project));
+        let make_default = self.make_default;
+        let default_box =
+            crate::motion::shown("pr-stack-merge-default", default_box, SHOW, window, cx).map(
+                |shown| {
+                    let (method, project) = shown.value.clone();
+                    let view = view.clone();
+                    shown.fold(
+                        Checkbox::new("pr-stack-merge-default")
+                            .label(
+                                crate::tr!(
+                                    "pull_requests.merge.make_default",
+                                    method = super::lifecycle::segment_label(method),
+                                    project = project
+                                )
+                                .into_owned(),
+                            )
+                            .checked(make_default)
+                            .disabled(self.sending)
+                            .on_click(move |checked, _, cx| {
+                                let checked = *checked;
+                                view.update(cx, |dialog, cx| {
+                                    dialog.make_default = checked;
+                                    cx.notify();
+                                })
+                            }),
                     )
-                    .checked(self.make_default)
-                    .disabled(self.sending)
-                    .on_click(move |checked, _, cx| {
-                        let checked = *checked;
-                        view.update(cx, |dialog, cx| {
-                            dialog.make_default = checked;
-                            cx.notify();
-                        })
-                    })
-            });
-        let mut body = v_flex().gap_3().child(facts).child(
+                },
+            );
+        let body = v_flex().gap_3().child(facts).child(
             v_flex()
                 .w_full()
                 .gap_2()
@@ -1881,9 +1984,11 @@ impl Render for MergeStackDialog {
                         .text_caption(cx)
                         .child(crate::tr!("pull_requests.merge.method").into_owned()),
                 )
-                .child(method)
+                .child(div().opacity(read).child(method))
                 .children(default_box),
         );
+        let outer = body;
+        let mut body = v_flex().gap_3().opacity(read);
         let mut ready = false;
         match &self.state {
             None => {
@@ -2026,23 +2131,33 @@ impl Render for MergeStackDialog {
                             })),
                     );
                 }
-                let mut notes = vec![line(
-                    IconName::GitMerge,
-                    theme.info,
-                    tr_with(
-                        "note_merge",
-                        &[
-                            ("count", scope.len().to_string()),
-                            ("base", state.base.clone()),
-                        ],
+                // Keyed by what each note is about, so a note the store or a read adds or takes
+                // away folds in or out and the others move over.
+                let mut notes: Vec<(SharedString, MergeNote)> = vec![(
+                    "merge".into(),
+                    (
+                        Some((IconName::GitMerge, theme.info)),
+                        tr_with(
+                            "note_merge",
+                            &[
+                                ("count", scope.len().to_string()),
+                                ("base", state.base.clone()),
+                            ],
+                        ),
                     ),
                 )];
                 if state.merge_queue {
-                    notes.push(line(IconName::ListOrdered, theme.info, tr("note_queue")));
+                    notes.push((
+                        "queue".into(),
+                        (Some((IconName::ListOrdered, theme.info)), tr("note_queue")),
+                    ));
                 }
                 let blockers = self.blockers(state);
                 for blocker in &blockers {
-                    notes.push(line(IconName::Lock, theme.danger, blocker.clone()));
+                    notes.push((
+                        SharedString::from(format!("blocker-{blocker}")),
+                        (Some((IconName::Lock, theme.danger)), blocker.clone()),
+                    ));
                 }
                 let links = target.store.read(cx).pull_requests(&target.session);
                 let snapshot = |number: u64| {
@@ -2065,30 +2180,36 @@ impl Render for MergeStackDialog {
                     })
                     .collect();
                 for number in failing.iter().take(3) {
-                    notes.push(line(
-                        IconName::CircleX,
-                        theme.danger,
-                        tr_with("note_checks", &[("number", number.to_string())]),
+                    notes.push((
+                        SharedString::from(format!("checks-{number}")),
+                        (
+                            Some((IconName::CircleX, theme.danger)),
+                            tr_with("note_checks", &[("number", number.to_string())]),
+                        ),
                     ));
                 }
                 if failing.len() > 3 {
-                    notes.push(
-                        div()
-                            .child(tr_with(
+                    notes.push((
+                        "checks-more".into(),
+                        (
+                            None,
+                            tr_with(
                                 "summary_more",
                                 &[("count", (failing.len() - 3).to_string())],
-                            ))
-                            .into_any_element(),
-                    );
+                            ),
+                        ),
+                    ));
                 }
                 for number in &numbers {
                     if snapshot(*number).is_some_and(|snapshot| {
                         snapshot.review_decision == Some(core_pr::ReviewDecision::ChangesRequested)
                     }) {
-                        notes.push(line(
-                            IconName::MessageSquareWarning,
-                            theme.danger,
-                            tr_with("note_changes", &[("number", number.to_string())]),
+                        notes.push((
+                            SharedString::from(format!("changes-{number}")),
+                            (
+                                Some((IconName::MessageSquareWarning, theme.danger)),
+                                tr_with("note_changes", &[("number", number.to_string())]),
+                            ),
                         ));
                     }
                 }
@@ -2102,29 +2223,57 @@ impl Render for MergeStackDialog {
                     .as_ref()
                     .and_then(|offer| offer.operation.as_ref())
                 {
-                    notes.push(line(
-                        IconName::CircleQuestionMark,
-                        theme.warning,
-                        tr_with(
-                            "previous_unconfirmed",
-                            &[("ago", super::detail::ago(*started_at))],
+                    notes.push((
+                        "unconfirmed".into(),
+                        (
+                            Some((IconName::CircleQuestionMark, theme.warning)),
+                            tr_with(
+                                "previous_unconfirmed",
+                                &[("ago", super::detail::ago(*started_at))],
+                            ),
                         ),
                     ));
                 }
-                body = body.child(self::notes(cx).children(notes));
+                // Each note carries the gap above it, so the gap goes with it.
+                let notes = crate::motion::keyed(
+                    "pr-stack-merge-notes",
+                    notes,
+                    ROWS,
+                    window,
+                    cx,
+                    |_, (icon, text), _, _| {
+                        div()
+                            .pt_1()
+                            .child(match icon {
+                                Some((icon, color)) => line(icon.clone(), *color, text.clone()),
+                                None => div().child(text.clone()).into_any_element(),
+                            })
+                            .into_any_element()
+                    },
+                );
+                body = body.child(notes.render(self::notes(cx).gap_0().mt(gpui::rems(-0.25))));
                 let changed = self.notice.clone();
-                if let Some(changed) = &changed {
+                let again = cx.listener(|this, _, _, cx| this.load(cx));
+                if let Some(shown) = crate::motion::shown(
+                    "pr-stack-merge-changed",
+                    changed.clone(),
+                    SHOW,
+                    window,
+                    cx,
+                ) {
                     body = body.child(
-                        warning_wash(cx)
-                            .child(line(IconName::TriangleAlert, theme.warning, tr("changed")))
-                            .child(div().child(changed.clone()))
-                            .child(
-                                Button::new("pr-stack-review-again")
-                                    .outline()
-                                    .xsmall()
-                                    .label(tr("review_again"))
-                                    .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
-                            ),
+                        shown.fold(
+                            warning_wash(cx)
+                                .child(line(IconName::TriangleAlert, theme.warning, tr("changed")))
+                                .child(div().child(shown.value.clone()))
+                                .child(
+                                    Button::new("pr-stack-review-again")
+                                        .outline()
+                                        .xsmall()
+                                        .label(tr("review_again"))
+                                        .on_click(again),
+                                ),
+                        ),
                     );
                 }
                 ready = blockers.is_empty() && changed.is_none() && self.method.is_some();
@@ -2140,7 +2289,9 @@ impl Render for MergeStackDialog {
         } else {
             tr_with("merge_confirm", &[("count", count.to_string())])
         };
-        body.child(
+        // The dialog's height glides as what it read takes the place of what it showed meanwhile.
+        let glide = crate::motion::GlideState::keyed("pr-stack-merge-height", window, cx);
+        let content = outer.child(body).child(
             h_flex()
                 .gap_2()
                 .justify_end()
@@ -2161,7 +2312,8 @@ impl Render for MergeStackDialog {
                         .label(confirm_label)
                         .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
                 ),
-        )
+        );
+        crate::motion::SizeGlide::new(&glide, content).on_change(phase)
     }
 }
 
@@ -2373,7 +2525,21 @@ impl RebaseStackDialog {
         .detach();
     }
 
-    fn confirm_view(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn confirm_view(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // What the dialog read fades in in place of what it showed while it read.
+        let phase = match &self.state {
+            None => 0,
+            Some(Ok(_)) => 1,
+            Some(Err(_)) => 2,
+        };
+        let read = crate::motion::appear(
+            SharedString::from(format!("pr-stack-rebase-phase-{phase}")),
+            true,
+            APPEAR,
+            window,
+            cx,
+        )
+        .progress;
         let target = &self.target;
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
@@ -2384,7 +2550,7 @@ impl RebaseStackDialog {
             .as_ref()
             .map(StackOffer::base)
             .unwrap_or_default();
-        let mut body = v_flex().gap_3().child(
+        let body = v_flex().gap_3().child(
             v_flex()
                 .gap_1p5()
                 .child(fact(
@@ -2411,6 +2577,8 @@ impl RebaseStackDialog {
                     cx,
                 )),
         );
+        let outer = body;
+        let mut body = v_flex().gap_3().opacity(read);
         let mut ready = false;
         let mut count = 0;
         match &self.state {
@@ -2511,18 +2679,27 @@ impl RebaseStackDialog {
                         );
                 }
                 let changed = self.notice.clone();
-                if let Some(changed) = &changed {
+                let again = cx.listener(|this, _, _, cx| this.load(cx));
+                if let Some(shown) = crate::motion::shown(
+                    "pr-stack-rebase-changed",
+                    changed.clone(),
+                    SHOW,
+                    window,
+                    cx,
+                ) {
                     body = body.child(
-                        warning_wash(cx)
-                            .child(line(IconName::TriangleAlert, theme.warning, tr("changed")))
-                            .child(div().child(changed.clone()))
-                            .child(
-                                Button::new("pr-stack-rebase-review-again")
-                                    .outline()
-                                    .xsmall()
-                                    .label(tr("review_again"))
-                                    .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
-                            ),
+                        shown.fold(
+                            warning_wash(cx)
+                                .child(line(IconName::TriangleAlert, theme.warning, tr("changed")))
+                                .child(div().child(shown.value.clone()))
+                                .child(
+                                    Button::new("pr-stack-rebase-review-again")
+                                        .outline()
+                                        .xsmall()
+                                        .label(tr("review_again"))
+                                        .on_click(again),
+                                ),
+                        ),
                     );
                 }
                 ready = blockers.is_empty() && changed.is_none();
@@ -2542,50 +2719,136 @@ impl RebaseStackDialog {
         } else {
             tr_with("rebase_confirm", &[("count", count.to_string())])
         };
-        body.child(
-            h_flex()
-                .gap_2()
-                .justify_end()
-                .child(
-                    Button::new("pr-stack-rebase-cancel")
-                        .outline()
-                        .small()
-                        .disabled(self.sending)
-                        .label(crate::tr!("pull_requests.actions.cancel"))
-                        .on_click(|_, window, cx| window.close_dialog(cx)),
-                )
-                .child(
-                    Button::new("pr-stack-rebase-confirm")
-                        .primary()
-                        .small()
-                        .icon(IconName::RefreshCw)
-                        .loading(self.sending)
-                        .disabled(!ready || self.sending)
-                        .label(label)
-                        .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
-                ),
-        )
-        .into_any_element()
+        outer
+            .child(body)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("pr-stack-rebase-cancel")
+                            .outline()
+                            .small()
+                            .disabled(self.sending)
+                            .label(crate::tr!("pull_requests.actions.cancel"))
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("pr-stack-rebase-confirm")
+                            .primary()
+                            .small()
+                            .icon(IconName::RefreshCw)
+                            .loading(self.sending)
+                            .disabled(!ready || self.sending)
+                            .label(label)
+                            .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
 impl Render for RebaseStackDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.started {
-            return self.confirm_view(cx);
-        }
-        progress_view(&self.target, &mut self.last, cx)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Starting the rebase turns the dialog to its progress, which fades in in its place.
+        let shown = crate::motion::appear(
+            SharedString::from(format!("pr-stack-rebase-view-{}", self.started)),
+            true,
+            APPEAR,
+            window,
+            cx,
+        )
+        .progress;
+        let view = if self.started {
+            progress_view(&self.target, &mut self.last, window, cx)
+        } else {
+            self.confirm_view(window, cx)
+        };
+        // The dialog's height glides as what it read, or the progress, takes the place of what
+        // it showed before.
+        let shows = match (self.started, &self.state) {
+            (true, _) => 3,
+            (false, None) => 0,
+            (false, Some(Ok(_))) => 1,
+            (false, Some(Err(_))) => 2,
+        };
+        let glide = crate::motion::GlideState::keyed("pr-stack-rebase-height", window, cx);
+        crate::motion::SizeGlide::new(&glide, div().opacity(shown).child(view)).on_change(shows)
     }
 }
 
 /// The rows of a rebase as the host runs it, or as the host keeps its end until the next sync.
+/// A rebase layer's step: its glyph and its words.
+fn step_parts(
+    step: &StackRebaseStep,
+    below: Option<u64>,
+    base: &str,
+    cx: &App,
+) -> (AnyElement, String) {
+    let theme = cx.theme();
+    let muted = theme.muted_foreground;
+    match step {
+        StackRebaseStep::Waiting => (
+            Icon::new(IconName::CircleDashed)
+                .text_color(muted)
+                .into_any_element(),
+            tr("step_waiting"),
+        ),
+        StackRebaseStep::Rebasing => (
+            Spinner::new().into_any_element(),
+            match below {
+                Some(below) => tr_with("step_rebasing", &[("number", below.to_string())]),
+                None => tr_with("step_rebasing_base", &[("base", base.to_owned())]),
+            },
+        ),
+        StackRebaseStep::Pushing => (Spinner::new().into_any_element(), tr("step_pushing")),
+        StackRebaseStep::Pushed { from, to } => (
+            Icon::new(IconName::CircleCheck)
+                .text_color(theme.success)
+                .into_any_element(),
+            tr_with("step_pushed", &[("from", short(from)), ("to", short(to))]),
+        ),
+        StackRebaseStep::AlreadyCurrent => (
+            Icon::new(IconName::Check)
+                .text_color(muted)
+                .into_any_element(),
+            tr("step_current"),
+        ),
+        StackRebaseStep::Failed { reason } => (
+            Icon::new(match reason {
+                StackRebaseFailure::PushUnconfirmed => IconName::CircleQuestionMark,
+                _ => IconName::CircleX,
+            })
+            .text_color(match reason {
+                StackRebaseFailure::PushUnconfirmed => theme.warning,
+                _ => theme.danger,
+            })
+            .into_any_element(),
+            match reason {
+                StackRebaseFailure::Conflict => tr("step_conflict"),
+                StackRebaseFailure::LeaseRefused => tr("step_lease"),
+                StackRebaseFailure::PushUnconfirmed => tr("step_unknown"),
+                StackRebaseFailure::Git { step, .. } => {
+                    tr_with("step_git", &[("step", git_step(*step))])
+                }
+            },
+        ),
+        StackRebaseStep::NotStarted => (
+            Icon::new(IconName::Minus)
+                .text_color(muted)
+                .into_any_element(),
+            tr("step_not_started"),
+        ),
+    }
+}
+
 fn progress_view(
     target: &Target,
     last: &mut Option<StackOperationKind>,
+    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let theme = cx.theme().clone();
-    let muted = theme.muted_foreground;
     let store = target.store.read(cx);
     let machine = machine_label(Some(store));
     let offer = StackOffer::new(
@@ -2621,59 +2884,33 @@ fn progress_view(
                 .checked_sub(1)
                 .and_then(|below| last.get(below))
                 .map(|below| below.number);
-            let (icon, text): (AnyElement, String) = match &layer.step {
-                StackRebaseStep::Waiting => (
-                    Icon::new(IconName::CircleDashed)
-                        .text_color(muted)
-                        .into_any_element(),
-                    tr("step_waiting"),
-                ),
-                StackRebaseStep::Rebasing => (
-                    Spinner::new().into_any_element(),
-                    match below {
-                        Some(below) => tr_with("step_rebasing", &[("number", below.to_string())]),
-                        None => tr_with("step_rebasing_base", &[("base", base.clone())]),
-                    },
-                ),
-                StackRebaseStep::Pushing => (Spinner::new().into_any_element(), tr("step_pushing")),
-                StackRebaseStep::Pushed { from, to } => (
-                    Icon::new(IconName::CircleCheck)
-                        .text_color(theme.success)
-                        .into_any_element(),
-                    tr_with("step_pushed", &[("from", short(from)), ("to", short(to))]),
-                ),
-                StackRebaseStep::AlreadyCurrent => (
-                    Icon::new(IconName::Check)
-                        .text_color(muted)
-                        .into_any_element(),
-                    tr("step_current"),
-                ),
-                StackRebaseStep::Failed { reason } => (
-                    Icon::new(match reason {
-                        StackRebaseFailure::PushUnconfirmed => IconName::CircleQuestionMark,
-                        _ => IconName::CircleX,
-                    })
-                    .text_color(match reason {
-                        StackRebaseFailure::PushUnconfirmed => theme.warning,
-                        _ => theme.danger,
-                    })
-                    .into_any_element(),
-                    match reason {
-                        StackRebaseFailure::Conflict => tr("step_conflict"),
-                        StackRebaseFailure::LeaseRefused => tr("step_lease"),
-                        StackRebaseFailure::PushUnconfirmed => tr("step_unknown"),
-                        StackRebaseFailure::Git { step, .. } => {
-                            tr_with("step_git", &[("step", git_step(*step))])
-                        }
-                    },
-                ),
-                StackRebaseStep::NotStarted => (
-                    Icon::new(IconName::Minus)
-                        .text_color(muted)
-                        .into_any_element(),
-                    tr("step_not_started"),
-                ),
-            };
+            // Each layer's step cross-fades into the next: its glyph and its words.
+            let row_id = gpui::ElementId::from(SharedString::from(format!(
+                "pr-stack-progress-step-{}",
+                layer.number
+            )));
+            let step = (layer.step.clone(), below);
+            let icon = crate::motion::cross_fade(
+                (row_id.clone(), "icon"),
+                step.clone(),
+                CHANGE,
+                window,
+                cx,
+                |(step, below), _, cx| step_parts(step, *below, &base, cx).0,
+            );
+            let text = crate::motion::cross_fade(
+                (row_id, "text"),
+                step,
+                CHANGE,
+                window,
+                cx,
+                |(step, below), _, cx| {
+                    div()
+                        .whitespace_nowrap()
+                        .child(step_parts(step, *below, &base, cx).1)
+                        .into_any_element()
+                },
+            );
             material::group_row(cx)
                 .id(SharedString::from(format!(
                     "pr-stack-progress-{}",
@@ -2706,6 +2943,14 @@ fn progress_view(
         StackRebaseStep::Failed { reason } => Some((layer.number, reason)),
         _ => None,
     });
+    // The recovery folds in when the rebase stops on a layer.
+    let shown = crate::motion::shown(
+        "pr-stack-recovery",
+        (stopped.is_some() && ended).then_some(()),
+        SHOW,
+        window,
+        cx,
+    );
     if let Some((failed, reason)) = stopped.filter(|_| ended) {
         let numbers = |wanted: fn(&StackRebaseStep) -> bool| -> Vec<u64> {
             last.iter()
@@ -2749,7 +2994,7 @@ fn progress_view(
         let can_ask = !target
             .store
             .read(cx)
-            .session_status()
+            .session_status_for(Some(&target.session), cx)
             .is_none_or(|status| status.conversation_read_only);
         let ask = matches!(reason, StackRebaseFailure::Conflict).then(|| {
             let store = target.store.clone();
@@ -2788,21 +3033,20 @@ fn progress_view(
             "https://{}/{}/pull/{failed}",
             target.offer.key.host, target.offer.key.repository
         );
-        body = body.child(
-            warning_wash(cx)
-                .child(div().child(state))
-                .child(div().child(advice))
-                .child(
-                    h_flex().gap_2().items_center().children(ask).child(
-                        Button::new("pr-stack-open-failed")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::ExternalLink)
-                            .label(tr_with("open_layer", &[("number", failed.to_string())]))
-                            .on_click(move |_, _, cx| cx.open_url(&url)),
-                    ),
+        let wash = warning_wash(cx)
+            .child(div().child(state))
+            .child(div().child(advice))
+            .child(
+                h_flex().gap_2().items_center().children(ask).child(
+                    Button::new("pr-stack-open-failed")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ExternalLink)
+                        .label(tr_with("open_layer", &[("number", failed.to_string())]))
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
                 ),
-        );
+            );
+        body = body.children(shown.map(|shown| shown.fold(wash)));
     }
     body.child(
         h_flex().justify_end().child(

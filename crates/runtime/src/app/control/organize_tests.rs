@@ -159,7 +159,10 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
         assert!(done.pull_requests[0].watch.is_some());
         assert_eq!(state.resident("done").unwrap().queue.len(), 1);
         assert!(
-            state.control_activity(10).is_empty(),
+            state
+                .control_activity(&Default::default(), 10)
+                .entries
+                .is_empty(),
             "a preview audits nothing"
         );
     });
@@ -371,6 +374,8 @@ fn a_recorded_review_changes_no_thread_and_is_read_back_after_a_restart() {
     });
     cx.run_until_parked();
 
+    // A restarted host is another process, which nothing the stopped host left running reaches.
+    let cx = &mut TestAppContext::default();
     let restarted = cx.new_entity(TestClientState::new((*store).clone()));
     restarted.deliver(
         cx,

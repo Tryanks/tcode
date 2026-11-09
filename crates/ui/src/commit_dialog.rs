@@ -25,6 +25,8 @@ use crate::store::WorkspaceStore;
 
 pub struct CommitDialog {
     store: Entity<WorkspaceStore>,
+    /// The thread the dialog commits in.
+    session_id: String,
     message: Entity<TextareaState>,
     files: Vec<GitFileEntry>,
     /// User-*excluded* (unchecked) paths — kept out of the commit via pathspec.
@@ -41,11 +43,14 @@ pub struct CommitDialog {
 impl CommitDialog {
     pub fn new(
         store: Entity<WorkspaceStore>,
+        session_id: String,
         action: GitAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let state = store.read(cx).commit_dialog_state();
+        let state = store
+            .read(cx)
+            .commit_dialog_state_for(Some(&session_id), cx);
         let files = state.files;
         let branch = state.branch;
         let on_default_branch = state.on_default_branch;
@@ -56,6 +61,7 @@ impl CommitDialog {
         });
         let mut this = Self {
             store,
+            session_id,
             message,
             files,
             excluded: HashSet::new(),
@@ -92,7 +98,9 @@ impl CommitDialog {
         self.generating = true;
         let included = self.included();
         let store = self.store.clone();
-        let task = store.update(cx, |store, cx| store.generate_commit_message(included, cx));
+        let task = store.update(cx, |store, cx| {
+            store.generate_commit_message_for(Some(&self.session_id), included, cx)
+        });
         let message = self.message.clone();
         self._gen_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
@@ -127,8 +135,9 @@ impl CommitDialog {
             None
         };
         let action = self.action;
+        let session_id = self.session_id.clone();
         self.store.update(cx, |store, _cx| {
-            store.run_git_action(action, Some(message), included, feature_branch);
+            store.run_git_action_for(session_id, action, Some(message), included, feature_branch);
         });
         true
     }
@@ -204,7 +213,14 @@ impl CommitDialog {
 }
 
 impl Render for CommitDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The message: a change the field's height follows.
+        let message_key = {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            self.message.read(cx).value().hash(&mut hasher);
+            hasher.finish()
+        };
         let muted = cx.theme().muted_foreground;
 
         let branch_label = self
@@ -344,7 +360,15 @@ impl Render for CommitDialog {
                 .w_full()
                 .gap_1()
                 .child(message_header)
-                .child(Textarea::new(&self.message)),
+                // The field grows to a generated message, and shrinks as it
+                // is cut, gliding; what is below it moves along.
+                .child(
+                    crate::motion::SizeGlide::new(
+                        &crate::motion::GlideState::keyed("commit-message-glide", window, cx),
+                        Textarea::new(&self.message),
+                    )
+                    .on_change(message_key),
+                ),
         );
 
         body
@@ -354,7 +378,6 @@ impl Render for CommitDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     use gpui::{ScrollDelta, ScrollEvent, TestAppContext, point};
     use tcode_core::git::GitStatus;
@@ -400,7 +423,7 @@ mod tests {
         let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
             pump_link
-                .pump_with_timer(|| executor.timer(Duration::from_millis(25)))
+                .pump_with_timer(|delay| executor.timer(delay))
                 .await;
         });
         let store = cx.new(|cx| {
@@ -409,19 +432,24 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-        store.update(cx, |store, _| store.select_session("session".into()));
+        store.update(cx, |store, cx| store.show_alone("session".into(), cx));
         for line in deferred {
             incoming.try_send(line).unwrap();
         }
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         let (_dialog, cx) = cx.add_window_view(|window, cx| {
-            CommitDialog::new(store.clone(), GitAction::Commit, window, cx)
+            CommitDialog::new(
+                store.clone(),
+                "session".into(),
+                GitAction::Commit,
+                window,
+                cx,
+            )
         });
         cx.simulate_resize(gpui::size(px(640.), px(800.)));
         cx.update(|window, cx| _ = window.draw(cx));

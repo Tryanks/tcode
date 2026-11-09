@@ -24,11 +24,12 @@ desktop = [
     "voice",
     "local-permissions",
     "pasteboard-image",
+    "window-attention",
 ]
 # GPUI's platform file dialogs (`prompt_for_paths` / `prompt_for_new_path`).
 # Guards only the Browse and Save-to-disk actions.
 native-dialogs = []
-# Embedded webview preview backend. Available on macOS, Windows, Linux (X11), Android and iOS; the panel,
+# Embedded webview preview backend. Available on macOS, Windows, Linux, Android and iOS; the panel,
 # its URL field, open-externally and copy-URL are always compiled.
 native-preview = [
     "dep:tcode-traverse",
@@ -48,8 +49,13 @@ native-preview = [
     "dep:objc2-foundation",
     "dep:webview2-com",
     "dep:webkit2gtk",
+    "dep:cairo-rs",
     "dep:gdk",
+    "dep:gtk",
+    "dep:wayland-nest",
     "dep:windows-core",
+    "dep:windows",
+    "dep:gpui-windows-core",
     "dep:tempfile",
 ]
 # System dictation in the composer, including ClientHost recognizers.
@@ -58,17 +64,20 @@ voice = ["tcode-client/voice"]
 local-permissions = ["dep:computer-use-mcp"]
 # Reading an image off the macOS AppKit pasteboard.
 pasteboard-image = ["dep:objc2-foundation"]
+# Flashing a Windows taskbar button until its window comes to the front.
+window-attention = ["dep:windows"]
 
 [dependencies]
 url = "2"
 percent-encoding = "2"
+uuid = { version = "1", features = ["v4", "js"] }
 agent = { path = "../agent", default-features = false }
 tcode-client = { path = "../client" }
 tcode-core = { path = "../core", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
 qrcode = { version = "0.14", default-features = false }
-gpui = { package = "gpui-fast", version = "0.1.12", default-features = false }
-gpui-base = { version = "0.8.1", features = ["gpui-fast"] }
+gpui = { package = "gpui-fast", version = "0.1.13", default-features = false }
+gpui-base = { version = "0.9.0", features = ["gpui-fast"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 base64 = "0.23"
 async-channel = "2"
@@ -99,19 +108,22 @@ web-time = "1"
 # iOS off), so it is left to the composition roots.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tcode-traverse = { path = "../traverse", default-features = false, optional = true }
-reqwest-client = { package = "gpui-pre-reqwest-client", version = "=0.3.10" }
+reqwest-client = { package = "gpui-pre-reqwest-client", version = "=0.3.11" }
 # Android apps do not have the Unix certificate files used by native-roots discovery.
 reqwest = { package = "gpui-pre-reqwest", version = "=0.12.15", default-features = false, features = ["rustls-tls-webpki-roots"] }
 
-# The preview backend exists only where a system webview can be embedded as a
-# child of the GPUI window, so its whole dependency set is target-scoped.
-[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "ios"))'.dependencies]
-gpui-kit = { version = "0.8.1", default-features = false, features = ["gpui-fast"], optional = true }
-gpui-webview = { version = "0.8.1", features = ["gpui-fast"], optional = true }
+# The preview backend exists only where a system webview can be embedded in
+# the GPUI window, so its whole dependency set is target-scoped. Windows drives
+# WebView2 itself (`preview_panel::webview2`).
+[target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))'.dependencies]
+gpui-kit = { version = "0.9.0", default-features = false, features = ["gpui-fast"], optional = true }
+gpui-webview = { version = "0.9.0", features = ["gpui-fast"], optional = true }
 wry = { version = "0.53.3", package = "lb-wry", features = ["mac-proxy"], optional = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "ios"))'.dependencies]
 raw-window-handle = { version = "0.6", features = ["std"] }
-# Only the Windows WebContext needs it, but Cargo has no per-feature target
-# narrower than this.
+# Only the Windows WebView2 environment needs it, but Cargo has no per-feature
+# target narrower than this.
 async-lock = { version = "3", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -141,26 +153,43 @@ optional = true
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-web-kit]
 version = "0.3.2"
-features = ["WKNavigationDelegate", "WKNavigationAction", "WKFrameInfo", "WKSnapshotConfiguration", "WKWebView"]
+features = ["WKContentWorld", "WKNavigationDelegate", "WKNavigationAction", "WKFrameInfo", "WKScriptMessage", "WKScriptMessageHandler", "WKSnapshotConfiguration", "WKUserContentController", "WKUserScript", "WKWebView"]
 optional = true
 
 # The WebKitGTK load-failure signals behind `preview_status.load_error`. Pinned
 # to the version lb-wry resolves, so both drive the same WebKit objects.
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = { version = "=2.0.1", optional = true }
+# WebKitGTK's snapshots are cairo surfaces; the version webkit2gtk resolves.
+cairo-rs = { version = "0.18", features = ["png"], optional = true }
 # The X error trap that keeps a released webview from exiting the process.
 gdk = { version = "0.18.2", optional = true }
+# The GTK windows that hold webviews on a Wayland session.
+gtk = { version = "0.18.2", optional = true }
+wayland-nest = { path = "../platform/wayland-nest", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tempfile = { version = "3", optional = true }
-# Pinned to the version lb-wry resolves, so both drive the same WebView2 objects.
+# The version lb-wry resolves elsewhere, and the `windows` release it binds.
 webview2-com = { version = "0.38.2", optional = true }
 windows-core = { version = "0.61", optional = true }
+windows = { version = "0.61", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectComposition",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# The release gpui-fast-windows hands a native surface's visual in.
+gpui-windows-core = { package = "windows-core", version = "0.62", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
-gpui = { package = "gpui-fast", version = "0.1.12", default-features = false, features = ["test-support"] }
-gpui_platform = { package = "gpui-fast-platform", version = "0.1.12", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui = { package = "gpui-fast", version = "0.1.13", default-features = false, features = ["test-support"] }
+gpui_platform = { package = "gpui-fast-platform", version = "0.1.13", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 smol = "2"
 tcode-runtime = { path = "../runtime", features = ["test-support"] }
 # dump-create is only needed by examples/sanitize_syntaxes.rs and the syntax-set

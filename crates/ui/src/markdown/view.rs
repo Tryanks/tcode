@@ -49,6 +49,7 @@ pub struct MarkdownView {
     selection_entry: Option<(Entity<SelectionDocument>, u64)>,
     compact_headings: Option<bool>,
     base_dir: Option<PathBuf>,
+    image_host: Option<crate::store::ImageHost>,
     menu_extension: Option<MenuExtension>,
 }
 
@@ -63,6 +64,7 @@ impl MarkdownView {
             selection_entry: None,
             compact_headings: None,
             base_dir: None,
+            image_host: None,
             menu_extension: None,
         }
     }
@@ -84,6 +86,12 @@ impl MarkdownView {
     /// document's other entries in a [`SelectionArea`] its owner draws.
     pub fn selection_entry(mut self, document: &Entity<SelectionDocument>, entry: u64) -> Self {
         self.selection_entry = Some((document.clone(), entry));
+        self
+    }
+
+    /// The host this document's file images are read from.
+    pub(crate) fn image_host(mut self, host: crate::store::ImageHost) -> Self {
+        self.image_host = Some(host);
         self
     }
 
@@ -139,20 +147,46 @@ impl Element for MarkdownView {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let state = self.state.clone();
-        state.update(cx, |state, cx| {
-            if let Some((document, entry)) = &self.selection_entry {
-                state.set_selection_entry(document, *entry, cx);
-            } else if let Some(selectable) = self.selectable {
-                state.set_selectable(selectable, cx);
-            }
-            state.clear_own_selection_on_focus_out(window, cx);
-            if let Some(compact) = self.compact_headings {
-                state.set_compact_headings(compact, cx);
-            }
-            if let Some(base_dir) = &self.base_dir {
-                state.set_base_dir(Some(base_dir.clone()), cx);
-            }
-        });
+        // Updating the state while the frame draws counts as changing it,
+        // which builds the view drawing it again: the state is only updated
+        // when it does not hold what this view asks of it already.
+        let holds = {
+            let current = state.read(cx);
+            (match (&self.selection_entry, self.selectable) {
+                (Some((document, entry)), _) => current.is_selection_entry(document, *entry),
+                (None, Some(selectable)) => selectable == current.selection.is_some(),
+                (None, None) => true,
+            }) && !current.wants_focus_out_watch()
+                && self
+                    .compact_headings
+                    .is_none_or(|compact| compact == current.compact_headings)
+                && self
+                    .base_dir
+                    .as_ref()
+                    .is_none_or(|base_dir| current.base_dir.as_ref() == Some(base_dir))
+                && self
+                    .image_host
+                    .is_none_or(|host| current.image_host == host)
+        };
+        if !holds {
+            state.update(cx, |state, cx| {
+                if let Some((document, entry)) = &self.selection_entry {
+                    state.set_selection_entry(document, *entry, cx);
+                } else if let Some(selectable) = self.selectable {
+                    state.set_selectable(selectable, cx);
+                }
+                state.clear_own_selection_on_focus_out(window, cx);
+                if let Some(compact) = self.compact_headings {
+                    state.set_compact_headings(compact, cx);
+                }
+                if let Some(base_dir) = &self.base_dir {
+                    state.set_base_dir(Some(base_dir.clone()), cx);
+                }
+                if let Some(host) = self.image_host {
+                    state.set_image_host(host, cx);
+                }
+            });
+        }
         let focus_handle = state.read(cx).focus_handle.clone();
         let element = div()
             .key_context(super::CONTEXT)
@@ -320,8 +354,9 @@ impl Element for MarkdownView {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        request_layout.0.read(cx).begin_frame();
         request_layout.1.prepaint(window, cx);
+        request_layout.0.read(cx).measure_unrevealed();
+        request_layout.0.read(cx).register_edges(cx);
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         if let Some(membership) = &request_layout.0.read(cx).selection {
             membership.document.read(cx).register_participant(
@@ -1014,7 +1049,11 @@ mod tests {
         ] {
             let work = layout_work(cx, |cx| {
                 root.update(cx, |root, cx| {
-                    root.markdown.update(cx, |md, cx| md.push_str(delta, cx));
+                    root.markdown.update(cx, |md, cx| {
+                        // The chat streams into the live tail of a running turn.
+                        md.set_streaming(true, cx);
+                        md.push_str(delta, cx);
+                    });
                     // The chat remeasures the row of a message that changed.
                     root.list_state.remeasure_items(0..1);
                 });
@@ -1039,43 +1078,55 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_diagram_resolving_its_size_remeasures_only_its_block(cx: &mut TestAppContext) {
+    fn a_diagram_arriving_remeasures_only_its_block(cx: &mut TestAppContext) {
         const BLOCKS: usize = 400;
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let (root, cx) = cx.add_window_view(|_, cx| OuterListRoot::new("", cx));
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        let source = format!(
-            "```mermaid\nflowchart LR\n  A --> B\n```\n\n{}",
-            paragraphs(BLOCKS)
-        );
-        // The diagram is decoded off the main thread; the frames this update
-        // draws lay it out before it has a size.
-        root.update(cx, |root, cx| {
-            root.markdown.update(cx, |md, cx| md.set_text(&source, cx));
-            root.list_state.remeasure_items(0..1);
-        });
-        let pending = cx
-            .debug_bounds("markdown-mermaid-root-0")
-            .expect("the diagram block is painted")
+        let (root, cx) = open_timeline_row(&paragraphs(BLOCKS), cx);
+        let push = |text: &str, cx: &mut VisualTestContext| {
+            root.update(cx, |root, cx| {
+                root.markdown.update(cx, |md, cx| {
+                    md.set_streaming(true, cx);
+                    md.push_str(text, cx);
+                });
+                // The chat remeasures the row of a message that changed.
+                root.list_state.remeasure_items(0..1);
+            });
+        };
+        let frame = |cx: &mut VisualTestContext| {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                _ = window.draw(cx);
+            });
+        };
+        push("\n\n```mermaid\nflowchart TD\n  A --> B\n", cx);
+        scroll_to_end(&root, cx);
+        for _ in 0..30 {
+            frame(cx);
+        }
+        // The fence is root block BLOCKS.
+        let diagram = "markdown-mermaid-block-root-400";
+        let before = cx
+            .debug_bounds(diagram)
+            .expect("the diagram is painted")
             .size
             .height;
 
-        let work = layout_work(cx, |cx| cx.run_until_parked());
-        let resolved = cx
-            .debug_bounds("markdown-mermaid-root-0")
-            .expect("the diagram block is painted")
-            .size
-            .height;
-        assert!(
-            resolved != pending,
-            "the diagram resolved its size: {pending:?} -> {resolved:?}"
-        );
-        assert!(
-            work.measure_calls < BLOCKS as u64 / 4
-                && work.nodes_created + work.nodes_reused < BLOCKS as u64 / 2,
-            "resolving one diagram: {work:?}"
-        );
+        // A statement arrives; its picture replaces the shown one, gliding.
+        push("  B --> C\n", cx);
+        for _ in 0..30 {
+            // Each frame lays out what is visible and the diagram; one that
+            // lays out every block is work in proportion to the whole message.
+            let work = layout_work(cx, frame);
+            let nodes_per_frame = (work.nodes_created + work.nodes_reused) / work.frames.max(1);
+            assert!(
+                work.measure_calls < BLOCKS as u64 / 4 && nodes_per_frame < BLOCKS as u64 / 2,
+                "a frame of one diagram's swap: {work:?}"
+            );
+        }
+        let after = cx.debug_bounds(diagram).unwrap().size.height;
+        assert!(after > before, "the diagram grew: {before:?} -> {after:?}");
     }
 
     #[gpui::test]
@@ -1479,6 +1530,139 @@ mod tests {
         cx.simulate_mouse_move(jittered, Some(MouseButton::Left), Modifiers::default());
         cx.simulate_mouse_up(jittered, MouseButton::Left, Modifiers::default());
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+    }
+
+    /// A view around a message, which the test renders again.
+    struct Around(Entity<Message>);
+
+    impl Render for Around {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.0.clone())
+        }
+    }
+
+    /// A message in a view of its own, narrower than the window.
+    struct Message(Entity<MarkdownState>);
+
+    impl Render for Message {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(240.))
+                .child(MarkdownView::new(&self.0).selectable(true))
+        }
+    }
+
+    #[gpui::test]
+    fn the_pointer_moving_off_links_leaves_the_message_drawn_from_last_frame(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (around, cx) = cx.add_window_view(|_, cx| {
+            let markdown = cx.new(|cx| {
+                MarkdownState::new(
+                    "Plain words.\n\nWords, then [a link](https://example.com).",
+                    cx,
+                )
+            });
+            Around(cx.new(|_| Message(markdown)))
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(gpui::size(px(1_024.), px(600.)));
+        cx.simulate_mouse_move(point(px(600.), px(300.)), None, Modifiers::default());
+        crate::test_frames::draw_settled(cx);
+
+        let plain = cx.debug_bounds("markdown-block-0").expect("drawn");
+        let linked = cx.debug_bounds("markdown-block-1").expect("drawn");
+        let moves_to = |at, cx: &mut VisualTestContext| {
+            cx.simulate_mouse_move(at, None, Modifiers::default());
+            cx.update(|window, _| window.reset_layout_stats());
+            around.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            cx.update(|window, _| window.layout_stats().views_built)
+        };
+        let beside_the_message = [point(px(600.), px(20.)), point(px(600.), plain.center().y)];
+        for at in beside_the_message {
+            assert_eq!(
+                moves_to(at, cx),
+                1,
+                "the pointer at {at:?} built the message"
+            );
+        }
+        // Entering the message's own element is a hover it is drawn by.
+        moves_to(point(px(200.), plain.top() + px(4.)), cx);
+        let over_text_beside_the_link = [
+            point(px(4.), plain.top() + px(4.)),
+            point(px(4.), linked.top() + px(4.)),
+            point(px(200.), plain.top() + px(4.)),
+        ];
+        for at in over_text_beside_the_link {
+            assert_eq!(
+                moves_to(at, cx),
+                1,
+                "the pointer at {at:?} built the message"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn a_link_shows_its_tooltip_on_the_rows_it_wraps_onto(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let markdown = cx.new(|cx| {
+                MarkdownState::new(
+                    "Plain words.\n\nWords, then [a link whose words run on past the end \
+                     of the row it starts on](https://example.com)",
+                    cx,
+                )
+            });
+            gpui_base::Root::new(cx.new(|_| Message(markdown)), window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(gpui::size(px(1_024.), px(600.)));
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        };
+        let rest_at = |at, time, cx: &mut VisualTestContext| {
+            cx.simulate_mouse_move(at, None, Modifiers::default());
+            draw(cx);
+            cx.executor().advance_clock(time);
+            draw(cx);
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            draw(cx);
+            cx.debug_bounds("tcode-tooltip")
+        };
+        draw(cx);
+        let defaults = cx.update(|_, cx| gpui_base::TooltipDefaults::global(cx));
+        let rem = cx.update(|window, _| window.rem_size());
+        // The paragraph above is one row and the gap below it.
+        let row = cx.debug_bounds("markdown-block-0").unwrap().size.height - rem;
+        let linked = cx.debug_bounds("markdown-block-1").unwrap();
+        assert!(linked.size.height > row * 1.5, "the link wraps");
+
+        let beside = point(linked.left() + px(4.), linked.top() + row / 2.);
+        assert_eq!(
+            rest_at(beside, defaults.show_delay(), cx),
+            None,
+            "the text before the link on its first row shows none"
+        );
+        let wrapped = point(linked.left() + px(4.), linked.bottom() - row / 2.);
+        let shown = rest_at(wrapped, defaults.show_delay(), cx).expect("shown on its last row");
+        assert!(
+            shown.top() >= wrapped.y || shown.bottom() <= linked.bottom() - row,
+            "beside the row under the pointer: {shown:?}"
+        );
+        assert_eq!(
+            rest_at(beside, defaults.grace_period(), cx),
+            None,
+            "gone once the pointer left the link"
+        );
     }
 
     /// The view under the window `Root`, which owns Copy for the window

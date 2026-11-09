@@ -18,7 +18,17 @@ pub(super) struct CommandOutputFeed {
     rendering: bool,
     timer_armed: bool,
     last_started: Option<Instant>,
-    last_sent: Option<TerminalFrame>,
+    held: Held,
+}
+
+/// What the topic's subscribers hold, which the next push continues from.
+enum Held {
+    Nothing,
+    /// Every subscriber holds this screen, so a push sends what changed.
+    Same(TerminalFrame),
+    /// A subscriber was answered with a screen the others do not hold, so
+    /// the next push sends the whole screen.
+    Mixed,
 }
 
 impl AppState {
@@ -33,7 +43,7 @@ impl AppState {
                 rendering: false,
                 timer_armed: false,
                 last_started: None,
-                last_sent: None,
+                held: Held::Nothing,
             },
         );
     }
@@ -99,12 +109,16 @@ impl AppState {
         let Some(feed) = self.command_output_feeds.get_mut(topic) else {
             return;
         };
-        if feed.revision == revision {
-            feed.last_sent = Some(frame.clone());
-        } else {
+        if feed.revision != revision {
             feed.rendered = revision;
-            feed.last_sent = None;
+            feed.held = Held::Mixed;
+            return;
         }
+        feed.held = match std::mem::replace(&mut feed.held, Held::Mixed) {
+            Held::Nothing => Held::Same(frame.clone()),
+            Held::Same(held) if held == *frame => Held::Same(held),
+            Held::Same(_) | Held::Mixed => Held::Mixed,
+        };
     }
 
     /// A record touched `item_id`; every width subscribed to it is rendered
@@ -195,15 +209,24 @@ impl AppState {
                     return;
                 };
                 feed.rendering = false;
-                if let Ok(frame) = result
-                    && feed.last_sent.as_ref() != Some(&frame)
-                {
-                    feed.last_sent = Some(frame.clone());
-                    cx.emit(HostEvent::Domain(EventEnvelope {
-                        request_id: None,
-                        topic: topic.clone(),
-                        event: ServerEvent::CommandOutputReplaced(Box::new(frame)),
-                    }));
+                if let Ok(frame) = result {
+                    let event = match &feed.held {
+                        Held::Same(held) if *held == frame => None,
+                        Held::Same(held) => Some(ServerEvent::CommandOutputDelta(Box::new(
+                            crate::terminal::command_output_delta(held, &frame),
+                        ))),
+                        Held::Nothing | Held::Mixed => {
+                            Some(ServerEvent::CommandOutputReplaced(Box::new(frame.clone())))
+                        }
+                    };
+                    if let Some(event) = event {
+                        feed.held = Held::Same(frame);
+                        cx.emit(HostEvent::Domain(EventEnvelope {
+                            request_id: None,
+                            topic: topic.clone(),
+                            event,
+                        }));
+                    }
                 }
                 state.schedule_command_output(&topic, cx);
             });
@@ -227,9 +250,9 @@ impl AppState {
         let read = self.stored_command_output(session_id, item_id.clone(), cx);
         let host_cx = cx.clone();
         cx.spawn_background(async move {
-            let output = read.await?;
+            let (output, running) = read.await?;
             Ok(host_cx
-                .unblock(move || crate::terminal::render_command_output(&output, cols))
+                .unblock(move || crate::terminal::render_command_output(&output, cols, running))
                 .await)
         })
     }

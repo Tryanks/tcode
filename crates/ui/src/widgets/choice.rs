@@ -1,14 +1,14 @@
 //! Tcode's single-choice form control: a styled composition of
 //! `gpui_base::RadioGroup`/`Radio`, drawn as a
 //! [`TabBar::segmented`](super::tabs::TabBar::segmented) track.
+use crate::widgets::TooltipTrigger as _;
 use crate::{
     icon::{Icon, IconName},
-    material::focus_ring,
     theme::ActiveTheme as _,
     typography::TextRole as _,
     widgets::{
         Tooltip,
-        tabs::{segment, segmented_track},
+        tabs::{Glide, item_key, label_color, segment, segment_list, segmented_track},
     },
 };
 use gpui::{
@@ -18,6 +18,9 @@ use gpui::{
 };
 use gpui_base::{Radio, RadioGroup, StyledExt as _};
 use std::rc::Rc;
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 
 type SelectHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -112,7 +115,7 @@ impl Styled for ChoiceGroup {
 }
 
 impl RenderOnce for ChoiceGroup {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let Self {
             id,
             compact,
@@ -121,21 +124,40 @@ impl RenderOnce for ChoiceGroup {
             style,
         } = self;
         let count = choices.len();
-        let radios = choices
+        let selected = choices.iter().position(|choice| choice.selected);
+        let dim = selected.is_some_and(|ix| choices[ix].disabled);
+        let glide = Glide::new(
+            &id,
+            selected.map(|ix| item_key(&choices[ix].id)),
+            window,
+            cx,
+        );
+        let radios: Vec<_> = choices
             .into_iter()
             .enumerate()
-            .map(|(ix, choice)| render_choice(choice, ix, count, compact, cx));
+            .map(|(ix, choice)| render_choice(choice, ix, count, compact, &glide, window, cx))
+            .collect();
         let group = RadioGroup::new(id.clone())
             .axis(Axis::Horizontal)
             .when_some(aria_label, |this, label| this.aria_label(label))
-            .children(radios);
-        segmented_track(id.clone(), group, compact, cx)
+            .child(glide.pill(dim, cx))
+            .children(radios)
+            .relative();
+        segmented_track(id.clone(), segment_list(group, cx), compact)
             .debug_selector(|| id.to_string())
             .refine_style(&style)
     }
 }
 
-fn render_choice(choice: Choice, ix: usize, count: usize, compact: bool, cx: &App) -> Radio {
+fn render_choice(
+    choice: Choice,
+    ix: usize,
+    count: usize,
+    compact: bool,
+    glide: &Glide,
+    window: &mut Window,
+    cx: &mut App,
+) -> crate::motion::focus_ring::Ringed {
     let Choice {
         id,
         label,
@@ -144,8 +166,34 @@ fn render_choice(choice: Choice, ix: usize, count: usize, compact: bool, cx: &Ap
         recommended,
         on_select,
     } = choice;
-    let theme = cx.theme();
-    let ring = focus_ring(cx);
+    let (hovered, on_hover) = crate::motion::hovered((id.clone(), "hover"), window, cx);
+    let lit = hovered && !selected && !disabled;
+    let target = if selected || lit {
+        cx.theme().foreground
+    } else {
+        cx.theme().muted_foreground
+    };
+    let fg = label_color(&id, "fg", target, window, cx);
+    let opacity = gpui_base::motion::transition(
+        (id.clone(), "dim"),
+        if disabled { 0.5 } else { 1. },
+        gpui_base::motion::Transition::new(GLIDE),
+        window,
+        cx,
+    );
+    let muted = cx.theme().muted;
+    let hover_fill = label_color(
+        &id,
+        "hover-fill",
+        if lit { muted } else { muted.opacity(0.) },
+        window,
+        cx,
+    );
+    // gpui-base's Radio keeps its own focus handle, leaving only GPUI's
+    // `focus_visible`, which switches at once, to show the keyboard's focus: it
+    // is handed this handle instead, and the ring fades in and out over it
+    // (`motion::focus_ring`).
+    let focus = crate::motion::focus_ring::handle(&id, window, cx);
     let accessible: SharedString = if recommended {
         crate::tr!("choice.recommended_option", label = label.clone())
             .into_owned()
@@ -154,13 +202,14 @@ fn render_choice(choice: Choice, ix: usize, count: usize, compact: bool, cx: &Ap
         label.clone()
     };
     let selector = id.to_string();
+    let key = item_key(&id);
     let radio = Radio::new(id)
         .debug_selector(move || selector)
         .checked(selected)
         .disabled(disabled)
         .set_position(ix + 1, count)
         .accessibility_label(accessible)
-        .focus_visible(move |style| style.shadow(vec![ring]))
+        .track_focus(&focus)
         .flex()
         .items_center()
         .px(px(if compact { 14. } else { 12. }))
@@ -168,18 +217,19 @@ fn render_choice(choice: Choice, ix: usize, count: usize, compact: bool, cx: &Ap
         .text_body(compact, cx)
         .font_medium()
         .whitespace_nowrap()
-        .text_color(theme.muted_foreground)
+        .text_color(fg)
         .when(!disabled, |this| this.cursor_pointer())
-        .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+        .on_hover(on_hover)
+        .opacity(opacity)
         .when_some(on_select.filter(|_| !disabled), |this, handler| {
             this.on_change(move |_, _, window, cx| handler(window, cx))
         })
         .child(div().flex_none().child(label))
         .when(recommended, |this| {
             this.child(Icon::new(IconName::Star).flex_none())
-                .tooltip(|window, cx| {
-                    Tooltip::new(crate::tr!("choice.recommended")).build(window, cx)
-                })
+                .with_tooltip(|_, _| Tooltip::new(crate::tr!("choice.recommended")))
         });
-    segment(radio, selected, !disabled, compact, cx)
+    let mut radio = glide.measure(key, segment(radio, hover_fill, compact, cx));
+    let corners = radio.style().corner_radii.clone();
+    crate::motion::focus_ring::Ringed::new(radio, &focus, corners, cx)
 }

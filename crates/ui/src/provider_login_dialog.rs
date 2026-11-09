@@ -11,8 +11,9 @@ use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
 use agent::ProviderKind;
 use gpui::{
-    App, AppContext as _, ClipboardItem, Context, Entity, IntoElement, ParentElement as _, Render,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _,
+    App, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _,
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_core::provider_status::{AuthStatus, ProviderLogin};
@@ -58,6 +59,7 @@ pub(crate) fn show(
         let cancel = dialog.clone();
         let name = store.read(cx).provider_profile_display_name(&profile_id);
         builder
+            .sheet()
             .title(crate::tr!("providers.login.title", name = name).into_owned())
             .content(move |body, _, _| body.child(content.clone()))
             .on_cancel(move |_, _, cx| {
@@ -160,6 +162,7 @@ impl ProviderLoginDialog {
         };
         match snapshot.login {
             Some(ProviderLogin::AwaitingCode { url }) => Shown::Code(url),
+            Some(ProviderLogin::AwaitingDevice { url, code }) => Shown::Device(url, code),
             Some(ProviderLogin::Failed { message }) => Shown::Failed(Some(message)),
             Some(ProviderLogin::Starting | ProviderLogin::Finishing) => Shown::Waiting,
             None if self.seen_login
@@ -178,6 +181,8 @@ impl ProviderLoginDialog {
 enum Shown {
     Waiting,
     Code(Option<String>),
+    /// The one-time code to enter on the sign-in page.
+    Device(Option<String>, String),
     Failed(Option<String>),
 }
 
@@ -248,6 +253,45 @@ impl Render for ProviderLoginDialog {
                             )
                             .child(Input::new(&self.code)),
                     )
+            }
+            Shown::Device(url, code) => {
+                let copy = code.clone();
+                v_flex()
+                    .gap_4()
+                    .child(
+                        div()
+                            .text_secondary(false, cx)
+                            .child(crate::tr!("providers.login.device_instructions")),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .debug_selector(|| "provider-login-device-code".into())
+                                    .text_title(cx)
+                                    .text_code(cx)
+                                    .child(code),
+                            )
+                            .child(
+                                Button::new("provider-login-copy-code")
+                                    .ghost()
+                                    .label(crate::tr!("providers.login.copy_code"))
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            copy.clone(),
+                                        ))
+                                    }),
+                            ),
+                    )
+                    .when_some(url, |body, url| {
+                        body.child(
+                            Button::new("provider-login-open")
+                                .label(crate::tr!("providers.login.open_browser"))
+                                .on_click(move |_, _, cx| cx.open_url(&url)),
+                        )
+                    })
             }
             Shown::Failed(message) => {
                 actions = actions.child(

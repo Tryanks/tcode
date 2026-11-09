@@ -1,3 +1,4 @@
+use crate::widgets::TooltipTrigger as _;
 use std::borrow::Cow;
 use std::time::Duration;
 
@@ -5,19 +6,19 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, ElementId, Entity,
-    Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, Task, Window, div,
+    Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, Div, ElementId,
+    Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
+    RenderOnce, SharedString, Stateful, Styled as _, StyledText, Task, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::h_flex;
 
-use super::super::model::{
-    TurnTimeClause, format_elapsed_deciseconds, format_local_time, turn_time_breakdown,
-    turn_time_clauses,
-};
+use super::super::model::{TurnTimeClause, format_elapsed, format_local_time, turn_time_clauses};
 use crate::time::now_millis;
 use tcode_core::session::TurnMeta;
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// A running turn's working indicator, drawn by a view whose clock ticks
 /// only while a frame draws it: the view is the element's state, so a turn
@@ -31,45 +32,51 @@ struct WorkingIndicator {
 impl RenderOnce for WorkingIndicator {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let started_at = self.started_at;
+        // The view is kept with the start it shows, so it is placed without
+        // reading it: what draws the indicator is not built again with it.
         window.with_global_id(self.id, |id, window| {
-            window.with_element_state(id, |view: Option<Entity<WorkingClock>>, _| {
-                let view = view
-                    .filter(|view| view.read(cx).started_at == started_at)
-                    .unwrap_or_else(|| cx.new(|cx| WorkingClock::new(started_at, cx)));
-                (view.clone(), view)
-            })
+            window.with_element_state(
+                id,
+                |held: Option<(Option<u64>, Entity<WorkingClock>)>, _| {
+                    let view = match held {
+                        Some((held_at, view)) if held_at == started_at => view,
+                        _ => cx.new(|_| WorkingClock {
+                            started_at,
+                            tick: None,
+                        }),
+                    };
+                    (view.clone(), (started_at, view))
+                },
+            )
         })
     }
 }
 
 struct WorkingClock {
     started_at: Option<u64>,
-    _tick: Task<()>,
-}
-
-impl WorkingClock {
-    fn new(started_at: Option<u64>, cx: &mut Context<Self>) -> Self {
-        // The elapsed time is shown to the decisecond.
-        let tick = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        });
-        Self {
-            started_at,
-            _tick: tick,
-        }
-    }
+    tick: Option<Task<()>>,
 }
 
 impl Render for WorkingClock {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        working_indicator("working".into(), self.started_at, cx)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The indicator's animations draw it again on every frame, which moves
+        // its time with them. Reduced motion stills them, and the time, shown
+        // to the decisecond, is then moved by a timer.
+        if !cx.reduce_motion() {
+            self.tick = None;
+        } else if self.tick.is_none() {
+            self.tick = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+        working_indicator("working".into(), self.started_at, window, cx)
     }
 }
 
@@ -93,7 +100,12 @@ pub(crate) fn shimmer_label(id: SharedString, label: Cow<'static, str>, cx: &App
 
             div().child(StyledText::new(glyph)).with_animation(
                 animation_id,
-                Animation::new(Duration::from_millis(1400)).repeat(),
+                // On the app's clock, not the element's: a running turn's
+                // label moves to each new last row of the turn, whose fresh
+                // element state would restart the sweep. gpui-base's
+                // `animate_keyframes` keeps its start in element state and has
+                // no clock-synced repeat, so gpui's `repeat_synced` stands in.
+                Animation::new(Duration::from_millis(1400)).repeat_synced(),
                 move |element, delta| {
                     // Enter and leave outside the text so every glyph returns to muted.
                     let center = -0.15 + delta * 1.3;
@@ -110,7 +122,12 @@ pub(crate) fn shimmer_label(id: SharedString, label: Cow<'static, str>, cx: &App
         .into_any_element()
 }
 
-pub(crate) fn working_indicator(id: SharedString, started_at: Option<u64>, cx: &App) -> AnyElement {
+pub(crate) fn working_indicator(
+    id: SharedString,
+    started_at: Option<u64>,
+    window: &mut Window,
+    cx: &App,
+) -> AnyElement {
     const DELAYS_MS: [u64; 9] = [90, 180, 270, 0, 90, 180, 90, 180, 270];
     const CYCLE_MS: u64 = 650;
 
@@ -125,7 +142,9 @@ pub(crate) fn working_indicator(id: SharedString, started_at: Option<u64>, cx: &
                 .bg(foreground)
                 .with_animation(
                     animation_id,
-                    Animation::new(Duration::from_millis(CYCLE_MS)).repeat(),
+                    // On the app's clock, as the shimmer is: the indicator
+                    // moves to each new last row of its turn.
+                    Animation::new(Duration::from_millis(CYCLE_MS)).repeat_synced(),
                     move |element, delta| {
                         let phase = (delta + 1. - delay_ms as f32 / CYCLE_MS as f32) % 1.;
                         let triangle = 1. - (phase * 2. - 1.).abs();
@@ -137,6 +156,44 @@ pub(crate) fn working_indicator(id: SharedString, started_at: Option<u64>, cx: &
     }
 
     let elapsed_ms = started_at.map_or(0, |start| now_millis().saturating_sub(start));
+    let label = crate::tr!("chat.working");
+    let elapsed = format_elapsed(elapsed_ms);
+    // `items_baseline` cannot align these: gpui-fast's measured leaves (text)
+    // hand taffy a size and no baseline, and taffy then takes a box's bottom
+    // edge for its baseline. So the row centres the label's line and the
+    // smaller timer's, and the timer is moved onto the label's baseline,
+    // until gpui-fast reports text baselines. A line is painted with its
+    // baseline (ascent - descent) / 2 below its centre, from the metrics
+    // shaping found, which depend on the platform's monospace and the
+    // locale's fallback font, so both lines are shaped to measure it.
+    let theme = cx.theme();
+    let typography = &theme.tokens.typography;
+    let below_centre = |text: SharedString, family: SharedString, size: Pixels| {
+        let font = gpui::Font {
+            family,
+            fallbacks: crate::i18n::cjk_font_fallbacks(),
+            ..Default::default()
+        };
+        let run = gpui::TextRun {
+            len: text.len(),
+            font,
+            color: Hsla::default(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let line = window.text_system().shape_line(text, size, &[run], None);
+        (line.ascent - line.descent) / 2.
+    };
+    let drop = below_centre(
+        SharedString::from(label.clone().into_owned()),
+        theme.font_family.clone(),
+        typography.sm.size,
+    ) - below_centre(
+        SharedString::from(elapsed.clone()),
+        typography.mono.clone(),
+        typography.xs.size,
+    );
     h_flex()
         .gap(px(10.))
         .items_center()
@@ -144,19 +201,15 @@ pub(crate) fn working_indicator(id: SharedString, started_at: Option<u64>, cx: &
         .child(pixels)
         .child(shimmer_label(
             SharedString::from(format!("{id}-label")),
-            crate::tr!("chat.working"),
+            label,
             cx,
         ))
         .child(
             div()
                 .text_meta_mono(false, cx)
-                // Flex has no text baselines (taffy sees opaque boxes), so the
-                // smaller digits render top-aligned beside the label; drop
-                // them onto the label's baseline. Measured against DM Sans at
-                // 2x; both fonts ship with the app.
                 .relative()
-                .top(px(2.))
-                .child(format_elapsed_deciseconds(elapsed_ms)),
+                .top(drop)
+                .child(elapsed),
         )
         .into_any_element()
 }
@@ -168,8 +221,11 @@ pub(crate) fn turn_working_indicator(
     turn: usize,
     started_at: Option<u64>,
     served_model: Option<String>,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
+    let motion = motion.clone();
+    let warning = cx.theme().warning;
     h_flex()
         .gap_2()
         .items_center()
@@ -179,180 +235,98 @@ pub(crate) fn turn_working_indicator(
             id: SharedString::from(format!("working-{turn}")).into(),
             started_at,
         })
-        .when_some(served_model, |row, served| {
-            let tooltip = crate::tr!("chat.served_model_tooltip").into_owned();
-            row.child(
-                h_flex()
-                    .id(SharedString::from(format!("served-model-{turn}")))
-                    .gap_1()
-                    .items_center()
-                    .text_color(cx.theme().warning)
-                    .child(crate::icon::Icon::new(crate::icon::IconName::TriangleAlert))
-                    .child(served)
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)),
-            )
-        })
+        .child(crate::motion::Sampled::new(move |window, cx| {
+            let id = SharedString::from(format!("served-model-{turn}"));
+            match motion.shown(id.clone(), served_model, SHOW, window, cx) {
+                Some(served) => {
+                    let tooltip = crate::tr!("chat.served_model_tooltip").into_owned();
+                    served.fade(
+                        h_flex()
+                            .id(id)
+                            .gap_1()
+                            .items_center()
+                            .text_color(warning)
+                            .child(crate::icon::Icon::new(crate::icon::IconName::TriangleAlert))
+                            .child(served.value.clone())
+                            .with_tooltip(move |_, _| Tooltip::new(tooltip.clone())),
+                    )
+                }
+                None => div().into_any_element(),
+            }
+        }))
         .into_any_element()
 }
 
-/// A finished turn's quiet mono timing row.
-pub(crate) fn turn_time_footer(
+/// A finished turn's footer: on the leading edge the actions of the message
+/// it ends on, if any, and on the trailing edge its quiet mono timing, whose
+/// clauses wrap toward that edge as the column narrows.
+fn turn_time_footer(
     id: SharedString,
     clauses: Vec<TurnTimeClause>,
-    breakdown: Option<String>,
+    actions: Option<AnyElement>,
     cx: &App,
-) -> AnyElement {
+) -> Stateful<Div> {
     let warning = cx.theme().warning;
     let last = clauses.len().saturating_sub(1);
     h_flex()
         .id(id)
         .w_full()
         .gap_1p5()
-        .items_start()
+        .items_center()
         .text_meta_mono(false, cx)
         .debug_selector(|| "turn-time-row".into())
-        .when_some(breakdown, |row, breakdown| {
-            row.tooltip(move |window, cx| Tooltip::new(breakdown.clone()).build(window, cx))
-        })
+        .children(actions.map(|actions| div().flex_none().child(actions)))
         .child(
             h_flex()
                 .flex_1()
                 .min_w_0()
                 .flex_wrap()
-                .justify_start()
+                .justify_end()
                 .gap_x(px(4.))
                 .gap_y(px(2.))
                 .children(clauses.into_iter().enumerate().map(|(index, clause)| {
                     let selector = clause.selector;
-                    div()
+                    // The clause alone triggers its tooltip, which stands
+                    // beside what it explains.
+                    let text = div()
+                        .id(selector)
                         .min_w_0()
                         .debug_selector(move || selector.into())
+                        .child(clause.text)
+                        .when_some(clause.tooltip, |text, tooltip| {
+                            text.with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
+                        });
+                    h_flex()
+                        .min_w_0()
+                        .gap_x(px(4.))
                         .when(clause.warning, |element| element.text_color(warning))
-                        .child(if index == last {
-                            clause.text
-                        } else {
-                            format!("{} ·", clause.text)
-                        })
+                        .child(text)
+                        .when(index != last, |element| element.child("·"))
                 })),
         )
-        .into_any_element()
 }
 
+/// [`turn_time_footer`] for `turn`, timed from `timestamp` when it has one.
 pub(crate) fn finished_turn_time(
-    timestamp: u64,
+    timestamp: Option<u64>,
     turn: &TurnMeta,
     requested_model: Option<&str>,
+    actions: Option<AnyElement>,
     cx: &App,
-) -> AnyElement {
-    turn_time_footer(
-        SharedString::from(format!("turn-time-{timestamp}")),
+) -> Stateful<Div> {
+    let clauses = timestamp.map_or_else(Vec::new, |timestamp| {
         turn_time_clauses(
             format_local_time(timestamp),
             turn.timing,
             turn.cost_usd,
             turn.served_model.as_deref(),
             requested_model,
-        ),
-        turn_time_breakdown(turn.timing),
+        )
+    });
+    turn_time_footer(
+        SharedString::from(format!("turn-time-{}", timestamp.unwrap_or_default())),
+        clauses,
+        actions,
         cx,
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::turn_time_footer;
-    use crate::chat::model::{TurnTimeClause, turn_time_clauses};
-    use gpui::TestAppContext;
-    use tcode_core::session::TurnTiming;
-
-    struct TurnTimeFooterProbe {
-        clauses: Vec<TurnTimeClause>,
-    }
-
-    impl gpui::Render for TurnTimeFooterProbe {
-        fn render(
-            &mut self,
-            _: &mut gpui::Window,
-            cx: &mut gpui::Context<Self>,
-        ) -> impl gpui::IntoElement {
-            // The turn column stacks the footer under the answer, so the row is
-            // content-height there; reproduce that rather than letting the window
-            // stretch it and mask a wrap.
-            use gpui::{ParentElement as _, Styled as _};
-            gpui_base::v_flex().size_full().child(turn_time_footer(
-                "turn-time-probe".into(),
-                self.clauses.clone(),
-                None,
-                cx,
-            ))
-        }
-    }
-
-    #[gpui::test]
-    fn the_time_row_keeps_its_compact_clauses_inside_narrow_widths(cx: &mut TestAppContext) {
-        use gpui::{VisualTestContext, px, size};
-
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
-        let clauses = turn_time_clauses(
-            "10:18 AM".into(),
-            Some(TurnTiming::new(99_000, 0)),
-            None,
-            None,
-            None,
-        );
-        // The footer's clauses, in render order (mirrors `turn_time_footer`).
-        let selectors = ["turn-time-clock", "turn-time-total"];
-        assert_eq!(clauses.len(), selectors.len());
-
-        cx.update(crate::theme::init);
-        let (_, cx) = cx.add_window_view(|_, _| TurnTimeFooterProbe { clauses });
-        let cx: &mut VisualTestContext = cx;
-        let draw = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                _ = window.draw(cx);
-            });
-        };
-
-        // A comfortable chat width: the restrained single-line baseline.
-        cx.simulate_resize(size(px(900.), px(120.)));
-        draw(cx);
-        let first = cx.debug_bounds(selectors[0]).expect("clock bounds");
-        for selector in &selectors[1..] {
-            let clause = cx.debug_bounds(selector).expect("clause bounds");
-            assert_eq!(
-                clause.top(),
-                first.top(),
-                "{selector} left the single line at 900px: {clause:?}"
-            );
-        }
-
-        // Opening the diff panel squeezes the chat column; sweep well below any
-        // practical width. Every clause must stay inside the row, and the row
-        // must preserve the intentionally left-aligned footer.
-        for width in 260..=900 {
-            cx.simulate_resize(size(px(width as f32), px(120.)));
-            draw(cx);
-
-            let row = cx.debug_bounds("turn-time-row").expect("row bounds");
-            for selector in &selectors {
-                let clause = cx.debug_bounds(selector).expect("clause bounds");
-                assert!(
-                    clause.left() >= row.left() && clause.right() <= row.right(),
-                    "{selector} escaped the row at {width}px: row={row:?}, clause={clause:?}"
-                );
-                assert!(
-                    clause.size.width > px(0.) && clause.size.height > px(0.),
-                    "{selector} was squeezed away at {width}px: {clause:?}"
-                );
-            }
-            let first_clause = cx.debug_bounds(selectors[0]).expect("clause bounds");
-            assert!(
-                (first_clause.left() - row.left()).abs() <= px(0.5),
-                "the footer left the leading edge at {width}px: \
-                 row={row:?}, clause={first_clause:?}"
-            );
-        }
-    }
 }

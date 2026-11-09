@@ -4,9 +4,11 @@
 //! for page and view navigation, [`TabBar::segmented`] for a view switch
 //! inside a panel, and [`TabBar::rail`] for a vertical navigation list. The
 //! segmented drawing is shared with [`super::choice::ChoiceGroup`].
+use crate::widgets::TooltipTrigger as _;
 use crate::{
     icon::Icon,
-    material::{self, TOUCH_TARGET, focus_ring},
+    material::{self, TOUCH_TARGET},
+    motion::keyed::{Fold, keyed_in},
     scroll::{ScrollArea, ScrollableElement as _},
     theme::ActiveTheme as _,
     typography::TextRole as _,
@@ -16,15 +18,24 @@ use crate::{
     },
 };
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, InteractiveElement, IntoElement,
-    ParentElement, Pixels, RenderOnce, SharedString, Stateful, StatefulInteractiveElement as _,
-    StyleRefinement, Styled, Window, div, prelude::FluentBuilder, px,
+    AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Hsla, InteractiveElement,
+    IntoElement, ParentElement, Pixels, Refineable as _, RenderOnce, SharedString, Stateful,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div, point,
+    prelude::FluentBuilder, px,
 };
-use gpui_base::{StyledExt as _, Tab, Tabs};
-use std::rc::Rc;
+use gpui_base::motion::{Transition, transition};
+use gpui_base::{ElementExt as _, StyledExt as _, Tab, Tabs};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
 
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type MenuBuilder = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
+type ElementBuilder = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 
 /// The underline indicator's weight.
 const INDICATOR: f32 = 2.;
@@ -37,13 +48,14 @@ enum Form {
 }
 
 /// One tab of a [`TabBar`].
+#[derive(Clone)]
 pub struct TabItem {
     id: ElementId,
     label: SharedString,
     icon: Option<Icon>,
     selected: bool,
     count: Option<usize>,
-    trailing: Option<AnyElement>,
+    trailing: Option<ElementBuilder>,
     on_click: Option<ClickHandler>,
     context_menu: Option<MenuBuilder>,
 }
@@ -75,9 +87,14 @@ impl TabItem {
         self
     }
     /// A control or mark beside the label, such as a close button. It shares
-    /// the tab's surface but not its click, focus or accessible name.
-    pub fn trailing(mut self, element: impl IntoElement) -> Self {
-        self.trailing = Some(element.into_any_element());
+    /// the tab's surface but not its click, focus or accessible name. It is
+    /// built each time the tab is drawn, so a tab that goes is drawn with it
+    /// while it folds away.
+    pub fn trailing(
+        mut self,
+        build: impl Fn(&mut Window, &mut App) -> AnyElement + 'static,
+    ) -> Self {
+        self.trailing = Some(Rc::new(build));
         self
     }
     pub fn on_click(
@@ -100,7 +117,9 @@ impl TabItem {
 /// The tab list of a page, panel or navigation rail.
 ///
 /// Its own styles place the bar (width, flex, margins); the form owns
-/// everything inside it.
+/// everything inside it. A tab that joins the bar folds in, and one that
+/// leaves it folds away, as the others move over and the selection mark
+/// follows its tab.
 #[derive(IntoElement)]
 pub struct TabBar {
     id: ElementId,
@@ -111,9 +130,10 @@ pub struct TabBar {
     label_max_w: Option<Pixels>,
     aria_label: Option<SharedString>,
     items: Vec<TabItem>,
+    /// A rail's mark kept by the column that holds several rails.
+    mark: Option<Rc<Glide>>,
     style: StyleRefinement,
 }
-
 impl TabBar {
     /// An underline bar, the default form.
     pub fn new(id: impl Into<ElementId>) -> Self {
@@ -126,6 +146,7 @@ impl TabBar {
             label_max_w: None,
             aria_label: None,
             items: Vec::new(),
+            mark: None,
             style: StyleRefinement::default(),
         }
     }
@@ -164,6 +185,14 @@ impl TabBar {
     /// Unset by default; overflowing bars still scroll.
     pub fn label_max_w(mut self, width: impl Into<Pixels>) -> Self {
         self.label_max_w = Some(width.into());
+        self
+    }
+    /// A rail that is one of several in a column sharing one selection:
+    /// its items are placed in `mark`, which the column draws with
+    /// [`Glide::rail`] under all of them, so the selected fill glides from
+    /// one rail to the next as it does within one.
+    pub(crate) fn shared_mark(mut self, mark: Rc<Glide>) -> Self {
+        self.mark = Some(mark);
         self
     }
     pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
@@ -236,8 +265,301 @@ fn segment_height(compact: bool) -> f32 {
     if compact { TOUCH_TARGET } else { 28. }
 }
 
+/// Where the underline mark starts and ends inside its tab: inside the tab's
+/// padding, or under the label alone when a trailing control follows it.
+fn underline_inset(m: &Metrics, compact: bool, icon_only: bool, trailing: bool) -> (f32, f32) {
+    if icon_only {
+        (6., 6.)
+    } else if trailing {
+        (m.pad, if compact { 8. } else { 4. })
+    } else {
+        (m.pad, m.pad)
+    }
+}
+
+type Places = Rc<RefCell<HashMap<SharedString, Bounds<Pixels>>>>;
+/// Where a mark lies inside an item, given the item's bounds and its list's.
+type Place = Box<dyn Fn(&SharedString, Bounds<Pixels>, Bounds<Pixels>) -> Bounds<Pixels>>;
+
+/// A selection mark (the underline, the segment pill) drawn once for the
+/// whole bar, so it can glide from one item to the next, and follow its
+/// item while other items fold in and out around it.
+///
+/// Each item records where it is placed this frame, and the mark, painted
+/// once every item has been placed, is drawn from those places in the same
+/// frame: between the items the selection is leaving, by how far it still
+/// is from them, and the item it is going to.
+pub(crate) struct Glide {
+    /// Where each item is placed this frame, by key, in window coordinates.
+    places: Places,
+    /// The items the mark lies between, and how much of the mark each holds.
+    weights: Vec<(SharedString, f32)>,
+}
+
+/// Where a bar's selection mark is going and what it is leaving.
+#[derive(Default)]
+struct Selection {
+    /// The items the mark lay between when the selection last changed.
+    from: Vec<(SharedString, f32)>,
+    to: Option<SharedString>,
+    /// Counts the changes, naming each one's progress.
+    change: u64,
+}
+
+impl Glide {
+    /// The mark of the bar `id` with the item `selected` selected, by key.
+    pub(crate) fn new(
+        id: &ElementId,
+        selected: Option<SharedString>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
+        let state = window.use_keyed_state((id.clone(), "glide"), cx, |_, _| Selection::default());
+        let progress_id = |change: u64| (id.clone(), SharedString::from(format!("glide-{change}")));
+        let settle = || Transition::new(GLIDE);
+        let (to, change) = {
+            let state = state.read(cx);
+            (state.to.clone(), state.change)
+        };
+        if to != selected {
+            let from = match (&to, &selected) {
+                // From wherever the mark is now, part way or at rest.
+                (Some(_), Some(_)) => {
+                    let progress = transition(progress_id(change), 1f32, settle(), window, cx);
+                    let from = blend(&state.read(cx).from, to.as_ref(), progress);
+                    // Starts from nothing rather than at rest.
+                    transition(progress_id(change + 1), 0f32, settle(), window, cx);
+                    from
+                }
+                // A mark that appears or goes does so at once.
+                _ => Vec::new(),
+            };
+            state.update(cx, |state, _| {
+                state.from = from;
+                state.to = selected;
+                state.change += 1;
+            });
+        }
+        let (weights, at_rest) = {
+            let change = state.read(cx).change;
+            let progress = transition(progress_id(change), 1f32, settle(), window, cx);
+            let state = state.read(cx);
+            (
+                blend(&state.from, state.to.as_ref(), progress),
+                progress >= 1. && !state.from.is_empty(),
+            )
+        };
+        if at_rest {
+            state.update(cx, |state, _| state.from.clear());
+        }
+        Self {
+            places: Places::default(),
+            weights,
+        }
+    }
+
+    /// Records where item `key` is placed this frame.
+    pub(crate) fn measure<E: ParentElement>(&self, key: SharedString, el: E) -> E {
+        let places = self.places.clone();
+        el.on_prepaint(move |bounds, _, _| {
+            places.borrow_mut().insert(key.clone(), bounds);
+        })
+    }
+
+    /// The mark, for the list holding the items, which must be positioned:
+    /// `place` puts it inside an item, given the item's bounds and the
+    /// list's, and `style` draws it.
+    fn mark(
+        &self,
+        place: impl Fn(&SharedString, Bounds<Pixels>, Bounds<Pixels>) -> Bounds<Pixels> + 'static,
+        style: StyleRefinement,
+    ) -> AnyElement {
+        Mark {
+            places: self.places.clone(),
+            weights: self.weights.clone(),
+            place: Box::new(place),
+            style,
+        }
+        .into_any_element()
+    }
+
+    /// The segment pill under the selected segment, for the list's first
+    /// child so the segments paint over it. `dim` matches a disabled
+    /// selected segment.
+    pub(crate) fn pill(&self, dim: bool, cx: &App) -> AnyElement {
+        let raised = raised_segment(cx);
+        let mut pill = div()
+            .rounded(segment_radius(cx))
+            .bg(if dim { raised.opacity(0.5) } else { raised })
+            .shadow_xs();
+        let mut style = pill.style().clone();
+        if dim {
+            for shadow in style.box_shadow.iter_mut().flatten() {
+                shadow.color = shadow.color.opacity(0.5);
+            }
+        }
+        self.mark(|_, item, _| item, style)
+    }
+
+    /// A rail's selected fill under the selected row, for the first child
+    /// of the positioned element holding the rail (or rails) whose items
+    /// are placed in this glide, so the rows paint over it.
+    pub(crate) fn rail(&self, cx: &App) -> AnyElement {
+        let style = div()
+            .rounded(cx.theme().tokens.radius.md)
+            .bg(cx.theme().list_active)
+            .style()
+            .clone();
+        self.mark(|_, item, _| item, style)
+    }
+}
+
+/// The weights of `from`, scaled by how far the selection is from them, with
+/// `to` holding the rest.
+fn blend(
+    from: &[(SharedString, f32)],
+    to: Option<&SharedString>,
+    progress: f32,
+) -> Vec<(SharedString, f32)> {
+    let progress = if from.is_empty() {
+        1.
+    } else {
+        progress.clamp(0., 1.)
+    };
+    let mut weights: Vec<(SharedString, f32)> = from
+        .iter()
+        .map(|(key, weight)| (key.clone(), weight * (1. - progress)))
+        .collect();
+    if let Some(to) = to {
+        match weights.iter_mut().find(|(key, _)| key == to) {
+            Some((_, weight)) => *weight += progress,
+            None => weights.push((to.clone(), progress)),
+        }
+    }
+    weights.retain(|(_, weight)| *weight > 0.);
+    weights
+}
+
+/// A selection mark, painted from where its items were placed this frame.
+struct Mark {
+    places: Places,
+    weights: Vec<(SharedString, f32)>,
+    place: Place,
+    style: StyleRefinement,
+}
+
+impl IntoElement for Mark {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl gpui::Element for Mark {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, ()) {
+        // Over the whole list, taking no place in it.
+        let style = gpui::Style {
+            position: gpui::Position::Absolute,
+            inset: gpui::Edges::all(px(0.).into()),
+            ..Default::default()
+        };
+        (window.request_layout(style, None, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut Window,
+        _: &mut App,
+    ) {
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        list: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let places = self.places.borrow();
+        let (mut total, mut edges) = (0f32, [0f32; 4]);
+        for (key, weight) in &self.weights {
+            let Some(item) = places.get(key) else {
+                continue;
+            };
+            let mark = (self.place)(key, *item, list);
+            for (edge, value) in
+                edges
+                    .iter_mut()
+                    .zip([mark.left(), mark.top(), mark.right(), mark.bottom()])
+            {
+                *edge += value.as_f32() * weight;
+            }
+            total += weight;
+        }
+        if total <= 0. {
+            return;
+        }
+        let [left, top, right, bottom] = edges.map(|edge| px(edge / total));
+        let mut style = gpui::Style::default();
+        style.refine(&self.style);
+        style.paint(
+            Bounds::from_corners(point(left, top), point(right, bottom)),
+            window,
+            cx,
+            |_, _| {},
+        );
+    }
+}
+
+/// A selected label's colour, gliding with the selection.
+pub(crate) fn label_color(
+    id: &ElementId,
+    channel: &'static str,
+    target: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) -> Hsla {
+    transition(
+        (id.clone(), channel),
+        target,
+        Transition::new(GLIDE),
+        window,
+        cx,
+    )
+}
+
+/// The key a tab keeps while it comes, stays and goes: its id.
+pub(crate) fn item_key(id: &ElementId) -> SharedString {
+    id.to_string().into()
+}
+
 impl RenderOnce for TabBar {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let Self {
             id,
             form,
@@ -247,26 +569,89 @@ impl RenderOnce for TabBar {
             label_max_w,
             aria_label,
             items,
+            mark,
             style,
         } = self;
         let m = metrics(form, compact);
         let count = items.len();
-        let tabs = items.into_iter().enumerate().map(|(ix, item)| {
-            render_item(
-                item,
-                ix,
-                count,
-                form,
-                compact,
-                icon_only,
-                label_max_w,
-                &m,
-                cx,
+        let keyed: Vec<_> = items
+            .into_iter()
+            .map(|item| (item_key(&item.id), item))
+            .collect();
+        let positions: HashMap<SharedString, usize> = keyed
+            .iter()
+            .enumerate()
+            .map(|(ix, (key, _))| (key.clone(), ix))
+            .collect();
+        let selected = keyed
+            .iter()
+            .find(|(_, item)| item.selected)
+            .map(|(key, _)| key.clone());
+        let shared = mark.is_some();
+        let glide = mark.unwrap_or_else(|| Rc::new(Glide::new(&id, selected, window, cx)));
+        let insets: Rc<RefCell<HashMap<SharedString, (f32, f32)>>> = Rc::default();
+        let fold = match form {
+            Form::Underline => Fold::Across(px(UNDERLINE_GAP)),
+            Form::Segmented => Fold::Share(px(SEGMENT_GAP)),
+            Form::Rail => Fold::Down,
+        };
+        let tabs = keyed_in(
+            (id.clone(), "tabs"),
+            fold,
+            keyed,
+            ROWS,
+            window,
+            cx,
+            |key, item, window, cx| {
+                let position = positions.get(key).map(|ix| (*ix, count));
+                let mut item = item.clone();
+                // A tab on its way out is no longer the selected one.
+                item.selected &= position.is_some();
+                insets.borrow_mut().insert(
+                    key.clone(),
+                    underline_inset(&m, compact, icon_only, item.trailing.is_some()),
+                );
+                render_item(
+                    key,
+                    item,
+                    position,
+                    form,
+                    compact,
+                    icon_only,
+                    label_max_w,
+                    &m,
+                    &glide,
+                    window,
+                    cx,
+                )
+            },
+        );
+        let rail = (form == Form::Rail && !shared).then(|| glide.rail(cx));
+        let pill = (form == Form::Segmented).then(|| glide.pill(false, cx));
+        let underline = (form == Form::Underline).then(|| {
+            let insets = insets.clone();
+            let pad = m.pad;
+            glide.mark(
+                move |key, tab, list| {
+                    let (start, end) = insets.borrow().get(key).copied().unwrap_or((pad, pad));
+                    // Bottom-aligned with the bar's hairline, which it covers.
+                    Bounds::from_corners(
+                        point(tab.left() + px(start), list.bottom() - px(INDICATOR)),
+                        point(tab.right() - px(end), list.bottom()),
+                    )
+                },
+                div()
+                    .rounded(px(INDICATOR / 2.))
+                    .bg(cx.theme().foreground)
+                    .style()
+                    .clone(),
             )
         });
         let list = Tabs::new(id.clone())
             .when_some(aria_label, |this, label| this.aria_label(label))
-            .children(tabs);
+            .relative()
+            .children(pill)
+            .children(rail);
         match form {
             Form::Underline => {
                 let list = list
@@ -275,13 +660,13 @@ impl RenderOnce for TabBar {
                     .h_full()
                     .min_w_full()
                     .flex_shrink_0()
-                    .gap_1();
+                    .gap(px(UNDERLINE_GAP));
                 let viewport = div()
                     .id((id.clone(), "viewport"))
                     .flex()
                     .h(px(m.bar))
                     .overflow_x_scroll_area()
-                    .child(list);
+                    .child(tabs.followed_by(underline).render(list));
                 div()
                     .debug_selector(|| id.to_string())
                     .relative()
@@ -304,33 +689,43 @@ impl RenderOnce for TabBar {
                     .refine_style(&style)
                     .into_any_element()
             }
-            Form::Segmented => segmented_track(id.clone(), list, compact, cx)
-                .debug_selector(|| id.to_string())
-                .refine_style(&style)
-                .into_any_element(),
-            Form::Rail => list
-                .debug_selector(|| id.to_string())
-                .flex()
-                .flex_col()
-                .when(icon_only, |this| this.items_center())
-                .gap(px(2.))
-                .refine_style(&style)
-                .into_any_element(),
+            Form::Segmented => {
+                let list = tabs.render(segment_list(list, cx));
+                segmented_track(id.clone(), list, compact)
+                    .debug_selector(|| id.to_string())
+                    .refine_style(&style)
+                    .into_any_element()
+            }
+            Form::Rail => {
+                let list = list
+                    .debug_selector(|| id.to_string())
+                    .flex()
+                    .flex_col()
+                    .when(icon_only, |this| this.items_center())
+                    .gap(px(2.))
+                    .refine_style(&style);
+                tabs.render(list)
+            }
         }
     }
 }
 
+/// The space between an underline bar's tabs.
+const UNDERLINE_GAP: f32 = 4.;
+
 #[allow(clippy::too_many_arguments)]
 fn render_item(
+    key: &SharedString,
     item: TabItem,
-    ix: usize,
-    count: usize,
+    position: Option<(usize, usize)>,
     form: Form,
     compact: bool,
     icon_only: bool,
     label_max_w: Option<Pixels>,
     m: &Metrics,
-    cx: &App,
+    glide: &Glide,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
     let TabItem {
         id,
@@ -342,21 +737,51 @@ fn render_item(
         on_click,
         context_menu,
     } = item;
+    // A rail reads as a list: its labels are body text, its icons muted.
+    let (fg, icon_fg) = {
+        let theme = cx.theme();
+        match form {
+            _ if selected => (theme.foreground, theme.foreground),
+            Form::Rail => (theme.foreground, theme.muted_foreground),
+            _ => (theme.muted_foreground, theme.muted_foreground),
+        }
+    };
+    // A rail's rows glide their own hover fill; a bar's tab lifts its label
+    // and fills under the pointer, both gliding.
+    let (hovered, on_hover) = crate::motion::hovered((id.clone(), "hover"), window, cx);
+    let lit = hovered && !selected && form != Form::Rail;
+    let fg = label_color(
+        &id,
+        "fg",
+        if lit { cx.theme().foreground } else { fg },
+        window,
+        cx,
+    );
+    let icon_fg = label_color(&id, "icon-fg", icon_fg, window, cx);
+    let muted = cx.theme().muted;
+    let hover_fill = label_color(
+        &id,
+        "hover-fill",
+        if lit { muted } else { muted.opacity(0.) },
+        window,
+        cx,
+    );
+    let on_hover = Rc::new(on_hover);
+    let trailing = trailing
+        .filter(|_| !icon_only)
+        .map(|build| build(window, cx));
+    // gpui-base's Tab takes no focus of its own; a `tab_index` tab stop's
+    // handle is GPUI's, leaving only `focus_visible`, which switches at once,
+    // to show the keyboard's focus. The tab tracks this handle instead, and
+    // the ring fades in and out over it (`motion::focus_ring`).
+    let focus = crate::motion::focus_ring::handle(&id, window, cx);
     let theme = cx.theme();
-    let ring = focus_ring(cx);
     let accessible = match tally {
         Some(tally) => crate::tr!("tabs.with_count", label = label.clone(), count = tally)
             .into_owned()
             .into(),
         None => label.clone(),
     };
-    // A rail reads as a list: its labels are body text, its icons muted.
-    let (fg, icon_fg) = match form {
-        _ if selected => (theme.foreground, theme.foreground),
-        Form::Rail => (theme.foreground, theme.muted_foreground),
-        _ => (theme.muted_foreground, theme.muted_foreground),
-    };
-    let trailing = trailing.filter(|_| !icon_only);
     let gap = px(if compact { 8. } else { 6. });
     // The item id doubles as its debug selector, so a test finds a tab by the
     // id its call site gave it.
@@ -364,12 +789,33 @@ fn render_item(
     let tab = Tab::new(id.clone())
         .debug_selector(move || selector)
         .selected(selected)
-        .set_position(ix + 1, count)
+        .when_some(position, |tab, (ix, count)| tab.set_position(ix + 1, count))
         .accessibility_label(accessible)
-        .tab_index(0)
-        .focus_visible(move |style| style.shadow(vec![ring]))
+        .track_focus(&focus)
         .cursor_pointer()
-        .gap(gap)
+        .gap(gap);
+    let has_trailing = trailing.is_some();
+    // The surface goes on first, so its fill lies under the content.
+    let tab = if has_trailing {
+        tab
+    } else {
+        surface(
+            tab.text_color(fg),
+            form,
+            selected,
+            hover_fill,
+            compact,
+            icon_only,
+            false,
+            m,
+            cx,
+        )
+        .when(form != Form::Rail, |tab| {
+            let on_hover = on_hover.clone();
+            tab.on_hover(move |hovered, window, cx| on_hover(hovered, window, cx))
+        })
+    };
+    let tab = tab
         .when_some(icon, |this, icon| {
             let color = icon.explicit_text_color().unwrap_or(icon_fg);
             let icon = if icon_only {
@@ -398,35 +844,50 @@ fn render_item(
             })
         })
         .when(icon_only, |this| {
-            this.tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+            this.with_tooltip(move |_, _| Tooltip::new(label.clone()))
         })
         .when_some(on_click, |tab, handler| {
             tab.on_click(move |event, window, cx| handler(event, window, cx))
         });
     let Some(trailing) = trailing else {
-        let tab = tab.text_color(fg);
-        let tab = surface(tab, form, selected, compact, icon_only, false, m, cx);
-        return match context_menu {
+        let mut tab = glide.measure(key.clone(), tab);
+        let corners = tab.style().corner_radii.clone();
+        let tab = match context_menu {
             Some(builder) => tab
                 .context_menu(move |menu, window, cx| builder(menu, window, cx))
                 .into_any_element(),
             None => tab.into_any_element(),
         };
+        return crate::motion::focus_ring::Ringed::new(tab, &focus, corners, cx).into_any_element();
     };
     // The trailing control shares the tab's surface but sits beside the tab,
     // outside its click, focus and accessible name.
-    let row = div()
-        .id((id, "surface"))
-        .text_color(fg)
-        .child(
-            tab.h_full()
-                .rounded(surface_radius(form, cx))
-                .when(form == Form::Rail, |tab| {
-                    tab.flex_1().min_w_0().justify_start()
-                }),
-        )
-        .child(div().flex_none().flex().items_center().child(trailing));
-    let row = surface(row, form, selected, compact, icon_only, true, m, cx);
+    let row = surface(
+        div().id((id, "surface")).text_color(fg),
+        form,
+        selected,
+        hover_fill,
+        compact,
+        icon_only,
+        true,
+        m,
+        cx,
+    )
+    .when(form != Form::Rail, |row| {
+        row.on_hover(move |hovered, window, cx| on_hover(hovered, window, cx))
+    })
+    .child({
+        let mut tab = tab
+            .h_full()
+            .rounded(surface_radius(form, cx))
+            .when(form == Form::Rail, |tab| {
+                tab.flex_1().min_w_0().justify_start()
+            });
+        let corners = tab.style().corner_radii.clone();
+        crate::motion::focus_ring::Ringed::new(tab, &focus, corners, cx)
+    })
+    .child(div().flex_none().flex().items_center().child(trailing));
+    let row = glide.measure(key.clone(), row);
     match context_menu {
         Some(builder) => row
             .context_menu(move |menu, window, cx| builder(menu, window, cx))
@@ -442,19 +903,14 @@ fn surface<E: Styled + InteractiveElement + ParentElement + FluentBuilder>(
     el: E,
     form: Form,
     selected: bool,
+    hover_fill: Hsla,
     compact: bool,
     icon_only: bool,
     trailing: bool,
     m: &Metrics,
     cx: &App,
 ) -> E {
-    let theme = cx.theme();
-    let foreground = theme.foreground;
-    let end = if trailing {
-        if compact { 8. } else { 4. }
-    } else {
-        m.pad
-    };
+    let (start, end) = underline_inset(m, compact, icon_only, trailing);
     let el = el
         .relative()
         .flex()
@@ -464,7 +920,7 @@ fn surface<E: Styled + InteractiveElement + ParentElement + FluentBuilder>(
     match form {
         // Only a rail may change weight with selection: its labels do not
         // share a line.
-        Form::Rail => material::selectable_row(el, selected, compact, cx)
+        Form::Rail => material::selectable_row_under_mark(el, selected, compact, cx)
             .when(selected, |this| this.font_medium())
             .when(icon_only, |this| this.w(px(m.item)).px_0().justify_center())
             .when(!icon_only, |this| this.w_full().justify_start()),
@@ -477,32 +933,16 @@ fn surface<E: Styled + InteractiveElement + ParentElement + FluentBuilder>(
                 if icon_only {
                     this.min_w(px(m.item)).justify_center()
                 } else {
-                    this.pl(px(m.pad)).pr(px(end))
+                    this.pl(px(start)).pr(px(end))
                 }
             })
             .map(|this| {
                 if form == Form::Segmented {
-                    return segment(this, selected, true, compact, cx);
+                    return segment(this, hover_fill, compact, cx);
                 }
                 this.h(px(m.item))
                     .rounded(surface_radius(form, cx))
-                    .when(!selected, |this| {
-                        this.hover(move |style| style.bg(theme.muted).text_color(foreground))
-                    })
-                    .when(selected, |this| {
-                        // Bottom-aligned with the bar's hairline, which it covers.
-                        let (start, end) = if icon_only { (6., 6.) } else { (m.pad, end) };
-                        this.child(
-                            div()
-                                .absolute()
-                                .left(px(start))
-                                .right(px(end))
-                                .bottom(px(-(m.bar - m.item) / 2.))
-                                .h(px(INDICATOR))
-                                .rounded(px(INDICATOR / 2.))
-                                .bg(foreground),
-                        )
-                    })
+                    .bg(hover_fill)
             }),
     }
 }
@@ -517,20 +957,35 @@ fn surface_radius(form: Form, cx: &App) -> Pixels {
 /// The track's padding around its segments.
 const TRACK_INSET: f32 = 2.;
 
+/// The space between a track's segments.
+const SEGMENT_GAP: f32 = 2.;
+
 /// A segment's corners sit concentric inside the track's.
 fn segment_radius(cx: &App) -> Pixels {
     material::radius_input(cx) - px(TRACK_INSET)
 }
 
-/// The pill track shared by [`TabBar::segmented`] and
-/// [`ChoiceGroup`](super::choice::ChoiceGroup): `list` holds the segments and
-/// scrolls sideways once they no longer fit, and otherwise its segments divide
-/// the width the track is given.
+/// The list of segments of a [`TabBar::segmented`] or a
+/// [`ChoiceGroup`](super::choice::ChoiceGroup), for [`segmented_track`]: a
+/// pill track whose segments divide the width it is given.
+pub(crate) fn segment_list<E: Styled>(list: E, cx: &App) -> E {
+    list.flex()
+        .items_center()
+        .h_full()
+        .min_w_full()
+        .flex_shrink_0()
+        .gap(px(SEGMENT_GAP))
+        .p(px(TRACK_INSET))
+        .rounded(material::radius_input(cx))
+        .bg(cx.theme().secondary)
+}
+
+/// The viewport of a [`segment_list`], which scrolls sideways once its
+/// segments no longer fit.
 pub(crate) fn segmented_track(
     id: impl Into<ElementId>,
-    list: impl Styled + ParentElement + IntoElement,
+    list: impl IntoElement,
     compact: bool,
-    cx: &App,
 ) -> ScrollArea<Stateful<Div>> {
     let id = id.into();
     let height = segment_height(compact) + 2. * TRACK_INSET;
@@ -541,50 +996,29 @@ pub(crate) fn segmented_track(
         .min_h(px(height))
         .min_w_0()
         .overflow_x_scroll_area()
-        .child(
-            list.flex()
-                .items_center()
-                .h_full()
-                .min_w_full()
-                .flex_shrink_0()
-                .gap(px(2.))
-                .p(px(TRACK_INSET))
-                .rounded(material::radius_input(cx))
-                .bg(cx.theme().secondary),
-        )
+        .child(list)
 }
 
-/// One segment's surface: transparent at rest, a raised pill when selected.
-/// `interactive` is false for a segment that cannot be chosen.
-pub(crate) fn segment<E: Styled + InteractiveElement + FluentBuilder>(
-    el: E,
-    selected: bool,
-    interactive: bool,
-    compact: bool,
-    cx: &App,
-) -> E {
+/// The selected segment's pill.
+fn raised_segment(cx: &App) -> Hsla {
     let theme = cx.theme();
     // The popover surface is the lightest plane in the light theme but
     // matches the track in the dark one, where the pill is lifted with the
     // foreground instead.
-    let raised = if theme.mode.is_dark() {
-        theme.foreground.opacity(0.12)
-    } else {
-        theme.popover
-    };
-    let (muted, foreground) = (theme.muted, theme.foreground);
-    el.h(px(segment_height(compact)))
+    theme.by_mode(theme.popover, theme.foreground.opacity(0.12))
+}
+
+/// One segment's surface: `hover_fill` over the track, under the track's
+/// gliding [`Glide::pill`].
+pub(crate) fn segment<E: Styled>(el: E, hover_fill: Hsla, compact: bool, cx: &App) -> E {
+    el.relative()
+        .h(px(segment_height(compact)))
         .flex_grow(1.)
         .flex_basis(px(0.))
         .flex_shrink_0()
         .justify_center()
         .rounded(segment_radius(cx))
-        .when(selected, |this| {
-            this.bg(raised).text_color(foreground).shadow_xs()
-        })
-        .when(!selected && interactive, |this| {
-            this.hover(move |style| style.bg(muted).text_color(foreground))
-        })
+        .bg(hover_fill)
 }
 
 #[cfg(test)]
@@ -646,12 +1080,14 @@ mod tests {
             TabBar::new("bar").item(
                 TabItem::new("tab", "Terminal")
                     .on_click(move |_, _, _| select.set((select.get().0 + 1, select.get().1)))
-                    .trailing(
+                    .trailing(move |_, _| {
+                        let close = close.clone();
                         crate::widgets::Button::new("close")
                             .debug_selector(|| "close".into())
                             .label("x")
-                            .on_click(move |_, _, _| close.set((close.get().0, close.get().1 + 1))),
-                    ),
+                            .on_click(move |_, _, _| close.set((close.get().0, close.get().1 + 1)))
+                            .into_any_element()
+                    }),
             )
         }
     }
@@ -671,5 +1107,207 @@ mod tests {
         let tab = bounds(cx, "tab");
         cx.simulate_click(tab.center(), Modifiers::default());
         assert_eq!(clicks.get(), (1, 1));
+    }
+
+    /// A bar whose tabs the test changes.
+    struct Changing {
+        tabs: Vec<&'static str>,
+        selected: &'static str,
+        form: Form,
+    }
+
+    impl Render for Changing {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let bar = TabBar::new("changing").items(
+                self.tabs
+                    .iter()
+                    .map(|tab| TabItem::new(*tab, *tab).selected(*tab == self.selected)),
+            );
+            div().w(px(320.)).child(match self.form {
+                Form::Underline => bar,
+                Form::Segmented => bar.segmented(),
+                Form::Rail => bar.rail(),
+            })
+        }
+    }
+
+    /// Frames as a display delivers them, each followed by `sample`.
+    fn frames<T>(
+        cx: &mut VisualTestContext,
+        mut sample: impl FnMut(&mut VisualTestContext) -> T,
+    ) -> Vec<T> {
+        (0..20)
+            .map(|_| {
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(16));
+                cx.update(|window, cx| {
+                    window.simulate_next_frame(cx);
+                    let _ = window.draw(cx);
+                });
+                sample(cx)
+            })
+            .collect()
+    }
+
+    /// The bounds of the quads painted in `background`.
+    fn painted(cx: &mut VisualTestContext, background: Hsla) -> Vec<Bounds<Pixels>> {
+        cx.update(|window, _| {
+            let scale = window.scale_factor();
+            window
+                .painted_quads()
+                .iter()
+                .filter(|quad| quad.background.as_solid() == Some(background))
+                .map(|quad| {
+                    Bounds::new(
+                        point(
+                            px(quad.bounds.origin.x.0 / scale),
+                            px(quad.bounds.origin.y.0 / scale),
+                        ),
+                        gpui::size(
+                            px(quad.bounds.size.width.0 / scale),
+                            px(quad.bounds.size.height.0 / scale),
+                        ),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    fn between(values: &[f32], from: f32, to: f32) -> usize {
+        values
+            .iter()
+            .filter(|value| (**value - from) * (to - **value) > 0.)
+            .count()
+    }
+
+    /// A tab that joins an underline bar folds in and pushes the selected
+    /// tab over gradually, the underline staying under that tab every
+    /// frame; closing the selected tab folds it away while the underline
+    /// glides to the tab selected in its place.
+    #[gpui::test]
+    fn underline_tabs_fold_in_and_out_with_the_mark_following(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (view, cx) = cx.add_window_view(|_, _| Changing {
+            tabs: vec!["one", "two"],
+            selected: "two",
+            form: Form::Underline,
+        });
+        crate::test_frames::draw_settled(cx);
+        let foreground = cx.update(|_, cx| cx.theme().foreground);
+        let pad = metrics(Form::Underline, false).pad;
+        let mark = |cx: &mut VisualTestContext| {
+            let marks: Vec<_> = painted(cx, foreground)
+                .into_iter()
+                .filter(|bounds| bounds.size.height == px(INDICATOR))
+                .collect();
+            assert_eq!(marks.len(), 1, "one mark: {marks:?}");
+            marks[0].left()
+        };
+        let rest = bounds(cx, "two").left();
+        assert_eq!(mark(cx), rest + px(pad));
+
+        view.update(cx, |view, cx| {
+            view.tabs = vec!["one", "new", "two"];
+            cx.notify();
+        });
+        let moves = frames(cx, |cx| {
+            let two = bounds(cx, "two").left();
+            assert_eq!(mark(cx), two + px(pad), "the mark left its tab");
+            f32::from(two)
+        });
+        let moved = *moves.last().unwrap();
+        assert!(moved > f32::from(rest));
+        assert!(
+            between(&moves, f32::from(rest), moved) >= 4,
+            "jumped: {moves:?}"
+        );
+        crate::test_frames::draw_settled(cx);
+
+        let target = bounds(cx, "new").left() + px(pad);
+        let from = mark(cx);
+        view.update(cx, |view, cx| {
+            view.tabs = vec!["one", "new"];
+            view.selected = "new";
+            cx.notify();
+        });
+        let marks = frames(cx, |cx| f32::from(mark(cx)));
+        assert!(
+            between(&marks, f32::from(from), f32::from(target)) >= 4,
+            "the mark jumped: {marks:?}"
+        );
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(mark(cx), target);
+        assert!(painted(cx, foreground).len() == 1);
+    }
+
+    /// A segment that joins a track takes its share of the width from
+    /// nothing, the others giving theirs up as it grows, with the pill
+    /// under the selected segment every frame.
+    #[gpui::test]
+    fn a_new_segment_grows_its_share_of_the_track(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (view, cx) = cx.add_window_view(|_, _| Changing {
+            tabs: vec!["a", "b"],
+            selected: "a",
+            form: Form::Segmented,
+        });
+        crate::test_frames::draw_settled(cx);
+        let raised = cx.update(|_, cx| raised_segment(cx));
+        let wide = bounds(cx, "a").size.width;
+
+        view.update(cx, |view, cx| {
+            view.tabs = vec!["a", "b", "c"];
+            cx.notify();
+        });
+        let widths = frames(cx, |cx| {
+            let a = bounds(cx, "a");
+            assert_eq!(painted(cx, raised), vec![a], "the pill left its segment");
+            f32::from(a.size.width)
+        });
+        crate::test_frames::draw_settled(cx);
+        let narrow = bounds(cx, "a").size.width;
+        assert!(narrow < wide);
+        assert_eq!(narrow, bounds(cx, "c").size.width);
+        assert!(
+            between(&widths, f32::from(wide), f32::from(narrow)) >= 4,
+            "jumped: {widths:?}"
+        );
+    }
+
+    /// Choosing another row of a rail moves its selected fill there over
+    /// several frames, under one row's height all the way.
+    #[gpui::test]
+    fn a_rail_selection_fill_glides_to_the_chosen_row(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (view, cx) = cx.add_window_view(|_, _| Changing {
+            tabs: vec!["general", "threads", "usage"],
+            selected: "general",
+            form: Form::Rail,
+        });
+        crate::test_frames::draw_settled(cx);
+        let active = cx.update(|_, cx| cx.theme().list_active);
+        let fill = |cx: &mut VisualTestContext| {
+            let fills = painted(cx, active);
+            assert_eq!(fills.len(), 1, "one fill: {fills:?}");
+            fills[0]
+        };
+        assert_eq!(fill(cx), bounds(cx, "general"));
+
+        view.update(cx, |view, cx| {
+            view.selected = "usage";
+            cx.notify();
+        });
+        let (from, to) = (bounds(cx, "general").top(), bounds(cx, "usage").top());
+        let tops = frames(cx, |cx| {
+            let fill = fill(cx);
+            assert_eq!(fill.size.height, bounds(cx, "general").size.height);
+            f32::from(fill.top())
+        });
+        assert!(
+            between(&tops, f32::from(from), f32::from(to)) >= 4,
+            "the fill jumped: {tops:?}"
+        );
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(fill(cx), bounds(cx, "usage"));
     }
 }

@@ -73,6 +73,28 @@ pub enum Command {
         request_id: u64,
         response: Result<crate::PreviewResponse, String>,
     },
+    /// Render `session_id`'s preview on the client subscribed to
+    /// [`crate::Topic::Preview`] as `client_id`. With `take_over`, the
+    /// rendering client, if any, lets its page go; without it, only a thread
+    /// that no attached client renders comes here.
+    ShowPreviewHere {
+        session_id: String,
+        client_id: String,
+        take_over: bool,
+    },
+    /// The rendering client's pages of `session_id`, after they changed.
+    /// From any other client it changes nothing.
+    ReportPreviewTabs {
+        session_id: String,
+        client_id: String,
+        tabs: Vec<crate::PreviewTab>,
+    },
+    /// The user acted on the page of `session_id` on its rendering client.
+    /// From any other client it changes nothing.
+    ReportPreviewInput {
+        session_id: String,
+        client_id: String,
+    },
     /// Consume and apply the restart-continuity marker, returning the Settings
     /// section that the client should open.
     ApplyPendingRelaunch,
@@ -81,17 +103,20 @@ pub enum Command {
     /// Shut down every live provider and PTY, then acknowledge only after the
     /// FIFO store-write barrier has drained.
     ShutdownAllAndFlush,
-    OrchestrateTurn {
-        session_id: String,
-        text: String,
-        attachment_paths: Vec<PathBuf>,
-    },
     ReloadProvider,
     SetHostToken {
         host: String,
         token: Option<String>,
         /// The account email a host that takes one authenticates the token with; with no
         /// token, the one already saved with an email goes on with this one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        email: Option<String>,
+    },
+    /// Asks the host whose `token` is and saves it only when the host takes it, answering
+    /// with [`CommandResponse::TokenCheck`].
+    VerifyHostToken {
+        host: String,
+        token: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         email: Option<String>,
     },
@@ -147,7 +172,10 @@ pub enum Command {
         profile_id: String,
         patch: ProfileSettingsPatch,
     },
+    /// Add an endpoint profile of `provider` from its harness's endpoint
+    /// variables, in its own config directory.
     CreateThirdPartyProfile {
+        provider: ProviderKind,
         name: String,
         base_url: String,
         model: Option<String>,
@@ -188,6 +216,9 @@ pub enum Command {
     /// provider profile (Codex, Claude Code).
     RefreshProviderUsage,
     CheckProviderVersions,
+    /// Measure the host's [`crate::Topic::DiskUsage`] again, unless a
+    /// measurement runs.
+    MeasureDiskUsage,
     UpdateProviders {
         providers: Vec<ProviderKind>,
     },
@@ -212,7 +243,6 @@ pub enum Command {
         name: String,
         command: String,
         args: Vec<String>,
-        env: Vec<(String, String)>,
     },
     UpdateAcpAgent {
         id: String,
@@ -333,15 +363,21 @@ pub enum Command {
         project_id: String,
         png: Option<Vec<u8>>,
     },
-    /// Register a project rooted at `root`. The host validates the path against
-    /// its own filesystem — a client never decides whether a host path is
-    /// absolute or exists — and answers `invalid_project_root` when it is not an
-    /// absolute, existing directory there.
+    /// Register a project rooted at `root`. The host reads the path by its own
+    /// rules — a leading `~` is its home and `..` folds — and validates it
+    /// against its own filesystem; a client never decides whether a host path
+    /// is absolute or exists. It answers `invalid_project_root` when the path is
+    /// not an absolute, existing directory there.
     CreateProject {
         root: PathBuf,
     },
+    /// Create the folder `name` for a new project inside `parent`, a host
+    /// path where `~` is the home; without one, inside Settings' new-project
+    /// folder.
     CreateNewProject {
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
     },
     /// Point a project at `root`, carrying every thread's working directory
     /// under the old root along. With `move_files` the host moves the old
@@ -451,8 +487,12 @@ pub enum Command {
     RegenerateSessionTitle {
         session_id: String,
     },
+    /// Fork the whole thread, or what came before the message `at` names.
+    /// With `at`, holding everything through a finished turn.
     ForkThread {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<ForkAt>,
     },
     /// Move a thread into another project, continuing in `cwd` (the project root when
     /// absent; a relative path is taken from the root, and the directory must lie inside
@@ -541,6 +581,22 @@ pub enum Command {
     Interrupt {
         session_id: String,
     },
+    /// Kill the thread's provider process when it no longer answers a stop.
+    ForceTerminate {
+        session_id: String,
+    },
+    /// Stop one piece of the thread's background work, or all of it with no
+    /// `task_id`; only offered where the provider's `Caps::background` stops it.
+    StopBackgroundTask {
+        session_id: String,
+        task_id: Option<String>,
+    },
+    /// Move the thread's running call `item_id` into the background; only
+    /// offered where the provider's `Caps::background` can.
+    MoveToBackground {
+        session_id: String,
+        item_id: String,
+    },
     /// Ask the provider to compact the session's context now; only offered
     /// where the provider has a native operation (`Caps::manual_compaction`).
     CompactContext {
@@ -585,13 +641,64 @@ pub enum Command {
         branch: String,
     },
     ToggleFavoriteModel {
+        provider: ProviderKind,
+        profile_id: Option<String>,
         model: String,
     },
+    /// Rewind the thread to before the prompt that opened absolute turn
+    /// `turn`, or before the steer `steer` in it, through its harness.
     RewindTurn {
         session_id: String,
         turn: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steer: Option<String>,
+        /// The restore point the client saw there; the host refuses when its
+        /// own differs (a turn index is reused once a rewind cuts).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint_id: Option<String>,
+        mode: RewindMode,
+        /// The client that asked: it alone puts the restored prompt in its
+        /// composer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+    },
+    /// What [`Self::RewindTurn`] would restore, where the harness can tell
+    /// before restoring anything; answered with
+    /// [`CommandResponse::RewindPreview`].
+    PreviewRewind {
+        session_id: String,
+        turn: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint_id: Option<String>,
         mode: RewindMode,
     },
+    /// Undo the thread's latest rewind while its harness keeps it undoable
+    /// (until the next message), or return to the branch it left.
+    UndoRewind {
+        session_id: String,
+        checkpoint_id: String,
+    },
+    /// Go on in the branch the rewind whose divider opened absolute turn
+    /// `turn` left, in a thread of its own: the one that already took it up,
+    /// or a new one holding that branch's turns. Answered with
+    /// [`CommandResponse::SessionId`].
+    OpenRewoundBranch {
+        session_id: String,
+        turn: usize,
+        checkpoint_id: String,
+    },
+}
+
+/// The finished absolute turn `turn`, with its restore point as the client
+/// saw it: the host refuses when its own differs, a turn index being reused
+/// once a rewind cuts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkAt {
+    pub turn: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
 }
 
 /// Correlated result of a [`Command`].
@@ -622,6 +729,9 @@ pub enum CommandResponse {
     ThreadReferenceAdded {
         boundary_notice: bool,
     },
+    /// `VerifyHostToken`: what the host answered; the token was saved only when accepted.
+    TokenCheck(tcode_core::settings::TokenCheck),
+    RewindPreview(agent::RewindPreviewResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -648,7 +758,6 @@ impl Command {
             | Self::RefreshPullRequest { session_id, .. }
             | Self::RunPullRequestAction { session_id, .. }
             | Self::EditPullRequestReviewDraft { session_id, .. }
-            | Self::OrchestrateTurn { session_id, .. }
             | Self::RunGitAction { session_id, .. }
             | Self::SetActiveAcpAgent { session_id, .. }
             | Self::SetTerminalHeight { session_id, .. }
@@ -699,6 +808,9 @@ impl Command {
             | Self::MoveQueued { session_id, .. }
             | Self::RetryTurn { session_id, .. }
             | Self::Interrupt { session_id, .. }
+            | Self::StopBackgroundTask { session_id, .. }
+            | Self::MoveToBackground { session_id, .. }
+            | Self::ForceTerminate { session_id }
             | Self::CompactContext { session_id, .. }
             | Self::SetGoal { session_id, .. }
             | Self::ClearGoal { session_id, .. }
@@ -708,8 +820,11 @@ impl Command {
             | Self::SetActiveOption { session_id, .. }
             | Self::LoadBranches { session_id, .. }
             | Self::CheckoutBranch { session_id, .. }
-            | Self::RewindTurn { session_id, .. } => Some(session_id),
-            Self::ForkThread { id } => Some(id),
+            | Self::RewindTurn { session_id, .. }
+            | Self::PreviewRewind { session_id, .. }
+            | Self::UndoRewind { session_id, .. }
+            | Self::OpenRewoundBranch { session_id, .. } => Some(session_id),
+            Self::ForkThread { id, .. } => Some(id),
             _ => None,
         }
     }
@@ -719,6 +834,7 @@ impl Command {
         matches!(
             self,
             Self::SetHostToken { .. }
+                | Self::VerifyHostToken { .. }
                 | Self::SetProfileSecret { .. }
                 | Self::CreateThirdPartyProfile { .. }
                 | Self::SubmitProviderLoginCode { .. }
@@ -729,18 +845,31 @@ impl Command {
     /// pull request action must not have it. All other variants are retained
     /// writes, including settings assignments: repeating an old assignment
     /// after a newer one would undo user intent.
+    ///
+    /// Terminal input (keys, pastes, mouse and focus reports) and the drawer
+    /// height are a live stream, not retained: bytes typed for whatever the
+    /// terminal showed then are wrong to replay into it after a relaunch, and
+    /// a burst of them would evict pending messages from the bounded outbox.
+    /// A preview report is not retained either: losing the link releases
+    /// rendering, so the host would refuse it when replayed.
     pub fn requires_delivery_key(&self) -> bool {
         !matches!(
             self,
-            Self::ResizeTerminal { .. }
+            Self::TerminalInput { .. }
+                | Self::SetTerminalHeight { .. }
+                | Self::ResizeTerminal { .. }
                 | Self::PreviewReply { .. }
+                | Self::ReportPreviewTabs { .. }
+                | Self::ReportPreviewInput { .. }
                 | Self::ShutdownAllAndFlush
                 | Self::OpenLatestSession
                 | Self::RefreshHostCredentials
                 | Self::RunPullRequestAction { .. }
+                | Self::PreviewRewind { .. }
                 | Self::RefreshProviderStatus
                 | Self::RefreshProviderUsage
                 | Self::CheckProviderVersions
+                | Self::MeasureDiskUsage
                 | Self::RefreshAcpRegistry
                 | Self::RefreshProviderPlugins { .. }
                 | Self::LoadBranches { .. }

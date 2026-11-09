@@ -1,7 +1,7 @@
-use gpui::{Context, Entity, EventEmitter, SharedString};
+use gpui::{Context, EventEmitter, SharedString};
 use serde::{Deserialize, Serialize};
 
-use crate::store::WorkspaceStore;
+use crate::store::{HostKey, ThreadKey};
 
 /// One place the window can be. The window keeps a *history* of them, and every
 /// Back — the toolbar control, the Android gesture, the desktop Back row — pops
@@ -11,12 +11,13 @@ use crate::store::WorkspaceStore;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Destination {
-    /// Which host this window talks to: the root, and a place that can also be
-    /// *visited* from an attached workspace without detaching from it.
+    /// The machines this device knows, and which of them the window's
+    /// workspace holds: a page visited over the threads.
     Hosts,
-    /// The pairing form, pushed from Hosts (or from a repair row that
-    /// prefilled it).
+    /// The pairing form, pushed from Hosts, from a refused host's Pair again
+    /// or from a window with no host.
     Pair,
+    /// The threads of every host the window shows: the root.
     Threads,
     Thread,
     /// The thread's terminal, diff/plan or preview, full width.
@@ -29,18 +30,37 @@ pub enum Destination {
     /// *that a detail is open* is navigation and belongs here.
     SettingsSection,
     SettingsThreadRules,
+    /// One Git platform, managed on a phone's page pushed over Git Platforms.
+    SettingsSourceControlHost,
+    /// One harness's settings, a page on a compact window.
+    SettingsHarness,
     /// The phone's page for pinning, settling and reordering threads by handle.
     ArrangeThreads,
 }
 
 /// The shell's client-local checkpoint, independent of the host's settings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct NavigationSnapshot {
     pub history: Vec<Destination>,
-    pub host_id: Option<String>,
-    pub session_id: Option<String>,
-    #[serde(default)]
+    /// The thread the window showed.
+    pub thread: Option<ThreadKey>,
     pub panel: NavigationPanel,
+}
+
+/// A checkpoint as saved: this version's, or an earlier one's, which named
+/// the thread by its id and its host's id, with none for the host in the
+/// window's process.
+#[derive(Deserialize)]
+struct SavedNavigation {
+    history: Vec<Destination>,
+    #[serde(default)]
+    thread: Option<ThreadKey>,
+    #[serde(default)]
+    host_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    panel: NavigationPanel,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,7 +90,18 @@ impl NavigationPanel {
 
 impl NavigationSnapshot {
     pub fn from_preferences(value: serde_json::Value) -> Option<Self> {
-        let mut snapshot: Self = serde_json::from_value(value).ok()?;
+        let saved: SavedNavigation = serde_json::from_value(value).ok()?;
+        let thread = saved.thread.or_else(|| {
+            Some(ThreadKey {
+                host: saved.host_id.map_or(HostKey::Local, HostKey::Remote),
+                session_id: saved.session_id?,
+            })
+        });
+        let mut snapshot = Self {
+            history: saved.history,
+            thread,
+            panel: saved.panel,
+        };
         // Ignore malformed/unbounded local state rather than building an
         // arbitrary number of mounted views during startup.
         if snapshot.history.len() > 128 {
@@ -82,32 +113,31 @@ impl NavigationSnapshot {
                 Destination::Settings
                     | Destination::SettingsSection
                     | Destination::SettingsThreadRules
+                    | Destination::SettingsSourceControlHost
+                    | Destination::SettingsHarness
                     | Destination::ArrangeThreads
                     | Destination::Pair
                     // A cold start reads the pull request afresh from its thread.
                     | Destination::PullRequest
             )
         });
-        if snapshot.history.first() != Some(&Destination::Hosts) {
-            snapshot.history.insert(0, Destination::Hosts);
+        // Machines was the root before the threads were.
+        if snapshot.history.first() == Some(&Destination::Hosts) {
+            snapshot.history.remove(0);
+        }
+        if snapshot.history.first() != Some(&Destination::Threads) {
+            snapshot.history.insert(0, Destination::Threads);
         }
         snapshot.history.dedup();
-        if snapshot.host_id.is_none() {
-            snapshot.without_host();
-        } else if snapshot.session_id.is_none() {
+        if snapshot.thread.is_none() {
             snapshot.without_thread();
         }
         Some(snapshot)
     }
 
-    pub fn without_host(&mut self) {
-        self.host_id = None;
-        self.session_id = None;
-        self.history = vec![Destination::Hosts];
-    }
-
-    fn without_thread(&mut self) {
-        self.session_id = None;
+    /// The thread is not one the window can show again.
+    pub fn without_thread(&mut self) {
+        self.thread = None;
         if let Some(index) = self.history.iter().position(|destination| {
             matches!(
                 destination,
@@ -125,7 +155,11 @@ impl Destination {
     pub fn route(self) -> Route {
         match self {
             Self::Hosts | Self::Pair => Route::Hosts,
-            Self::Settings | Self::SettingsSection | Self::SettingsThreadRules => Route::Settings,
+            Self::Settings
+            | Self::SettingsSection
+            | Self::SettingsThreadRules
+            | Self::SettingsSourceControlHost
+            | Self::SettingsHarness => Route::Settings,
             Self::Threads
             | Self::Thread
             | Self::Panel
@@ -146,7 +180,11 @@ impl Destination {
             Self::Thread => "mobile.thread",
             Self::Panel => "chat.panels",
             Self::PullRequest => "pull_requests.title",
-            Self::Settings | Self::SettingsSection | Self::SettingsThreadRules => "settings.title",
+            Self::Settings
+            | Self::SettingsSection
+            | Self::SettingsThreadRules
+            | Self::SettingsSourceControlHost
+            | Self::SettingsHarness => "settings.title",
         })
         .into_owned()
         .into()
@@ -160,33 +198,43 @@ pub struct WindowState {
     /// persisted: widening a window is not a preference.
     pub compact: bool,
     /// Where the window has been, oldest first. Never empty: `history[0]` is
-    /// [`Destination::Hosts`], the root the platform's Back gesture falls off.
+    /// [`Destination::Threads`], the root the platform's Back gesture falls off.
     history: Vec<Destination>,
+    /// Whether the palette is open. A closed palette stays on screen while it
+    /// leaves (see [`Self::palette_mounted`]).
     pub palette_open: bool,
+    /// Closed, with the palette's presence not yet gone; the palette clears
+    /// it ([`Self::palette_left`]).
+    palette_leaving: bool,
     /// Whether the palette focuses its search input when it opens. A tap on
     /// the search pill wants the keyboard; the mobile "+" button lists
     /// projects to tap and must not raise it.
     pub palette_focuses_query: bool,
-    pub sidebar_collapsed: bool,
     pub quit_prompt_epoch: u64,
     pub quit_prompt_open: bool,
     pub pending_settings_section: Option<String>,
+    /// The host whose settings the Settings route shows; `None` for the
+    /// current pane's host.
+    pub settings_host: Option<HostKey>,
 }
 
-impl WindowState {
-    pub fn new(sidebar_collapsed: bool) -> Self {
+impl Default for WindowState {
+    fn default() -> Self {
         Self {
             compact: false,
-            history: vec![Destination::Hosts],
+            history: vec![Destination::Threads],
             palette_open: false,
+            palette_leaving: false,
             palette_focuses_query: true,
-            sidebar_collapsed,
             quit_prompt_epoch: 0,
             quit_prompt_open: false,
             pending_settings_section: None,
+            settings_host: None,
         }
     }
+}
 
+impl WindowState {
     pub fn with_compact(mut self, compact: bool) -> Self {
         self.compact = compact;
         self
@@ -212,8 +260,9 @@ impl WindowState {
         cx.notify();
     }
 
-    /// A restored thread was archived/deleted while this client was away.
-    pub(crate) fn discard_restored_thread(&mut self, cx: &mut Context<Self>) {
+    /// The thread the window showed is not there any more: a restored one
+    /// went while this client was away, or the column left its host.
+    pub(crate) fn drop_thread_pages(&mut self, cx: &mut Context<Self>) {
         if let Some(index) = self.history.iter().position(|destination| {
             matches!(
                 destination,
@@ -246,6 +295,33 @@ impl WindowState {
         }
         self.history.push(destination);
         cx.notify();
+    }
+
+    /// Stand a thread's page on the topmost thread page, in place of what
+    /// stood on it: the thread beneath stays a page to come back to.
+    /// [`Self::go`] does nothing on a thread page, where this is the point.
+    pub(crate) fn stack_thread(&mut self, cx: &mut Context<Self>) {
+        if let Some(at) = self.thread_page_at() {
+            self.history.truncate(at + 1);
+            self.history.push(Destination::Thread);
+            cx.notify();
+        }
+    }
+
+    /// Take out the `count` topmost thread pages; what stands on them stays.
+    pub(crate) fn unstack_threads(&mut self, count: usize, cx: &mut Context<Self>) {
+        for _ in 0..count {
+            if let Some(at) = self.thread_page_at() {
+                self.history.remove(at);
+                cx.notify();
+            }
+        }
+    }
+
+    fn thread_page_at(&self) -> Option<usize> {
+        self.history
+            .iter()
+            .rposition(|destination| *destination == Destination::Thread)
     }
 
     /// Leave the pairing page for the Machines page it was opened over. Wide,
@@ -286,25 +362,35 @@ impl WindowState {
         true
     }
 
-    /// A fresh attachment: the previous host's pages are not this host's, so the
-    /// history restarts at its thread list.
+    /// A fresh workspace: the previous host's pages are not this host's, so
+    /// the history restarts at the threads.
     pub fn enter_workspace(&mut self, cx: &mut Context<Self>) {
-        self.history.truncate(1);
-        self.history.push(Destination::Threads);
+        self.history = vec![Destination::Threads];
         cx.notify();
     }
 
-    /// No attachment: only the root remains.
+    /// No host: what remains is the threads' empty root and a visit to
+    /// Machines, where hosts are added.
     pub fn leave_workspace(&mut self, cx: &mut Context<Self>) {
-        self.history.truncate(1);
+        self.history.retain(|destination| {
+            matches!(
+                destination,
+                Destination::Threads | Destination::Hosts | Destination::Pair
+            )
+        });
+        self.history.dedup();
         cx.notify();
     }
 
-    /// "Show me this thread." It is a navigation intent, not a layout decision:
-    /// every width emits it and the shell decides how to present it — a wide
-    /// window already shows the thread beside the list, a compact one pushes it.
-    pub fn open_thread(&mut self, cx: &mut Context<Self>) {
-        cx.emit(OpenThread);
+    /// Leave a visit to Machines for the threads beneath it.
+    pub fn leave_hosts(&mut self, cx: &mut Context<Self>) {
+        if self.route() != Route::Hosts {
+            return;
+        }
+        while self.history.len() > 1 && self.route() == Route::Hosts {
+            self.history.pop();
+        }
+        cx.notify();
     }
 
     /// Sidebar-driven conversation navigation replaces the wide Hosts visit
@@ -320,26 +406,28 @@ impl WindowState {
         if self.route() != Route::Chat {
             return;
         }
-        *self.history.last_mut().expect("the history is never empty") = Destination::Thread;
+        if self.history.len() == 1 {
+            self.history.push(Destination::Thread);
+        } else {
+            *self.history.last_mut().expect("the history is never empty") = Destination::Thread;
+        }
         cx.notify();
     }
 
-    pub fn toggle_sidebar_collapsed(
-        &mut self,
-        store: &Entity<WorkspaceStore>,
-        cx: &mut Context<Self>,
-    ) {
-        self.sidebar_collapsed = !self.sidebar_collapsed;
-        store.update(cx, |store, cx| {
-            store.set_sidebar_collapsed(self.sidebar_collapsed, cx)
-        });
-        cx.notify();
-    }
-
-    /// Switch to the settings route (closes the palette).
+    /// Switch to the settings route (closes the palette), on the current
+    /// pane's host.
     pub fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_host = None;
+        // Settings replaces the window the palette would leave over.
         self.palette_open = false;
+        self.palette_leaving = false;
         self.go(Destination::Settings, cx);
+    }
+
+    /// Switch to the settings route on `host`.
+    pub fn open_settings_on(&mut self, host: HostKey, cx: &mut Context<Self>) {
+        self.open_settings(cx);
+        self.settings_host = Some(host);
     }
 
     /// Leave settings, however deep in it the window is.
@@ -351,43 +439,72 @@ impl WindowState {
     }
 
     pub fn open_palette(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = true;
-        self.palette_focuses_query = true;
-        cx.notify();
+        self.show_palette(true, cx);
     }
 
     /// Open the palette as a list to tap through, leaving the search input
     /// unfocused so no software keyboard comes up.
     pub fn open_palette_without_keyboard(&mut self, cx: &mut Context<Self>) {
+        self.show_palette(false, cx);
+    }
+
+    fn show_palette(&mut self, focuses_query: bool, cx: &mut Context<Self>) {
         self.palette_open = true;
-        self.palette_focuses_query = false;
+        self.palette_leaving = false;
+        self.palette_focuses_query = focuses_query;
         cx.notify();
     }
 
+    /// Whether the palette is on screen: open, or still leaving after a
+    /// close. Its host keeps it mounted meanwhile. A wide window draws the
+    /// palette only on the Chat route, so on any other a leaving palette is
+    /// gone.
+    pub fn palette_mounted(&self) -> bool {
+        self.palette_open || (self.palette_leaving && (self.compact || self.route() == Route::Chat))
+    }
+
+    /// Whether a closed palette is still leaving.
+    pub(crate) fn palette_leaving(&self) -> bool {
+        self.palette_leaving
+    }
+
+    /// The palette leaves mounted and inert until its presence is gone
+    /// ([`Self::palette_left`]), then unmounts.
     pub fn close_palette(&mut self, cx: &mut Context<Self>) {
+        if !self.palette_open {
+            return;
+        }
         self.palette_open = false;
+        self.palette_leaving = true;
         cx.notify();
+    }
+
+    /// The closed palette's presence is gone.
+    pub(crate) fn palette_left(&mut self, cx: &mut Context<Self>) {
+        if self.palette_leaving {
+            self.palette_leaving = false;
+            cx.notify();
+        }
     }
 
     pub fn toggle_palette(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = !self.palette_open;
-        cx.notify();
+        if self.palette_open {
+            self.close_palette(cx);
+        } else {
+            self.open_palette(cx);
+        }
     }
 }
 
 /// The top-level window surface: the chat workspace, the hosts list or
 /// settings. Derived from [`WindowState::destination`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Route {
     #[default]
     Chat,
     Hosts,
     Settings,
 }
-
-#[derive(Clone, Copy)]
-pub struct OpenThread;
-impl EventEmitter<OpenThread> for WindowState {}
 
 #[derive(Clone, Copy)]
 pub(crate) struct OpenPanel(pub NavigationPanel);

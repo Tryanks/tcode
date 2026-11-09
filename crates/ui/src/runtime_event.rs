@@ -1,9 +1,8 @@
-use agent::{ProviderKind, RewindMode};
+use agent::ProviderKind;
 use tcode_core::git::GitAction;
 use tcode_protocol::{
-    GitActionRequest, MergeWorktreeFailure, NoticeSeverity, PluginOperationTarget, RuntimeEffect,
-    RuntimeError, RuntimeNotice, RuntimeNotification as RuntimeEvent, RuntimeOperationId,
-    RuntimeToast,
+    GitActionRequest, MergeWorktreeFailure, NoticeSeverity, PluginOperationTarget, RuntimeError,
+    RuntimeNotice, RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast,
 };
 
 use crate::toast::ToastKind;
@@ -21,17 +20,6 @@ pub(super) struct PresentedRuntimeEvent {
     pub message: String,
 }
 
-pub(super) fn apply_runtime_effect(effect: &RuntimeEffect) {
-    match effect {
-        RuntimeEffect::ApplyLocale { language } => {
-            crate::settings::apply_locale(language.as_deref());
-        }
-        RuntimeEffect::CopyToClipboard { .. } => {
-            unreachable!("clipboard effects are applied by the app shell")
-        }
-    }
-}
-
 pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEvent {
     let (severity, message) = match event {
         RuntimeEvent::Error(error) => {
@@ -41,6 +29,9 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 }
                 RuntimeError::PersistSettings { error } => {
                     crate::tr!("errors.persist_settings", error = error).into_owned()
+                }
+                RuntimeError::SettingsUnreadable { error } => {
+                    crate::tr!("errors.settings_unreadable", error = error).into_owned()
                 }
                 RuntimeError::TerminalStart { error } => {
                     crate::tr!("errors.terminal_start", error = error).into_owned()
@@ -60,7 +51,6 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::DeleteProject { error } => {
                     crate::tr!("errors.delete_project", error = error).into_owned()
                 }
-                RuntimeError::NativeRewindBlocked => crate::tr!("chat.rewind_blocked").into_owned(),
                 RuntimeError::PersistEvent { error } => {
                     crate::tr!("errors.persist_event", error = error).into_owned()
                 }
@@ -81,20 +71,33 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                     crate::tr!("composer.steer_unsupported", agent = agent).into_owned()
                 }
                 RuntimeError::DirtyTree => crate::tr!("notice.dirty_tree").into_owned(),
-                RuntimeError::ProviderStart { error } => {
-                    crate::tr!("errors.provider_start", error = error).into_owned()
+                RuntimeError::ProviderStart { harness, error } => {
+                    crate::tr!("errors.provider_start", harness = harness, error = error)
+                        .into_owned()
                 }
+                RuntimeError::ProviderBatchLineBreak { program } => crate::tr!(
+                    "errors.provider_batch_line_break",
+                    program = program.to_string_lossy()
+                )
+                .into_owned(),
                 RuntimeError::WorkingDirectoryMissing { cwd, .. } => crate::tr!(
                     "errors.working_directory_missing",
                     cwd = cwd.to_string_lossy()
                 )
                 .into_owned(),
                 RuntimeError::ProviderClosed {
+                    harness,
                     reason: Some(reason),
-                } => crate::tr!("errors.provider_closed_reason", reason = reason).into_owned(),
-                RuntimeError::ProviderClosed { reason: None } => {
-                    crate::tr!("errors.provider_closed").into_owned()
-                }
+                } => crate::tr!(
+                    "errors.provider_closed_reason",
+                    harness = harness,
+                    reason = reason
+                )
+                .into_owned(),
+                RuntimeError::ProviderClosed {
+                    harness,
+                    reason: None,
+                } => crate::tr!("errors.provider_closed", harness = harness).into_owned(),
                 RuntimeError::PersistSessionIndex { error } => {
                     crate::tr!("errors.persist_session_index", error = error).into_owned()
                 }
@@ -115,15 +118,6 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeNotice::TcodeUpdateAvailable { version } => {
                     crate::tr!("notice.tcode_update_available", version = version).into_owned()
                 }
-                RuntimeNotice::NativeRewindCompleted { mode } => match mode {
-                    RewindMode::Files => crate::tr!("chat.rewind_files_done").into_owned(),
-                    RewindMode::Conversation => {
-                        crate::tr!("chat.rewind_conversation_done").into_owned()
-                    }
-                    RewindMode::FilesAndConversation => {
-                        crate::tr!("chat.rewind_all_done").into_owned()
-                    }
-                },
                 RuntimeNotice::SwitchedBranch { branch } => {
                     crate::tr!("notice.switched_branch", branch = branch).into_owned()
                 }
@@ -350,12 +344,8 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
         | RuntimeToast::ProviderUpdateProgress { operation, run }
         | RuntimeToast::ProviderUpdateFinished { operation, run } => {
             let finished = matches!(toast, RuntimeToast::ProviderUpdateFinished { .. });
-            let failed = run
-                .failed
-                .iter()
-                .map(|provider| provider.display_name())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let failed =
+                crate::i18n::join_list(run.failed.iter().map(|provider| provider.display_name()));
             let title = if finished {
                 if run.failed.is_empty() {
                     crate::tr!("providers.updated_count", count = run.completed).into_owned()
@@ -444,7 +434,7 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
         RuntimeToast::CommitMessageGenerated { message } => (
             RuntimeToastDisposition::Push,
             ToastKind::Info,
-            "Generated commit message".to_string(),
+            crate::tr!("git.toast.message_generated").into_owned(),
             Some(message.clone()),
             None,
         ),
@@ -522,7 +512,7 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
         _ => (
             RuntimeToastDisposition::Push,
             ToastKind::Warning,
-            "Unknown runtime notification".to_string(),
+            crate::tr!("toast.unknown").into_owned(),
             Some(format!("{toast:?}")),
             None,
         ),
@@ -572,9 +562,9 @@ mod tests {
             assert_eq!(
                 manual.title,
                 if language == crate::LANGUAGE_ENGLISH {
-                    "Updates available for 2 providers"
+                    "Updates available for 2 Harnesses"
                 } else {
-                    "有 2 个 Provider 可更新"
+                    "有 2 个 Harness 可更新"
                 }
             );
             updates[1].automatic = true;
@@ -588,23 +578,6 @@ mod tests {
             );
         }
         crate::set_locale(crate::LANGUAGE_ENGLISH);
-    }
-
-    #[test]
-    fn locale_effect_is_applied_only_at_ui_boundary() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        apply_runtime_effect(&RuntimeEffect::ApplyLocale {
-            language: Some(crate::LANGUAGE_SIMPLIFIED_CHINESE.to_string()),
-        });
-        let chinese = crate::tr!("chat.new_thread").into_owned();
-
-        apply_runtime_effect(&RuntimeEffect::ApplyLocale {
-            language: Some(crate::LANGUAGE_ENGLISH.to_string()),
-        });
-        let english = crate::tr!("chat.new_thread").into_owned();
-
-        assert_eq!(chinese, "新建对话");
-        assert_eq!(english, "New thread");
     }
 
     #[test]

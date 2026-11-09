@@ -93,6 +93,9 @@ async function browser(base) {
   const wasm = await fetch(`${base}/tcode_web_bg.wasm`);
   assert.equal(wasm.status, 200);
   assert.deepEqual([...new Uint8Array(await wasm.arrayBuffer()).slice(0, 4)], [0, 97, 115, 109]);
+  const font = await fetch(`${base}/NotoSansJP-Regular.otf`, { method: 'HEAD' });
+  assert.equal(font.status, 200);
+  assert.equal(font.headers.get('content-type'), 'font/otf');
   const login = async value => fetch(`${base}/auth/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ password: value, device_name: 'Container smoke' }),

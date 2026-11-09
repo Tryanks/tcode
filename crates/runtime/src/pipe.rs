@@ -26,14 +26,10 @@ pub struct HostServices {
     pub background_startup_probes: bool,
     /// Generate AI-authored titles for new threads and explicit regeneration.
     pub ai_title_generation: bool,
-    /// URL/tokens and the broker receiver stay host-side. Requests reach
-    /// subscribed WebViews through the preview reverse-RPC topic.
+    /// URL/tokens and the broker receiver stay host-side. Requests reach the
+    /// client rendering the thread's preview on its preview topic.
     pub preview: Option<preview_mcp::PreviewMcpServer>,
     pub pull_requests: Option<pull_request_mcp::PullRequestMcpServer>,
-    /// Deliberate construction-time local handle. The broker receiver stays
-    /// entirely on the host executor; a remote transport must expose the same
-    /// operations as correlated RPC instead of moving the channel.
-    pub orchestrate: Option<orchestrate_mcp::OrchestrateMcpServer>,
     /// Registration-only startup data (URL and token issuer); this contains no
     /// request receiver or live backend handle.
     pub computer_use: Option<computer_use_mcp::ComputerUseMcpServer>,
@@ -43,19 +39,17 @@ pub struct HostServices {
 impl HostServices {
     /// Starts the MCP servers a host offers its agents on one loopback MCP host, computer use
     /// only where `computer_use`. A host that cannot bind or start runs without any of them.
-    /// Preview requests travel to whichever client shows the session's preview panel, so a host
-    /// without a desktop serves preview too.
+    /// Preview requests travel to the client rendering the thread's preview, so a host without a
+    /// desktop serves preview too.
     pub fn start_mcp_servers(&mut self, computer_use: bool) -> std::io::Result<()> {
         let mut host = mcp_host::Host::bind()?;
         let preview = preview_mcp::start(&mut host);
         let pull_requests = pull_request_mcp::start(&mut host);
-        let orchestrate = orchestrate_mcp::start(&mut host);
         let control = control_mcp::start(&mut host);
         let computer_use = computer_use.then(|| computer_use_mcp::start(&mut host));
         host.start()?;
         self.preview = Some(preview);
         self.pull_requests = Some(pull_requests);
-        self.orchestrate = Some(orchestrate);
         self.control = Some(control);
         self.computer_use = computer_use;
         Ok(())
@@ -136,6 +130,33 @@ impl SpawnedHost {
             .clone()
     }
 
+    /// Stop the host for an application that is quitting: its loop ends once
+    /// its inbox closes, which, as the process's last host, stops every harness
+    /// this process started (see [`RunningHost`]). A quit
+    /// that stops waiting first drops this future — gpui gives its quit
+    /// handlers a fixed budget, then exits — and the drop stops every harness
+    /// still running at once, on the quitting thread, since the host may not
+    /// run again before the process is gone.
+    pub fn stop(&self) -> impl std::future::Future<Output = ()> + use<> {
+        struct Unfinished;
+        impl Drop for Unfinished {
+            fn drop(&mut self) {
+                agent::stop_every_tree();
+            }
+        }
+        // Made outside the future, so a future dropped before its first
+        // poll stops them too.
+        let unfinished = Unfinished;
+        let to_host = self.to_host.clone();
+        let stopped = self.stopped.clone();
+        async move {
+            let unfinished = unfinished;
+            to_host.close();
+            let _ = stopped.recv().await;
+            std::mem::forget(unfinished);
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn shutdown_blocking(&self) -> Result<(), ProtocolError> {
         self.link().shutdown_blocking()?;
@@ -170,6 +191,29 @@ fn transport_error(error: impl std::fmt::Display) -> ProtocolError {
     }
 }
 
+/// A host running in this process. When the last one goes, every harness this
+/// process started is stopped, since the process may exit before their actors
+/// run again. A host that goes while another runs leaves its harnesses to their
+/// actors, which it asked to stop and which the running process still runs.
+struct RunningHost;
+
+static RUNNING_HOSTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl RunningHost {
+    fn enter() -> Self {
+        RUNNING_HOSTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for RunningHost {
+    fn drop(&mut self) {
+        if RUNNING_HOSTS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            agent::stop_every_tree();
+        }
+    }
+}
+
 /// Spawn the dedicated host thread and return its serialized transport and local affordances.
 pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::Result<SpawnedHost> {
     fn assert_send<T: Send>() {}
@@ -198,6 +242,8 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     std::thread::Builder::new()
         .name("tcode-host".into())
         .spawn(move || {
+            // Entered before the host answers that it is ready.
+            let running = RunningHost::enter();
             let mut state = match AppState::with_ai_titles(
                 store,
                 services.ai_title_generation,
@@ -212,9 +258,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             if let Some((url, tokens)) = preview_registration {
                 state.attach_preview_mcp(url, tokens);
             }
-            if let Some(server) = services.orchestrate.take() {
-                state.attach_orchestrate_mcp(server);
-            }
             if let Some(server) = services.computer_use.take() {
                 state.attach_computer_use_mcp(server.url, server.tokens);
             }
@@ -224,9 +267,9 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             let mut cx = HostCx::new(mailbox_tx, event_tx);
             state.pump_pull_request_requests(services.pull_requests.take(), &mut cx);
             state.start_pull_request_workers(&mut cx);
-            state.pump_orchestrate_requests(&mut cx);
             state.pump_control_requests(&mut cx);
             state.pump_preview_requests(preview_requests, &mut cx);
+            state.resume_undelivered_reports(&mut cx);
             if services.background_startup_probes {
                 state.recover_orphaned_worktrees(&mut cx);
                 state.refresh_model_catalogs(&mut cx);
@@ -237,12 +280,13 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.refresh_provider_status(&mut cx);
                 state.index_session_search(&mut cx);
             }
-            state.start_diff_pass(&mut cx);
+            state.start_storage_pass(&mut cx);
             state.sync_terminal_handles();
             state.start_activity(&mut cx);
             let _ = ready_tx.send(Ok(()));
             let mut state =
                 smol::block_on(host_loop(state, cx, attachment_rx, mailbox_rx, original_rx));
+            drop(running);
             if let Err(error) = state.close_store() {
                 log::error!("could not close the session store cleanly: {error}");
             }
@@ -513,7 +557,25 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::PreviewReply {
             request_id,
             response,
-        } => app.resolve_preview(request_id, response),
+        } => app.resolve_preview(request_id, response, cx),
+        Command::ShowPreviewHere {
+            session_id,
+            client_id,
+            take_over,
+        } => {
+            if let Err(error) = app.show_preview_here(&session_id, &client_id, take_over, cx) {
+                return CommandOutcome::Immediate(Err(error));
+            }
+        }
+        Command::ReportPreviewTabs {
+            session_id,
+            client_id,
+            tabs,
+        } => app.report_preview_tabs(&session_id, &client_id, tabs, cx),
+        Command::ReportPreviewInput {
+            session_id,
+            client_id,
+        } => app.report_preview_input(&session_id, &client_id, cx),
         Command::ApplyPendingRelaunch => {
             let (section, session_id) = app.apply_pending_relaunch();
             response = CommandResponse::PendingRelaunchSection {
@@ -528,11 +590,6 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             app.shutdown_all(cx);
             return CommandOutcome::StoreBarrier(app.store_write_barrier(cx));
         }
-        Command::OrchestrateTurn {
-            session_id,
-            text,
-            attachment_paths,
-        } => app.orchestrate_turn(&session_id, text, attachment_paths, cx),
         Command::ReloadProvider => app.reload_provider(cx),
         Command::LinkPullRequest {
             session_id,
@@ -607,9 +664,12 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::SetPullRequestWatchesPaused { session_id, paused } => {
             app.set_pull_request_watches_paused(&session_id, paused, cx);
         }
-        Command::RefreshHostCredentials => app.refresh_host_credentials(cx),
+        Command::RefreshHostCredentials => app.identify_host_credentials(cx),
         Command::SetHostToken { host, token, email } => {
             return CommandOutcome::Pending(app.set_host_token(host, token, email, cx));
+        }
+        Command::VerifyHostToken { host, token, email } => {
+            return CommandOutcome::Pending(app.verify_host_token(host, token, email, cx));
         }
         Command::SetProfileSecret {
             profile_id,
@@ -620,16 +680,20 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             app.update_profile_settings(&profile_id, patch, cx)
         }
         Command::CreateThirdPartyProfile {
+            provider,
             name,
             base_url,
             model,
             api_key,
             inherit_config,
         } => app.create_third_party_profile(
-            &name,
-            &base_url,
-            model.as_deref(),
-            &api_key,
+            provider,
+            crate::app::NewEndpointProfile {
+                name: &name,
+                base_url: &base_url,
+                model: model.as_deref(),
+                api_key: &api_key,
+            },
             inherit_config,
             cx,
         ),
@@ -653,6 +717,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::RefreshProviderStatus => app.refresh_provider_status(cx),
         Command::RefreshProviderUsage => app.refresh_provider_usage(cx),
         Command::CheckProviderVersions => app.check_provider_versions(cx),
+        Command::MeasureDiskUsage => app.measure_disk_usage(cx),
         Command::UpdateProviders { providers } => app.update_providers(providers, cx),
         Command::SetSidebarCollapsed { collapsed } => app.set_sidebar_collapsed(collapsed, cx),
         Command::RunGitAction {
@@ -671,8 +736,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             name,
             command,
             args,
-            env,
-        } => app.add_custom_acp_agent(name, command, args, env, cx),
+        } => app.add_custom_acp_agent(name, command, args, cx),
         Command::UpdateAcpAgent { id, patch } => app.update_acp_agent(&id, patch, cx),
         Command::SetActiveAcpAgent { session_id, id } => {
             app.set_active_acp_agent(&session_id, &id, cx)
@@ -819,8 +883,8 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             Ok(project_id) => response = CommandResponse::ProjectId(Some(project_id)),
             Err(error) => return CommandOutcome::Immediate(Err(error)),
         },
-        Command::CreateNewProject { name } => {
-            let task = app.create_new_project(name, cx);
+        Command::CreateNewProject { name, parent } => {
+            let task = app.create_new_project(name, parent, cx);
             return CommandOutcome::Pending(cx.spawn_background(async move {
                 task.await.map(|id| CommandResponse::ProjectId(Some(id)))
             }));
@@ -920,8 +984,17 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::RegenerateSessionTitle { session_id } => {
             app.regenerate_session_title(&session_id, cx)
         }
-        Command::ForkThread { id } => {
+        Command::ForkThread { id, at: None } => {
             response = CommandResponse::SessionId(app.fork_thread(&id, cx));
+        }
+        Command::ForkThread { id, at: Some(at) } => {
+            let Some(forked) = app.fork_thread_at(&id, &at, cx) else {
+                return CommandOutcome::Immediate(Err(ProtocolError {
+                    code: "fork_unavailable".into(),
+                    message: "This thread cannot be forked through that turn now.".into(),
+                }));
+            };
+            response = CommandResponse::SessionId(Some(forked));
         }
         Command::MoveSession {
             session_id,
@@ -995,6 +1068,30 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                     .map(|()| CommandResponse::Unit),
             );
         }
+        Command::ForceTerminate { session_id } => {
+            return CommandOutcome::Immediate(
+                app.force_terminate(&session_id, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
+        Command::MoveToBackground {
+            session_id,
+            item_id,
+        } => {
+            return CommandOutcome::Immediate(
+                app.move_to_background(&session_id, item_id)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
+        Command::StopBackgroundTask {
+            session_id,
+            task_id,
+        } => {
+            return CommandOutcome::Immediate(
+                app.stop_background_task(&session_id, task_id)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::CompactContext { session_id } => {
             return CommandOutcome::Immediate(
                 app.compact_context(&session_id, cx)
@@ -1056,12 +1153,68 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::CheckoutBranch { session_id, branch } => {
             app.checkout_branch(&session_id, branch, cx);
         }
-        Command::ToggleFavoriteModel { model } => app.toggle_favorite_model(&model, cx),
+        Command::ToggleFavoriteModel {
+            provider,
+            profile_id,
+            model,
+        } => app.toggle_favorite_model(provider, profile_id, model, cx),
         Command::RewindTurn {
             session_id,
             turn,
+            steer,
+            checkpoint_id,
             mode,
-        } => app.rewind_turn(&session_id, turn, mode, cx),
+            client_id,
+        } => {
+            let at = crate::app::RewindAt {
+                turn,
+                steer: steer.as_deref(),
+                checkpoint: checkpoint_id.as_deref(),
+            };
+            app.rewind_turn(&session_id, at, mode, client_id, cx);
+        }
+        Command::PreviewRewind {
+            session_id,
+            turn,
+            steer,
+            checkpoint_id,
+            mode,
+        } => {
+            let at = crate::app::RewindAt {
+                turn,
+                steer: steer.as_deref(),
+                checkpoint: checkpoint_id.as_deref(),
+            };
+            let answer = app.preview_rewind(&session_id, at, mode, cx);
+            return CommandOutcome::Pending(cx.spawn_background(async move {
+                answer
+                    .recv()
+                    .await
+                    .map(CommandResponse::RewindPreview)
+                    .map_err(|error| ProtocolError {
+                        code: "rewind_preview_unanswered".into(),
+                        message: error.to_string(),
+                    })
+            }));
+        }
+        Command::UndoRewind {
+            session_id,
+            checkpoint_id,
+        } => {
+            app.undo_rewind(&session_id, &checkpoint_id, cx);
+        }
+        Command::OpenRewoundBranch {
+            session_id,
+            turn,
+            checkpoint_id,
+        } => {
+            response = CommandResponse::SessionId(app.open_rewound_branch(
+                &session_id,
+                turn,
+                &checkpoint_id,
+                cx,
+            ));
+        }
     }
     CommandOutcome::Immediate(Ok(response))
 }
@@ -1140,6 +1293,15 @@ fn dispatch_query(
         Query::BrowseIconImages { directory } => {
             let task = cx.unblock(move || tcode_services::project_icons::browse(&directory));
             cx.spawn_background(async move { task.await.map_err(io_protocol_error) })
+        }
+        Query::BrowseDirectories { path } => {
+            let directories = app.user_directories().clone();
+            let task = cx.unblock(move || directories.browse_directories(&path));
+            cx.spawn_background(async move {
+                task.await
+                    .map(QueryResponse::Directories)
+                    .map_err(io_protocol_error)
+            })
         }
         Query::ReadIconImage { path } => {
             let task = cx.unblock(move || tcode_services::project_icons::thumbnail(&path));
@@ -1227,6 +1389,56 @@ fn dispatch_query(
                     .map_err(io_protocol_error)
             })
         }
+        Query::BeginUpload {
+            session_id,
+            name,
+            size,
+        } => {
+            if size > tcode_core::attachments::MAX_UPLOAD_BYTES {
+                return cx.spawn_background(async { Err(upload_refused("file too large")) });
+            }
+            if app.find_meta(&session_id).is_none() {
+                return cx.spawn_background(async { Err(upload_refused("unknown thread")) });
+            }
+            let directories = app.user_directories().clone();
+            let task = cx.unblock(move || directories.reserve_upload(&session_id, &name));
+            cx.spawn_background(async move {
+                task.await
+                    .map(QueryResponse::UploadBegun)
+                    .map_err(io_protocol_error)
+            })
+        }
+        Query::WriteUpload {
+            session_id,
+            path,
+            offset,
+            bytes,
+        } => {
+            let end = offset.saturating_add(bytes.len() as u64);
+            if end > tcode_core::attachments::MAX_UPLOAD_BYTES
+                || !app.user_directories().is_upload_of(&session_id, &path)
+            {
+                return cx.spawn_background(async { Err(upload_refused("not an open upload")) });
+            }
+            let task = cx
+                .unblock(move || tcode_services::user_files::append_upload(&path, offset, &bytes));
+            cx.spawn_background(async move {
+                task.await
+                    .map(|_| QueryResponse::UploadWritten)
+                    .map_err(io_protocol_error)
+            })
+        }
+        Query::DiscardUpload { session_id, path } => {
+            if !app.user_directories().is_upload_of(&session_id, &path) {
+                return cx.spawn_background(async { Err(upload_refused("not an upload")) });
+            }
+            let task = cx.unblock(move || tcode_services::user_files::discard_upload(&path));
+            cx.spawn_background(async move {
+                task.await
+                    .map(|()| QueryResponse::UploadDiscarded)
+                    .map_err(io_protocol_error)
+            })
+        }
         Query::RenderThreadExport { session_id, format } => {
             app.render_thread_export(&session_id, format, cx)
         }
@@ -1270,14 +1482,33 @@ fn dispatch_query(
             let archived = app.scoped_archived_sessions(&cx.principal);
             cx.spawn_background(async move { Ok(QueryResponse::ArchivedSessions(archived)) })
         }
-        Query::ControlActivity { limit } => {
-            let activity = app.control_activity(limit as usize);
+        Query::ControlActivity { limit, filter } => {
+            let activity = app.control_activity(&filter, limit as usize);
             cx.spawn_background(async move { Ok(QueryResponse::ControlActivity(activity)) })
+        }
+        Query::NativeMcpServers { profile_id } => {
+            let servers = app.native_mcp_servers(profile_id, cx);
+            cx.spawn_background(async move {
+                servers
+                    .await
+                    .map(QueryResponse::NativeMcpServers)
+                    .map_err(|message| ProtocolError {
+                        code: "native_mcp_unreadable".into(),
+                        message,
+                    })
+            })
         }
         Query::ReviewRecords { limit } => {
             let records = app.review_records(limit as usize);
             cx.spawn_background(async move { Ok(QueryResponse::ReviewRecords(records)) })
         }
+    }
+}
+
+fn upload_refused(reason: &str) -> ProtocolError {
+    ProtocolError {
+        code: "invalid_upload".into(),
+        message: reason.into(),
     }
 }
 
@@ -1291,6 +1522,107 @@ fn io_protocol_error(error: std::io::Error) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A quit stops waiting for the host after a fixed budget (gpui gives
+    /// its quit handlers 200 ms, then the process exits). With the host busy
+    /// past it and a harness that ignores everything but SIGKILL, the harness
+    /// is still gone by the time the quit gives up.
+    #[cfg(unix)]
+    #[test]
+    fn a_quit_that_stops_waiting_for_the_host_still_ends_every_harness() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root =
+            std::env::temp_dir().join(format!("tcode-abandoned-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pi = root.join("pi");
+        let pid_file = root.join("pi.pid");
+        std::fs::write(
+            &pi,
+            format!(
+                "#!/bin/sh\ntrap '' HUP INT TERM\necho $$ > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\nexec sleep 120\n",
+                pid = pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = spawn_host(
+            SessionStore::open_at(root.join("store")).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+
+        // A model catalog query the harness never answers.
+        let catalog = std::thread::spawn(move || {
+            smol::block_on(agent::pi::list_models(Some(pi), Default::default()))
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let harness: libc::pid_t = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|pid| pid.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the harness never ran"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+
+        let (entered, busy) = async_channel::bounded(1);
+        let (release, released) = async_channel::bounded::<()>(1);
+        let working = std::thread::spawn({
+            let host = host.clone();
+            move || {
+                smol::block_on(host.update_state_for_test(move |_, _| {
+                    entered.send_blocking(()).unwrap();
+                    let _ = released.recv_blocking();
+                }))
+            }
+        });
+        busy.recv_blocking().unwrap();
+
+        let stopped = smol::block_on(smol::future::or(
+            async {
+                host.stop().await;
+                true
+            },
+            async {
+                smol::Timer::after(std::time::Duration::from_millis(200)).await;
+                false
+            },
+        ));
+        assert!(!stopped, "the host was still busy");
+        let exited = |pid: libc::pid_t| {
+            // SAFETY: `info` is a valid, writable siginfo; WNOWAIT leaves the
+            // exit status for the thread that owns the child.
+            unsafe {
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                ) != 0
+                    || info.si_pid() == pid
+            }
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !exited(harness) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the harness {harness} outlived the quit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        release.send_blocking(()).unwrap();
+        working.join().unwrap().unwrap();
+        assert!(catalog.join().unwrap().is_err());
+        host.stopped.recv_blocking().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     pub(super) fn next_event(
         events: &async_channel::Receiver<EventEnvelope>,
@@ -1372,7 +1704,10 @@ mod tests {
                 Command::RewindTurn {
                     session_id: id.clone(),
                     turn: 999,
+                    steer: None,
+                    checkpoint_id: None,
                     mode: agent::RewindMode::Files,
+                    client_id: None,
                 },
                 "rewind_unavailable",
             ),
@@ -1500,11 +1835,6 @@ mod tests {
                 text: "hi".into(),
                 attachment_paths: Vec::new(),
             },
-            Command::OrchestrateTurn {
-                session_id: "gone".into(),
-                text: "hi".into(),
-                attachment_paths: Vec::new(),
-            },
         ] {
             assert_eq!(
                 link.command_blocking(command).unwrap_err().code,
@@ -1516,92 +1846,6 @@ mod tests {
         // Windows may still hold the draft's files for a moment after shutdown;
         // a leftover temp dir is not a test failure.
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// Export rendering is host work and delivery is the client's, so the query
-    /// must hand back the complete artifact and leave nothing behind on the
-    /// host — including for a client whose filesystem the host cannot reach.
-    #[test]
-    fn rendering_a_thread_export_returns_the_whole_artifact_and_writes_nothing() {
-        let data_root =
-            std::env::temp_dir().join(format!("tcode-export-query-{}", uuid::Uuid::new_v4()));
-        let store = SessionStore::open_at(data_root.clone()).expect("open session store");
-        let mut meta = tcode_core::project::SessionMeta::new(
-            agent::ProviderKind::ClaudeCode,
-            data_root.join("workspace"),
-            Some("opus".into()),
-        );
-        meta.id = "export-session".into();
-        meta.title = "Export: fixture/thread".into();
-        store
-            .append_event(
-                &meta.id,
-                1,
-                &agent::AgentEvent::Warning {
-                    message: "recorded".into(),
-                },
-            )
-            .expect("append event");
-        store.upsert_meta(&meta).expect("write meta");
-        let event_log = store.read_event_log(&meta.id).expect("read event log");
-        let index = store.load_index().expect("read index");
-        let reader = store.clone();
-
-        let host = spawn_host(store, HostServices::default()).expect("spawn host");
-        let before = tree_snapshot(&data_root);
-        let link = host.link();
-
-        let QueryResponse::ThreadExport {
-            bytes,
-            suggested_name,
-            mime,
-        } = smol::block_on(link.query(Query::RenderThreadExport {
-            session_id: meta.id.clone(),
-            format: tcode_protocol::ThreadExportFormat::Jsonl,
-        }))
-        .expect("render export over the pipe")
-        else {
-            panic!("unexpected export response");
-        };
-
-        // The JSONL artifact is a metadata header line followed by the session's
-        // own append-only log, byte for byte.
-        let split = bytes
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .expect("header line");
-        let header: serde_json::Value =
-            serde_json::from_slice(&bytes[..split]).expect("header is JSON");
-        assert_eq!(header["type"], "tcode_thread");
-        assert_eq!(header["version"], 1);
-        assert_eq!(header["meta"]["id"], "export-session");
-        assert_eq!(header["attachments"], "references_only");
-        assert_eq!(header["redaction"], "none");
-        assert_eq!(&bytes[split + 1..], event_log.as_slice());
-
-        // The name is safe on any client OS; the host's title had a separator in it.
-        assert_eq!(suggested_name, "Export- fixture-thread.jsonl");
-        assert_eq!(mime, "application/x-ndjson");
-
-        assert_eq!(
-            tree_snapshot(&data_root),
-            before,
-            "rendering an export must not write anything on the host"
-        );
-        assert_eq!(reader.read_event_log(&meta.id).unwrap(), event_log);
-        assert_eq!(reader.load_index().unwrap(), index);
-
-        let missing = smol::block_on(link.query(Query::RenderThreadExport {
-            session_id: "nope".into(),
-            format: tcode_protocol::ThreadExportFormat::Markdown,
-        }))
-        .expect_err("unknown session must be refused");
-        assert_eq!(missing.code, "unknown_session");
-
-        link.shutdown_blocking().expect("stop host");
-        host.stopped.recv_blocking().expect("host thread stopped");
-        drop(host);
-        std::fs::remove_dir_all(data_root).expect("remove test data");
     }
 
     /// A recorded image opened from a thread a client is reading streams from
@@ -1874,7 +2118,8 @@ mod tests {
             },
         })]);
         let running = topic("run-1", 40);
-        assert_eq!(reply(&running).rows, 0);
+        let mut held = reply(&running);
+        assert_eq!(held.rows, 0);
 
         // A progress bar redrawn in place, then a green verdict.
         let mut growth = (1..=9)
@@ -1883,12 +2128,16 @@ mod tests {
         growth.push(delta("100%\n\u{1b}[32mok\u{1b}[0m\n"));
         let deltas = growth.len();
         record(growth);
+        // The subscriber holds the answer, so each push is what changed.
         let mut pushes = 0;
         let latest = loop {
-            let frame = frame_of(next_event(&events, |event| event.topic == running));
+            match next_event(&events, |event| event.topic == running).event {
+                ServerEvent::CommandOutputDelta(delta) => held.apply(&delta),
+                other => panic!("a push after the answer sent {other:?}"),
+            }
             pushes += 1;
-            if frame.rows == 2 {
-                break frame;
+            if held.rows == 2 {
+                break held;
             }
         };
         assert!(pushes < deltas, "{pushes} pushes for {deltas} deltas");
@@ -1920,38 +2169,6 @@ mod tests {
         host.stopped.recv_blocking().expect("host thread stopped");
         drop(host);
         std::fs::remove_dir_all(data_root).expect("remove test data");
-    }
-
-    fn tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
-        fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                // The live store's own files are checked through the store
-                // above; Windows locks them while the host runs, so they
-                // cannot be read here.
-                if matches!(
-                    entry.file_name().to_str(),
-                    Some("tcode.db" | "tcode.db-wal" | "tcode.db-shm" | "tcode.lock")
-                ) {
-                    continue;
-                }
-                match entry.metadata() {
-                    Ok(metadata) if metadata.is_dir() => walk(&path, out),
-                    Ok(_) => {
-                        let bytes = std::fs::read(&path).expect("read fixture content");
-                        out.push((path, bytes));
-                    }
-                    Err(_) => {}
-                }
-            }
-        }
-        let mut out = Vec::new();
-        walk(root, &mut out);
-        out.sort();
-        out
     }
 
     #[test]
@@ -1993,148 +2210,6 @@ mod tests {
         link.shutdown_blocking().unwrap();
         host.stopped.recv_blocking().unwrap();
         drop(host);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn project_icons_replicate_persist_and_reset_to_t3_config() {
-        let root =
-            std::env::temp_dir().join(format!("tcode-project-icons-{}", uuid::Uuid::new_v4()));
-        let project_root = root.join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let logo = project_root.join("logo.png");
-        std::fs::write(&logo, include_bytes!("../../../assets/icons/app/tcode.png")).unwrap();
-        std::fs::write(
-            project_root.join("t3.json"),
-            r#"{"iconPath":"logo.png","scripts":[]}"#,
-        )
-        .unwrap();
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        // An older project record must still load with automatic artwork.
-        std::fs::write(
-            root.join("sessions.json"),
-            serde_json::json!({
-                "projects": [{"id":"p", "name":"Project", "root": project_root, "created_at":1}],
-                "sessions": []
-            })
-            .to_string(),
-        )
-        .unwrap();
-        store
-            .migrate(|_| {}, &std::sync::atomic::AtomicBool::new(false))
-            .unwrap();
-        let host = spawn_host(store.clone(), HostServices::default()).unwrap();
-        let link = host.link();
-        link.subscribe(Subscription {
-            known_index: None,
-            after: None,
-            topic: Topic::Index,
-        })
-        .unwrap();
-        let events = super::p4b_tests::observed_events(&link);
-        next_event(&events, |event| {
-            matches!(event.event, ServerEvent::IndexSnapshot(_))
-        });
-        let QueryResponse::FileBytes(png) = smol::block_on(link.query(Query::ReadProjectIcon {
-            project_id: "p".into(),
-            pixels: 128,
-        }))
-        .unwrap() else {
-            panic!()
-        };
-        link.command_blocking(Command::SetProjectIcon {
-            project_id: "p".into(),
-            png: None,
-        })
-        .unwrap();
-        let refreshed = next_event(
-            &events,
-            |event| matches!(&event.event, ServerEvent::IndexUpsertProject(project) if project.id == "p"),
-        );
-        assert_eq!(refreshed.topic, Topic::Index);
-        assert!(
-            link.command_blocking(Command::SetProjectIcon {
-                project_id: "missing".into(),
-                png: None
-            })
-            .is_err()
-        );
-        assert!(
-            link.command_blocking(Command::SetProjectIcon {
-                project_id: "p".into(),
-                png: Some(b"broken".to_vec())
-            })
-            .is_err()
-        );
-        link.command_blocking(Command::SetProjectIcon {
-            project_id: "p".into(),
-            png: Some(png.clone()),
-        })
-        .unwrap();
-        let event = next_event(
-            &events,
-            |event| matches!(&event.event, ServerEvent::IndexUpsertProject(project) if project.icon_path.is_some()),
-        );
-        let ServerEvent::IndexUpsertProject(project) = event.event else {
-            panic!()
-        };
-        let first = project.icon_path.clone().unwrap();
-        assert!(first.starts_with(root.join("project-icons")));
-        host.shutdown_blocking().unwrap();
-        // Each restart opens the data dir afresh, as a new process would.
-        let reopen = || SessionStore::open_at(root.clone()).unwrap();
-        assert_eq!(
-            reopen().read_file().unwrap().projects[0].icon_path.as_ref(),
-            Some(&first)
-        );
-        // Removing the source must not break the saved custom copy.
-        std::fs::remove_file(&logo).unwrap();
-        let host = spawn_host(reopen(), HostServices::default()).unwrap();
-        let link = host.link();
-        assert!(matches!(
-            smol::block_on(link.query(Query::ReadProjectIcon {
-                project_id: "p".into(),
-                pixels: 128,
-            }))
-            .unwrap(),
-            QueryResponse::FileBytes(_)
-        ));
-        link.command_blocking(Command::SetProjectIcon {
-            project_id: "p".into(),
-            png: Some(png),
-        })
-        .unwrap();
-        host.shutdown_blocking().unwrap();
-        let second = reopen().read_file().unwrap().projects[0]
-            .icon_path
-            .clone()
-            .unwrap();
-        assert_ne!(first, second);
-        assert!(!first.exists());
-        std::fs::write(&logo, include_bytes!("../../../assets/icons/app/tcode.png")).unwrap();
-        let host = spawn_host(reopen(), HostServices::default()).unwrap();
-        let link = host.link();
-        link.command_blocking(Command::SetProjectIcon {
-            project_id: "p".into(),
-            png: None,
-        })
-        .unwrap();
-        assert!(matches!(
-            smol::block_on(link.query(Query::ReadProjectIcon {
-                project_id: "p".into(),
-                pixels: 128,
-            }))
-            .unwrap(),
-            QueryResponse::FileBytes(_)
-        ));
-        host.shutdown_blocking().unwrap();
-        assert!(
-            reopen().read_file().unwrap().projects[0]
-                .icon_path
-                .is_none()
-        );
-        assert!(!second.exists());
-        assert!(logo.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2189,8 +2264,8 @@ mod tests {
             ),
             (
                 Some(3_000),
-                AgentEvent::TurnStarted {
-                    turn_id: "t2".into(),
+                AgentEvent::Warning {
+                    message: "Reconnecting.".into(),
                 },
             ),
         ]

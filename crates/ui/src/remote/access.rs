@@ -24,6 +24,18 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Mint a new invitation, replacing the current one.
 pub(super) type NewInvitation = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -35,14 +47,18 @@ fn new_invitation_button(on_new: NewInvitation) -> Button {
 }
 
 /// The invitation a machine shows other devices: the QR to scan, the link to
-/// copy, how long it lasts and the way to a fresh one.
+/// copy, how long it lasts and the way to a fresh one. `reflow` places the
+/// QR beside or under the text.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn invitation_card(
     link: &str,
     remaining: u64,
     group: Option<&str>,
+    reflow: crate::motion::reflow::Reflow,
     compact: bool,
     on_new: NewInvitation,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
     let copied = link.to_owned();
     let text = v_flex()
@@ -79,10 +95,18 @@ pub(super) fn invitation_card(
                 )
                 .child(new_invitation_button(on_new).ghost().outline()),
         );
-    beside_qr(text, link, compact, cx)
-        .p(px(crate::material::CARD_INSET))
-        .debug_selector(|| "remote-invitation".into())
-        .into_any_element()
+    beside_qr(
+        "remote-invitation-qr",
+        reflow,
+        text,
+        link,
+        compact,
+        window,
+        cx,
+    )
+    .p(px(crate::material::CARD_INSET))
+    .debug_selector(|| "remote-invitation".into())
+    .into_any_element()
 }
 
 /// The invitation ran out: say so, next to the button that mints another.
@@ -110,6 +134,9 @@ pub(crate) struct AccessSection {
     observer: SpacesObserver,
     /// Repaints the invitation's countdown while there is one.
     ticker: Option<Task<()>>,
+    /// The section's size-class motion: the window draws it under another
+    /// parent when it turns compact or wide.
+    motion: crate::motion::owned::Owned,
 }
 
 impl AccessSection {
@@ -125,6 +152,7 @@ impl AccessSection {
             pairing_switch,
             observer: SpacesObserver::default(),
             ticker: None,
+            motion: Default::default(),
         }
     }
 
@@ -151,6 +179,7 @@ impl AccessSection {
         &mut self,
         spaces: &Entity<Spaces>,
         compact: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let model = spaces.read(cx);
@@ -166,25 +195,49 @@ impl AccessSection {
             }
         });
         self.sync_ticker(invitation.is_some(), cx);
-        let row = match invitation {
-            Some((link, remaining)) => {
-                invitation_card(&link, remaining, group.as_deref(), compact, on_new, cx)
-            }
-            None => expired_invitation_row(compact, on_new, cx),
-        };
-        settings_group(crate::tr!("remote.invite.title"), vec![row], cx).into_any_element()
+        let expired = invitation.is_none().then_some(());
+        let live = crate::motion::shown(
+            "remote-invitation-live",
+            invitation.map(|(link, remaining)| (link, remaining, group)),
+            SHOW,
+            window,
+            cx,
+        )
+        .map(|shown| {
+            let (link, remaining, group) = &shown.value;
+            shown.fold(invitation_card(
+                link,
+                *remaining,
+                group.as_deref(),
+                self.motion
+                    .reflow_in("remote-invitation-qr", u64::from(compact), window, cx),
+                compact,
+                on_new.clone(),
+                window,
+                cx,
+            ))
+        });
+        let expired = crate::motion::shown("remote-invitation-expired", expired, SHOW, window, cx)
+            .map(|shown| shown.fold(expired_invitation_row(compact, on_new, cx)));
+        settings_group(
+            crate::tr!("remote.invite.title"),
+            live.into_iter().chain(expired).collect(),
+            cx,
+        )
+        .into_any_element()
     }
 
     fn devices(
         &self,
         spaces: &Entity<Spaces>,
         compact: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let model = spaces.read(cx);
+        let (known, devices) = (model.spaces().to_vec(), model.devices().to_vec());
         let space_name = |space_id: &str| {
-            model
-                .spaces()
+            known
                 .iter()
                 .find(|space| space.id == space_id)
                 .map(|space| space.name.clone())
@@ -193,30 +246,79 @@ impl AccessSection {
         // removes it from every machine of the group. A browser is listed
         // under a UUID and never is one.
         let group = model.group().map(|group| group.name.clone());
-        let mut rows = Vec::new();
-        for device in model.devices() {
-            let space = match &device.access {
-                DeviceAccess::Space { space_id } => space_name(space_id),
-                DeviceAccess::Full => None,
-            };
-            let in_group = group.clone().filter(|_| {
-                device.access == DeviceAccess::Full
-                    && tcode_client::pairing::valid_host_id(&device.id)
-            });
-            let status_color = match &device.path {
-                Some(_) => cx.theme().success,
-                None => cx.theme().muted_foreground,
-            };
-            let spaces = spaces.clone();
-            let id = device.id.clone();
-            let name = device.name.clone();
-            let revoke = move |window: &mut Window, cx: &mut App| {
-                let task = spaces.update(cx, |spaces, cx| {
-                    spaces.act_hosting(HostingAction::RevokeDevice(id.clone()), cx)
+        // The empty row is one more row, which leaves as the first device
+        // pairs and comes back once the last is revoked.
+        let rows = if devices.is_empty() {
+            vec![(SharedString::from("devices-empty"), None)]
+        } else {
+            devices
+                .into_iter()
+                .map(|device| {
+                    (
+                        SharedString::from(format!("device-{}", device.id)),
+                        Some(device),
+                    )
+                })
+                .collect()
+        };
+        // On a compact window a device's controls go under its name.
+        let reflow = self
+            .motion
+            .reflow_in("remote-devices", u64::from(compact), window, cx);
+        let rows = crate::motion::keyed(
+            "remote-devices",
+            rows,
+            ROWS,
+            window,
+            cx,
+            |_, device, window, cx| {
+                let Some(device) = device else {
+                    return empty_row(crate::tr!("remote.devices.empty"), cx).into_any_element();
+                };
+                let space = match &device.access {
+                    DeviceAccess::Space { space_id } => space_name(space_id),
+                    DeviceAccess::Full => None,
+                };
+                let in_group = group.clone().filter(|_| {
+                    device.access == DeviceAccess::Full
+                        && tcode_client::pairing::valid_host_id(&device.id)
                 });
-                report("remote.devices.revoke_failed", task, window, cx);
-            };
-            rows.push(
+                let status_color = gpui_base::motion::transition(
+                    (
+                        SharedString::from(format!("device-status-{}", device.id)),
+                        "color",
+                    ),
+                    match &device.path {
+                        Some(_) => cx.theme().success,
+                        None => cx.theme().muted_foreground,
+                    },
+                    gpui_base::motion::Transition::new(GLIDE),
+                    window,
+                    cx,
+                );
+                let path = crate::motion::cross_fade(
+                    SharedString::from(format!("device-path-{}", device.id)),
+                    super::path_label(device.path.as_ref()),
+                    CHANGE,
+                    window,
+                    cx,
+                    move |label, _, cx| {
+                        div()
+                            .text_secondary(compact, cx)
+                            .text_color(status_color)
+                            .child(label.clone())
+                            .into_any_element()
+                    },
+                );
+                let spaces = spaces.clone();
+                let id = device.id.clone();
+                let name = device.name.clone();
+                let revoke = move |window: &mut Window, cx: &mut App| {
+                    let task = spaces.update(cx, |spaces, cx| {
+                        spaces.act_hosting(HostingAction::RevokeDevice(id.clone()), cx)
+                    });
+                    report("remote.devices.revoke_failed", task, window, cx);
+                };
                 row_frame(compact, cx)
                     .child(
                         h_flex()
@@ -234,53 +336,57 @@ impl AccessSection {
                             .children(space.map(|name| super::spaces::member_badge(&name, cx))),
                     )
                     .child(
-                        h_flex()
-                            .gap_3()
-                            .items_center()
-                            .when(compact, |controls| controls.w_full().justify_between())
-                            .child(
-                                div()
-                                    .text_secondary(compact, cx)
-                                    .text_color(status_color)
-                                    .child(super::path_label(device.path.as_ref())),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("revoke-{}", device.id)))
+                        reflow.part(
+                            format!("controls-{}", device.id),
+                            h_flex()
+                                .gap_3()
+                                .items_center()
+                                .when(compact, |controls| controls.w_full().justify_between())
+                                .child(path)
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "revoke-{}",
+                                        device.id
+                                    )))
                                     .ghost()
                                     .compact()
                                     .danger()
                                     .label(crate::tr!("remote.devices.revoke"))
-                                    .on_click(move |_, window, cx| match in_group.clone() {
-                                        Some(group) => super::group::confirm_group_removal(
-                                            name.clone(),
-                                            group,
-                                            revoke.clone(),
-                                            window,
-                                            cx,
-                                        ),
-                                        None => super::confirm_destructive(
-                                            crate::tr!(
-                                                "remote.devices.revoke_title",
-                                                name = name.clone()
-                                            )
-                                            .into_owned(),
-                                            crate::tr!("remote.devices.revoke_description")
+                                    .on_click(
+                                        move |_, window, cx| match in_group.clone() {
+                                            Some(group) => super::group::confirm_group_removal(
+                                                name.clone(),
+                                                group,
+                                                revoke.clone(),
+                                                window,
+                                                cx,
+                                            ),
+                                            None => super::confirm_destructive(
+                                                crate::tr!(
+                                                    "remote.devices.revoke_title",
+                                                    name = name.clone()
+                                                )
                                                 .into_owned(),
-                                            crate::tr!("remote.devices.revoke").into_owned(),
-                                            revoke.clone(),
-                                            window,
-                                            cx,
-                                        ),
-                                    }),
-                            ),
+                                                crate::tr!("remote.devices.revoke_description")
+                                                    .into_owned(),
+                                                crate::tr!("remote.devices.revoke").into_owned(),
+                                                revoke.clone(),
+                                                window,
+                                                cx,
+                                            ),
+                                        },
+                                    ),
+                                ),
+                        ),
                     )
-                    .into_any_element(),
-            );
-        }
-        if rows.is_empty() {
-            rows.push(empty_row(crate::tr!("remote.devices.empty"), cx).into_any_element());
-        }
-        settings_group(crate::tr!("remote.devices.section"), rows, cx).into_any_element()
+                    .into_any_element()
+            },
+        );
+        reflow.render(settings_group(
+            crate::tr!("remote.devices.section"),
+            vec![rows.render(v_flex().w_full())],
+            cx,
+        ))
     }
 }
 
@@ -289,18 +395,23 @@ impl gpui::Render for AccessSection {
         let compact = crate::window_seam::window_is_compact(window, cx);
         let spaces = (self.resolve)(&self.store, cx);
         self.observer.watch(spaces.as_ref(), cx);
-        let Some(spaces) = spaces.filter(|spaces| spaces.read(cx).loaded()) else {
+        let loaded = spaces.filter(|spaces| spaces.read(cx).loaded());
+        // The section folds in at the machine's first answer, and out with
+        // the machine it last showed once there is none to manage: hosting
+        // stopped, or the attachment lost the scope.
+        let Some(shown) = crate::motion::shown("remote-access", loaded, SHOW, window, cx) else {
             self.sync_ticker(false, cx);
             return div().into_any_element();
         };
+        let spaces = shown.value.clone();
         let accepting = spaces.read(cx).accepting();
-        let mut column = v_flex()
-            .w_full()
-            .gap(crate::material::section_gap(cx))
-            .debug_selector(|| "remote-access".into());
+        let gap = crate::material::section_gap(cx);
+        // Spacing rides inside each part, so a part that folds away takes
+        // its gap with it.
+        let mut column = v_flex().w_full().debug_selector(|| "remote-access".into());
         if self.pairing_switch {
             let switch = spaces.clone();
-            column = column.child(settings_group(
+            column = column.child(div().pb(gap).child(settings_group(
                 crate::tr!("remote.host.section"),
                 vec![
                     ToggleRow::new(
@@ -318,15 +429,28 @@ impl gpui::Render for AccessSection {
                     .into_any_element(),
                 ],
                 cx,
-            ));
+            )));
         }
-        if accepting {
-            column = column.child(self.invitation(&spaces, compact, cx));
-        } else {
+        if !accepting {
             self.sync_ticker(false, cx);
         }
-        column
-            .child(self.devices(&spaces, compact, cx))
-            .into_any_element()
+        let invitation = crate::motion::shown(
+            "remote-invitation-group",
+            accepting.then_some(()),
+            SHOW,
+            window,
+            cx,
+        )
+        .map(|fold| {
+            fold.fold(
+                div()
+                    .pb(gap)
+                    .child(self.invitation(&spaces, compact, window, cx)),
+            )
+        });
+        column = column
+            .children(invitation)
+            .child(self.devices(&spaces, compact, window, cx));
+        shown.fold(column)
     }
 }

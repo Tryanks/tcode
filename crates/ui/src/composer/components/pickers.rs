@@ -8,11 +8,20 @@ use crate::{
 };
 use gpui_base::slider::{SliderEvent, SliderState};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(Clone)]
 /// One selectable model in the picker (a catalog [`ModelSpec`] row).
 struct ModelRow {
-    /// Provider-native model id (the favorites key + selection value), or the
-    /// ACP agent's registry id when `acp` is set.
+    /// Provider-native model id (the selection value), or the ACP agent's
+    /// registry id when `acp` is set.
     id: String,
     name: String,
     provider: ProviderKind,
@@ -26,24 +35,22 @@ struct ModelRow {
     favorite: bool,
 }
 
-/// The provider glyph tinted with the accent configured on its Settings →
-/// Providers card, falling back to the provider's own brand tint.
-fn tinted_provider_glyph(provider: ProviderKind, store: &WorkspaceStore) -> Icon {
-    let glyph = provider_glyph(provider);
-    let profile_id = tcode_core::settings::Settings::builtin_profile_id(provider);
-    match store.provider_profile_accent(profile_id) {
-        Some(accent) => glyph.text_color(rgb(accent)),
-        None => glyph,
-    }
+/// The row a thread runs on, in a row's own terms. Its id alone names no row:
+/// two accounts of one CLI list the same ids, and Favorites spans providers.
+#[derive(Clone)]
+struct SelectedModel {
+    id: String,
+    provider: ProviderKind,
+    profile_id: Option<String>,
 }
 
-/// A profile's rail glyph: the kind's glyph tinted with the profile's own accent
-/// (so a third-party profile can be told apart from the built-in at a glance).
-fn tinted_profile_glyph(profile_id: &str, store: &WorkspaceStore) -> Icon {
-    let glyph = provider_glyph(store.provider_profile_kind(profile_id));
-    match store.provider_profile_accent(profile_id) {
-        Some(accent) => glyph.text_color(rgb(accent)),
-        None => glyph,
+impl ModelRow {
+    fn is_selected(&self, selected: &Option<SelectedModel>) -> bool {
+        selected.as_ref().is_some_and(|selected| {
+            selected.id == self.id
+                && selected.provider == self.provider
+                && selected.profile_id == self.profile_id
+        })
     }
 }
 
@@ -71,13 +78,15 @@ impl Composer {
         }
     }
 
-    /// The model-picker button + popover (anchored above, ~360px).
-    pub(in super::super) fn render_model_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The model-picker button + popover (anchored above, ~360px), with the
+    /// model's name; none before the thread has a model.
+    pub(in super::super) fn render_model_picker(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<(gpui::SharedString, AnyElement)> {
         let store = self.workspace_store.read(cx);
-        let composer_state = store.composer_state();
-        let Some(active_model) = composer_state.active_model.clone() else {
-            return div().into_any_element();
-        };
+        let composer_state = self.composer_state(cx);
+        let active_model = composer_state.active_model.clone()?;
         let provider = active_model.provider;
         let current_model = active_model.model;
         let acp_agent_id = active_model.acp_agent_id;
@@ -92,7 +101,8 @@ impl Composer {
                 .as_deref()
                 .unwrap_or_else(|| tcode_core::settings::Settings::builtin_profile_id(provider)),
         );
-        let display = current_model_name_resolved(&resolved, &catalog, current_model.as_deref());
+        let display: gpui::SharedString =
+            current_model_name_resolved(&resolved, &catalog, current_model.as_deref()).into();
 
         // Build the filtered row list for the current frame. Favorites open
         // first when any exist. The favorites sweep covers every
@@ -145,8 +155,9 @@ impl Composer {
                 })
                 .collect(),
             // Each profile is its own rail and lists only its own models: the
-            // built-in profiles show the official catalog; a third-party profile
-            // (e.g. Klaude Kode → Kimi) shows only the models added to its card.
+            // built-in profiles and other accounts show the official catalog; a
+            // third-party profile (e.g. Klaude Kode → Kimi) shows only the models
+            // added to its card.
             PickerRail::Profile(id) => {
                 let kind = store.provider_profile_kind(id);
                 let is_builtin = tcode_core::settings::Settings::is_builtin_profile_id(id);
@@ -179,9 +190,11 @@ impl Composer {
                 })
                 .collect(),
         };
+        let all_rows: Rc<[ModelRow]> = all_rows.into();
         let rows: Rc<[ModelRow]> = all_rows
-            .into_iter()
+            .iter()
             .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query))
+            .cloned()
             .collect();
         // Only the built-in profiles have a probed catalog that can still be
         // loading; a third-party profile shows its own slugs immediately.
@@ -198,7 +211,14 @@ impl Composer {
         let selected = match provider {
             ProviderKind::Acp => acp_agent_id.clone(),
             _ => current_model.clone(),
-        };
+        }
+        .map(|id| SelectedModel {
+            id,
+            provider,
+            profile_id: active_profile
+                .clone()
+                .filter(|id| !tcode_core::settings::Settings::is_builtin_profile_id(id)),
+        });
         let acp_rail_agents: Vec<(String, String)> = store
             .settings_installed_acp_agents()
             .into_iter()
@@ -207,6 +227,7 @@ impl Composer {
             .collect();
 
         let trigger = Button::new("model-picker")
+            .motion(&self.button_motion())
             .debug_selector(|| "model-picker".into())
             // The model name truncates so the row's other chips and its
             // actions keep room.
@@ -224,13 +245,53 @@ impl Composer {
                     .gap_1p5()
                     .items_center()
                     .text_chip(cx)
-                    .child(tinted_provider_glyph(provider, store))
-                    .child(
+                    .child({
+                        // The account the thread runs on, in its card's accent;
+                        // another account's glyph cross-fades over it.
+                        let (motion, key) = (self.motion.clone(), self.motion_key("model-glyph"));
+                        let profile = (
+                            provider,
+                            active_profile.clone().unwrap_or_else(|| {
+                                tcode_core::settings::Settings::builtin_profile_id(provider)
+                                    .to_owned()
+                            }),
+                        );
+                        let store = self.workspace_store.clone();
+                        crate::motion::Sampled::new(move |window, cx| {
+                            motion.cross_fade_part(
+                                key,
+                                profile,
+                                CHANGE,
+                                window,
+                                cx,
+                                move |(provider, profile_id), _, cx| {
+                                    profile_glyph(store.read(cx), *provider, Some(profile_id))
+                                        .into_any_element()
+                                },
+                            )
+                        })
+                    })
+                    .child({
+                        // A new model's name cross-fades over the last one's.
+                        let (motion, key) = (self.motion.clone(), self.motion_key("model-label"));
+                        let display = display.clone();
                         div()
                             .min_w_0()
                             .overflow_hidden()
-                            .child(crate::widgets::fade_text(display)),
-                    )
+                            .child(crate::motion::Sampled::new(move |window, cx| {
+                                motion.cross_fade_part(
+                                    key,
+                                    display,
+                                    CHANGE,
+                                    window,
+                                    cx,
+                                    |display, _, _| {
+                                        crate::widgets::fade_text(display.clone())
+                                            .into_any_element()
+                                    },
+                                )
+                            }))
+                    })
                     .child(
                         Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground),
                     ),
@@ -243,46 +304,51 @@ impl Composer {
         // field asks for the keyboard.
         let search_focus = (!crate::window_seam::is_mobile(cx))
             .then(|| self.model_search.read(cx).focus_handle(cx));
-        crate::material::overlay_popover(("model-picker-popover", self.model_picker_token), cx)
-            .when_some(search_focus, |popover, focus| popover.track_focus(&focus))
-            .anchor(Anchor::BottomLeft)
-            .when(self.compact, |popover| {
-                popover.bottom_sheet(crate::tr!("mobile.model"))
-            })
-            .default_open(self.model_picker_token > 0 && self.interactive(cx))
-            .trigger(trigger)
-            .content(move |_state, _window, cx| {
-                let rows = rows.clone();
-                let store_entity = store_entity.clone();
-                let model_search = model_search.clone();
-                let composer = composer.clone();
-                let selected = selected.clone();
-                let popover = cx.entity();
-                let rail = rail.clone();
-                let acp_rail_agents = acp_rail_agents.clone();
-                render_model_pane(
-                    rows,
-                    &selected,
-                    rail,
-                    &acp_rail_agents,
-                    pending_restart,
-                    loading,
-                    &store_entity,
-                    &model_search,
-                    &composer,
-                    &popover,
-                    cx,
-                )
-            })
-            .into_any_element()
+        let picker =
+            crate::material::overlay_popover(("model-picker-popover", self.model_picker_token), cx)
+                .when_some(search_focus, |popover, focus| popover.track_focus(&focus))
+                .anchor(Anchor::BottomLeft)
+                .when(self.compact, |popover| {
+                    popover.bottom_sheet(crate::tr!("mobile.model"))
+                })
+                .default_open(self.model_picker_token > 0 && self.interactive(cx))
+                .trigger(trigger)
+                .content(move |_state, _window, cx| {
+                    let rows = rows.clone();
+                    let all_rows = all_rows.clone();
+                    let store_entity = store_entity.clone();
+                    let model_search = model_search.clone();
+                    let composer = composer.clone();
+                    let selected = selected.clone();
+                    let popover = cx.entity();
+                    let rail = rail.clone();
+                    let acp_rail_agents = acp_rail_agents.clone();
+                    render_model_pane(
+                        rows,
+                        all_rows,
+                        &selected,
+                        rail,
+                        &acp_rail_agents,
+                        pending_restart,
+                        loading,
+                        &store_entity,
+                        &model_search,
+                        &composer,
+                        &popover,
+                        cx,
+                    )
+                });
+        Some((display, picker.into_any_element()))
     }
 
-    /// The traits chip ("High · Fast") + descriptor popover. Empty element when
-    /// the current model has no descriptors. The context window is the context
-    /// meter's, so it is neither listed nor named here.
-    pub(in super::super) fn render_traits_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let store = self.workspace_store.read(cx);
-        let composer = store.composer_state();
+    /// The traits chip ("High · Fast") + descriptor popover, with its label;
+    /// none when the current model has no descriptors. The context window is
+    /// the context meter's, so it is neither listed nor named here.
+    pub(in super::super) fn render_traits_picker(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<(gpui::SharedString, AnyElement)> {
+        let composer = self.composer_state(cx);
         let descriptors = composer
             .active_option_descriptors
             .iter()
@@ -326,17 +392,22 @@ impl Composer {
                 effort.map(str::to_owned)
             }
             .unwrap_or_else(|| crate::tr!("composer.context_unknown").into_owned());
-            return Button::new("traits-chip")
-                .debug_selector(|| "traits-chip".into())
-                .ghost()
-                .chip()
-                .touch(self.compact)
-                .disabled(true)
-                .label(label)
-                .into_any_element();
+            let label = gpui::SharedString::from(label);
+            return Some((
+                label.clone(),
+                Button::new("traits-chip")
+                    .motion(&self.button_motion())
+                    .debug_selector(|| "traits-chip".into())
+                    .ghost()
+                    .chip()
+                    .touch(self.compact)
+                    .disabled(true)
+                    .label(label)
+                    .into_any_element(),
+            ));
         }
         if descriptors.is_empty() {
-            return div().into_any_element();
+            return None;
         }
         let spec = ModelSpec {
             options: descriptors,
@@ -347,7 +418,7 @@ impl Composer {
                 options: Vec::new(),
             })
         };
-        let selections = composer.active_option_selections;
+        let selections = composer.active_option_selections.clone();
         // Keep the effort value readable on phones; the sheet still exposes
         // every parameter, including context capacity and service tier.
         let mut chip_spec = spec.clone();
@@ -358,13 +429,12 @@ impl Composer {
         {
             chip_spec.options = vec![effort.clone()];
         }
-        let Some(label) = traits_chip_label(&chip_spec, &selections) else {
-            return div().into_any_element();
-        };
+        let label = gpui::SharedString::from(traits_chip_label(&chip_spec, &selections)?);
         let muted = cx.theme().muted_foreground;
         let pending_restart = composer.options_pending_restart;
 
         let trigger = Button::new("traits-chip")
+            .motion(&self.button_motion())
             .debug_selector(|| "traits-chip".into())
             .ghost()
             .chip()
@@ -376,13 +446,17 @@ impl Composer {
                     .items_center()
                     .text_chip(cx)
                     .text_color(muted)
-                    .child(div().whitespace_nowrap().child(label))
+                    .child(glided_label(
+                        self.motion.scope(self.motion_key("traits-label")),
+                        label.clone(),
+                    ))
                     .child(Icon::new(IconName::ChevronDown)),
             );
 
         let store_entity = self.workspace_store.clone();
+        let session_id = self.session_id.clone();
         let composer_entity = cx.entity();
-        crate::material::overlay_popover("traits-popover", cx)
+        let picker = crate::material::overlay_popover("traits-popover", cx)
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
                 popover.bottom_sheet(crate::tr!("mobile.model"))
@@ -396,18 +470,19 @@ impl Composer {
                     composer_entity.read(cx).compact,
                     pending_restart,
                     &store_entity,
+                    session_id.clone(),
                     &popover,
                     window,
                     cx,
                 )
-            })
-            .into_any_element()
+            });
+        Some((label, picker.into_any_element()))
     }
 
     /// The circular context-window meter (ring showing used%, red > 90%) and
     /// its hover/click popover.
     pub(in super::super) fn render_context_meter(&self, cx: &mut Context<Self>) -> AnyElement {
-        let composer = self.workspace_store.read(cx).composer_state();
+        let composer = self.composer_state(cx);
         let usage = composer.token_usage;
         let account_usage = composer.usage.clone();
         let provider = composer.provider;
@@ -426,6 +501,7 @@ impl Composer {
         track.a = 0.35;
 
         let trigger = Button::new("context-meter")
+            .motion(&self.button_motion())
             .debug_selector(|| "context-meter".into())
             .aria_label(crate::tr!("composer.context_window_title").into_owned())
             .ghost()
@@ -433,12 +509,19 @@ impl Composer {
             .touch(self.compact)
             .disabled(!self.interactive(cx))
             // The ring is a glyph at an icon's default size.
-            .child(div().size(px(16.)).child(crate::widgets::ring::ring_canvas(
-                pct.unwrap_or(0.0),
-                ring_color,
-                track,
-            )));
+            // The ring sweeps to a new reading and its colour glides as it
+            // crosses into overload.
+            .child(div().size(px(16.)).child({
+                let motion = self.motion.scope(self.motion_key("context-ring"));
+                crate::motion::Sampled::new(move |window, cx| {
+                    let curve = crate::motion::Curve::new(GLIDE);
+                    let pct = motion.transition("pct", pct.unwrap_or(0.0), &curve, window, cx);
+                    let color = motion.transition("color", ring_color, &curve, window, cx);
+                    crate::widgets::ring::ring_canvas(pct, color, track).into_any_element()
+                })
+            }));
 
+        let session_id = self.session_id.clone();
         crate::material::overlay_popover("context-popover", cx)
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
@@ -447,7 +530,8 @@ impl Composer {
             .trigger(trigger)
             .content(move |_, window, cx| {
                 let compact = crate::window_seam::window_is_compact(window, cx);
-                let edit_window = window_editable.then(|| store_entity.clone());
+                let edit_window =
+                    window_editable.then(|| (store_entity.clone(), session_id.clone()));
                 render_context_meter_pane(
                     usage,
                     account_usage.clone(),
@@ -455,6 +539,7 @@ impl Composer {
                     pct,
                     compact,
                     edit_window,
+                    window,
                     cx,
                 )
             })
@@ -462,7 +547,7 @@ impl Composer {
     }
 
     pub(in super::super) fn render_permission_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let composer = self.workspace_store.read(cx).composer_state();
+        let composer = self.composer_state(cx);
         let Some(control) = PermissionControl::from_composer(&composer) else {
             return permission_notice(&composer, cx);
         };
@@ -491,17 +576,22 @@ impl Composer {
                             .overflow_hidden()
                             .child(crate::widgets::fade_text(label)),
                     )
-                    .when(pending, |row| {
-                        row.child(
+                    .child(folding_suffix(
+                        "permission-chip-pending",
+                        pending,
+                        px(6.),
+                        |cx| {
                             div()
                                 .flex_none()
                                 .text_secondary(false, cx)
-                                .child(crate::tr!("permission.pending")),
-                        )
-                    })
+                                .child(crate::tr!("permission.pending"))
+                                .into_any_element()
+                        },
+                    ))
                     .child(Icon::new(IconName::ChevronDown)),
             );
         let store_entity = self.workspace_store.clone();
+        let session_id = self.session_id.clone();
         let compact = self.compact;
         let title = control.label.clone();
         crate::material::overlay_popover("permission-popover", cx)
@@ -509,62 +599,107 @@ impl Composer {
             .when(self.compact, |popover| popover.bottom_sheet(title))
             .trigger(trigger)
             .content(move |_, _, cx| {
-                render_permission_pane(&control, compact, &store_entity, &cx.entity(), cx)
+                render_permission_pane(
+                    &control,
+                    compact,
+                    &store_entity,
+                    session_id.clone(),
+                    &cx.entity(),
+                    cx,
+                )
             })
             .into_any_element()
     }
 
-    /// The phone composer's "+" : a sheet of ways to add to the message.
-    /// Only the photo library for now; more rows go here, not in the row.
+    /// The "+": a menu of the platform's pickers on a client that has them,
+    /// and otherwise, on a desktop, the system's file picker.
     pub(in super::super) fn render_attach_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let composer = cx.entity();
-        // Only a phone composer offers the photo library, so the control is
-        // always a touch one.
+        let compact = self.compact;
+        let (photos, files) =
+            cx.try_global::<crate::remote::ClientAttachment>()
+                .map_or((false, false), |client| {
+                    let host = client.host();
+                    (host.supports_image_picker(), host.supports_file_picker())
+                });
+        #[cfg(feature = "native-dialogs")]
+        if !photos && !files {
+            return crate::material::toolbar_icon_button(
+                "attach-files",
+                IconName::Plus,
+                crate::tr!("attach.attach_files"),
+                compact,
+            )
+            .debug_selector(|| "attach-files".into())
+            .on_click(cx.listener(|composer, _, window, cx| composer.pick_paths(window, cx)))
+            .into_any_element();
+        }
         let trigger = crate::material::toolbar_icon_button(
             "attach-menu",
             IconName::Plus,
             crate::tr!("attach.add"),
-            true,
+            compact,
         )
         .debug_selector(|| "attach-menu".into());
 
         crate::material::overlay_popover("attach-popover", cx)
             .anchor(Anchor::BottomLeft)
-            .bottom_sheet(crate::tr!("attach.add"))
+            .when(compact, |popover| {
+                popover.bottom_sheet(crate::tr!("attach.add"))
+            })
             .trigger(trigger)
             .content(move |_, _window, cx| {
-                let composer = composer.clone();
                 let popover = cx.entity();
-                let muted = cx.theme().muted_foreground;
+                let row = |id: &'static str,
+                           icon: Icon,
+                           label: std::borrow::Cow<'static, str>,
+                           pick: fn(&mut Composer, &mut Window, &mut Context<Composer>),
+                           cx: &mut Context<PopoverState>| {
+                    let composer = composer.clone();
+                    let popover = popover.clone();
+                    crate::material::menu_item_frame(true, crate::material::ItemFill::Hover, cx)
+                        .id(id)
+                        .w_full()
+                        .items_center()
+                        .cursor_pointer()
+                        .text_body(true, cx)
+                        .text_color(cx.theme().muted_foreground)
+                        .child(icon)
+                        .child(label)
+                        .on_click(move |_, window, cx| {
+                            popover.update(cx, |state, cx| state.dismiss(window, cx));
+                            composer.update(cx, |composer, cx| pick(composer, window, cx));
+                        })
+                };
                 v_flex()
                     .w_full()
                     .p_1()
                     .gap_0p5()
-                    .child(
-                        crate::material::menu_item_frame(true, cx)
-                            .id("attach-photo-library")
-                            .w_full()
-                            .items_center()
-                            .cursor_pointer()
-                            .text_body(true, cx)
-                            .text_color(muted)
-                            .hover(|style| style.bg(cx.theme().muted))
-                            .child(Icon::empty().path("icons/image.svg"))
-                            .child(crate::tr!("attach.photo_library"))
-                            .on_click(move |_, window, cx| {
-                                popover.update(cx, |state, cx| state.dismiss(window, cx));
-                                composer.update(cx, |composer, cx| {
-                                    composer.pick_images_from_library(window, cx)
-                                });
-                            }),
-                    )
+                    .when(photos, |menu| {
+                        menu.child(row(
+                            "attach-photo-library",
+                            Icon::empty().path("icons/image.svg"),
+                            crate::tr!("attach.photo_library"),
+                            Composer::pick_images_from_library,
+                            cx,
+                        ))
+                    })
+                    .when(files, |menu| {
+                        menu.child(row(
+                            "attach-files",
+                            Icon::new(IconName::File),
+                            crate::tr!("attach.files"),
+                            Composer::pick_files,
+                            cx,
+                        ))
+                    })
                     .into_any_element()
             })
             .into_any_element()
     }
 
     pub(in super::super) fn render_overflow_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let composer = self.workspace_store.read(cx).composer_state();
+        let composer = self.composer_state(cx);
         let usage = composer.token_usage;
         let permission = PermissionControl::from_composer(&composer).map(|control| {
             if control.requested.is_some() {
@@ -601,7 +736,10 @@ impl Composer {
 #[allow(clippy::too_many_arguments)]
 fn render_model_pane(
     rows: Rc<[ModelRow]>,
-    selected: &Option<String>,
+    // The rail's rows before the search filtered them, which a row the
+    // search takes away is drawn from as it folds.
+    all_rows: Rc<[ModelRow]>,
+    selected: &Option<SelectedModel>,
     rail: PickerRail,
     // (id, name) of every installed+enabled ACP agent — one rail entry each.
     acp_agents: &[(String, String)],
@@ -614,6 +752,7 @@ fn render_model_pane(
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let compact = composer.read(cx).compact;
+    let session_id = composer.read(cx).session_id.clone();
 
     let rail_icon = |id: gpui::SharedString,
                      label: gpui::SharedString,
@@ -648,7 +787,7 @@ fn render_model_pane(
         ));
     // One entry per *enabled* native profile: every built-in plus any
     // user-created profiles whose switch is on. Each is its own rail.
-    let profile_ids: Vec<String> = {
+    let profiles: Vec<(String, ProviderKind)> = {
         let store = store_entity.read(cx);
         let profiles = store.enabled_profiles();
         ProviderKind::NATIVE
@@ -657,12 +796,12 @@ fn render_model_pane(
                 profiles
                     .iter()
                     .filter(move |profile| profile.kind == kind)
-                    .map(|profile| profile.id.clone())
+                    .map(|profile| (profile.id.clone(), profile.kind))
             })
             .collect()
     };
-    for id in profile_ids {
-        let glyph = tinted_profile_glyph(&id, store_entity.read(cx));
+    for (id, kind) in profiles {
+        let glyph = profile_glyph(store_entity.read(cx), kind, Some(&id));
         let label = store_entity.read(cx).provider_profile_display_name(&id);
         rail_col = rail_col.item(rail_icon(
             gpui::SharedString::from(format!("rail-profile-{id}")),
@@ -681,6 +820,7 @@ fn render_model_pane(
             PickerRail::Acp(id.clone()),
         ));
     }
+    let show_source = rail == PickerRail::Favorites;
     let rail = div()
         .id("model-provider-rail")
         .flex_none()
@@ -691,67 +831,127 @@ fn render_model_pane(
         .overflow_y_scroll_area()
         .child(div().w_full().py_2().px_1p5().child(rail_col));
 
-    let list = div()
-        .id("model-picker-list")
-        .role(Role::ListBox)
-        .aria_label(crate::tr!("composer.model_results"))
-        .flex_1()
-        .min_h_0();
-    let list = if rows.is_empty() {
-        list.child(crate::material::empty_row(
-            if loading {
-                crate::tr!("composer.loading_models")
-            } else {
-                crate::tr!("composer.no_models")
-            },
-            cx,
-        ))
-        .into_any_element()
-    } else {
-        let count = rows.len();
-        // Opening the picker shows the current model; a search starts at the
-        // top of its results.
-        let current = model_search
-            .read(cx)
-            .value()
-            .is_empty()
-            .then(|| {
-                rows.iter()
-                    .position(|row| selected.as_deref() == Some(row.id.as_str()))
-            })
-            .flatten();
-        let rows = rows.clone();
+    // Opening the picker shows the current model; a search starts at the
+    // top of its results.
+    let current = model_search
+        .read(cx)
+        .value()
+        .is_empty()
+        .then(|| rows.iter().position(|row| row.is_selected(selected)))
+        .flatten();
+    let build_list = {
         let selected = selected.clone();
         let store_entity = store_entity.clone();
+        let session_id = session_id.clone();
         let popover = popover.clone();
-        list.flex()
-            .flex_col()
-            .child(
-                crate::scroll::VirtualList::measured(
-                    "model-picker-rows",
-                    count,
-                    move |index, _, cx| {
-                        div()
-                            .when(index + 1 < count, |row| row.pb_0p5())
-                            .child(render_model_row(
-                                &rows[index],
-                                index,
-                                &selected,
-                                compact,
-                                &store_entity,
-                                &popover,
-                                cx,
-                            ))
-                    },
-                )
-                .reveal(current)
-                .flex_1()
-                .min_h_0()
-                .px_1()
-                .py_1(),
-            )
+        move |rows: Rc<[ModelRow]>, current: Option<usize>| {
+            let count = rows.len();
+            let keys: Rc<[u64]> = rows.iter().map(model_row_key).collect();
+            let leaving = {
+                let all_rows = all_rows.clone();
+                let selected = selected.clone();
+                let store_entity = store_entity.clone();
+                let session_id = session_id.clone();
+                let popover = popover.clone();
+                move |key, _: &mut Window, cx: &mut App| {
+                    let index = all_rows.iter().position(|row| model_row_key(row) == key)?;
+                    Some(render_model_row(
+                        &all_rows[index],
+                        index,
+                        &selected,
+                        show_source,
+                        compact,
+                        &store_entity,
+                        session_id.clone(),
+                        &popover,
+                        cx,
+                    ))
+                }
+            };
+            let selected = selected.clone();
+            let store_entity = store_entity.clone();
+            let session_id = session_id.clone();
+            let popover = popover.clone();
+            crate::scroll::VirtualList::measured("model-picker-rows", count, move |index, _, cx| {
+                div()
+                    .when(index + 1 < count, |row| row.pb_0p5())
+                    .child(render_model_row(
+                        &rows[index],
+                        index,
+                        &selected,
+                        show_source,
+                        compact,
+                        &store_entity,
+                        session_id.clone(),
+                        &popover,
+                        cx,
+                    ))
+            })
+            .reveal(current)
+            // A keystroke's results, and a favourite moving to the top,
+            // glide into place.
+            .keyed(keys, crate::motion::KEYSTROKE, leaving)
+            .flex_1()
+            .min_h_0()
+            .px_1()
+            .py_1()
             .into_any_element()
+        }
     };
+    // Loading, nothing found and the results each keep a layer, so one
+    // fades out under the next; the results leaving are the last ones there
+    // were.
+    let state = if !rows.is_empty() {
+        2
+    } else if loading {
+        0
+    } else {
+        1
+    };
+    let shown_rows = rows.clone();
+    let content = crate::motion::Sampled::new(move |window, cx| {
+        let last = window.use_keyed_state("model-picker-last-rows", cx, |_, _| shown_rows.clone());
+        if !shown_rows.is_empty() && !Rc::ptr_eq(last.read(cx), &shown_rows) {
+            last.update(cx, |last, _| *last = shown_rows.clone());
+        }
+        let last = last.read(cx).clone();
+        let fade =
+            crate::motion::CrossFade::new("model-picker-states", state, 3, CHANGE, window, cx);
+        let layers: Vec<(usize, AnyElement)> = (0..3)
+            .filter(|layer| fade.shows(*layer))
+            .map(|layer| {
+                let content = match layer {
+                    0 => crate::material::empty_row(crate::tr!("composer.loading_models"), cx)
+                        .into_any_element(),
+                    1 => crate::material::empty_row(crate::tr!("composer.no_models"), cx)
+                        .into_any_element(),
+                    _ if state == 2 => build_list(shown_rows.clone(), current),
+                    _ => build_list(last.clone(), None),
+                };
+                (
+                    layer,
+                    v_flex().size_full().child(content).into_any_element(),
+                )
+            })
+            .collect();
+        fade.fill()
+            .render(layers)
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .into_any_element()
+    });
+    let list = div()
+        .id("model-picker-list")
+        .debug_selector(|| "model-picker-list".into())
+        .role(Role::ListBox)
+        .aria_label(crate::tr!("composer.model_results"))
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .child(content)
+        .into_any_element();
 
     let mut pane = v_flex()
         .flex_1()
@@ -771,20 +971,24 @@ fn render_model_pane(
                 ),
         )
         .child(list);
-    if pending_restart {
-        pane = pane.child(
+    pane = pane.child(folding_note(
+        "model-restart-note",
+        pending_restart,
+        move |cx| {
             div()
                 .px_3()
                 .py_1p5()
                 .border_t_1()
                 .border_color(cx.theme().border)
                 .text_secondary(compact, cx)
-                .child(crate::tr!("composer.restart_note")),
-        );
-    }
+                .child(crate::tr!("composer.restart_note"))
+                .into_any_element()
+        },
+    ));
 
     let key_rows: Vec<ModelRow> = rows.iter().take(9).cloned().collect();
     let store_key = store_entity.clone();
+    let key_session = session_id.clone();
     let popover_key = popover.clone();
 
     let pane = h_flex()
@@ -806,9 +1010,17 @@ fn render_model_pane(
                 let row = key_rows[n - 1].clone();
                 store_key.update(cx, |store, _cx| {
                     if row.acp {
-                        store.set_active_acp_agent(row.id);
+                        store.set_active_acp_agent_for(
+                            key_session.clone().unwrap_or_default(),
+                            row.id,
+                        );
                     } else {
-                        store.set_active_model(row.provider, Some(row.id), row.profile_id);
+                        store.set_active_model_for(
+                            key_session.clone().unwrap_or_default(),
+                            row.provider,
+                            Some(row.id),
+                            row.profile_id,
+                        );
                     }
                 });
                 popover_key.update(cx, |st, cx| st.dismiss(window, cx));
@@ -821,22 +1033,20 @@ fn render_model_pane(
             .w_full()
             .min_h_0()
             .child(pane)
-            .child(render_compact_model_footer(store_entity, cx))
+            .child(render_compact_model_footer(store_entity, session_id, cx))
             .into_any_element();
     }
-    pane.with_animation(
-        "model-picker-pop-in",
-        Animation::new(Duration::from_millis(150)),
-        |element, delta| element.opacity(delta),
-    )
-    .into_any_element()
+    pane.into_any_element()
 }
 
 fn render_compact_model_footer(
     store_entity: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
-    let composer_state = store_entity.read(cx).composer_state();
+    let composer_state = store_entity
+        .read(cx)
+        .composer_state_for(session_id.as_deref(), cx);
     let selections = composer_state.active_option_selections.clone();
     let effort = composer_state
         .active_option_descriptors
@@ -875,6 +1085,7 @@ fn render_compact_model_footer(
             .map(|option| {
                 let selected = current.as_deref() == Some(option.value.as_str());
                 let store = store_entity.clone();
+                let session_id = session_id.clone();
                 let value = option.value.clone();
                 Choice::new(
                     gpui::SharedString::from(format!("compact-effort-{}", option.value)),
@@ -884,7 +1095,8 @@ fn render_compact_model_footer(
                 .on_select(move |_, cx| {
                     let value = value.clone();
                     store.update(cx, |store, _cx| {
-                        store.set_active_option(
+                        store.set_active_option_for(
+                            session_id.clone().unwrap_or_default(),
                             "reasoningEffort".to_string(),
                             Some(serde_json::Value::String(value)),
                         );
@@ -906,6 +1118,7 @@ fn render_compact_model_footer(
             .iter()
             .map(|row| {
                 let store = store_entity.clone();
+                let session_id = session_id.clone();
                 let id = control.id.clone();
                 let value = row.value.clone();
                 Choice::new(
@@ -917,7 +1130,11 @@ fn render_compact_model_footer(
                 .disabled(row.unavailable.is_some())
                 .on_select(move |_, cx| {
                     store.update(cx, |store, _cx| {
-                        store.set_active_option(id.clone(), Some(value.clone()))
+                        store.set_active_option_for(
+                            session_id.clone().unwrap_or_default(),
+                            id.clone(),
+                            Some(value.clone()),
+                        )
                     });
                 })
             })
@@ -950,17 +1167,22 @@ fn render_compact_model_footer(
         .into_any_element()
 }
 
+/// `show_source` names each row's profile under it: only Favorites spans
+/// profiles, so every other rail's rows are its own profile's.
+#[allow(clippy::too_many_arguments)]
 fn render_model_row(
     row: &ModelRow,
     index: usize,
-    selected: &Option<String>,
+    selected: &Option<SelectedModel>,
+    show_source: bool,
     compact: bool,
     store_entity: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
     popover: &Entity<PopoverState>,
     cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
-    let is_current = selected.as_deref() == Some(row.id.as_str());
+    let is_current = row.is_selected(selected);
     let is_acp = row.acp;
     let is_fav = !is_acp && row.favorite;
     let name = row.name.clone();
@@ -968,6 +1190,7 @@ fn render_model_row(
     let provider = row.provider;
     let profile_id = row.profile_id.clone();
     let fav_id = row.id.clone();
+    let fav_profile_id = row.profile_id.clone();
 
     let store_select = store_entity.clone();
     let popover_select = popover.clone();
@@ -975,8 +1198,11 @@ fn render_model_row(
     let popover_fav = popover.clone();
 
     let accessible_label = crate::tr!("composer.model_option", model = name.clone()).into_owned();
-    crate::material::menu_item_frame(compact, cx)
+    crate::material::menu_item_frame(compact, crate::material::ItemFill::Hover, cx)
         .id(("model-row", index))
+        .when(is_current, |row| {
+            row.debug_selector(|| "model-row-current".into())
+        })
         .role(Role::ListBoxOption)
         .aria_label(accessible_label)
         .aria_selected(is_current)
@@ -986,15 +1212,19 @@ fn render_model_row(
         .items_center()
         .cursor_pointer()
         .when(is_current, |row| row.bg(cx.theme().list_active))
-        .hover(|s| s.bg(cx.theme().muted))
         .on_click(move |_, window, cx| {
             let id = id.clone();
             let profile_id = profile_id.clone();
             store_select.update(cx, |store, _cx| {
                 if is_acp {
-                    store.set_active_acp_agent(id);
+                    store.set_active_acp_agent_for(session_id.clone().unwrap_or_default(), id);
                 } else {
-                    store.set_active_model(provider, Some(id), profile_id);
+                    store.set_active_model_for(
+                        session_id.clone().unwrap_or_default(),
+                        provider,
+                        Some(id),
+                        profile_id,
+                    );
                 }
             });
             popover_select.update(cx, |st, cx| st.dismiss(window, cx));
@@ -1013,34 +1243,22 @@ fn render_model_row(
                             this.child(Icon::new(IconName::Check).text_color(cx.theme().primary))
                         }),
                 )
-                .child({
+                .when(show_source, |this| {
                     // A third-party profile's row is attributed to that profile
                     // (its accent + display name), not the built-in provider.
-                    let (glyph, label) = match &row.profile_id {
-                        Some(id) => {
-                            let store = store_entity.read(cx);
-                            (
-                                tinted_profile_glyph(id, store),
-                                store.provider_profile_display_name(id).into(),
-                            )
-                        }
-                        None => (
-                            tinted_provider_glyph(row.provider, store_entity.read(cx)),
-                            gpui::SharedString::from(provider_label(row.provider)),
-                        ),
+                    let store = store_entity.read(cx);
+                    let glyph = profile_glyph(store, row.provider, row.profile_id.as_deref());
+                    let label = match &row.profile_id {
+                        Some(id) => store.provider_profile_display_name(id).into(),
+                        None => gpui::SharedString::from(provider_label(row.provider)),
                     };
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .text_secondary(compact, cx)
-                        .child(glyph)
-                        .child(label)
-                })
-                .when(!row.provider.caps().mcp_servers, |this| {
                     this.child(
-                        div()
+                        h_flex()
+                            .gap_1()
+                            .items_center()
                             .text_secondary(compact, cx)
-                            .child(crate::tr!("providers.mcp_unavailable")),
+                            .child(glyph)
+                            .child(label),
                     )
                 }),
         )
@@ -1056,6 +1274,7 @@ fn render_model_row(
         })
         .child(
             Button::new(("model-fav", index))
+                .debug_selector(move || format!("model-fav-{index}"))
                 .ghost()
                 .xsmall()
                 .touch(compact)
@@ -1083,7 +1302,10 @@ fn render_model_row(
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
                     let fav_id = fav_id.clone();
-                    store_fav.update(cx, |store, cx| store.toggle_favorite_model(fav_id, cx));
+                    let fav_profile_id = fav_profile_id.clone();
+                    store_fav.update(cx, |store, cx| {
+                        store.toggle_favorite_model(provider, fav_profile_id, fav_id, cx)
+                    });
                     // Refresh the open popover so the star + ordering update.
                     popover_fav.update(cx, |_, cx| cx.notify());
                 }),
@@ -1240,6 +1462,7 @@ fn render_permission_pane(
     control: &PermissionControl,
     compact: bool,
     store_entity: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
     popover: &Entity<PopoverState>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
@@ -1257,66 +1480,84 @@ fn render_permission_pane(
         let pending = control.requested.as_ref() == Some(&option.value);
         let disabled = option.unavailable.is_some();
         let store = store_entity.clone();
+        let session_id = session_id.clone();
         let popover = popover.clone();
         let value = option.value.clone();
         let id = control.id.clone();
         list = list.child(
-            crate::material::menu_item_frame(compact, cx)
-                .id(("permission-row", index))
-                .debug_selector(move || format!("permission-row-{index}"))
-                .role(Role::MenuItem)
-                .aria_label(
-                    std::iter::once(option.label.as_str())
-                        .chain(option.description.as_deref())
-                        .chain(option.unavailable.as_deref())
-                        .collect::<Vec<_>>()
-                        .join(": "),
-                )
-                .aria_selected(effective)
-                .when(effective, |row| row.aria_active_descendant())
-                .w_full()
-                .items_start()
-                .when(effective, |row| row.bg(cx.theme().list_active))
-                .when(disabled, |row| row.opacity(0.55))
-                .when(!disabled, |row| {
-                    row.cursor_pointer()
-                        .hover(|style| style.bg(cx.theme().muted))
-                        .on_click(move |_, window, cx| {
-                            store.update(cx, |store, _cx| {
-                                store.set_active_option(id.clone(), Some(value.clone()))
-                            });
-                            popover.update(cx, |state, cx| state.dismiss(window, cx));
-                        })
-                })
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_0p5()
-                        .child(
-                            h_flex()
-                                .gap_1p5()
-                                .items_center()
-                                .flex_wrap()
-                                .text_body(compact, cx)
-                                .child(div().child(option.label.clone()))
-                                .when(option.recommended, |row| {
-                                    row.child(caption(crate::tr!("permission.recommended").into()))
-                                })
-                                .when(effective, |row| {
-                                    row.child(Icon::new(IconName::Check).text_color(primary))
-                                })
-                                .when(pending, |row| {
-                                    row.child(caption(crate::tr!("permission.pending").into()))
-                                }),
+            crate::material::menu_item_frame(
+                compact,
+                if disabled {
+                    crate::material::ItemFill::Inert
+                } else {
+                    crate::material::ItemFill::highlight(effective, cx.theme().list_active)
+                },
+                cx,
+            )
+            .id(("permission-row", index))
+            .debug_selector(move || format!("permission-row-{index}"))
+            .role(Role::MenuItem)
+            .aria_label(
+                std::iter::once(option.label.as_str())
+                    .chain(option.description.as_deref())
+                    .chain(option.unavailable.as_deref())
+                    .collect::<Vec<_>>()
+                    .join(": "),
+            )
+            .aria_selected(effective)
+            .when(effective, |row| row.aria_active_descendant())
+            .w_full()
+            .items_start()
+            .when(disabled, |row| row.opacity(0.55))
+            .when(!disabled, |row| {
+                row.cursor_pointer().on_click(move |_, window, cx| {
+                    store.update(cx, |store, _cx| {
+                        store.set_active_option_for(
+                            session_id.clone().unwrap_or_default(),
+                            id.clone(),
+                            Some(value.clone()),
                         )
-                        .when_some(option.description.clone(), |column, description| {
-                            column.child(caption(description.into()))
-                        })
-                        .when_some(option.unavailable.clone(), |column, reason| {
-                            column.child(caption(reason.into()))
-                        }),
-                ),
+                    });
+                    popover.update(cx, |state, cx| state.dismiss(window, cx));
+                })
+            })
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .flex_wrap()
+                            .text_body(compact, cx)
+                            .child(div().child(option.label.clone()))
+                            .when(option.recommended, |row| {
+                                row.child(caption(crate::tr!("permission.recommended").into()))
+                            })
+                            .when(effective, |row| {
+                                row.child(Icon::new(IconName::Check).text_color(primary))
+                            })
+                            .child(folding_suffix(
+                                gpui::SharedString::from(format!("permission-row-pending-{index}")),
+                                pending,
+                                px(6.),
+                                move |cx| {
+                                    div()
+                                        .text_secondary(compact, cx)
+                                        .child(crate::tr!("permission.pending"))
+                                        .into_any_element()
+                                },
+                            )),
+                    )
+                    .when_some(option.description.clone(), |column, description| {
+                        column.child(caption(description.into()))
+                    })
+                    .when_some(option.unavailable.clone(), |column, reason| {
+                        column.child(caption(reason.into()))
+                    }),
+            ),
         );
     }
     let mut pane = v_flex()
@@ -1334,15 +1575,7 @@ fn render_permission_pane(
                 .child(caption(hint.into())),
         );
     }
-    if compact {
-        return pane.into_any_element();
-    }
-    pane.with_animation(
-        "permission-picker-pop-in",
-        Animation::new(Duration::from_millis(150)),
-        |element, delta| element.opacity(delta),
-    )
-    .into_any_element()
+    pane.into_any_element()
 }
 
 /// The traits pane's effort control, in Codex's model-picker style: the
@@ -1351,10 +1584,13 @@ fn render_permission_pane(
 /// pane open. `None` when the model describes fewer than two levels.
 fn render_effort_slider(
     store_entity: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
     window: &mut Window,
     cx: &mut Context<PopoverState>,
 ) -> Option<AnyElement> {
-    let composer_state = store_entity.read(cx).composer_state();
+    let composer_state = store_entity
+        .read(cx)
+        .composer_state_for(session_id.as_deref(), cx);
     let (levels, current) = composer_state.active_option_descriptors.iter().find_map(
         |descriptor| match descriptor {
             OptionDescriptor::Select {
@@ -1390,6 +1626,7 @@ fn render_effort_slider(
         cx,
         |_, cx| {
             let store = store_entity.clone();
+            let session_id = session_id.clone();
             let values: Vec<String> = levels.iter().map(|level| level.value.clone()).collect();
             let mut applied = current;
             cx.subscribe_self(move |_, event: &SliderEvent, cx| {
@@ -1406,7 +1643,8 @@ fn render_effort_slider(
                 applied = index;
                 let value = value.clone();
                 store.update(cx, |store, _cx| {
-                    store.set_active_option(
+                    store.set_active_option_for(
+                        session_id.clone().unwrap_or_default(),
                         "reasoningEffort".to_string(),
                         Some(serde_json::Value::String(value)),
                     );
@@ -1421,11 +1659,32 @@ fn render_effort_slider(
         },
     );
     let shown = (state.read(cx).value().end().round() as usize).min(levels.len() - 1);
-    let accent = if shown == levels.len() - 1 {
-        cx.theme().max_effort_accent()
-    } else {
-        cx.theme().primary
-    };
+    // The accent glides to the max level's and back; the level's name
+    // cross-fades over the last one.
+    let accent = gpui_base::motion::transition(
+        gpui::SharedString::from(format!("effort-accent-{key}")),
+        if shown == levels.len() - 1 {
+            cx.theme().max_effort_accent()
+        } else {
+            cx.theme().primary
+        },
+        gpui_base::motion::Transition::new(GLIDE),
+        window,
+        cx,
+    );
+    let level_label = crate::motion::cross_fade_part(
+        gpui::SharedString::from(format!("effort-label-{key}")),
+        levels[shown].label.clone(),
+        CHANGE,
+        window,
+        cx,
+        move |label, _, _| {
+            div()
+                .text_color(accent)
+                .child(label.clone())
+                .into_any_element()
+        },
+    );
     Some(
         v_flex()
             .w_full()
@@ -1441,7 +1700,7 @@ fn render_effort_slider(
                             .text_color(cx.theme().muted_foreground)
                             .child(crate::tr!("composer.effort")),
                     )
-                    .child(div().text_color(accent).child(levels[shown].label.clone())),
+                    .child(level_label),
             )
             .child(
                 div()
@@ -1467,6 +1726,7 @@ fn render_traits_pane(
     compact: bool,
     pending_restart: bool,
     store_entity: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
     popover: &Entity<PopoverState>,
     window: &mut Window,
     cx: &mut Context<PopoverState>,
@@ -1522,7 +1782,8 @@ fn render_traits_pane(
                 let options = &options;
                 // The slider carries its own label and replaces the rows.
                 if id == "reasoningEffort"
-                    && let Some(slider) = render_effort_slider(store_entity, window, cx)
+                    && let Some(slider) =
+                        render_effort_slider(store_entity, session_id.clone(), window, cx)
                 {
                     pane = pane.child(slider);
                     continue;
@@ -1537,33 +1798,38 @@ fn render_traits_pane(
                         text.push_str(&default_suffix);
                     }
                     let store = store_entity.clone();
+                    let session_id = session_id.clone();
                     let pop = popover.clone();
                     let opt_id = id.clone();
                     let opt_value = opt.value.clone();
                     pane = pane.child(
-                        crate::material::menu_item_frame(compact, cx)
-                            .id(gpui::SharedString::from(format!("trait-opt-{id}-{index}")))
-                            .flex_none()
-                            .w_full()
-                            .items_center()
-                            .cursor_pointer()
-                            .text_body(compact, cx)
-                            .hover(|s| s.bg(cx.theme().muted))
-                            .child(div().flex_1().min_w_0().child(text))
-                            .when(is_selected, |this| {
-                                this.child(Icon::new(IconName::Check).text_color(primary))
-                            })
-                            .on_click(move |_, window, cx| {
-                                let opt_id = opt_id.clone();
-                                let opt_value = opt_value.clone();
-                                store.update(cx, |store, _cx| {
-                                    store.set_active_option(
-                                        opt_id,
-                                        Some(serde_json::Value::String(opt_value)),
-                                    );
-                                });
-                                pop.update(cx, |st, cx| st.dismiss(window, cx));
-                            }),
+                        crate::material::menu_item_frame(
+                            compact,
+                            crate::material::ItemFill::Hover,
+                            cx,
+                        )
+                        .id(gpui::SharedString::from(format!("trait-opt-{id}-{index}")))
+                        .flex_none()
+                        .w_full()
+                        .items_center()
+                        .cursor_pointer()
+                        .text_body(compact, cx)
+                        .child(div().flex_1().min_w_0().child(text))
+                        .when(is_selected, |this| {
+                            this.child(Icon::new(IconName::Check).text_color(primary))
+                        })
+                        .on_click(move |_, window, cx| {
+                            let opt_id = opt_id.clone();
+                            let opt_value = opt_value.clone();
+                            store.update(cx, |store, _cx| {
+                                store.set_active_option_for(
+                                    session_id.clone().unwrap_or_default(),
+                                    opt_id,
+                                    Some(serde_json::Value::String(opt_value)),
+                                );
+                            });
+                            pop.update(cx, |st, cx| st.dismiss(window, cx));
+                        }),
                     );
                 }
             }
@@ -1587,49 +1853,56 @@ fn render_traits_pane(
                 {
                     let is_selected = on == value;
                     let store = store_entity.clone();
+                    let session_id = session_id.clone();
                     let pop = popover.clone();
                     let opt_id = id.clone();
                     pane = pane.child(
-                        crate::material::menu_item_frame(compact, cx)
-                            .id(gpui::SharedString::from(format!("trait-opt-{id}-{index}")))
-                            .flex_none()
-                            .w_full()
-                            .items_center()
-                            .cursor_pointer()
-                            .text_body(compact, cx)
-                            .hover(|s| s.bg(cx.theme().muted))
-                            .child(div().flex_1().min_w_0().child(text))
-                            .when(is_selected, |this| {
-                                this.child(Icon::new(IconName::Check).text_color(primary))
-                            })
-                            .on_click(move |_, window, cx| {
-                                let opt_id = opt_id.clone();
-                                store.update(cx, |store, _cx| {
-                                    store.set_active_option(
-                                        opt_id,
-                                        Some(serde_json::Value::Bool(value)),
-                                    );
-                                });
-                                pop.update(cx, |st, cx| st.dismiss(window, cx));
-                            }),
+                        crate::material::menu_item_frame(
+                            compact,
+                            crate::material::ItemFill::Hover,
+                            cx,
+                        )
+                        .id(gpui::SharedString::from(format!("trait-opt-{id}-{index}")))
+                        .flex_none()
+                        .w_full()
+                        .items_center()
+                        .cursor_pointer()
+                        .text_body(compact, cx)
+                        .child(div().flex_1().min_w_0().child(text))
+                        .when(is_selected, |this| {
+                            this.child(Icon::new(IconName::Check).text_color(primary))
+                        })
+                        .on_click(move |_, window, cx| {
+                            let opt_id = opt_id.clone();
+                            store.update(cx, |store, _cx| {
+                                store.set_active_option_for(
+                                    session_id.clone().unwrap_or_default(),
+                                    opt_id,
+                                    Some(serde_json::Value::Bool(value)),
+                                );
+                            });
+                            pop.update(cx, |st, cx| st.dismiss(window, cx));
+                        }),
                     );
                 }
             }
         }
     }
 
-    if pending_restart {
-        pane = pane.child(
+    pane = pane.child(div().flex_none().child(folding_note(
+        "traits-restart-note",
+        pending_restart,
+        move |cx| {
             div()
-                .flex_none()
                 .px_2()
                 .py_1p5()
                 .border_t_1()
                 .border_color(cx.theme().border)
                 .text_secondary(compact, cx)
-                .child(crate::tr!("composer.restart_note")),
-        );
-    }
+                .child(crate::tr!("composer.restart_note"))
+                .into_any_element()
+        },
+    )));
     div()
         .relative()
         .w_full()
@@ -1647,6 +1920,7 @@ fn render_traits_pane(
             selections,
             compact,
             store_entity,
+            session_id,
             cx,
         ))
         .into_any_element()
@@ -1658,6 +1932,7 @@ fn render_fast_mode_bolt(
     selections: &[agent::OptionSelection],
     compact: bool,
     store_entity: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -1698,7 +1973,11 @@ fn render_fast_mode_bolt(
                 cx.stop_propagation();
                 let value = fast.value(fast.next(level));
                 store.update(cx, |store, _cx| {
-                    store.set_active_option(fast.option_id.clone(), Some(value));
+                    store.set_active_option_for(
+                        session_id.clone().unwrap_or_default(),
+                        fast.option_id.clone(),
+                        Some(value),
+                    );
                 });
             }),
         )
@@ -1714,7 +1993,7 @@ fn render_overflow_pane(
     let muted = cx.theme().muted_foreground;
     let compact = crate::window_seam::window_is_compact(window, cx);
     let item = |icon: Icon, label: String| -> AnyElement {
-        crate::material::menu_item_frame(compact, cx)
+        crate::material::menu_item_frame(compact, crate::material::ItemFill::Inert, cx)
             .w_full()
             .items_center()
             .text_body(compact, cx)
@@ -1737,6 +2016,7 @@ fn render_overflow_pane(
 }
 
 /// Context usage, model capacity and provider rate-limit windows.
+#[allow(clippy::too_many_arguments)]
 fn render_context_meter_pane(
     usage: Option<TokenUsage>,
     account_usage: Option<tcode_core::usage::ProviderUsage>,
@@ -1744,16 +2024,24 @@ fn render_context_meter_pane(
     pct: Option<f32>,
     compact: bool,
     // Present when the active model's context window can be changed here.
-    edit_window: Option<Entity<WorkspaceStore>>,
+    edit_window: Option<(Entity<WorkspaceStore>, Option<String>)>,
+    window: &mut Window,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let overloaded = pct.map(context_meter::is_overloaded).unwrap_or(false);
-    let bar_color: Hsla = if overloaded {
-        rgb(METER_RED).into()
-    } else {
-        rgb(METER_BLUE).into()
-    };
+    let glide = |id: &str| gpui::SharedString::from(format!("context-pane-{id}"));
+    let bar_color: Hsla = gpui_base::motion::transition(
+        glide("bar-color"),
+        if overloaded {
+            rgb(METER_RED).into()
+        } else {
+            rgb(METER_BLUE).into()
+        },
+        gpui_base::motion::Transition::new(GLIDE),
+        window,
+        cx,
+    );
     let mut pane = v_flex()
         .debug_selector(|| "context-pane".into())
         .w_full()
@@ -1794,7 +2082,7 @@ fn render_context_meter_pane(
                             .text_caption(cx)
                             .child(crate::tr!("composer.context_window_title")),
                     )
-                    .when_some(edit_window, |title, store| {
+                    .when_some(edit_window, |title, (store, session_id)| {
                         let popover = cx.entity();
                         let label = crate::tr!("composer.context_window_edit").into_owned();
                         title.child(
@@ -1808,7 +2096,12 @@ fn render_context_meter_pane(
                                 .icon(Icon::empty().path("icons/pencil.svg"))
                                 .on_click(move |_, window, cx| {
                                     popover.update(cx, |state, cx| state.dismiss(window, cx));
-                                    super::context_window::open(store.clone(), window, cx);
+                                    super::context_window::open(
+                                        store.clone(),
+                                        session_id.clone(),
+                                        window,
+                                        cx,
+                                    );
                                 }),
                         )
                     }),
@@ -1816,21 +2109,31 @@ fn render_context_meter_pane(
             .child(stat),
     );
 
-    if let Some(pct) = pct {
-        let fraction = pct.clamp(0.0, 100.0) / 100.0;
+    // The bar folds in once the share is known; its fill glides to each
+    // new share.
+    let fraction = gpui_base::motion::transition(
+        glide("bar-fraction"),
+        pct.map_or(0., |pct| pct.clamp(0.0, 100.0) / 100.0),
+        gpui_base::motion::Transition::new(GLIDE),
+        window,
+        cx,
+    );
+    if let Some(shown) = crate::motion::shown(glide("bar"), pct.map(|_| ()), SHOW, window, cx) {
         pane = pane.child(
-            div()
-                .w_full()
-                .h(px(6.))
-                .rounded_full()
-                .bg(cx.theme().muted)
-                .child(
-                    div()
-                        .h_full()
-                        .rounded_full()
-                        .bg(bar_color)
-                        .w(gpui::relative(fraction)),
-                ),
+            shown.fold(
+                div()
+                    .w_full()
+                    .h(px(6.))
+                    .rounded_full()
+                    .bg(cx.theme().muted)
+                    .child(
+                        div()
+                            .h_full()
+                            .rounded_full()
+                            .bg(bar_color)
+                            .w(gpui::relative(fraction)),
+                    ),
+            ),
         );
     }
 
@@ -1848,16 +2151,25 @@ fn render_context_meter_pane(
 
     // "Total processed" — the session-cumulative token count, when the provider
     // reports it (a native running total or timeline accumulation).
-    if let Some(total) = usage.and_then(|u| u.total_processed_tokens) {
+    if let Some(shown) = crate::motion::shown(
+        glide("total"),
+        usage.and_then(|u| u.total_processed_tokens),
+        SHOW,
+        window,
+        cx,
+    ) {
+        let total = shown.value;
         pane = pane.child(
-            h_flex()
-                .w_full()
-                .justify_between()
-                .items_center()
-                .gap_3()
-                .text_secondary(compact, cx)
-                .child(crate::tr!("composer.total_processed"))
-                .child(context_meter::format_tokens(Some(total))),
+            shown.fold(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .items_center()
+                    .gap_3()
+                    .text_secondary(compact, cx)
+                    .child(crate::tr!("composer.total_processed"))
+                    .child(context_meter::format_tokens(Some(total))),
+            ),
         );
     }
 
@@ -1868,9 +2180,18 @@ fn render_context_meter_pane(
         )));
     }
 
-    // Show only the rate-limit windows reported by the provider.
-    if let Some(account) = account_usage.filter(|a| a.error.is_some() || !a.windows.is_empty()) {
-        pane = pane.child(crate::material::faded_hairline(cx));
+    // Show only the rate-limit windows reported by the provider; the
+    // section folds in once they are known, and away if they go.
+    if let Some(shown) = crate::motion::shown(
+        glide("account"),
+        account_usage.filter(|a| a.error.is_some() || !a.windows.is_empty()),
+        SHOW,
+        window,
+        cx,
+    ) {
+        let account = shown.value.clone();
+        let mut section = v_flex().w_full().gap_2();
+        section = section.child(crate::material::faded_hairline(cx));
         // 256px only affords one trailing fact: the plan when the provider
         // named it, otherwise how fresh the numbers are.
         let trailing = account
@@ -1883,7 +2204,7 @@ fn render_context_meter_pane(
                 );
                 crate::tr!("usage.updated", when = ago).into_owned()
             });
-        pane = pane.child(
+        section = section.child(
             h_flex()
                 .w_full()
                 .justify_between()
@@ -1895,17 +2216,40 @@ fn render_context_meter_pane(
         );
         // The raw provider error is Settings-only; at 256px this pane just
         // says the latest number is missing, above whatever was last fetched.
-        if account.error.is_some() {
-            pane = pane.child(
-                div()
-                    .text_secondary(compact, cx)
-                    .child(crate::tr!("usage.unavailable")),
+        if let Some(unavailable) = crate::motion::shown(
+            glide("unavailable"),
+            account.error.is_some().then_some(()),
+            SHOW,
+            window,
+            cx,
+        ) {
+            section = section.child(
+                unavailable.fold(
+                    div()
+                        .text_secondary(compact, cx)
+                        .child(crate::tr!("usage.unavailable")),
+                ),
             );
         }
         let now = crate::time::now_secs();
-        for window in &account.windows {
-            let fill = crate::usage::bar_color(window.used_percent, cx);
-            pane = pane.child(
+        for (index, limit) in account.windows.iter().enumerate() {
+            let limit_id = |part: &str| glide(&format!("limit-{index}-{part}"));
+            let fill = gpui_base::motion::transition(
+                limit_id("fill"),
+                crate::usage::bar_color(limit.used_percent, cx),
+                gpui_base::motion::Transition::new(GLIDE),
+                window,
+                cx,
+            );
+            let used = gpui_base::motion::transition(
+                limit_id("used"),
+                limit.used_percent.clamp(0.0, 100.0) / 100.0,
+                gpui_base::motion::Transition::new(GLIDE),
+                window,
+                cx,
+            );
+            let window_usage = limit;
+            section = section.child(
                 v_flex()
                     .w_full()
                     .gap(cx.theme().tokens.spacing.xxs)
@@ -1919,13 +2263,13 @@ fn render_context_meter_pane(
                             .child(
                                 div()
                                     .text_color(muted)
-                                    .child(crate::usage::window_label(window)),
+                                    .child(crate::usage::window_label(window_usage)),
                             )
                             .child(
                                 div()
                                     .font_family(cx.theme().mono_font_family.clone())
                                     .text_color(muted)
-                                    .child(crate::usage::percent_label(window.used_percent)),
+                                    .child(crate::usage::percent_label(window_usage.used_percent)),
                             ),
                     )
                     .child(
@@ -1934,19 +2278,92 @@ fn render_context_meter_pane(
                             .h(px(4.))
                             .rounded_full()
                             .bg(cx.theme().muted)
-                            .child(div().h_full().rounded_full().bg(fill).w(gpui::relative(
-                                window.used_percent.clamp(0.0, 100.0) / 100.0,
-                            ))),
+                            .child(
+                                div()
+                                    .h_full()
+                                    .rounded_full()
+                                    .bg(fill)
+                                    .w(gpui::relative(used)),
+                            ),
                     )
                     .when_some(
-                        crate::usage::resets_label(window.resets_at, now),
+                        crate::usage::resets_label(window_usage.resets_at, now),
                         |col, label| col.child(div().text_secondary(compact, cx).child(label)),
                     ),
             );
         }
+        pane = pane.child(shown.fold(section));
     }
 
     pane.into_any_element()
+}
+
+/// A note under a pane (a restart notice) that folds in while `present` and
+/// away after.
+fn folding_note(
+    id: impl Into<gpui::ElementId>,
+    present: bool,
+    build: impl FnOnce(&mut App) -> AnyElement + 'static,
+) -> crate::motion::Sampled {
+    let id = id.into();
+    crate::motion::Sampled::new(move |window, cx| {
+        match crate::motion::shown(id, present.then_some(()), SHOW, window, cx) {
+            Some(shown) => shown.fold(build(cx)),
+            None => gpui::Empty.into_any_element(),
+        }
+    })
+}
+
+/// What a model row is known by while the search and the favourites move it.
+fn model_row_key(row: &ModelRow) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (&row.id, &row.profile_id, row.acp, row.provider).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A suffix beside a label (a "pending" note) that widens in while
+/// `present` and narrows away after, with the `gap` before it.
+fn folding_suffix(
+    id: impl Into<gpui::ElementId>,
+    present: bool,
+    gap: gpui::Pixels,
+    build: impl FnOnce(&mut App) -> AnyElement + 'static,
+) -> crate::motion::Sampled {
+    let id = id.into();
+    crate::motion::Sampled::new(move |window, cx| {
+        match crate::motion::shown(id, present.then_some(()), SHOW, window, cx) {
+            Some(shown) => shown.fold_across_gap(gap, build(cx)),
+            None => gpui::Empty.into_any_element(),
+        }
+    })
+}
+
+/// A chip's label that cross-fades to a new text while the chip's width
+/// glides to fit it, so what is beside the chip moves over rather than jumps.
+fn glided_label(
+    motion: crate::motion::owned::Owned,
+    label: gpui::SharedString,
+) -> impl IntoElement {
+    crate::motion::Sampled::new(move |window, cx| {
+        let key = {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            label.hash(&mut hasher);
+            hasher.finish()
+        };
+        let glide = motion.glide_state("glide");
+        let text = motion.cross_fade_part("text", label, CHANGE, window, cx, |label, _, _| {
+            div()
+                .whitespace_nowrap()
+                .child(label.clone())
+                .into_any_element()
+        });
+        crate::motion::SizeGlide::new(&glide, text)
+            .axes(crate::motion::GlideAxes::Width)
+            .on_change(key)
+            .into_any_element()
+    })
 }
 
 #[cfg(test)]
@@ -1972,14 +2389,26 @@ mod sheet_tests {
                             .label("Open")
                             .debug_selector(|| "picker-open".into()),
                     )
-                    .content(move |_, _, cx| {
+                    .content(move |_, window, cx| {
                         if context {
-                            render_context_meter_pane(None, None, None, None, compact, None, cx)
+                            render_context_meter_pane(
+                                None, None, None, None, compact, None, window, cx,
+                            )
                         } else {
-                            let mut composer = store.read(cx).composer_state();
+                            let mut composer = store
+                                .read(cx)
+                                .composer_state_for(store.read(cx).sole_thread().as_deref(), cx);
                             composer.provider = Some(ProviderKind::ClaudeCode);
                             let control = PermissionControl::from_composer(&composer).unwrap();
-                            render_permission_pane(&control, compact, &store, &cx.entity(), cx)
+                            let session_id = store.read(cx).sole_thread();
+                            render_permission_pane(
+                                &control,
+                                compact,
+                                &store,
+                                session_id,
+                                &cx.entity(),
+                                cx,
+                            )
                         }
                     }),
             )
@@ -2007,7 +2436,6 @@ mod sheet_tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -2045,7 +2473,9 @@ mod sheet_tests {
                     let sheet = cx.debug_bounds("touch-picker-sheet").unwrap();
                     assert_eq!(sheet.left(), px(0.));
                     assert_eq!(sheet.right(), px(393.));
-                    assert_eq!(sheet.bottom(), px(852. - bottom));
+                    assert_eq!(sheet.bottom(), px(852.));
+                    let content = cx.debug_bounds("touch-picker-content").unwrap();
+                    assert!(content.bottom() <= px(852. - bottom));
                     assert!(sheet.top() >= px(99.));
                     assert_eq!(pane.left(), px(16.));
                     assert_eq!(pane.right(), px(377.));

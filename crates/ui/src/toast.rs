@@ -13,6 +13,9 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub type ToastId = u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,17 +103,26 @@ pub fn notification(
                             cx.notify();
                         })),
                 );
-                if is_expanded {
+                let reveal = crate::motion::shown(
+                    gpui::ElementId::from(("toast-detail", id as usize)),
+                    is_expanded.then_some(()),
+                    SHOW,
+                    window,
+                    cx,
+                );
+                if let Some(reveal) = reveal {
                     content = content.child(
-                        div()
-                            .id(("toast-detail-scroll", id as usize))
-                            .max_h_40()
-                            .p(cx.theme().tokens.spacing.sm)
-                            .rounded(crate::material::radius_input(cx))
-                            .bg(cx.theme().muted)
-                            .text_code(cx)
-                            .overflow_y_scroll_area()
-                            .child(detail.clone()),
+                        reveal.fold(
+                            div()
+                                .id(("toast-detail-scroll", id as usize))
+                                .max_h_40()
+                                .p(cx.theme().tokens.spacing.sm)
+                                .rounded(crate::material::radius_input(cx))
+                                .bg(cx.theme().muted)
+                                .text_code(cx)
+                                .overflow_y_scroll_area()
+                                .child(detail.clone()),
+                        ),
                     );
                 }
                 if kind == ToastKind::Error {
@@ -140,6 +152,7 @@ pub fn notification(
         notification = notification.action(move |_, _, _| {
             let handler = handler.clone();
             Button::new(("toast-action", id as usize))
+                .debug_selector(|| "toast-action".into())
                 .outline()
                 .label(label.clone())
                 .on_click(move |_, window, cx| handler(window, cx))

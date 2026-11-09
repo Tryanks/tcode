@@ -10,18 +10,18 @@
 use gpui::{App, Bounds, Pixels};
 
 pub use crate::chat::CaptureScroll;
-use crate::chat::ChatView;
+use crate::chat::TimelineView;
 use crate::shell::current_window_shell;
 
 fn with_chat<R>(
     cx: &mut App,
-    f: impl FnOnce(&mut ChatView, &mut gpui::Context<ChatView>) -> R,
+    f: impl FnOnce(&mut TimelineView, &mut gpui::Context<TimelineView>) -> R,
 ) -> Option<R> {
     let (window, shell) = current_window_shell(cx)?;
     window
         .update(cx, |_, _, cx| {
-            let chat = shell.read(cx).capture_chat(cx)?;
-            Some(chat.update(cx, f))
+            let timeline = shell.read(cx).capture_chat(cx)?.read(cx).timeline();
+            Some(timeline.update(cx, f))
         })
         .ok()
         .flatten()

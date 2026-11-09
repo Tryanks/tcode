@@ -7,14 +7,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::widgets::tooltip::Tooltip;
+use crate::widgets::tooltip::{Tooltip, tooltip_area};
 use gpui::{
     AbsoluteLength, AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity,
     GlobalElementId, HighlightStyle, Hsla, InspectorElementId, InteractiveElement as _,
     IntoElement, LayoutId, LineFragment as WrapLineFragment, MouseButton, ObjectFit,
     ParentElement as _, Pixels, Role, SharedString, SharedUri, Size,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, TextRun, TextStyle, WhiteSpace,
-    Window, div, img, point, prelude::FluentBuilder as _, px, relative, size,
+    Window, div, img, point, px, relative, size,
 };
 
 use super::{
@@ -23,6 +23,9 @@ use super::{
     selection::RunOrigin,
     state::{MarkdownState, PendingContextTarget},
 };
+
+/// How long a picture drawn here takes to fade in once it has decoded.
+const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
 
 const ELEMENT_LEN: usize = 1;
 const INLINE_CODE_PADDING_X: Pixels = px(3.);
@@ -141,8 +144,9 @@ enum LineFragmentKind {
 }
 
 impl InlineFlow {
+    /// `id` is the paragraph's render path.
     pub(super) fn new(
-        id: impl Into<ElementId>,
+        id: String,
         path: Rc<[u32]>,
         view: Entity<MarkdownState>,
         items: Vec<InlineFlowItem>,
@@ -155,18 +159,38 @@ impl InlineFlow {
         }
     }
 
+    /// The glide of the image at `ix`: once it decodes, its width goes from
+    /// the square it held to its own proportion, moving the text after it
+    /// along the line rather than jumping it.
+    fn image_glide(&self, ix: usize, cx: &App) -> crate::motion::GlideState {
+        self.view.read(cx).glide(&format!("{}/image/{ix}", self.id))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn image_element(
         ix: usize,
+        path: &str,
         view: Entity<MarkdownState>,
         url: &SharedUri,
         link: &Option<LinkMark>,
         title: &str,
         size: Size<Pixels>,
-        cx: &App,
+        window: &mut Window,
+        cx: &mut App,
     ) -> AnyElement {
         let source = view.read(cx).image_source(url);
+        // The picture fades in over the line once it decodes.
+        let arrived = crate::motion::image_arrival(
+            crate::motion::Clock::from(&view.read(cx).motion()),
+            path.to_owned(),
+            &source,
+            ARRIVE,
+            window,
+            cx,
+        );
         let opened = view.read(cx).opened_image_source(url);
         let link = link.clone();
+        let has_link = link.is_some();
         let title = title.to_string();
         let tooltip_title = title.clone();
         let context_view = view.clone();
@@ -184,18 +208,14 @@ impl InlineFlow {
         } else {
             Role::Button
         };
-        crate::material::accessible_clickable(img(source), ix, role, label, cx)
+        let image = crate::material::accessible_clickable(img(source), ix, role, label, cx)
             .object_fit(ObjectFit::Contain)
+            .opacity(arrived)
             .with_fallback(crate::image_viewer::unpreviewed(false, true, cx))
             .max_w(relative(1.))
             .w(size.width)
             .h(size.height)
             .cursor_pointer()
-            .when(link.is_some(), |image| {
-                image.tooltip(move |window, cx| {
-                    Tooltip::new(tooltip_title.clone()).build(window, cx)
-                })
-            })
             .on_mouse_down(MouseButton::Right, move |_, _, cx| {
                 context_view.update(cx, |state, cx| {
                     state.set_pending_context(
@@ -214,8 +234,15 @@ impl InlineFlow {
                 } else {
                     crate::image_viewer::open(opened.clone(), title.clone(), window, cx);
                 }
+            });
+        if has_link {
+            tooltip_area(("image-tooltip", ix), image, move |_, _| {
+                Tooltip::new(tooltip_title.clone())
             })
             .into_any_element()
+        } else {
+            image.into_any_element()
+        }
     }
 }
 
@@ -253,10 +280,15 @@ impl Element for InlineFlow {
             .iter()
             .enumerate()
             .map(|(ix, item)| match item {
-                InlineFlowItem::Image { url, .. } => Some(inline_image_size_for_line(
-                    intrinsic_image_size(ix, url, &self.view, window, cx),
-                    line_height,
-                )),
+                InlineFlowItem::Image { url, .. } => {
+                    let intrinsic = intrinsic_image_size(ix, url, &self.view, window, cx);
+                    let target = inline_image_size_for_line(intrinsic, line_height);
+                    Some(self.image_glide(ix, cx).toward(
+                        crate::motion::size_key(intrinsic.unwrap_or_default()),
+                        target,
+                        cx,
+                    ))
+                }
                 InlineFlowItem::ImageLink { url, label } => {
                     let mut badge = super::image_link::badge(
                         ix,
@@ -367,6 +399,9 @@ impl Element for InlineFlow {
                         }
                         _ => (Arc::new(Mutex::new(InlineState::default())), 0),
                     };
+                    let run_origin =
+                        RunOrigin::new(self.path.clone()).offset(base + source_range.start);
+                    let len = text.len();
                     if let Ok(mut state) = state.lock() {
                         state.set_text(text);
                     }
@@ -378,18 +413,19 @@ impl Element for InlineFlow {
                         highlights,
                         font_overrides,
                     )
-                    .origin(Some(
-                        RunOrigin::new(self.path.clone()).offset(base + source_range.start),
-                    ));
+                    .origin(Some(run_origin.clone()));
                     let mut element = match code_style {
                         Some(code) => {
                             let line_height = code.line_height();
+                            let fades = self.view.read(cx).fades(&run_origin, len);
                             div()
                                 .flex_none()
                                 .px(INLINE_CODE_PADDING_X)
                                 .py(INLINE_CODE_PADDING_Y)
                                 .rounded(code.radius)
-                                .bg(code.background)
+                                .bg(code
+                                    .background
+                                    .opacity(super::stream_fade::surround_opacity(&fades, len)))
                                 .font_family(code.font_family)
                                 .text_size(code.font_size)
                                 .line_height(line_height)
@@ -415,15 +451,21 @@ impl Element for InlineFlow {
                     size: fragment_size,
                 } => {
                     let mut element = match &self.items[item_ix] {
-                        InlineFlowItem::Image { url, link, title } => Self::image_element(
-                            elements.len(),
-                            self.view.clone(),
-                            url,
-                            link,
-                            title,
-                            fragment_size,
-                            cx,
-                        ),
+                        InlineFlowItem::Image { url, link, title } => {
+                            self.image_glide(item_ix, cx)
+                                .painted_at(fragment_size, window);
+                            Self::image_element(
+                                elements.len(),
+                                &format!("{}/image/{item_ix}", self.id),
+                                self.view.clone(),
+                                url,
+                                link,
+                                title,
+                                fragment_size,
+                                window,
+                                cx,
+                            )
+                        }
                         InlineFlowItem::ImageLink { url, label } => super::image_link::badge(
                             item_ix,
                             self.view.clone(),

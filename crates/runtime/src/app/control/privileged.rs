@@ -1,51 +1,47 @@
 use super::*;
+use crate::app::orchestrate::resolve_approval_decision;
 use control_mcp::{
-    BatchResult, DeleteThreadsParams, Outcome, PatchSettingsParams, RespondInputParams,
-    RewindParams, RewindScope, TerminalOp, TerminalParams,
+    BatchResult, DeleteThreadsParams, Outcome, PatchSettingsParams, ReportResultParams,
+    RespondApprovalParams, RespondInputParams, RewindParams, RewindScope, TerminalOp,
+    TerminalParams,
 };
+use tcode_core::settings::ChildApprovalMode;
 use tcode_core::settings::SettingsPatch;
 use tcode_protocol::{Command, Principal};
 
 /// The settings an agent may change, as display preferences only. Everything else touches
 /// authority (approvals, computer use, browser evaluation, plugins, child approval, grants,
-/// hosting, credentials), automation (settlement rules and tiers, resuming, fallbacks, title
-/// and review models) or UI state (sidebar, last project), and stays the user's. The match is
-/// exhaustive so a new setting is decided here, not allowed by default.
+/// hosting, credentials), automation (settlement rules and tiers, resuming, the title model)
+/// or UI state (sidebar, last project), and stays the user's. The match is exhaustive so a
+/// new setting is decided here, not allowed by default.
 pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
     match patch {
         SettingsPatch::Language(_)
         | SettingsPatch::ThemeMode(_)
         | SettingsPatch::WordWrapDiffs(_)
-        | SettingsPatch::AutoOpenTaskPanel(_)
         | SettingsPatch::LiveCommandPanelDisabled(_)
         | SettingsPatch::SidebarProviderMarks(_)
         | SettingsPatch::InactiveFrameThrottleDisabled(_)
-        | SettingsPatch::FallbackReviewAdvisor(_) => false,
+        | SettingsPatch::ScrollToLatestOnSend(_) => false,
         SettingsPatch::SourceControlHost { .. }
         | SettingsPatch::RemoveSourceControlHost { .. }
         | SettingsPatch::SkipDeleteConfirmation(_)
         | SettingsPatch::ProviderUpdateChecksDisabled(_)
-        | SettingsPatch::AbortOnModelFallback(_)
         | SettingsPatch::ResumeOnLimitReset(_)
         | SettingsPatch::AutoSettleAfterDays(_)
         | SettingsPatch::AutoSettleOnMerge(_)
         | SettingsPatch::ProjectSettlement { .. }
         | SettingsPatch::ProjectMergeMethod { .. }
         | SettingsPatch::RemoveAgentCreditsOnMerge(_)
-        | SettingsPatch::OrchestrateDecisionModels(_)
-        | SettingsPatch::OrchestrateChildModels(_)
         | SettingsPatch::OrchestrateChildApproval(_)
         | SettingsPatch::OrchestrateChildWorktrees(_)
         | SettingsPatch::ComputerUseEnabled(_)
         | SettingsPatch::ComputerUseImageMode(_)
         | SettingsPatch::ComputerUseAllowInput(_)
-        | SettingsPatch::ComputerUseAllowForegroundFallback(_)
         | SettingsPatch::ComputerUseShowAgentCursor(_)
         | SettingsPatch::BrowserEnabled(_)
         | SettingsPatch::BrowserHomeUrl(_)
         | SettingsPatch::BrowserAllowEvaluate(_)
-        | SettingsPatch::PluginManagementEnabled(_)
-        | SettingsPatch::PluginManagementProvider { .. }
         | SettingsPatch::ControlEnabled(_)
         | SettingsPatch::ControlDefaultGrant(_)
         | SettingsPatch::ControlProjectGrant { .. }
@@ -53,14 +49,14 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::TitleGenerationProvider(_)
         | SettingsPatch::TitleGenerationModel(_)
         | SettingsPatch::TitleGenerationProfileId(_)
-        | SettingsPatch::FallbackReviewProvider(_)
-        | SettingsPatch::FallbackReviewModel(_)
-        | SettingsPatch::FallbackReviewProfileId(_)
         | SettingsPatch::SidebarLayout(_)
         | SettingsPatch::RemoteHostingEnabled(_)
         | SettingsPatch::Traverse(_)
         | SettingsPatch::RemoteHostName(_)
-        | SettingsPatch::LastProject(_) => true,
+        | SettingsPatch::LastProject(_)
+        | SettingsPatch::NewProjectDir(_)
+        | SettingsPatch::ProjectStart(_)
+        | SettingsPatch::ProjectStartCustom(_) => true,
     }
 }
 
@@ -98,11 +94,12 @@ impl AppState {
         let target = params.thread_id;
         let pending = self
             .resident(&target)
-            .and_then(|session| session.timeline.pending_user_input.as_ref())
-            .map(|pending| pending.request_id.clone());
-        let request_id = match (params.question_id, pending) {
-            (Some(asked), Some(pending)) if asked == pending => pending,
-            (None, Some(pending)) => pending,
+            .and_then(|session| session.timeline.pending_user_input.as_ref());
+        let (request_id, questions) = match (params.question_id, pending) {
+            (Some(asked), Some(pending)) if asked == pending.request_id => {
+                (asked, &pending.questions)
+            }
+            (None, Some(pending)) => (pending.request_id.clone(), &pending.questions),
             (Some(asked), _) => {
                 return Err(format!(
                     "refused: request {asked} is not pending in thread {target}"
@@ -114,6 +111,27 @@ impl AppState {
                 ));
             }
         };
+        let ids: Vec<&str> = questions
+            .iter()
+            .map(|question| question.id.as_str())
+            .collect();
+        if let Some(unknown) = params
+            .answers
+            .keys()
+            .find(|key| !ids.contains(&key.as_str()))
+        {
+            return Err(format!(
+                "unknown question id {unknown:?}; the question ids are {ids:?}"
+            ));
+        }
+        let missing: Vec<&str> = ids
+            .iter()
+            .filter(|id| !params.answers.contains_key(**id))
+            .copied()
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!("missing answers for question ids {missing:?}"));
+        }
         let mut cx = agent_cx(cx);
         let command = Command::RespondUserInput {
             session_id: target.clone(),
@@ -131,6 +149,77 @@ impl AppState {
             &mut cx,
         );
         Ok(serde_json::json!({ "thread_id": target, "request_id": request_id, "answered": true }))
+    }
+
+    /// The lead answers its own subagent's approval, where Settings → Control child
+    /// approval makes it the approver; every other approval is the user's.
+    pub(super) fn op_respond_approval(
+        &mut self,
+        caller: &Caller,
+        params: RespondApprovalParams,
+        cx: &mut HostCx,
+    ) -> Result<serde_json::Value, String> {
+        let target = params.thread_id;
+        if !self
+            .find_meta(&target)
+            .is_some_and(|meta| self.own_subagent(caller, &meta))
+        {
+            return Err(format!(
+                "refused: thread {target} is not your subagent; its approvals are the user's"
+            ));
+        }
+        if self.settings.subagents.child_approval == ChildApprovalMode::Manual {
+            return Err(
+                "refused: Settings → Control subagent approvals is manual, so the user answers \
+                 your subagents' approvals"
+                    .into(),
+            );
+        }
+        let pending = self.approval_requests(&target);
+        let request = match params.approval_id {
+            Some(id) => pending
+                .iter()
+                .find(|request| request.id == id)
+                .cloned()
+                .ok_or_else(|| {
+                    format!("refused: approval {id} is not pending in thread {target}")
+                })?,
+            None => match pending {
+                [request] => request.clone(),
+                [] => return Err(format!("refused: thread {target} has no pending approval")),
+                _ => {
+                    return Err(format!(
+                        "thread {target} has several pending approvals; approval_id is required"
+                    ));
+                }
+            },
+        };
+        let decision =
+            resolve_approval_decision(params.option.as_deref(), params.cancel, &request)?;
+        self.respond_session_approval(&target, request.id.clone(), decision)?;
+        let mut cx = agent_cx(cx);
+        self.audit(
+            caller,
+            &target,
+            action::RESPOND_APPROVAL,
+            Some(request.id.clone()),
+            &mut cx,
+        );
+        Ok(serde_json::json!({ "thread_id": target, "approval_id": request.id, "answered": true }))
+    }
+
+    /// Nothing is stored: the report is read back from this call's own tool item when the
+    /// turn ends (`Timeline::last_report`), so the transcript is the one copy.
+    pub(super) fn op_report_result(
+        &mut self,
+        _caller: &Caller,
+        params: ReportResultParams,
+    ) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({
+            "ok": true,
+            "chars": params.text.chars().count(),
+            "delivered_when": "turn_ends",
+        }))
     }
 
     pub(super) fn op_terminal(
@@ -303,51 +392,100 @@ impl AppState {
         Ok(serde_json::json!({ "results": results }))
     }
 
+    /// Rewind a thread through its harness and answer with what the harness
+    /// did, once it has.
     pub(super) fn op_rewind(
         &mut self,
         caller: &Caller,
         params: RewindParams,
         cx: &mut HostCx,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Answer {
         let target = params.thread_id;
         if self
             .find_meta(&target)
-            .is_some_and(|meta| !meta.provider.caps().native_rewind)
+            .is_some_and(|meta| meta.provider.caps().rewind.is_none())
         {
-            return Err(format!(
+            return Answer::Now(Err(format!(
                 "refused: thread {target}'s provider has no native rewind"
-            ));
+            )));
         }
-        if self.resident(&target).is_none() {
-            return Err(format!(
+        let Some(active) = self.resident(&target) else {
+            return Answer::Now(Err(format!(
                 "refused: thread {target}'s history is not loaded on the host; send it a message or open it first"
-            ));
-        }
+            )));
+        };
         let mode = match params.mode {
             RewindScope::Files => RewindMode::Files,
             RewindScope::Conversation => RewindMode::Conversation,
             RewindScope::FilesAndConversation => RewindMode::FilesAndConversation,
         };
-        self.validate_command_target(&Command::RewindTurn {
-            session_id: target.clone(),
+        let Some(status) = self.rewind_status(active) else {
+            return Answer::Now(Err(format!(
+                "refused: thread {target}'s session cannot be rewound"
+            )));
+        };
+        if let Some(blocked) = status.blocked {
+            return Answer::Now(Err(format!("refused: {blocked:?}")));
+        }
+        let mut agent_cx = agent_cx(cx);
+        let at = super::super::rewind::RewindAt {
             turn: params.turn,
-            mode,
-        })
-        .map_err(refusal)?;
-        let mut cx = agent_cx(cx);
-        self.rewind_turn(&target, params.turn, mode, &mut cx);
+            steer: None,
+            checkpoint: None,
+        };
+        let Some(answer) = self.rewind_turn(&target, at, mode, None, &mut agent_cx) else {
+            return Answer::Now(Err(format!(
+                "refused: turn {} of thread {target} cannot be restored as {:?}",
+                params.turn, params.mode
+            )));
+        };
         self.audit(
             caller,
             &target,
             action::REWIND,
             Some(params.turn.to_string()),
-            &mut cx,
+            &mut agent_cx,
         );
-        Ok(serde_json::json!({
-            "thread_id": target,
-            "turn": params.turn,
-            "mode": params.mode,
-            "status": "requested",
+        let turn = params.turn;
+        Answer::Later(cx.spawn_background(async move {
+            let outcome = answer
+                .recv()
+                .await
+                .map_err(|_| "the rewind was abandoned before the harness answered".to_owned())?;
+            Ok(match outcome {
+                AgentEvent::RewindCompleted {
+                    mode,
+                    prefill,
+                    later_history,
+                    files,
+                    incomplete,
+                    undo_token,
+                    ..
+                } => serde_json::json!({
+                    "thread_id": target,
+                    "turn": turn,
+                    "status": if incomplete.is_some() { "partial" } else { "completed" },
+                    "restored": mode,
+                    "later_history": later_history,
+                    "files": files,
+                    "incomplete": incomplete,
+                    "undoable": undo_token.is_some(),
+                    "restored_prompt": prefill,
+                }),
+                AgentEvent::RewindFailed { failure, .. } => serde_json::json!({
+                    "thread_id": target,
+                    "turn": turn,
+                    "status": "failed",
+                    "reason": failure.reason,
+                    "detail": failure.detail,
+                }),
+                other => serde_json::json!({
+                    "thread_id": target,
+                    "turn": turn,
+                    "status": "unexpected",
+                    "event": other,
+                }),
+            })
         }))
     }
 

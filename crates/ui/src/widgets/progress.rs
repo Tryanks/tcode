@@ -7,8 +7,12 @@ use gpui::{
     RenderOnce, StyleRefinement, Styled, Window, prelude::FluentBuilder as _, px, relative,
 };
 use gpui_base::StyledExt as _;
+use gpui_base::motion::{Transition, transition};
 use gpui_base::{ProgressIndicator, ProgressTrack};
 use std::time::Duration;
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[derive(IntoElement)]
 pub struct Progress {
@@ -55,8 +59,16 @@ impl Styled for Progress {
     }
 }
 impl RenderOnce for Progress {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let color = self.color.unwrap_or(cx.theme().primary);
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // A bar that changes colour with its value (a usage meter crossing a
+        // threshold) glides between them with the fill.
+        let color = transition(
+            (self.id.clone(), "color"),
+            self.color.unwrap_or(cx.theme().primary),
+            Transition::new(GLIDE),
+            window,
+            cx,
+        );
         let height = match self.size {
             Size::XSmall => px(4.),
             Size::Small => px(6.),
@@ -65,6 +77,14 @@ impl RenderOnce for Progress {
             Size::Size(v) => v,
         };
         let value = self.value;
+        let shown = transition(
+            (self.id.clone(), "value"),
+            value,
+            Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        let reduce_motion = cx.reduce_motion();
         gpui_base::Progress::new(self.id)
             .value(value)
             .indeterminate(self.loading)
@@ -89,7 +109,13 @@ impl RenderOnce for Progress {
                     .rounded(height / 2.)
                     .bg(color)
                     .map(|this| {
-                        if self.loading {
+                        if self.loading && reduce_motion {
+                            // A still segment in the middle of the track says
+                            // "working" without the sweep.
+                            this.left(relative(0.35))
+                                .w(relative(0.3))
+                                .into_any_element()
+                        } else if self.loading {
                             this.with_animation(
                                 "progress-loading",
                                 Animation::new(Duration::from_secs(1)).repeat(),
@@ -97,7 +123,7 @@ impl RenderOnce for Progress {
                             )
                             .into_any_element()
                         } else {
-                            this.w(relative(value / 100.)).into_any_element()
+                            this.w(relative(shown / 100.)).into_any_element()
                         }
                     }),
             )

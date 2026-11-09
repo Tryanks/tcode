@@ -12,10 +12,10 @@ default = []
 debug-exports = []
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-gpui = { package = "gpui-fast", version = "0.1.12", default-features = false }
+gpui = { package = "gpui-fast", version = "0.1.13", default-features = false }
 # The browser constructs its own platform (gpui::Application::with_platform)
 # rather than enabling the web backend's multithreaded default.
-gpui_web = { package = "gpui-fast-web", version = "0.1.12", default-features = false }
+gpui_web = { package = "gpui-fast-web", version = "0.1.13", default-features = false }
 console_error_panic_hook = "0.1"
 tcode-protocol = { path = "../protocol", default-features = false }
 tcode-client = { path = "../client" }
@@ -30,7 +30,7 @@ web-sys = { version = "=0.3.104", features = [
     "Window", "Performance", "Document", "Element", "HtmlCanvasElement", "HtmlAnchorElement", "Node",
     "MutationObserver", "MutationObserverInit", "MutationRecord", "NodeList",
     "Location", "Navigator", "Storage", "WebSocket", "Event", "EventTarget", "MessageEvent",
-    "Blob", "BlobPropertyBag", "Url",
+    "Blob", "BlobPropertyBag", "Url", "File", "FileList", "HtmlInputElement",
     "AbortController", "AbortSignal", "Request", "RequestInit", "Response", "Headers",
     "ReadableStream", "ReadableStreamDefaultReader",
     "PointerEvent", "MouseEvent", "UiEvent", "HtmlElement", "HtmlTextAreaElement", "VisualViewport",

@@ -1,0 +1,227 @@
+//! Windows for the harness's own calls about the session rather than the
+//! workspace: the tools it loaded, the skill it launched, a plan it
+//! proposed as a call, and its automatic reviewer's verdict on an action.
+
+use std::path::Path;
+
+use agent::ItemStatus;
+use gpui::{
+    AnyElement, InteractiveElement as _, IntoElement as _, ParentElement as _, Styled as _, div,
+};
+use gpui_base::h_flex;
+use serde::Deserialize;
+
+use super::window::{Argument, Chip, Header, Verb, first_line, section};
+use super::{Bound, Call, ToolCtx, ToolView, bounded_text, copy, output_section};
+use crate::chat::model::one_line;
+use crate::icon::IconName;
+use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
+
+#[derive(Deserialize)]
+struct ToolSearch<'a> {
+    #[serde(borrow)]
+    query: &'a str,
+}
+
+#[derive(Deserialize)]
+struct Skill<'a> {
+    #[serde(borrow, alias = "name", alias = "id")]
+    skill: &'a str,
+}
+
+#[derive(Deserialize)]
+struct ProposedPlan<'a> {
+    #[serde(borrow)]
+    plan: &'a str,
+}
+
+#[derive(Deserialize)]
+struct Review<'a> {
+    #[serde(borrow)]
+    summary: &'a str,
+}
+
+enum Kind<'a> {
+    LoadTools(&'a str),
+    Skill(&'a str),
+    Plan(&'a str),
+    Review(&'a str),
+}
+
+pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView + 'a>> {
+    let kind = if call.named(&["toolsearch", "tool_search"]) {
+        Kind::LoadTools(call.input::<ToolSearch<'a>>()?.query)
+    } else if call.named(&["skill"]) {
+        Kind::Skill(call.input::<Skill<'a>>()?.skill)
+    } else if call.named(&["exitplanmode", "exit_plan_mode"]) {
+        Kind::Plan(call.input::<ProposedPlan<'a>>()?.plan)
+    } else if call.named(&["auto-reviewer"]) {
+        Kind::Review(call.input::<Review<'a>>()?.summary)
+    } else {
+        return None;
+    };
+    Some(Box::new(Harness { kind }))
+}
+
+struct Harness<'a> {
+    kind: Kind<'a>,
+}
+
+/// The tools a search loaded: one `{"type":"tool_reference","tool_name":…}`
+/// line each.
+fn loaded_tools(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+            (value.get("type")?.as_str()? == "tool_reference")
+                .then(|| value.get("tool_name")?.as_str().map(str::to_owned))
+                .flatten()
+        })
+        .collect()
+}
+
+/// A reviewer's verdict: its rationale, and the risk it rated on the
+/// `Risk: <level>. <action>` line the adapter writes after it.
+struct Verdict<'o> {
+    rationale: &'o str,
+    risk: Option<&'o str>,
+}
+
+fn verdict(output: &str) -> Verdict<'_> {
+    let (rationale, last) = match output.trim_end().rsplit_once('\n') {
+        Some((rationale, last)) => (rationale, last),
+        None => ("", output.trim_end()),
+    };
+    let risk = last
+        .strip_prefix("Risk: ")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(risk, _)| risk)
+        .filter(|risk| *risk != "unknown");
+    match risk {
+        Some(_) => Verdict {
+            rationale: rationale.trim(),
+            risk,
+        },
+        None => Verdict {
+            rationale: output.trim(),
+            risk: None,
+        },
+    }
+}
+
+/// The plan's title: its first heading, else its first line.
+fn plan_title(plan: &str) -> String {
+    let heading = plan
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix('#'))
+        .map(|line| line.trim_start_matches('#').trim().to_owned());
+    one_line(&heading.or_else(|| first_line(plan)).unwrap_or_default())
+}
+
+impl ToolView for Harness<'_> {
+    fn header(&self, call: &Call<'_>, _cwd: &Path) -> Header {
+        let output = call.output.unwrap_or_default();
+        match self.kind {
+            Kind::LoadTools(query) => {
+                let tools = loaded_tools(output);
+                Header::new(IconName::Search, Verb("load_tools"))
+                    .argument(Argument::mono(query))
+                    .chip(
+                        (!tools.is_empty())
+                            .then(|| Chip::Count(super::counted("tools.tools", tools.len()))),
+                    )
+            }
+            Kind::Skill(skill) => {
+                Header::with_icon("icons/puzzle.svg", Verb("skill")).argument(Argument::mono(skill))
+            }
+            Kind::Plan(plan) => Header::new(IconName::ListOrdered, Verb("propose_plan"))
+                .argument(Argument::plain(plan_title(plan))),
+            Kind::Review(summary) => {
+                let verb = match call.status {
+                    ItemStatus::InProgress => Verb("review"),
+                    ItemStatus::Completed => Verb("review_approved"),
+                    _ => Verb("review_denied"),
+                };
+                let Verdict { rationale, risk } = verdict(output);
+                let risk = risk.map(|risk| {
+                    let label = crate::tr!("tools.risk", level = risk).into_owned();
+                    if risk == "low" {
+                        Chip::Count(label)
+                    } else {
+                        Chip::Warning(label)
+                    }
+                });
+                Header::new(IconName::BadgeCheck, verb)
+                    .argument(Argument::plain(one_line(summary)))
+                    .chip(risk)
+                    .error(first_line(rationale))
+            }
+        }
+    }
+
+    fn body(&self, call: &Call<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
+        let output = call.output.unwrap_or_default();
+        match self.kind {
+            Kind::LoadTools(_) => {
+                let tools = loaded_tools(output);
+                if tools.is_empty() {
+                    return super::body(output_section(call, Bound::OUTPUT, ctx));
+                }
+                let cx = ctx.app();
+                let theme = cx.theme();
+                let names = tools.into_iter().enumerate().map(|(index, tool)| {
+                    let selector = format!("tool-loaded-{}-{index}", call.id());
+                    div()
+                        .debug_selector(move || selector.clone())
+                        .font_family(theme.mono_font_family.clone())
+                        .text_color(theme.foreground.opacity(0.85))
+                        .child(tool)
+                        .into_any_element()
+                });
+                let list = h_flex()
+                    .w_full()
+                    .gap_x_3()
+                    .flex_wrap()
+                    .text_secondary(false, cx)
+                    .children(names);
+                super::body([section(&crate::tr!("tools.loaded"), list, cx).into_any_element()])
+            }
+            Kind::Plan(plan) => {
+                let text = bounded_text(call.entry, "plan", plan, false, Bound::HEAD, ctx);
+                let plan = section(&crate::tr!("tools.plan"), text, ctx.app()).into_any_element();
+                let output = output_section(call, Bound::HEAD, ctx);
+                super::body(std::iter::once(plan).chain(output))
+            }
+            Kind::Review(_) => {
+                let Verdict { rationale, .. } = verdict(output);
+                let text = (!rationale.is_empty()).then(|| {
+                    let text =
+                        bounded_text(call.entry, "output", rationale, false, Bound::HEAD, ctx);
+                    section(&crate::tr!("tools.rationale"), text, ctx.app()).into_any_element()
+                });
+                super::body(text)
+            }
+            Kind::Skill(_) => super::body(output_section(call, Bound::HEAD, ctx)),
+        }
+    }
+
+    fn copy_items(&self, call: &Call<'_>) -> Vec<(String, String)> {
+        let mut items = Vec::new();
+        match self.kind {
+            Kind::Plan(plan) => copy(&mut items, "tools.copy_plan", plan),
+            Kind::LoadTools(_) => copy(
+                &mut items,
+                "chat.copy_output",
+                &loaded_tools(call.output.unwrap_or_default()).join("\n"),
+            ),
+            Kind::Skill(_) | Kind::Review(_) => copy(
+                &mut items,
+                "chat.copy_output",
+                call.output.unwrap_or_default(),
+            ),
+        }
+        items
+    }
+}

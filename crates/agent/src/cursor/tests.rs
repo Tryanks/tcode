@@ -12,8 +12,9 @@ use smol::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufR
 use smol::net::{TcpListener, TcpStream};
 
 use crate::{
-    AgentEvent, ItemContent, ItemStatus, LaunchEnv, OptionSelection, PlanStepStatus, ResumeCursor,
-    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TurnStatus,
+    AgentEvent, ApprovalDecision, ApprovalKind, ItemContent, ItemStatus, LaunchEnv,
+    OptionSelection, PlanStepStatus, ResumeCursor, SessionCommand, SessionHandle, SessionOptions,
+    ThreadItem, TurnStatus,
 };
 
 const RECORDED: &str = include_str!("../../tests/fixtures/cursor/recorded_signed_out.jsonl");
@@ -99,7 +100,7 @@ impl Agent {
             cwd: std::env::temp_dir(),
             model: None,
             resume: None,
-            fork: false,
+            fork: None,
             binary_path: Some(stand_in()),
             option_selections: Vec::new(),
             mcp_servers: Vec::new(),
@@ -714,7 +715,7 @@ fn questions_and_todos_are_answered_in_cursors_nested_shapes() {
 }
 
 #[test]
-fn native_plan_requests_return_the_users_choice_and_cancel_on_interrupt() {
+fn native_plan_requests_show_the_plan_and_return_the_users_decision() {
     smol::block_on(bounded(async {
         for grok in [false, true] {
             let mut agent = Agent::new().await;
@@ -740,13 +741,22 @@ fn native_plan_requests_return_the_users_choice_and_cancel_on_interrupt() {
                     "_x.ai/exit_plan_mode",
                     json!({"sessionId": SESSION, "toolCallId": "native-plan", "planContent": "# Native content"}),
                     vec![
-                        ("Approve", json!({"outcome": "approved"})),
-                        ("Request changes", json!({"outcome": "cancelled"})),
                         (
-                            "Use another approach",
+                            ApprovalDecision::Option("approve".into()),
+                            json!({"outcome": "approved"}),
+                        ),
+                        (
+                            ApprovalDecision::Option("keep_planning".into()),
+                            json!({"outcome": "cancelled"}),
+                        ),
+                        (
+                            ApprovalDecision::Feedback("Use another approach".into()),
                             json!({"outcome": "cancelled", "feedback": "Use another approach"}),
                         ),
-                        ("Abandon", json!({"outcome": "abandoned"})),
+                        (
+                            ApprovalDecision::Option("abandon".into()),
+                            json!({"outcome": "abandoned"}),
+                        ),
                     ],
                 )
             } else {
@@ -754,35 +764,43 @@ fn native_plan_requests_return_the_users_choice_and_cancel_on_interrupt() {
                     "cursor/create_plan",
                     json!({"sessionId": SESSION, "toolCallId": "native-plan", "plan": "# Native content"}),
                     vec![
-                        ("Accept", json!({"outcome": {"outcome": "accepted"}})),
-                        ("Reject", json!({"outcome": {"outcome": "rejected"}})),
                         (
-                            "Use another approach",
+                            ApprovalDecision::Option("accept".into()),
+                            json!({"outcome": {"outcome": "accepted"}}),
+                        ),
+                        (
+                            ApprovalDecision::Option("reject".into()),
+                            json!({"outcome": {"outcome": "rejected"}}),
+                        ),
+                        (
+                            ApprovalDecision::Feedback("Use another approach".into()),
                             json!({"outcome": {"outcome": "rejected", "reason": "Use another approach"}}),
                         ),
                     ],
                 )
             };
-            for (choice, expected) in cases {
+            for (decision, expected) in cases {
                 let requested = agent.request(method, params.clone()).await;
                 let events = events_until(&handle, |event| {
-                    matches!(event, AgentEvent::UserInputRequested { .. })
+                    matches!(event, AgentEvent::ApprovalRequested(_))
                 })
                 .await;
-                let Some(AgentEvent::UserInputRequested {
-                    request_id,
-                    questions,
-                    ..
-                }) = events.last()
-                else {
+                assert!(
+                    events.iter().any(|event| matches!(event, AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::Plan { markdown }, .. })
+                        if id == "plan:native-plan" && markdown == "# Native content")),
+                    "{events:?}"
+                );
+                let Some(AgentEvent::ApprovalRequested(request)) = events.last() else {
                     unreachable!()
                 };
-                assert_eq!(questions[0].question, "# Native content");
+                assert!(
+                    matches!(&request.kind, ApprovalKind::Plan { item_id, .. } if item_id == "plan:native-plan")
+                );
                 handle
                     .commands
-                    .send(SessionCommand::RespondUserInput {
-                        request_id: request_id.clone(),
-                        answers: Map::from_iter([("decision".into(), json!(choice))]),
+                    .send(SessionCommand::RespondApproval {
+                        request_id: request.id.clone(),
+                        decision,
                     })
                     .await
                     .unwrap();
@@ -790,7 +808,7 @@ fn native_plan_requests_return_the_users_choice_and_cancel_on_interrupt() {
             }
             let requested = agent.request(method, params).await;
             events_until(&handle, |event| {
-                matches!(event, AgentEvent::UserInputRequested { .. })
+                matches!(event, AgentEvent::ApprovalRequested(_))
             })
             .await;
             handle

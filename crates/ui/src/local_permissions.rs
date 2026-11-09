@@ -25,6 +25,12 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 const KINDS: [PermissionKind; 2] = [
     PermissionKind::Accessibility,
     PermissionKind::ScreenRecording,
@@ -81,8 +87,11 @@ impl LocalPermissions {
         match self.grant_flow.advance(kind) {
             PermissionGrantAction::Request => {
                 if kind == PermissionKind::ScreenRecording {
+                    let session_id = crate::shell::current_thread(cx)
+                        .and_then(|thread| self.store.read(cx).session_of(thread))
+                        .unwrap_or_default();
                     self.store.update(cx, |store, _cx| {
-                        store.write_relaunch_marker("computer_use".into());
+                        store.write_relaunch_marker_for(session_id, "computer_use".into());
                     });
                     self.marker_pending = true;
                 }
@@ -117,8 +126,11 @@ impl LocalPermissions {
     }
 
     fn relaunch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let session_id = crate::shell::current_thread(cx)
+            .and_then(|thread| self.store.read(cx).session_of(thread))
+            .unwrap_or_default();
         self.store.update(cx, |store, _cx| {
-            store.write_relaunch_marker("computer_use".into());
+            store.write_relaunch_marker_for(session_id, "computer_use".into());
         });
         if let Err(error) = relaunch_app() {
             log::warn!("failed to relaunch tcode: {error}");
@@ -133,6 +145,7 @@ impl LocalPermissions {
         &self,
         kind: PermissionKind,
         compact: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let granted = self.status.granted(kind);
@@ -154,40 +167,62 @@ impl LocalPermissions {
                 "perm-recheck-screen-recording",
             ),
         };
-        let (bg, fg, chip) = if granted {
-            (
-                cx.theme().success.opacity(0.12),
-                cx.theme().success_foreground,
-                crate::tr!("permissions.granted"),
-            )
-        } else {
-            (
-                cx.theme().warning.opacity(0.12),
-                cx.theme().warning_foreground,
-                crate::tr!("permissions.missing"),
-            )
-        };
-        let mut controls = h_flex()
-            .flex_none()
-            .gap_2()
-            .items_center()
-            .child(crate::material::semantic_chip(chip, bg, fg, cx));
-        if !granted {
-            controls = controls
-                .child(
-                    Button::new(grant_id)
-                        .outline()
-                        .small()
-                        .label(grant_label)
-                        .on_click(cx.listener(move |this, _, _, cx| this.grant(kind, cx))),
-                )
-                .child(
-                    Button::new(recheck_id)
-                        .ghost()
-                        .small()
-                        .label(crate::tr!("permissions.recheck"))
-                        .on_click(cx.listener(|this, _, _, cx| this.recheck(true, cx))),
-                );
+        // The chip cross-fades to its new state, and the buttons that ask for
+        // a grant fade away once it is given.
+        let chip = crate::motion::cross_fade(
+            (gpui::ElementId::from(grant_id), "chip"),
+            granted,
+            CHANGE,
+            window,
+            cx,
+            |&granted, _, cx| {
+                let (bg, fg, chip) = if granted {
+                    (
+                        cx.theme().success.opacity(0.12),
+                        cx.theme().success_foreground,
+                        crate::tr!("permissions.granted"),
+                    )
+                } else {
+                    (
+                        cx.theme().warning.opacity(0.12),
+                        cx.theme().warning_foreground,
+                        crate::tr!("permissions.missing"),
+                    )
+                };
+                crate::material::semantic_chip(chip, bg, fg, cx).into_any_element()
+            },
+        );
+        let asking = crate::motion::shown(
+            (gpui::ElementId::from(grant_id), "asking"),
+            (!granted).then_some(grant_label),
+            SHOW,
+            window,
+            cx,
+        );
+        let mut controls = h_flex().flex_none().gap_2().items_center().child(chip);
+        if let Some(asking) = asking {
+            let grant_label = asking.value.clone();
+            controls = controls.child(
+                asking.fade(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Button::new(grant_id)
+                                .outline()
+                                .small()
+                                .label(grant_label)
+                                .on_click(cx.listener(move |this, _, _, cx| this.grant(kind, cx))),
+                        )
+                        .child(
+                            Button::new(recheck_id)
+                                .ghost()
+                                .small()
+                                .label(crate::tr!("permissions.recheck"))
+                                .on_click(cx.listener(|this, _, _, cx| this.recheck(true, cx))),
+                        ),
+                ),
+            );
         }
         // No reset affordance: the grant lives in the OS, not in settings.json.
         crate::material::group_row(cx)
@@ -229,12 +264,25 @@ impl Render for LocalPermissions {
         let compact = crate::window_seam::window_is_compact(window, cx);
         let rows: Vec<AnyElement> = KINDS
             .iter()
-            .map(|kind| self.permission_row(*kind, compact, cx))
+            .map(|kind| self.permission_row(*kind, compact, window, cx))
             .collect();
+        let banner = crate::motion::shown(
+            "perm-restart",
+            self.restart_hint.then_some(()),
+            SHOW,
+            window,
+            cx,
+        );
         v_flex()
             .w_full()
-            .gap_2()
             .child(crate::material::grouped(rows, cx))
-            .children(self.restart_hint.then(|| self.restart_banner(compact, cx)))
+            .children(banner.map(|banner| {
+                banner.fold(
+                    div()
+                        .w_full()
+                        .pt_2()
+                        .child(self.restart_banner(compact, cx)),
+                )
+            }))
     }
 }

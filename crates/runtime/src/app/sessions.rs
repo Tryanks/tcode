@@ -20,8 +20,8 @@ pub struct SettleEffects {
 /// Sessions viewed by clients and sessions retained for in-flight work or re-adoption.
 #[derive(Default)]
 pub struct ResidentSessions {
-    pub live: Revisioned<HashMap<String, ActiveSession>>,
-    pub(super) parked: Revisioned<HashMap<String, ActiveSession>>,
+    pub live: RevisionedMap<ActiveSession>,
+    pub(super) parked: RevisionedMap<ActiveSession>,
 }
 impl ResidentSessions {
     pub(crate) fn resident(&self, id: &str) -> Option<&ActiveSession> {
@@ -44,6 +44,12 @@ impl ResidentSessions {
             .keys()
             .chain(self.parked.keys())
             .map(String::as_str)
+    }
+    /// Residents borrowed one at a time at or after `revision`.
+    pub(super) fn touched_since(&self, revision: u64) -> impl Iterator<Item = &str> {
+        self.live
+            .touched_since(revision)
+            .chain(self.parked.touched_since(revision))
     }
 }
 
@@ -81,8 +87,13 @@ impl AppState {
                     self.refresh_terminal_projection(*terminal_id);
                 }
                 Topic::CommandOutput { .. } => self.open_command_output(&subscription.topic),
+                Topic::Preview { client } => self.preview_client_subscribed(client, cx),
+                Topic::DevServers { .. } => self.dev_servers_subscribed(cx),
                 _ => {}
             }
+        }
+        if subscription.topic == Topic::DiskUsage {
+            self.disk_usage_subscribed(cx);
         }
     }
 
@@ -94,6 +105,9 @@ impl AppState {
         self.subscriptions.remove(&subscription.topic);
         if let Topic::CommandOutput { .. } = &subscription.topic {
             self.close_command_output(&subscription.topic);
+        }
+        if let Topic::Preview { client } = &subscription.topic {
+            self.preview_client_unsubscribed(client, cx);
         }
         if let Topic::SpaceIndex { space_id } = &subscription.topic {
             self.space_scopes.remove(space_id);
@@ -190,22 +204,28 @@ impl AppState {
     /// Create a project rooted at `root`, or return the existing id when one
     /// already covers it.
     ///
-    /// The root is validated here, against this host's filesystem and path
-    /// rules: a client cannot decide whether `C:\src` or `/srv/src` is absolute,
-    /// and only the host can see whether the directory exists.
+    /// The root is resolved and validated here, against this host's filesystem
+    /// and path rules: a client cannot decide whether `C:\src` or `/srv/src` is
+    /// absolute, what `~` stands for, or whether the directory exists.
     pub fn create_project(
         &mut self,
         root: PathBuf,
         cx: &mut HostCx,
     ) -> Result<String, ProtocolError> {
+        let root = self
+            .user_directories
+            .resolve_host_path(&root)
+            .map_err(|error| ProtocolError {
+                code: "invalid_project_root".into(),
+                message: match error.kind() {
+                    std::io::ErrorKind::InvalidInput => {
+                        format!("{} is not an absolute path on this host", root.display())
+                    }
+                    _ => error.to_string(),
+                },
+            })?;
         if let Some(existing) = self.projects.iter().find(|p| p.root == root) {
             return Ok(existing.id.clone());
-        }
-        if !root.is_absolute() {
-            return Err(ProtocolError {
-                code: "invalid_project_root".into(),
-                message: format!("{} is not an absolute path on this host", root.display()),
-            });
         }
         if !root.is_dir() {
             return Err(ProtocolError {
@@ -224,8 +244,8 @@ impl AppState {
 
     /// Point `project_id` at `root`; see [`Command::SetProjectRoot`]. Every
     /// resident thread of the project is stopped first so no process keeps
-    /// working in the old directory; each resumes from its cursor when next
-    /// opened.
+    /// working in the old directory, and continues there when next opened; a
+    /// thread whose queue outlived its provider starts at once and delivers it.
     pub fn set_project_root(
         &mut self,
         project_id: &str,
@@ -313,16 +333,20 @@ impl AppState {
             .filter(|active| in_project(&active.meta))
             .map(|active| active.meta.id.clone())
             .collect();
-        if resident_ids
-            .iter()
-            .any(|id| self.resident(id).is_some_and(ActiveSession::has_work))
-        {
+        if resident_ids.iter().any(|id| {
+            self.resident(id)
+                .is_some_and(|active| active.has_work() && !active.queue_stranded())
+        }) {
             return Err(ProtocolError {
                 code: "project_busy".into(),
                 message: "A thread of this project is still running; wait for it to finish.".into(),
             });
         }
         for id in &resident_ids {
+            // No process to stop, and the queue exists nowhere else.
+            if self.resident(id).is_some_and(ActiveSession::queue_stranded) {
+                continue;
+            }
             if self.residents.live.contains_key(id) {
                 self.shutdown_active(id, cx);
             } else if let Some(parked) = self.residents.evict(id)
@@ -373,9 +397,23 @@ impl AppState {
             })
             .cloned()
             .collect();
+        let mut stranded = Vec::new();
         for mut meta in metas {
             if let Some(cwd) = rebase_path(&meta.cwd, &old_root, &root) {
-                meta.cwd = cwd;
+                let old_cwd = std::mem::replace(&mut meta.cwd, cwd);
+                if meta.cwd != old_cwd {
+                    // Keep the native session out of the new directory, as
+                    // `move_session_by` does: Claude Code cannot resume it there.
+                    meta.moved_from.get_or_insert(old_cwd);
+                    meta.resume_cursor = None;
+                    meta.pending_fork = None;
+                }
+                if self
+                    .resident(&meta.id)
+                    .is_some_and(ActiveSession::queue_stranded)
+                {
+                    stranded.push(meta.clone());
+                }
             }
             if let Some(worktree) = &mut meta.worktree
                 && let Some(path) = rebase_path(&worktree.root_project_path, &old_root, &root)
@@ -391,6 +429,9 @@ impl AppState {
                 resident.meta.cwd = meta.cwd.clone();
                 resident.meta.worktree = meta.worktree.clone();
                 resident.meta.project_id = meta.project_id.clone();
+                resident.meta.moved_from = meta.moved_from.clone();
+                resident.meta.resume_cursor = meta.resume_cursor.clone();
+                resident.meta.pending_fork = meta.pending_fork.clone();
             }
             self.persist_meta(&meta, cx);
         }
@@ -415,13 +456,6 @@ impl AppState {
                 let draft_destination =
                     ConversationDestination::ProjectDraft(project_id.to_string());
                 self.terminal_workspaces.remove(&draft_destination);
-                if self
-                    .terminal_preferences
-                    .remove(&draft_destination.preference_key())
-                    .is_some()
-                {
-                    self.write_terminal_preferences(cx);
-                }
                 self.enqueue_store_write(StoreWrite::RemoveProject(project_id.to_string()), cx);
                 self.settings
                     .collapsed_projects
@@ -446,6 +480,11 @@ impl AppState {
                 self.enqueue_store_write(StoreWrite::UpsertProject(project), cx);
             }
         }
+        for meta in stranded {
+            self.ensure_session_started(&meta.id, cx);
+            self.refresh_git_status(&meta.id, cx);
+            self.refresh_session_git_branch(meta.id, meta.cwd, cx);
+        }
         Ok(())
     }
 
@@ -454,7 +493,7 @@ impl AppState {
     /// Claude Code keeps its sessions per directory and cannot resume one from another — so
     /// the move clears the resume cursor and the next turn starts a fresh provider session
     /// there, handed the conversation so far by the relay owner
-    /// ([`Self::hand_off_moved_conversation`]). The Tcode transcript stays as it is.
+    /// ([`Self::hand_off_conversation`]). The Tcode transcript stays as it is.
     pub fn move_session(
         &mut self,
         session_id: &str,
@@ -560,7 +599,7 @@ impl AppState {
         meta.moved_from.get_or_insert(old_cwd);
         meta.project_id = Some(project.id.clone());
         meta.resume_cursor = None;
-        meta.pending_fork = false;
+        meta.pending_fork = None;
         meta.updated_at = now_secs();
         if !by_own_turn {
             self.detach_provider_to_idle(session_id, cx);
@@ -582,10 +621,12 @@ impl AppState {
     pub fn create_new_project(
         &self,
         name: String,
+        parent: Option<String>,
         cx: &HostCx,
     ) -> HostTask<Result<String, ProtocolError>> {
         let directories = self.user_directories.clone();
-        let task = cx.unblock(move || directories.new_project_root(&name));
+        let parent = parent.unwrap_or_else(|| self.settings.new_project_dir().to_owned());
+        let task = cx.unblock(move || directories.new_project_root(&parent, &name));
         let host = cx.clone();
         cx.spawn_background(async move {
             let root = task.await.map_err(project_directory_error)?;
@@ -1025,10 +1066,9 @@ impl AppState {
         self.residents.resident_mut(id)
     }
 
-    pub(super) fn find_meta(&self, id: &str) -> Option<SessionMeta> {
+    pub(crate) fn find_meta(&self, id: &str) -> Option<SessionMeta> {
         self.sessions
-            .iter()
-            .find(|meta| meta.id == id)
+            .by_id(id)
             .cloned()
             .or_else(|| self.resident(id).map(|session| session.meta.clone()))
     }
@@ -1036,6 +1076,10 @@ impl AppState {
     /// Directory where one session's image attachments are persisted.
     pub(crate) fn attachments_dir_for(&self, session_id: &str) -> PathBuf {
         user_files::attachment_dir(self.store.root(), session_id)
+    }
+
+    pub(crate) fn user_directories(&self) -> &user_files::UserDirectories {
+        &self.user_directories
     }
 
     /// Whether a client may save an attachment into `dir` with extension
@@ -1099,7 +1143,6 @@ impl AppState {
         if settlement_changed {
             self.evaluate_all_settlement(cx);
         }
-        self.forget_disabled_plugin_catalogs(cx);
         self.providers.provider_secret_names =
             provider_secret_names(&self.settings, &self.settings_store);
         // Keep the live computer-use MCP config in step with the persisted
@@ -1470,7 +1513,6 @@ impl AppState {
             self.drop_background(id, cx);
             self.revoke_preview_registration(id);
             self.revoke_pull_request_registration(id);
-            self.revoke_orchestrate_child_registration(id);
             self.revoke_control_registration(id);
         }
         for id in &ids {
@@ -1529,75 +1571,6 @@ impl AppState {
         }
     }
 
-    /// Duplicate a stored transcript and arrange for its next provider start to
-    /// fork the source's native session. The fork stays idle until its first
-    /// user turn, exactly like a cold-opened stored thread.
-    pub fn fork_thread(&mut self, id: &str, cx: &mut HostCx) -> Option<String> {
-        let resident = self.resident(id);
-        let source = resident
-            .map(|session| &session.meta)
-            .or_else(|| self.sessions.iter().find(|meta| meta.id == id))?;
-        if let Some(error) = fork_refusal(Self::session_fork_availability(source, resident)) {
-            self.report_error(RuntimeError::External(error.into()), cx);
-            return None;
-        }
-        let source = source.clone();
-
-        let mut fork = SessionMeta::new(source.provider, source.cwd.clone(), source.model.clone());
-        fork.title = format!("{} (fork)", source.title);
-        fork.option_selections = source.option_selections.clone();
-        fork.project_id = source.project_id.clone();
-        fork.acp_agent_id = source.acp_agent_id.clone();
-        fork.profile_id = source.profile_id.clone();
-        fork.resume_cursor = source.resume_cursor.clone();
-        // The fork carries the source's context, so it may read what the source could.
-        fork.references = source.references.clone();
-        fork.pending_fork = true;
-        // `worktree` deliberately stays absent: it is an ownership/cleanup
-        // marker. The cwd may be shared, but the fork must not own the source's
-        // generated worktree or offer to delete it.
-
-        let fork_id = fork.id.clone();
-        self.upsert_session_in_memory(fork.clone());
-        let (completion, completed) = smol::channel::bounded(1);
-        self.enqueue_store_write(
-            StoreWrite::Fork {
-                src: source.id,
-                meta: Box::new(fork.clone()),
-                completion,
-            },
-            cx,
-        );
-        self.queue_activity_load(&fork_id, cx);
-        let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
-            let result = completed
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("session store writer stopped".into()));
-            host_cx.enqueue(move |state, cx| match result {
-                Ok(()) => {
-                    state.select_session(&fork.id, cx);
-                    state.reply_to_subscription(
-                        None,
-                        tcode_protocol::Subscription {
-                            known_index: None,
-                            topic: Topic::SessionEvents {
-                                session_id: fork.id.clone(),
-                            },
-                            after: None,
-                        },
-                        cx,
-                    );
-                }
-                Err(error) => {
-                    state.report_error(RuntimeError::PersistSession { error }, cx);
-                }
-            });
-        });
-        Some(fork_id)
-    }
-
     /// Permanently delete a thread and every thread under it (the tree
     /// archive acts on): stop their providers, close their terminals, delete
     /// their metas and event logs in one transaction, and (when
@@ -1623,7 +1596,6 @@ impl AppState {
             .filter(|meta| deleted.contains(meta.id.as_str()))
             .cloned()
             .collect();
-        let mut terminal_preferences_changed = false;
         for id in ids {
             self.clear_approvals(id);
             if self.residents.live.contains_key(id) {
@@ -1634,13 +1606,8 @@ impl AppState {
             self.drop_background(id, cx);
             self.terminal_workspaces
                 .remove(&ConversationDestination::Thread(id.clone()));
-            terminal_preferences_changed |= self.terminal_preferences.remove(id).is_some();
-            self.revoke_orchestrate_child_registration(id);
             self.close_orchestrator_children(id, cx);
             self.settings.last_visited.remove(id);
-        }
-        if terminal_preferences_changed {
-            self.write_terminal_preferences(cx);
         }
         if metas
             .iter()
@@ -1704,6 +1671,7 @@ impl AppState {
         }
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         self.persist_settings(cx);
+        self.remove_thread_uploads(ids.to_vec(), cx);
         for (deleted_id, root, cwd) in worktree_removals {
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
@@ -1744,18 +1712,12 @@ impl AppState {
             .filter(|s| s.draft && s.meta.project_id.as_deref() == Some(project_id))
             .map(|s| s.meta.id.clone())
             .collect();
-        for id in drafts {
-            self.shutdown_active(&id, cx);
+        for id in &drafts {
+            self.shutdown_active(id, cx);
         }
+        self.remove_thread_uploads(drafts, cx);
         let draft_destination = ConversationDestination::ProjectDraft(project_id.to_string());
         self.terminal_workspaces.remove(&draft_destination);
-        if self
-            .terminal_preferences
-            .remove(&draft_destination.preference_key())
-            .is_some()
-        {
-            self.write_terminal_preferences(cx);
-        }
         let mut ids = Vec::new();
         let mut seen = HashSet::new();
         for session_id in session_ids {
@@ -1776,6 +1738,16 @@ impl AppState {
         self.persist_settings(cx);
         self.projects.retain(|project| project.id != project_id);
         self.replace_external_import_status(project_id, None, cx);
+    }
+
+    fn remove_thread_uploads(&self, session_ids: Vec<String>, cx: &mut HostCx) {
+        let directories = self.user_directories.clone();
+        let uploads = cx.unblock(move || directories.remove_thread_uploads(&session_ids));
+        HostCx::spawn_detached(cx, async move {
+            if let Err(error) = uploads.await {
+                log::warn!("could not remove a deleted thread's uploads: {error}");
+            }
+        });
     }
 
     /// Whether `session_id` owns live or queued work.
@@ -2024,13 +1996,20 @@ impl AppState {
                 project
                     .permission_defaults
                     .get(tcode_core::settings::provider_key(provider))
+            })
+            .cloned()
+            .or_else(|| {
+                let builtin = self
+                    .settings
+                    .resolved_profile(Settings::builtin_profile_id(provider))?;
+                builtin.settings.default_permission
             });
         match descriptor {
             OptionDescriptor::Select {
                 id, recommended, ..
             } => Some(OptionSelection {
                 id,
-                value: serde_json::Value::String(configured.cloned().or(recommended)?),
+                value: serde_json::Value::String(configured.or(recommended)?),
             }),
             OptionDescriptor::Boolean {
                 id, recommended, ..
@@ -2045,19 +2024,24 @@ impl AppState {
         }
     }
 
-    /// The reasoning effort last used with exactly this (provider, model),
-    /// from the most recently updated session that ran it (archived included:
+    /// The reasoning effort last used with exactly this (provider, profile,
+    /// model), from the most recently updated session that ran it (archived included:
     /// memory outlives the thread). Model switches restore this instead of
     /// resetting to the model's default. Keyed per model, so the remembered
     /// value is always one the model accepts.
     pub(super) fn remembered_effort(
         &self,
         provider: ProviderKind,
+        profile_id: Option<&str>,
         model: Option<&str>,
     ) -> Option<OptionSelection> {
         self.sessions
             .iter()
-            .filter(|meta| meta.provider == provider && meta.model.as_deref() == model)
+            .filter(|meta| {
+                meta.provider == provider
+                    && meta.profile_id.as_deref() == profile_id
+                    && meta.model.as_deref() == model
+            })
             .max_by_key(|meta| meta.updated_at)
             .and_then(|meta| {
                 meta.option_selections
@@ -2118,8 +2102,7 @@ impl AppState {
         {
             draft.meta.option_selections.push(selection);
         }
-        let terminal_preferences = self.terminal_preferences_for(&draft);
-        let restored_terminal = self.restore_terminal_workspace(&mut draft);
+        self.restore_terminal_workspace(&mut draft);
         let session_id = draft.meta.id.clone();
         self.thread_activity
             .insert(session_id.clone(), Default::default());
@@ -2130,9 +2113,6 @@ impl AppState {
         if let Some(active) = self.resident(&session_id) {
             self.refresh_session_git_branch(active.meta.id.clone(), active.meta.cwd.clone(), cx);
         }
-        if !restored_terminal {
-            self.reopen_persisted_terminals(&session_id, terminal_preferences, cx);
-        }
         self.refresh_git_status(&session_id, cx);
         session_id
     }
@@ -2140,14 +2120,6 @@ impl AppState {
     /// Persist the active draft as a real session.
     /// The session id is preserved, so its already-recorded events line up.
     pub(super) fn commit_draft(&mut self, target_id: &str, cx: &mut HostCx) {
-        let preference_migration = self.resident(target_id).and_then(|active| {
-            active.draft.then(|| {
-                (
-                    conversation_destination(active).preference_key(),
-                    active.meta.id.clone(),
-                )
-            })
-        });
         if let Some(active) = self.resident_mut(target_id)
             && active.draft
         {
@@ -2175,12 +2147,6 @@ impl AppState {
                 cx,
             );
             self.upsert_session_in_memory(meta);
-        }
-        if let Some((draft_key, session_key)) = preference_migration
-            && let Some(preferences) = self.terminal_preferences.remove(&draft_key)
-        {
-            self.terminal_preferences.insert(session_key, preferences);
-            self.write_terminal_preferences(cx);
         }
     }
 
@@ -2271,9 +2237,85 @@ impl AppState {
                 if let Some(session) = state.resident_mut(&session_id) {
                     session.timeline = timeline;
                 }
-                state.repair_orphaned_mirror_turn(&session_id, cx);
+                state.repair_orphaned_turn(&session_id, cx);
+                state.interrupt_unowned_background_work(&session_id, cx);
             });
         });
+    }
+
+    /// A thread whose last turn is still open while nothing runs it lost what
+    /// ran it: its process closed, before or across a host restart, or a
+    /// native subagent's parent left without a close. The turn ends as
+    /// interrupted when its last record was made, so it stops reporting work
+    /// nothing can finish and the next message opens a turn of its own
+    /// instead of joining it. A turn no provider started, as the one a rewind
+    /// opens for what comes next, stays open.
+    pub(super) fn repair_orphaned_turn(&mut self, id: &str, cx: &mut HostCx) {
+        let Some(session) = self.resident(id) else {
+            return;
+        };
+        let mirror_of = session.meta.native_subagent.clone();
+        let running = match mirror_of {
+            Some(_) => self.native_subagent_turns.get(id) == Some(&true),
+            None => session.turn_in_flight,
+        };
+        let Some(turn) = session
+            .timeline
+            .turns
+            .last()
+            .filter(|turn| !running && turn.status.is_none())
+        else {
+            return;
+        };
+        let Some(turn_id) = turn.provider_turn_id.clone().or(mirror_of.clone()) else {
+            return;
+        };
+        let ended = self
+            .event_records
+            .get(id)
+            .and_then(|log| log.records().last()?.ts)
+            .unwrap_or_else(now_millis);
+        if mirror_of.is_some() {
+            self.native_subagent_turns.insert(id.to_string(), false);
+        }
+        self.record_event_at(
+            id,
+            ended,
+            &AgentEvent::TurnCompleted {
+                turn_id,
+                status: TurnStatus::Interrupted,
+                usage: None,
+            },
+            Vec::new(),
+            cx,
+        );
+    }
+
+    /// Background work still open in a log no process can finish any more
+    /// ends as interrupted in Tcode's log: a log loaded while the thread has
+    /// no process, as a fork not started yet or a thread reopened after the
+    /// host restarted, and for a native subagent's mirror while its parent
+    /// has none either. The harness's session, which the model reads, is left
+    /// as it is.
+    pub(super) fn interrupt_unowned_background_work(&mut self, id: &str, cx: &mut HostCx) {
+        let has_process = |session: &ActiveSession| !matches!(session.runtime, Runtime::Idle);
+        let Some(session) = self.resident(id).filter(|session| !has_process(session)) else {
+            return;
+        };
+        if session.meta.native_subagent.is_some()
+            && (self.native_subagent_turns.get(id) == Some(&true)
+                || session
+                    .meta
+                    .parent_session_id
+                    .as_deref()
+                    .and_then(|parent| self.resident(parent))
+                    .is_some_and(has_process))
+        {
+            return;
+        }
+        for item in session.timeline.interrupted_background_items() {
+            self.record_event(id, &AgentEvent::ItemCompleted(item), cx);
+        }
     }
 
     /// Adopt a subscribed session, including an uncommitted parked draft. Stored
@@ -2297,16 +2339,17 @@ impl AppState {
                 parked.turn_in_flight,
                 parked.queue.len()
             );
-            let terminal_preferences = self.terminal_preferences_for(&parked);
-            let restored_terminal = self.restore_terminal_workspace(&mut parked);
+            self.restore_terminal_workspace(&mut parked);
             let mark_idle = !parked.draft
                 && matches!(parked.runtime, Runtime::Idle)
                 && !parked.turn_in_flight
                 && parked.delivery_in_flight.is_none()
-                && parked.queue.is_empty()
+                && (parked.queue.is_empty() || parked.queue_held)
                 && parked.background_task_count == 0
-                && !self.pending_native_rewinds.contains_key(session_id);
-            let needs_restart = matches!(parked.runtime, Runtime::Idle) && !parked.queue.is_empty();
+                && !self.rewind_requests.contains_key(session_id);
+            let needs_restart = matches!(parked.runtime, Runtime::Idle)
+                && !parked.queue.is_empty()
+                && !parked.queue_held;
             if parked.draft && self.archived_sharing_affected(&parked.meta) {
                 self.archived_revision += 1;
             }
@@ -2316,9 +2359,6 @@ impl AppState {
                 TimelineLoadTarget::Active { mark_idle },
                 cx,
             );
-            if !restored_terminal {
-                self.reopen_persisted_terminals(session_id, terminal_preferences, cx);
-            }
             // Anything still queued that can go now, goes now.
             if self.dispatch_next_queued(session_id, cx).is_err() {
                 self.report_error(RuntimeError::ProcessGone, cx);
@@ -2341,17 +2381,13 @@ impl AppState {
         let session_id = meta.id.clone();
         let provider_commands = self.cached_provider_commands_for(&meta);
         let mut active = ActiveSession::new(meta, false, provider_commands);
-        let terminal_preferences = self.terminal_preferences_for(&active);
-        let restored_terminal = self.restore_terminal_workspace(&mut active);
+        self.restore_terminal_workspace(&mut active);
         self.residents.live.insert(session_id.clone(), active);
         self.schedule_timeline_load(
             session_id.clone(),
             TimelineLoadTarget::Active { mark_idle: true },
             cx,
         );
-        if !restored_terminal {
-            self.reopen_persisted_terminals(&session_id, terminal_preferences, cx);
-        }
         self.refresh_git_status(&session_id, cx);
     }
 }
@@ -2415,3 +2451,7 @@ pub(super) fn directory_within(root: &Path, dir: &Path) -> Option<bool> {
     let root = fs::canonicalize(root).ok()?;
     Some(dir.starts_with(root))
 }
+
+#[cfg(test)]
+#[path = "sessions_tests.rs"]
+mod tests;

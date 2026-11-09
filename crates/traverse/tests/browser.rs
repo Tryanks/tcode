@@ -94,6 +94,7 @@ fn config(data_dir: PathBuf) -> BrowserConfig {
         data_dir,
         static_bundle: None,
         hosting: None,
+        hosting_events: None,
     }
 }
 
@@ -276,6 +277,51 @@ fn two_browsers_get_their_own_acks_and_shared_broadcasts() {
             let reply = two.recv().await;
             if reply["type"] == "ack" {
                 assert_eq!(reply["content"]["id"], 9, "the ack reaches only its sender");
+                break;
+            }
+        }
+    });
+    server.shutdown();
+}
+
+/// A browser following the hosting state hears of another browser coming
+/// online without reading again.
+#[test]
+fn a_browser_following_hosting_hears_another_connect() {
+    let dir = TestDir::new("follow");
+    let server = serve(fake_host(), config(dir.0.clone())).unwrap();
+    let addr = server.local_addr();
+    setup(&server, "secret password");
+    let token = |name| {
+        login(addr, "secret password", name).1["token"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (chrome, firefox) = (token("Chrome"), token("Firefox"));
+    let online = |state: &Value, name: &str| {
+        state["content"]["event"]["content"]["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|device| device["name"] == name && !device["path"].is_null())
+    };
+    tcode_traverse::block_on(async {
+        let (mut one, _) = Browser::hello(addr, hello(&chrome, "Chrome")).await;
+        one.send(
+            json!({"id":7,"payload":{"type":"subscribe","content":{"topic":{"type":"hosting"}}}}),
+        )
+        .await;
+        let reply = one.recv().await;
+        assert_eq!(reply["content"]["request_id"], 7);
+        assert_eq!(reply["content"]["event"]["type"], "hosting_replaced");
+        assert!(online(&reply, "Chrome") && !online(&reply, "Firefox"));
+
+        let (_two, _) = Browser::hello(addr, hello(&firefox, "Firefox")).await;
+        loop {
+            let pushed = one.recv().await;
+            assert_eq!(pushed["content"]["request_id"], Value::Null);
+            if online(&pushed, "Firefox") {
                 break;
             }
         }

@@ -1,5 +1,8 @@
 use super::super::*;
 
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl Composer {
     /// Whether the trigger menu is shown and owns Enter/arrows. A `/` or `$`
     /// token that matches nothing is ordinary text (a path, a shell variable,
@@ -42,7 +45,7 @@ impl Composer {
     /// Load the workspace file/folder listing for the active session cwd in the
     /// background (gitignore-respected), the first time a mention menu opens.
     pub(in super::super) fn ensure_workspace(&mut self, cx: &mut Context<Self>) {
-        let Some(cwd) = self.workspace_store.read(cx).composer_state().active_cwd else {
+        let Some(cwd) = self.composer_state(cx).active_cwd.clone() else {
             return;
         };
         if self.workspace_loading || self.workspace.as_ref().is_some_and(|(c, _)| *c == cwd) {
@@ -50,7 +53,9 @@ impl Composer {
         }
         self.workspace_loading = true;
         let store = self.workspace_store.clone();
-        let walked = store.update(cx, |store, cx| store.list_active_workspace(cx));
+        let walked = store.update(cx, |store, cx| {
+            store.list_workspace_for(self.session_id.as_deref(), cx)
+        });
         cx.spawn(async move |this, cx| {
             let walked = walked.await;
             let _ = this.update(cx, |this, cx| {
@@ -97,20 +102,14 @@ impl Composer {
             TriggerKind::Skill => {
                 // Provider-native skills (Claude `skills` / Codex `skills/list`),
                 // fuzzily filtered by the `$` query with no item cap.
-                let commands = self
-                    .workspace_store
-                    .read(cx)
-                    .composer_state()
-                    .provider_commands;
+                let composer = self.composer_state(cx);
+                let commands = &composer.provider_commands;
                 let rows =
-                    filter_provider_commands(&commands, ProviderCommandKind::Skill, &trigger.query)
+                    filter_provider_commands(commands, ProviderCommandKind::Skill, &trigger.query)
                         .into_iter()
                         .map(|c| MenuRow {
                             primary: format!("${}", c.name),
-                            secondary: c
-                                .description
-                                .clone()
-                                .unwrap_or_else(|| crate::tr!("composer.run_skill").into_owned()),
+                            secondary: c.description.clone().unwrap_or_default(),
                             icon: MenuIcon::Skill,
                             accept: MenuAccept::InsertSkill(c.name.clone()),
                             group: Some("composer.group_skills"),
@@ -119,56 +118,34 @@ impl Composer {
                 (rows, String::new(), false)
             }
             TriggerKind::SlashCommand | TriggerKind::SlashModel => {
-                let composer = self.workspace_store.read(cx).composer_state();
+                let composer = self.composer_state(cx);
+                let harness = harness_name(&composer, self.workspace_store.read(cx));
                 let compact_offered = compact_offered(&composer);
                 let goal_offered = goal_offered(&composer).is_some();
-                let mut builtins: Vec<(&str, Option<&str>, &str, MenuAccept)> = vec![
+                let mut builtins: Vec<(&str, &str, MenuAccept)> = vec![
                     (
                         "model",
-                        None,
                         "composer.cmd_model_desc",
                         MenuAccept::OpenModelPicker,
                     ),
-                    (
-                        "orchestrate",
-                        Some("composer.cmd_orchestrate_label"),
-                        "composer.cmd_orchestrate_desc",
-                        MenuAccept::InsertOrchestrate,
-                    ),
-                    (
-                        "later",
-                        None,
-                        "composer.cmd_later_desc",
-                        MenuAccept::InsertLater,
-                    ),
+                    ("later", "composer.cmd_later_desc", MenuAccept::InsertLater),
                 ];
                 if compact_offered {
                     builtins.push((
                         "compact",
-                        None,
                         "composer.cmd_compact_desc",
                         MenuAccept::InsertCommand("compact".into()),
                     ));
                 }
                 if goal_offered {
-                    builtins.push((
-                        "goal",
-                        None,
-                        "composer.cmd_goal_desc",
-                        MenuAccept::InsertGoal,
-                    ));
+                    builtins.push(("goal", "composer.cmd_goal_desc", MenuAccept::InsertGoal));
                 }
                 let mut rows: Vec<MenuRow> = builtins
                     .into_iter()
-                    .filter(|(name, _, _, _)| fuzzy_score(&trigger.query, name).is_some())
-                    .map(|(name, label, desc, accept)| MenuRow {
-                        primary: format!(
-                            "/{}",
-                            label
-                                .map(|key| crate::tr!(key).into_owned())
-                                .unwrap_or_else(|| name.to_string())
-                        ),
-                        secondary: crate::tr!(desc).into_owned(),
+                    .filter(|(name, _, _)| fuzzy_score(&trigger.query, name).is_some())
+                    .map(|(name, desc, accept)| MenuRow {
+                        primary: format!("/{name}"),
+                        secondary: crate::tr!(desc, provider = harness).into_owned(),
                         icon: MenuIcon::Command,
                         accept,
                         group: Some("composer.group_builtin"),
@@ -179,10 +156,10 @@ impl Composer {
                 // filtered without truncation. The provider's own `compact` is
                 // what the built-in row runs, so it is not listed twice; nor is
                 // its own `goal`.
-                let commands = composer.provider_commands;
+                let commands = &composer.provider_commands;
                 rows.extend(
                     filter_provider_commands(
-                        &commands,
+                        commands,
                         ProviderCommandKind::Command,
                         &trigger.query,
                     )
@@ -191,9 +168,7 @@ impl Composer {
                     .filter(|c| !(goal_offered && c.name == "goal"))
                     .map(|c| MenuRow {
                         primary: format!("/{}", c.name),
-                        secondary: c.description.clone().unwrap_or_else(|| {
-                            crate::tr!("composer.run_provider_command").into_owned()
-                        }),
+                        secondary: c.description.clone().unwrap_or_default(),
                         icon: MenuIcon::Command,
                         accept: MenuAccept::InsertCommand(c.name.clone()),
                         group: Some("composer.group_provider"),
@@ -209,10 +184,13 @@ impl Composer {
     /// provider takes `tcode_control`.
     fn thread_rows(&self, query: &str, cx: &App) -> Vec<MenuRow> {
         let store = self.workspace_store.read(cx);
-        let Some(status) = store.session_status().filter(|status| !status.draft) else {
+        let Some(status) = store
+            .session_status_for(self.session_id.as_deref(), cx)
+            .filter(|status| !status.draft)
+        else {
             return Vec::new();
         };
-        let (Some(control), Some(session_id)) = (&status.control, store.active_session_id()) else {
+        let (Some(control), Some(session_id)) = (&status.control, self.session_id.clone()) else {
             return Vec::new();
         };
         if query.is_empty() {
@@ -240,7 +218,7 @@ impl Composer {
                     .as_deref()
                     .and_then(|id| store.project(id))
                     .map(|project| project.name.clone())
-                    .unwrap_or_else(|| crate::tr!("control.reference.secondary").into_owned()),
+                    .unwrap_or_default(),
                 primary: meta.title,
                 icon: MenuIcon::Thread,
                 accept: MenuAccept::ReferenceThread(meta.id),
@@ -290,7 +268,6 @@ impl Composer {
             MenuAccept::InsertCommand(name) => {
                 self.replace_trigger(&format!("/{name} "), window, cx)
             }
-            MenuAccept::InsertOrchestrate => self.replace_trigger("/orchestrate ", window, cx),
             MenuAccept::InsertLater => self.replace_trigger("/later ", window, cx),
             MenuAccept::InsertGoal => self.replace_trigger("/goal ", window, cx),
             MenuAccept::OpenModelPicker => {
@@ -303,98 +280,161 @@ impl Composer {
         cx.notify();
     }
 
-    /// The floating `@`/`/`/`$` menu, rendered in-flow just above the composer
-    /// card. `None` when no trigger is active (or it was dismissed).
-    pub(in super::super) fn render_trigger_menu(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    /// What the `@`/`/`/`$` menu shows, `None` when no trigger is active (or
+    /// it was dismissed).
+    pub(in super::super) fn trigger_menu(&self, cx: &App) -> Option<TriggerMenu> {
         if !self.menu_visible(cx) {
             return None;
         }
         let (rows, empty_text, loading) = self.menu_rows(cx);
         let highlight = self.menu_highlight.min(rows.len().saturating_sub(1));
+        Some(TriggerMenu {
+            rows,
+            empty_text,
+            loading,
+            highlight,
+        })
+    }
+
+    /// The floating `@`/`/`/`$` menu, rendered in-flow just above the composer
+    /// card.
+    pub(in super::super) fn render_trigger_menu(
+        &self,
+        menu: &TriggerMenu,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let TriggerMenu {
+            rows,
+            empty_text,
+            loading,
+            highlight,
+        } = menu.clone();
 
         let compact = self.compact;
-        let list = if rows.is_empty() {
-            crate::material::empty_row(
-                if loading {
-                    crate::tr!("composer.searching").into_owned()
+        let harness = harness_name(&self.composer_state(cx), self.workspace_store.read(cx));
+        let list =
+            if rows.is_empty() {
+                let text: gpui::SharedString = if loading {
+                    crate::tr!("composer.searching").into_owned().into()
                 } else {
-                    empty_text
-                },
-                cx,
-            )
-            .into_any_element()
-        } else {
-            // Group headers are not selectable: each opens the row that starts
-            // its group, so keyboard selection indexes `rows` directly.
-            let mut last_group: Option<&'static str> = None;
-            let headers: Vec<Option<&'static str>> = rows
-                .iter()
-                .map(|row| {
-                    let group = row.group.filter(|group| last_group != Some(*group));
-                    if group.is_some() {
-                        last_group = group;
-                    }
-                    group
+                    empty_text.into()
+                };
+                let (motion, key) = (self.motion.clone(), self.motion_key("trigger-empty"));
+                crate::motion::Sampled::new(move |window, cx| {
+                    motion.cross_fade(key, text, CHANGE, window, cx, |text, _, cx| {
+                        crate::material::empty_row(text.clone(), cx).into_any_element()
+                    })
                 })
-                .collect();
-            let count = rows.len();
-            let rows: Rc<[MenuRow]> = rows.into();
-            crate::scroll::VirtualList::measured(
-                "composer-trigger-rows",
-                count,
-                cx.processor(move |_, index: usize, _, cx| {
-                    div().when(index + 1 < count, |row| row.pb_0p5()).child(
-                        v_flex()
-                            .gap_0p5()
-                            .when_some(headers[index], |col, group| {
-                                col.child(
-                                    div()
-                                        .px_2()
-                                        .pt_1p5()
-                                        .pb_0p5()
-                                        .text_caption(cx)
-                                        .child(crate::tr!(group).into_owned()),
-                                )
-                            })
-                            .child(render_menu_row(
-                                &rows[index],
-                                index,
-                                index == highlight,
-                                compact,
-                                cx,
-                            )),
-                    )
-                }),
-            )
-            .reveal(Some(highlight))
-            .w_full()
-            // About ten rows before the list scrolls, so the menu never
-            // covers the conversation; no owner sizes an in-flow menu. The
-            // menu's border sits outside this cap.
-            .max_h(px(286.))
-            .p_1()
-            .into_any_element()
-        };
-
-        Some(
-            crate::material::overlay_contour(div(), cx)
-                .rounded(crate::material::radius_overlay(cx))
-                .id("composer-trigger-menu")
-                .role(Role::ListBox)
-                .aria_label(crate::tr!("composer.trigger_results"))
-                .w_full()
-                .child(list)
-                .with_animation(
-                    "composer-trigger-menu-pop-in",
-                    Animation::new(Duration::from_millis(150)),
-                    |element, delta| element.opacity(delta),
+                .into_any_element()
+            } else {
+                // Group headers are not selectable: each opens the row that starts
+                // its group, so keyboard selection indexes `rows` directly.
+                let mut last_group: Option<&'static str> = None;
+                let headers: Vec<Option<&'static str>> = rows
+                    .iter()
+                    .map(|row| {
+                        let group = row.group.filter(|group| last_group != Some(*group));
+                        if group.is_some() {
+                            last_group = group;
+                        }
+                        group
+                    })
+                    .collect();
+                let count = rows.len();
+                let keys: Rc<[u64]> = rows.iter().map(menu_row_key).collect();
+                {
+                    let mut seen = self.menu_rows_seen.borrow_mut();
+                    for (key, row) in keys.iter().zip(&rows) {
+                        seen.entry(*key).or_insert_with(|| row.clone());
+                    }
+                }
+                let leaving = {
+                    let seen = self.menu_rows_seen.clone();
+                    let composer = cx.entity();
+                    move |key: u64, _: &mut Window, cx: &mut App| {
+                        let row = seen.borrow().get(&key).cloned()?;
+                        Some(composer.update(cx, |_, cx| {
+                            render_menu_row(&row, usize::MAX, false, compact, cx).into_any_element()
+                        }))
+                    }
+                };
+                let rows: Rc<[MenuRow]> = rows.into();
+                crate::scroll::VirtualList::measured(
+                    "composer-trigger-rows",
+                    count,
+                    cx.processor(move |_, index: usize, _, cx| {
+                        div().when(index + 1 < count, |row| row.pb_0p5()).child(
+                            v_flex()
+                                .gap_0p5()
+                                .when_some(headers[index], |col, group| {
+                                    col.child(
+                                        div().px_2().pt_1p5().pb_0p5().text_caption(cx).child(
+                                            crate::tr!(group, provider = harness).into_owned(),
+                                        ),
+                                    )
+                                })
+                                .child(render_menu_row(
+                                    &rows[index],
+                                    index,
+                                    index == highlight,
+                                    compact,
+                                    cx,
+                                )),
+                        )
+                    }),
                 )
-                .into_any_element(),
-        )
+                .reveal(Some(highlight))
+                // Each keystroke's results fold in and out as the rows that
+                // still match glide to their places.
+                .keyed(keys, crate::motion::KEYSTROKE, leaving)
+                .w_full()
+                // About ten rows before the list scrolls, so the menu never
+                // covers the conversation; no owner sizes an in-flow menu. The
+                // menu's border sits outside this cap.
+                .max_h(px(286.))
+                .p_1()
+                .into_any_element()
+            };
+
+        crate::material::overlay_contour(div(), cx)
+            .rounded(crate::material::radius_overlay(cx))
+            .id("composer-trigger-menu")
+            .role(Role::ListBox)
+            .aria_label(crate::tr!("composer.trigger_results"))
+            .w_full()
+            .child(list)
+            .into_any_element()
     }
+}
+
+/// What a trigger menu row is known by from one keystroke to the next.
+fn menu_row_key(row: &MenuRow) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (&row.primary, &row.secondary, row.group).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The product name of the thread's provider, which names its own commands and
+/// skills in the menu.
+/// The product name the composer's Harness goes by: an ACP agent's own name,
+/// else the native Harness's.
+fn harness_name(
+    composer: &crate::store::ComposerState,
+    store: &crate::store::WorkspaceStore,
+) -> String {
+    composer
+        .active_model
+        .as_ref()
+        .and_then(|active| active.acp_agent_id.as_deref())
+        .and_then(|id| store.installed_acp_agent(id))
+        .map(|agent| agent.name)
+        .unwrap_or_else(|| {
+            composer
+                .provider
+                .map_or("Harness", crate::settings::provider_label)
+                .to_owned()
+        })
 }
 
 fn render_menu_row(
@@ -418,41 +458,53 @@ fn render_menu_row(
         secondary = row.secondary.clone()
     )
     .into_owned();
-    crate::material::menu_item_frame(compact, cx)
-        .id(("menu-row", index))
-        .debug_selector(move || format!("menu-row-{index}"))
-        .role(Role::ListBoxOption)
-        .aria_label(accessible_label)
-        .aria_selected(is_active)
-        .when(is_active, |row| row.aria_active_descendant())
-        .flex_none()
-        .w_full()
-        .items_center()
-        .text_body(compact, cx)
-        .cursor_pointer()
-        .when(is_active, |s| s.bg(cx.theme().list_active))
-        .hover(|s| s.bg(cx.theme().muted))
-        .child(icon.text_color(muted))
-        .child(div().flex_none().child(row.primary.clone()))
-        .when(!row.secondary.is_empty(), |this| {
-            this.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_color(muted)
-                    .child(crate::widgets::fade_text(row.secondary.clone())),
-            )
-        })
-        .on_mouse_move(cx.listener(move |this, _, _, cx| {
-            if this.menu_highlight != index {
-                this.menu_highlight = index;
-                cx.notify();
-            }
-        }))
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.accept_menu(index, window, cx);
-        }))
+    crate::material::menu_item_frame(
+        compact,
+        crate::material::ItemFill::highlight(is_active, cx.theme().list_active),
+        cx,
+    )
+    .id(("menu-row", index))
+    .debug_selector(move || format!("menu-row-{index}"))
+    .role(Role::ListBoxOption)
+    .aria_label(accessible_label)
+    .aria_selected(is_active)
+    .when(is_active, |row| row.aria_active_descendant())
+    .flex_none()
+    .w_full()
+    .items_center()
+    .text_body(compact, cx)
+    .cursor_pointer()
+    .child(icon.text_color(muted))
+    .child(div().flex_none().child(row.primary.clone()))
+    .when(!row.secondary.is_empty(), |this| {
+        this.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_color(muted)
+                .child(crate::widgets::fade_text(row.secondary.clone())),
+        )
+    })
+    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+        if this.menu_highlight != index {
+            this.menu_highlight = index;
+            cx.notify();
+        }
+    }))
+    .on_click(cx.listener(move |this, _, window, cx| {
+        this.accept_menu(index, window, cx);
+    }))
+}
+
+/// What the trigger menu shows: kept while the menu folds away, so it leaves
+/// as it was.
+#[derive(Clone, PartialEq)]
+pub(in super::super) struct TriggerMenu {
+    rows: Vec<MenuRow>,
+    empty_text: String,
+    loading: bool,
+    highlight: usize,
 }
 
 #[cfg(test)]
@@ -490,24 +542,24 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         driver.wait_until(cx, &store, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "selected conversation", |cx| {
-            store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.chat_loading()
+            store.read_with(cx, |store, cx| {
+                store.baseline_ready()
+                    && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
         store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, timeline, cx);
+            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let (composer, cx) = cx.add_window_view(|window, cx| {
-            Composer::new_with_layout(store.clone(), compact, window, cx)
+            Composer::new_with_layout(store.clone(), Some(session_id), compact, window, cx)
         });
         (store, composer, cx)
     }
@@ -517,7 +569,11 @@ mod tests {
         let (store, composer, cx) = composer_window(true, cx);
         cx.simulate_resize(size(px(393.), px(852.)));
         composer.update_in(cx, |composer, window, cx| {
-            let cwd = store.read(cx).composer_state().active_cwd.unwrap();
+            let cwd = store
+                .read(cx)
+                .composer_state_for(store.read(cx).sole_thread().as_deref(), cx)
+                .active_cwd
+                .unwrap();
             composer.workspace = Some((cwd, vec![PathEntry::from_rel("file.rs".into(), false)]));
             window.focus(&composer.input.read(cx).focus_handle(cx), cx);
         });
@@ -570,7 +626,9 @@ mod tests {
         composer.update_in(cx, |composer, window, cx| {
             window.focus(&composer.input.read(cx).focus_handle(cx), cx);
         });
-        assert!(store.read_with(cx, |store, _| compact_offered(&store.composer_state())));
+        assert!(store.read_with(cx, |store, cx| compact_offered(
+            &store.composer_state_for(store.sole_thread().as_deref(), cx)
+        )));
         cx.simulate_input("/comp");
         cx.update(|window, cx| _ = window.draw(cx));
         composer.read_with(cx, |composer, cx| {
@@ -597,7 +655,11 @@ mod tests {
         let (store, composer, cx) = composer_window(false, cx);
         cx.simulate_resize(size(px(800.), px(600.)));
         composer.update_in(cx, |composer, window, cx| {
-            let cwd = store.read(cx).composer_state().active_cwd.unwrap();
+            let cwd = store
+                .read(cx)
+                .composer_state_for(store.read(cx).sole_thread().as_deref(), cx)
+                .active_cwd
+                .unwrap();
             let entries = (0..FILE_MENU_ROW_CAP)
                 .map(|index| PathEntry::from_rel(format!("file-{index:02}.rs"), false))
                 .collect();
@@ -611,14 +673,19 @@ mod tests {
         assert!(cx.debug_bounds("menu-row-0").is_some());
         assert!(cx.debug_bounds(last_row).is_none());
 
-        for _ in 0..last {
-            cx.simulate_keystrokes("down");
+        // The list glides to each highlighted row; draw once it is there.
+        let step = |keys: &str, cx: &mut VisualTestContext| {
+            cx.simulate_keystrokes(keys);
             cx.update(|window, cx| _ = window.draw(cx));
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            cx.update(|window, cx| _ = window.draw(cx));
+        };
+        for _ in 0..last {
+            step("down", cx);
         }
         assert!(cx.debug_bounds(last_row).is_some());
         for _ in 0..last {
-            cx.simulate_keystrokes("up");
-            cx.update(|window, cx| _ = window.draw(cx));
+            step("up", cx);
         }
         assert!(cx.debug_bounds("menu-row-0").is_some());
     }

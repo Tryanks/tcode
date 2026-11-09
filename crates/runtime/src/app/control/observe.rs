@@ -112,6 +112,15 @@ struct QueueCounts {
 struct PendingApproval {
     id: String,
     kind: &'static str,
+    /// The native choices, by the id `respond_approval` takes.
+    options: Vec<ApprovalChoice>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApprovalChoice {
+    id: String,
+    label: String,
+    kind: agent::ApprovalOptionKind,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,6 +134,7 @@ struct Lineage {
     parent_session_id: Option<String>,
     children: Vec<String>,
     pending_fork: bool,
+    forked_from: Option<String>,
     imported_from: Option<String>,
     native_subagent: bool,
 }
@@ -146,6 +156,10 @@ struct ThreadDetail {
     pending_input: Option<PendingInput>,
     control: Option<tcode_protocol::ControlStatus>,
     lineage: Lineage,
+    /// What a subagent owes the thread that started it for that thread's latest message;
+    /// its delivery is in `activity.agent`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report: Option<tcode_core::settlement::AgentReport>,
     terminals: Vec<TerminalRow>,
     omitted: Vec<String>,
 }
@@ -229,10 +243,22 @@ struct GoalFacts {
 }
 
 #[derive(Debug, Serialize)]
+struct RewindFacts {
+    modes: &'static [agent::RewindMode],
+    /// The conversation can be restored to before the first turn.
+    first_turn_conversation: bool,
+    steer_targets: bool,
+    later_history: agent::LaterHistory,
+    running_turn: agent::RunningTurnPolicy,
+}
+
+#[derive(Debug, Serialize)]
 struct CapsFacts {
     steering: bool,
     fork: bool,
-    native_rewind: bool,
+    fork_at: bool,
+    /// What a rewind can restore, when the provider has one.
+    native_rewind: Option<RewindFacts>,
     manual_compaction: bool,
     goals: Option<GoalFacts>,
     per_turn_effort: bool,
@@ -448,6 +474,7 @@ fn approval_kind(kind: &agent::ApprovalKind) -> &'static str {
         agent::ApprovalKind::FileRead { .. } => "file_read",
         agent::ApprovalKind::FileChange { .. } => "file_change",
         agent::ApprovalKind::ToolUse { .. } => "tool_use",
+        agent::ApprovalKind::Plan { .. } => "plan",
     }
 }
 
@@ -839,6 +866,15 @@ impl AppState {
                 .map(|approval| PendingApproval {
                     id: approval.id.clone(),
                     kind: approval_kind(&approval.kind),
+                    options: approval
+                        .options
+                        .iter()
+                        .map(|option| ApprovalChoice {
+                            id: option.id.clone(),
+                            label: option.label.clone(),
+                            kind: option.kind,
+                        })
+                        .collect(),
                 })
                 .collect(),
             pending_input: resident
@@ -856,14 +892,18 @@ impl AppState {
                     .filter(|child| child.parent_session_id.as_deref() == Some(meta.id.as_str()))
                     .map(|child| child.id.clone())
                     .collect(),
-                pending_fork: meta.pending_fork,
+                pending_fork: meta.pending_fork.is_some(),
+                forked_from: meta
+                    .fork_origin
+                    .as_ref()
+                    .map(|origin| origin.thread_id.clone()),
                 imported_from: meta.imported_from.clone(),
                 native_subagent: meta.native_subagent.is_some(),
             },
+            report: meta.is_dispatched().then(|| meta.report()),
             terminals,
             omitted: vec![
                 "worktree.dirty: read it live with get_git or list_threads include_worktree".into(),
-                "the thread a fork was made from is not recorded".into(),
             ],
             thread,
         };
@@ -1138,7 +1178,14 @@ impl AppState {
                     caps: CapsFacts {
                         steering: caps.supports_steering,
                         fork: caps.supports_fork,
-                        native_rewind: caps.native_rewind,
+                        fork_at: caps.fork_at,
+                        native_rewind: caps.rewind.map(|rewind| RewindFacts {
+                            modes: rewind.modes,
+                            first_turn_conversation: rewind.first_turn_conversation,
+                            steer_targets: rewind.steer_targets,
+                            later_history: rewind.later_history,
+                            running_turn: rewind.running_turn,
+                        }),
                         manual_compaction: caps.manual_compaction,
                         goals: caps.goals.map(|goals| GoalFacts {
                             pause: goals.pause,
@@ -1172,7 +1219,7 @@ impl AppState {
                         .profiles_for_kind(kind)
                         .into_iter()
                         .map(|profile| ProfileRow {
-                            display_name: self.settings.profile_display_name(&profile.id),
+                            display_name: self.profile_display_name(&profile.id),
                             enabled: profile.settings.enabled,
                             status: status.provider_snapshots.get(&profile.id).cloned(),
                             usage: status.provider_usage.get(&profile.id).cloned(),

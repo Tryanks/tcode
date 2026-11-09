@@ -601,6 +601,30 @@ pub extern "C" fn gpui_ios_memory_warning() {
     super::with_platform(super::IosPlatform::notify_memory_warning);
 }
 
+/// Takes `ProcessInfo.ThermalState`'s raw value.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_thermal_state_changed(state: u8) {
+    let state = match state {
+        1 => gpui::ThermalState::Fair,
+        2 => gpui::ThermalState::Serious,
+        3 => gpui::ThermalState::Critical,
+        _ => gpui::ThermalState::Nominal,
+    };
+    super::with_platform(|platform| platform.update_thermal_state(state));
+}
+
+/// Takes `ProcessInfo.isLowPowerModeEnabled`. iOS tells Low Power Mode
+/// apart from nothing else, so any other state is unknown, as on macOS.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_low_power_mode_changed(enabled: u8) {
+    let mode = if enabled != 0 {
+        gpui::PowerMode::LowPower
+    } else {
+        gpui::PowerMode::Unknown
+    };
+    super::with_platform(|platform| platform.update_power_mode(mode));
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_text_range(kind: u32) -> TextRange {
     let mut result = None;
@@ -678,7 +702,7 @@ pub extern "C" fn gpui_ios_select_text(range: TextRange) {
     };
     with_window(|window| {
         window.input_activity();
-        window.with_input_handler(|handler| text_input::select_text(handler, range));
+        window.with_input_handler(|handler| handler.set_selected_text_range(range));
     });
 }
 
@@ -748,7 +772,7 @@ pub extern "C" fn gpui_ios_move_caret_toward(x: f64, y: f64) {
             };
             let target = point(px(x as f32), px(y as f32));
             if let Some(offset) = text_input::caret_toward(handler, head, target) {
-                text_input::select_text(handler, offset..offset);
+                handler.set_selected_text_range(offset..offset);
             }
         });
     });
@@ -800,9 +824,9 @@ pub extern "C" fn gpui_ios_open_url_received(bytes: *const u8, length: usize) {
 pub extern "C" fn gpui_ios_paste_text(bytes: *const u8, length: usize) {
     if let Some(text) = utf8(bytes, length) {
         with_window(|window| {
+            window.input_activity();
             window
                 .with_input_handler(|handler| handler.paste(gpui::ClipboardItem::new_string(text)));
-            window.schedule_forced_frame();
         });
     }
 }

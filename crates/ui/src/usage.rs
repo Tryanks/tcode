@@ -41,19 +41,7 @@ pub(crate) fn resets_label(resets_at: Option<u64>, now: u64) -> Option<String> {
     if resets_at <= now {
         return Some(crate::tr!("usage.resets_now").into_owned());
     }
-    let remaining = resets_at - now;
-    let (days, hours, minutes) = (
-        remaining / 86_400,
-        (remaining % 86_400) / 3_600,
-        (remaining % 3_600) / 60,
-    );
-    let duration = if days > 0 {
-        format!("{days}d {hours}h")
-    } else if hours > 0 {
-        format!("{hours}h {minutes}m")
-    } else {
-        format!("{minutes}m")
-    };
+    let duration = crate::time::format_span(resets_at - now);
     Some(crate::tr!("usage.resets_in", duration = duration).into_owned())
 }
 
@@ -121,6 +109,23 @@ mod tests {
         ] {
             assert_eq!(resets_label(reset, 1_000).as_deref(), expected, "{reset:?}");
         }
+        for (locale, expected) in [
+            (
+                crate::LANGUAGE_SIMPLIFIED_CHINESE,
+                ["2 小时 15 分钟后重置", "1 天 3 小时后重置"],
+            ),
+            (
+                crate::LANGUAGE_JAPANESE,
+                ["リセットまで 2 時間 15 分", "リセットまで 1 日 3 時間"],
+            ),
+        ] {
+            crate::set_locale(locale);
+            assert_eq!(
+                [9_100, 98_200].map(|reset| resets_label(Some(reset), 1_000).unwrap()),
+                expected
+            );
+        }
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
         for (percent, expected) in [(-1.0, "0%"), (12.4, "12%"), (12.5, "13%"), (130.0, "100%")] {
             assert_eq!(percent_label(percent), expected);
         }

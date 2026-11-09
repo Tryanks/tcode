@@ -73,33 +73,6 @@ pub fn read_text(handler: &mut PlatformInputHandler, range: Range<usize>) -> Opt
     utf16_slice(&text, start..end).map(str::to_owned)
 }
 
-pub fn select_text(handler: &mut PlatformInputHandler, range: Range<usize>) {
-    handler.set_selected_text_range(range.clone());
-    if handler
-        .selected_text_range(true)
-        .is_some_and(|selection| selection.range == range)
-    {
-        return;
-    }
-    // gpui-base inherits the no-op selection setter. Its composition API
-    // sets selection; identical replacement text records no undo edit.
-    let marked = handler.marked_text_range();
-    let context = marked
-        .clone()
-        .filter(|marked| marked.start <= range.start && range.end <= marked.end)
-        .unwrap_or(range.clone());
-    if let Some(text) = read_text(handler, context.clone()) {
-        handler.replace_and_mark_text_in_range(
-            Some(context.clone()),
-            &text,
-            Some(range.start - context.start..range.end - context.start),
-        );
-        if marked.is_none() {
-            handler.unmark_text();
-        }
-    }
-}
-
 pub fn commit_marked_text(handler: &mut PlatformInputHandler) {
     // gpui-base leaves the mark/undo transaction open on blur, and
     // unmark_text emits no Change. Replacing the preedit commits and emits it.
@@ -109,7 +82,7 @@ pub fn commit_marked_text(handler: &mut PlatformInputHandler) {
         let selection = handler.selected_text_range(true);
         handler.replace_text_in_range(Some(marked), &text);
         if let Some(selection) = selection {
-            select_text(handler, selection.range);
+            handler.set_selected_text_range(selection.range);
         }
     }
 }
@@ -117,7 +90,7 @@ pub fn commit_marked_text(handler: &mut PlatformInputHandler) {
 /// The caret offset nearest `target`, walking one grapheme at a time from the
 /// caret at `from`.
 ///
-/// gpui-base 0.8.0's `character_index_for_point` tests the point against every
+/// gpui-base's `character_index_for_point` tests the point against every
 /// line as if that line began at the top of the input, so it finds no index
 /// below the first line, and none past a line's last glyph. Caret bounds are
 /// right for every visible offset, so the walk follows those.
@@ -195,35 +168,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn native_selection_preserves_the_draft_and_undo(cx: &mut TestAppContext) {
-        let (input, cx, mut handler) = textarea(cx);
+    fn native_reads_count_and_slice_the_draft_in_utf16(cx: &mut TestAppContext) {
+        let (_, cx, mut handler) = textarea(cx);
         cx.simulate_input("前😀e\u{301}后");
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert_eq!(text_length(&mut handler), Some(6));
         assert_eq!(read_text(&mut handler, 1..3).as_deref(), Some("😀"));
         assert_eq!(read_text(&mut handler, 1..2), None);
-        select_text(&mut handler, 1..3);
-        assert_eq!(handler.selected_text_range(true).unwrap().range, 1..3);
-        assert_eq!(handler.marked_text_range(), None);
-        assert_eq!(
-            input.read_with(cx, |input, _| input.value()),
-            "前😀e\u{301}后"
-        );
-        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
-            "cmd-z"
-        } else {
-            "ctrl-z"
-        });
-        assert_eq!(input.read_with(cx, |input, _| input.value()), "");
-        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
-            "cmd-shift-z"
-        } else {
-            "ctrl-y"
-        });
-        assert_eq!(
-            input.read_with(cx, |input, _| input.value()),
-            "前😀e\u{301}后"
-        );
     }
 
     #[gpui::test]
@@ -247,7 +198,7 @@ mod tests {
             1,
             "committing must publish the draft to subscribers"
         );
-        select_text(&mut handler, 2..2);
+        handler.set_selected_text_range(2..2);
         handler.replace_and_mark_text_in_range(None, "世界", Some(2..2));
         cx.update(|window, cx| {
             window.blur(cx);

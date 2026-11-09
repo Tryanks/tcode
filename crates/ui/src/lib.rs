@@ -5,6 +5,7 @@ pub mod assets;
 /// The window's link to a host: its transport tasks and workspace store.
 pub mod attachment;
 mod attachments;
+mod attention;
 mod change_project_root_dialog;
 pub mod chat;
 mod commit_dialog;
@@ -13,12 +14,15 @@ mod composer_trigger;
 mod context_meter;
 mod control;
 mod conversation_ui;
+mod device;
 pub(crate) mod diff;
 mod edge_back;
+mod env_editor;
 #[doc(hidden)]
 pub mod gallery_support;
 pub(crate) mod git;
 mod haptics;
+mod harness_dialog;
 mod highlight;
 mod host_permissions;
 pub mod i18n;
@@ -33,24 +37,25 @@ pub mod markdown;
 #[cfg(target_os = "macos")]
 mod macos_backdrop;
 pub mod material;
+mod motion;
 mod move_thread_dialog;
-mod orchestrate_settings;
 pub mod overlay;
 /// The shared pairing form: origin validation, stale-result
 /// generations and fixed-origin behavior, reused by every client shell.
 pub mod pairing;
 pub mod palette;
+mod panes;
 mod pasteboard;
 mod plan_panel;
 mod plugins_settings;
 mod preview_panel;
 mod project_icon;
 pub(crate) mod provider_card;
-mod provider_dialog;
 mod provider_login_dialog;
 mod provider_model_picker;
 pub(crate) mod provider_models;
 pub(crate) mod provider_status;
+mod recent_cache;
 pub mod remote;
 mod run;
 pub(crate) mod runtime_event;
@@ -67,6 +72,8 @@ mod source_control_settings;
 pub mod store;
 mod terminal_drawer;
 mod terminal_key_bar;
+#[cfg(test)]
+mod test_frames;
 pub mod theme;
 mod thread_export;
 pub mod time;
@@ -75,14 +82,16 @@ mod touch_selection;
 pub mod typography;
 pub(crate) mod usage;
 pub mod widgets;
+mod width_frame;
 mod window_caption;
 pub(crate) mod window_seam;
 mod window_state;
+mod workspace;
 mod workspace_walk;
 
 pub use i18n::{
-    LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, apply_locale, resolve_locale, set_locale,
-    translate, translate_with_args,
+    LANGUAGE_ENGLISH, LANGUAGE_JAPANESE, LANGUAGE_SIMPLIFIED_CHINESE, apply_locale, resolve_locale,
+    set_locale, translate, translate_with_args,
 };
 pub use preview_panel::preview_backend;
 pub use run::{
@@ -91,11 +100,12 @@ pub use run::{
 };
 pub(crate) use shell::window_drag_area;
 pub use shell::{
-    AppShell, Quit, ShellSetup, TogglePalette, can_swipe_back, handle_back, update_edge_back,
+    AppShell, DEFAULT_WINDOW_WIDTH, Quit, ShellPlace, ShellSetup, TogglePalette, can_swipe_back,
+    handle_back, update_edge_back,
 };
 pub use thread_export::format_size;
 pub use window_seam::force_mobile_layout;
-pub use window_state::{OpenThread, WindowState};
+pub use window_state::WindowState;
 
 /// Where this client may keep its own files (the WebView2 profile is the only
 /// current user). Bootstrap owns the location; the UI never resolves it, so a

@@ -369,6 +369,10 @@ impl ComputerUseTools {
 
     #[tool(
         description = "Execute a transaction of desktop input actions against an observed state, optionally using expect to verify semantic success. \
+                       Actions: press, click (button, click_count), set_text, type_text, keypress, scroll, drag, and move_mouse to hover. \
+                       Each step uses the element's accessibility action (AX on macOS, UI Automation on Windows) when one fits and otherwise delivers events to the target app's own process or windows, so it works on background windows, never moves the user's pointer, and sends keys to the target app rather than whichever app the user has focused; each step reports its delivery. \
+                       When keys for type_text, keypress or set_text's keyboard replacement cannot be delivered to the target app, the step fails, its message says why, and its delivery is none. \
+                       Hover that an app tracks from the real pointer may not respond to move_mouse. \
                        Every @e ref must belong to the supplied state_id; an evicted or stale state or a ref from another state errors and requires a fresh observe_ui, while a successful call returns a successor state_id that must replace the old one. \
                        Results report worked/didnt/unknown per step, stop at the first failure with stopped_at, and use expect as a postcondition rather than treating event delivery as success. \
                        Input is refused when observe-only mode is enabled (allow_input=false) in Settings → Computer Use, and oversized output returns a preview plus a continuation ref for read_text."
@@ -430,8 +434,7 @@ impl ComputerUseTools {
                 &previous.tree,
             ));
             activation = match (activation, result.delivery) {
-                (_, Delivery::ForegroundHid) => "foreground",
-                ("none", Delivery::BackgroundPid) => "background",
+                ("none", Delivery::BackgroundPid | Delivery::WindowMessage) => "background",
                 (current, _) => current,
             };
             step_results.push(json!({
@@ -660,11 +663,19 @@ pub fn tool_descriptions() -> Vec<(String, String)> {
 }
 
 /// The server's `instructions`, which the client reads at initialization.
-pub const INSTRUCTIONS: &str = "Use find_roots → observe_ui, query the immutable cached state with \
-                 search_ui/expand_ui/inspect_ui, then use act_ui/wait_for and observe again. \
-                 Every @e ref belongs to the state_id that produced it, so use each returned \
-                 successor state instead of an older state. This server handles desktop windows \
-                 only; use the tcode_preview tools for web pages.";
+pub const INSTRUCTIONS: &str = "These tools are the way to see and operate desktop app windows; do not \
+                 script the pointer or keyboard yourself (CGEvent, cliclick, AppleScript, \
+                 SendInput), which takes over the user's own mouse and focus. act_ui uses the \
+                 app's accessibility actions first and otherwise delivers input to the target \
+                 app's own process or windows, so it can act on background windows without \
+                 moving the user's pointer or typing into the app they are using, and an agent \
+                 cursor shows where each action lands while Show agent cursor is on. \
+                 Use find_roots → observe_ui, query the immutable cached state with \
+                 search_ui/expand_ui/inspect_ui, then act with act_ui (press, click, set_text, \
+                 type_text, keypress, scroll, drag, move_mouse to hover) and wait_for or observe \
+                 again. Every @e ref belongs to the state_id that produced it, so use each \
+                 returned successor state instead of an older state. This server handles desktop \
+                 windows only; use the tcode_preview tools for web pages.";
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for ComputerUseTools {

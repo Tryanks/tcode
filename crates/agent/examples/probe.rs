@@ -9,22 +9,27 @@
 //! for Claude Code `CLAUDE_CONFIG_DIR`).
 //! Turn mode: `probe <provider> <prompt> [cwd] [acp-command args…] [flags]`.
 //! Flags are `--binary <path>`, `--model <id>`, `--option <id>=<value>`, `--effort <value>`,
-//! `--resume <cursor-json>`, `--fork`, `--leave-questions` (user-input requests
-//! stay unanswered), `--mcp <name> <url> <token>` (an HTTP MCP server registered
+//! `--resume <cursor-json>`, `--fork`, `--fork-at <checkpoint>`, `--leave-questions` (user-input requests
+//! stay unanswered), `--plan-feedback <words>` (the first plan decision is
+//! answered with these words instead of approved), `--mcp <name> <url> <token>` (an HTTP MCP server registered
 //! as tcode registers its own), `--linger <seconds>` (stay open until no turn has
 //! run for that long, to see turns the agent starts itself), `--follow-up
 //! <seconds> <prompt>` (send another turn that long after the first completes,
-//! running turn or not), `--interrupt-after <seconds>`, `--steer <message>`, and
+//! running turn or not), `--apply-settings <model> <effort>` (ask the running
+//! process to take them just before that follow-up), `--stop-background
+//! <seconds>` (stop all background work that long after the first turn
+//! completes), `--interrupt-after
+//! <seconds>`, `--steer <message>`, and
 //! `--image <path>`. Only one of the last three may be used.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use agent::{
-    AcpAgent, AcpLaunch, AgentEvent, ApprovalDecision, Attachment, ItemContent, LaunchEnv,
-    McpRegistration, OptionSelection, PluginContext, PluginOp, PluginScope, ProviderKind,
-    ResumeCursor, SessionCommand, SessionOptions, TurnOptions, TurnStatus, list_models,
-    list_plugins, run_plugin_op, start_session,
+    AcpAgent, AcpLaunch, AgentEvent, ApprovalDecision, Attachment, ForkPoint, ItemContent,
+    LaunchEnv, McpRegistration, OptionSelection, PluginContext, PluginOp, PluginScope,
+    ProviderKind, ResumeCursor, SessionCommand, SessionOptions, TurnOptions, TurnStatus,
+    list_models, list_plugins, run_plugin_op, start_session,
 };
 use base64::Engine as _;
 
@@ -229,8 +234,9 @@ fn main() {
     let mut effort = None;
     let mut option_selections = Vec::new();
     let mut resume = None;
-    let mut fork = false;
+    let mut fork = None;
     let mut leave_questions = false;
+    let mut plan_feedback = None;
     let mut mcp_servers = Vec::new();
     let mut continuation = Continuation::default();
     let mut probe_mode = ProbeMode::Standard;
@@ -258,9 +264,25 @@ fn main() {
                     },
                 )));
             }
-            "--fork" => fork = true,
+            "--fork" => fork = Some(ForkPoint::Tail),
+            "--fork-at" => {
+                fork = Some(ForkPoint::Before {
+                    checkpoint_id: args.next().unwrap_or_else(|| usage()),
+                });
+            }
             "--goal" => set_mode(&mut probe_mode, ProbeMode::Goal),
             "--leave-questions" => leave_questions = true,
+            "--plan-feedback" => plan_feedback = args.next(),
+            "--stop-background" => {
+                let seconds = args.next().and_then(|value| value.parse().ok());
+                continuation.stop_background =
+                    Some(Duration::from_secs(seconds.unwrap_or_else(|| usage())));
+            }
+            "--apply-settings" => {
+                let model = args.next().unwrap_or_else(|| usage());
+                let effort = args.next().unwrap_or_else(|| usage());
+                continuation.apply = Some((model, effort));
+            }
             "--linger" => {
                 let seconds = args.next().and_then(|value| value.parse().ok());
                 continuation.linger = Some(Duration::from_secs(seconds.unwrap_or_else(|| usage())));
@@ -350,6 +372,7 @@ fn main() {
             resume,
             fork,
             leave_questions,
+            plan_feedback,
         },
         binary,
         model,
@@ -359,14 +382,17 @@ fn main() {
 
 struct Resumption {
     resume: Option<ResumeCursor>,
-    fork: bool,
+    fork: Option<ForkPoint>,
     leave_questions: bool,
+    plan_feedback: Option<String>,
 }
 
 #[derive(Default)]
 struct Continuation {
     linger: Option<Duration>,
     follow_up: Option<(Duration, String)>,
+    apply: Option<(String, String)>,
+    stop_background: Option<Duration>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -380,7 +406,7 @@ async fn run_probe(
     acp: Option<AcpAgent>,
     mcp_servers: Vec<McpRegistration>,
     continuation: Continuation,
-    resumption: Resumption,
+    mut resumption: Resumption,
     binary_path: Option<PathBuf>,
     model: Option<String>,
 ) -> i32 {
@@ -482,6 +508,8 @@ async fn run_probe(
         .linger
         .or(continuation.follow_up.as_ref().map(|_| PHANTOM_TURN_GRACE));
     let mut follow_up = continuation.follow_up;
+    let mut apply = continuation.apply;
+    let mut stop_background = continuation.stop_background;
     let mut open_until = None;
     let mut running = false;
     let mut closing = false;
@@ -539,16 +567,21 @@ async fn run_probe(
         }
         match &event {
             AgentEvent::ApprovalRequested(request) => {
+                let feedback = matches!(request.kind, agent::ApprovalKind::Plan { .. })
+                    .then(|| resumption.plan_feedback.take())
+                    .flatten();
                 handle
                     .commands
                     .send(SessionCommand::RespondApproval {
                         request_id: request.id.clone(),
-                        decision: request
-                            .options
-                            .iter()
-                            .find(|option| option.kind == agent::ApprovalOptionKind::AllowOnce)
-                            .map(|option| ApprovalDecision::Option(option.id.clone()))
-                            .unwrap_or(ApprovalDecision::Cancel),
+                        decision: feedback.map(ApprovalDecision::Feedback).unwrap_or_else(|| {
+                            request
+                                .options
+                                .iter()
+                                .find(|option| option.kind == agent::ApprovalOptionKind::AllowOnce)
+                                .map(|option| ApprovalDecision::Option(option.id.clone()))
+                                .unwrap_or(ApprovalDecision::Cancel)
+                        }),
                     })
                     .await
                     .ok();
@@ -636,11 +669,38 @@ async fn run_probe(
                         "probe: TurnCompleted {turn_id} status={status:?} (#{turns_completed})"
                     );
                 }
-                if let Some((delay, text)) = follow_up.take() {
-                    open_until = Some(Instant::now() + delay + Duration::from_secs(1));
+                if let Some(delay) = stop_background.take() {
                     let commands = handle.commands.clone();
                     smol::spawn(async move {
                         smol::Timer::after(delay).await;
+                        eprintln!("probe: STOP BACKGROUND");
+                        commands
+                            .send(SessionCommand::StopBackgroundTask { task_id: None })
+                            .await
+                            .ok();
+                    })
+                    .detach();
+                }
+                if let Some((delay, text)) = follow_up.take() {
+                    open_until = Some(Instant::now() + delay + Duration::from_secs(1));
+                    let commands = handle.commands.clone();
+                    let apply = apply.take();
+                    smol::spawn(async move {
+                        smol::Timer::after(delay).await;
+                        if let Some((model, effort)) = apply {
+                            eprintln!("probe: APPLY -> {model} {effort}");
+                            commands
+                                .send(SessionCommand::ApplySettings {
+                                    model: Some(model),
+                                    option_selections: vec![OptionSelection {
+                                        id: "reasoningEffort".into(),
+                                        value: serde_json::json!(effort),
+                                    }],
+                                })
+                                .await
+                                .ok();
+                            smol::Timer::after(Duration::from_secs(1)).await;
+                        }
                         eprintln!("probe: FOLLOW-UP -> {text:?}");
                         commands
                             .send(SessionCommand::SendTurn {

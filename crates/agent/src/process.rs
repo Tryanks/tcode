@@ -25,7 +25,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// the pipes whoever runs the parent reads from. A child spawned with
 /// `Stdio::inherit` still gets them: std hands it an inheritable duplicate.
 /// No-op elsewhere.
-pub fn keep_own_stdio_from_children() {
+fn keep_own_stdio_from_children() {
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle as _;
@@ -51,18 +51,394 @@ pub fn keep_own_stdio_from_children() {
 }
 
 /// A blocking `std::process::Command` with the console suppressed.
-pub(crate) fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+///
+/// On Windows a package manager's `.cmd` shim is started as what it runs
+/// (see `cmd_shim`), so its arguments never pass through `cmd.exe`.
+pub fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
     keep_own_stdio_from_children();
-    #[cfg_attr(not(windows), allow(unused_mut))]
+    let program = program.as_ref();
+    let shim = if cfg!(windows) {
+        crate::cmd_shim::launch(std::path::Path::new(program))
+    } else {
+        None
+    };
     // Approved constructor: this is the helper every other site must use.
     #[allow(clippy::disallowed_methods)]
-    let mut cmd = std::process::Command::new(program);
+    let mut cmd = std::process::Command::new(
+        shim.as_ref()
+            .map_or(program, |shim| shim.program.as_os_str()),
+    );
+    if let Some(shim) = shim {
+        cmd.args(shim.args);
+        if let Some(node_path) = shim.node_path {
+            cmd.env("NODE_PATH", node_path);
+        }
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+/// [`command`] for a harness CLI: on Unix the child leads a process group of
+/// its own, which [`ProcessTree::kill`] stops with it.
+pub(crate) fn harness_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut cmd = command(program);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
+    cmd
+}
+
+/// [`harness_command`] as a `smol` command.
+pub(crate) fn async_harness_command<S: AsRef<std::ffi::OsStr>>(
+    program: S,
+) -> smol::process::Command {
+    smol::process::Command::from(harness_command(program))
+}
+
+/// A child whose process tree [`ProcessTree`] owns.
+pub(crate) trait Leader {
+    fn id(&self) -> u32;
+    fn kill(&mut self) -> std::io::Result<()>;
+}
+
+impl Leader for std::process::Child {
+    fn id(&self) -> u32 {
+        std::process::Child::id(self)
+    }
+    fn kill(&mut self) -> std::io::Result<()> {
+        std::process::Child::kill(self)
+    }
+}
+
+impl Leader for smol::process::Child {
+    fn id(&self) -> u32 {
+        smol::process::Child::id(self)
+    }
+    fn kill(&mut self) -> std::io::Result<()> {
+        smol::process::Child::kill(self)
+    }
+}
+
+/// A harness child and every process it starts, stopped together.
+///
+/// A harness starts its own background work as further processes, and Claude
+/// Code 2.1.318 starts each shell detached, in a session of its own, so
+/// killing the harness alone leaves that work running with nobody to answer
+/// to. [`kill`](Self::kill), dropping the tree, and [`stop_every_tree`] stop
+/// all of it. On Windows the tree is a job object closed with the process; on
+/// Unix it is read from the parent links before anything is killed, since an
+/// orphan's parent link is lost.
+pub(crate) struct ProcessTree<C: Leader> {
+    leader: C,
+    entry: u64,
+}
+
+static LIVE_TREES: Mutex<std::collections::BTreeMap<u64, TreeHandle>> =
+    Mutex::new(std::collections::BTreeMap::new());
+static NEXT_TREE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(unix)]
+type TreeHandle = u32;
+#[cfg(windows)]
+struct TreeHandle(windows::Win32::Foundation::HANDLE);
+#[cfg(not(any(unix, windows)))]
+type TreeHandle = ();
+
+// SAFETY: a job handle is a kernel handle usable from any thread; only the
+// registry closes it, once it is taken out under the lock.
+#[cfg(windows)]
+unsafe impl Send for TreeHandle {}
+
+fn live_trees() -> std::sync::MutexGuard<'static, std::collections::BTreeMap<u64, TreeHandle>> {
+    LIVE_TREES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl<C: Leader> ProcessTree<C> {
+    pub(crate) fn new(leader: C) -> Self {
+        let entry = NEXT_TREE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = tree_handle(leader.id()) {
+            live_trees().insert(entry, handle);
+        }
+        Self { leader, entry }
+    }
+
+    /// Stop the harness and everything it started.
+    pub(crate) fn kill(&mut self) -> std::io::Result<()> {
+        if let Some(handle) = live_trees().get(&self.entry) {
+            stop_tree(handle);
+        }
+        self.leader.kill()
+    }
+}
+
+impl<C: Leader> std::ops::Deref for ProcessTree<C> {
+    type Target = C;
+    fn deref(&self) -> &C {
+        &self.leader
+    }
+}
+
+impl<C: Leader> std::ops::DerefMut for ProcessTree<C> {
+    fn deref_mut(&mut self) -> &mut C {
+        &mut self.leader
+    }
+}
+
+impl<C: Leader> Drop for ProcessTree<C> {
+    fn drop(&mut self) {
+        let _ = self.kill();
+        if let Some(handle) = live_trees().remove(&self.entry) {
+            release_tree(handle);
+        }
+    }
+}
+
+/// Stop every harness tree this process started, for a host that is going
+/// away: the actors its shutdown asked to stop may not run again before the
+/// process exits.
+pub fn stop_every_tree() {
+    for handle in live_trees().values() {
+        stop_tree(handle);
+    }
+}
+
+#[cfg(unix)]
+fn tree_handle(pid: u32) -> Option<TreeHandle> {
+    Some(pid)
+}
+
+#[cfg(windows)]
+fn tree_handle(pid: u32) -> Option<TreeHandle> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+    // SAFETY: plain Win32 calls on handles this function owns; every handle
+    // is closed on each path that does not hand it to the registry.
+    unsafe {
+        let job = CreateJobObjectW(None, windows::core::PCWSTR::null()).ok()?;
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let assigned = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&limits).cast(),
+            std::mem::size_of_val(&limits) as u32,
+        )
+        .and_then(|()| OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid))
+        .and_then(|process| {
+            let assigned = AssignProcessToJobObject(job, process);
+            let _ = CloseHandle(process);
+            assigned
+        });
+        if let Err(error) = assigned {
+            log::warn!("harness process {pid} runs outside a job object: {error}");
+            let _ = CloseHandle(job);
+            return None;
+        }
+        Some(TreeHandle(job))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn tree_handle(_pid: u32) -> Option<TreeHandle> {
+    None
+}
+
+#[cfg(windows)]
+fn stop_tree(job: &TreeHandle) {
+    // SAFETY: the registry keeps the job handle open while it is listed.
+    let _ = unsafe { windows::Win32::System::JobObjects::TerminateJobObject(job.0, 1) };
+}
+
+#[cfg(windows)]
+fn release_tree(job: TreeHandle) {
+    // SAFETY: the handle was just taken out of the registry, its only owner.
+    let _ = unsafe { windows::Win32::Foundation::CloseHandle(job.0) };
+}
+
+#[cfg(not(windows))]
+fn release_tree(_handle: TreeHandle) {}
+
+#[cfg(not(any(unix, windows)))]
+fn stop_tree(_handle: &TreeHandle) {}
+
+/// Stop `leader` and its descendants: each is stopped as it is found, so none
+/// starts another while the tree is read, and then all are killed, with every
+/// process group one of them leads, which holds what they orphaned.
+#[cfg(unix)]
+fn stop_tree(leader: &TreeHandle) {
+    let Ok(leader) = libc::pid_t::try_from(*leader) else {
+        return;
+    };
+    // Once reaped, the id may name an unrelated process.
+    if !unreaped_child(leader) {
+        return;
+    }
+    let mut tree = vec![leader];
+    // SAFETY: signalling a process id this process still holds unreaped.
+    unsafe { libc::kill(leader, libc::SIGSTOP) };
+    for _ in 0..16 {
+        let found: Vec<_> = descendants(leader)
+            .into_iter()
+            .filter(|pid| !tree.contains(pid))
+            .collect();
+        if found.is_empty() {
+            break;
+        }
+        for &pid in &found {
+            // SAFETY: a descendant of a stopped, unreaped child of this
+            // process, which nothing else can reap and reuse before the kill.
+            unsafe { libc::kill(pid, libc::SIGSTOP) };
+        }
+        tree.extend(found);
+    }
+    // SAFETY: reading this process's own group.
+    let own_group = unsafe { libc::getpgrp() };
+    for &pid in &tree {
+        // SAFETY: as above; a group is signalled only when one of the tree's
+        // processes leads it.
+        if pid != own_group && unsafe { libc::getpgid(pid) } == pid {
+            unsafe { libc::killpg(pid, libc::SIGKILL) };
+        }
+    }
+    for &pid in &tree {
+        // SAFETY: as above.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+}
+
+/// Whether `pid` is a child of this process that has not been reaped yet,
+/// leaving it unreaped.
+#[cfg(unix)]
+fn unreaped_child(pid: libc::pid_t) -> bool {
+    // SAFETY: `info` is a valid, writable siginfo; WNOWAIT leaves any exit
+    // status in place for the child's owner.
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        ) == 0
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn descendants(root: libc::pid_t) -> Vec<libc::pid_t> {
+    let mut found = Vec::new();
+    let mut pending = vec![root];
+    while let Some(parent) = pending.pop() {
+        let mut children = vec![0 as libc::pid_t; 1024];
+        // SAFETY: the buffer holds `children.len()` pids and its size in
+        // bytes is passed with it.
+        let count = unsafe {
+            libc::proc_listchildpids(
+                parent,
+                children.as_mut_ptr().cast(),
+                std::mem::size_of_val(children.as_slice()) as libc::c_int,
+            )
+        };
+        let count = usize::try_from(count).unwrap_or(0).min(children.len());
+        for &child in &children[..count] {
+            if child > 0 && !found.contains(&child) {
+                found.push(child);
+                pending.push(child);
+            }
+        }
+    }
+    found
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn descendants(root: libc::pid_t) -> Vec<libc::pid_t> {
+    let mut parents = Vec::new();
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<libc::pid_t>().ok())
+        else {
+            continue;
+        };
+        // The parent is the second field after the name, which closes with
+        // the line's last `)`.
+        let Some(parent) = std::fs::read_to_string(entry.path().join("stat"))
+            .ok()
+            .and_then(|stat| {
+                let (_, fields) = stat.rsplit_once(')')?;
+                fields
+                    .split_whitespace()
+                    .nth(1)?
+                    .parse::<libc::pid_t>()
+                    .ok()
+            })
+        else {
+            continue;
+        };
+        parents.push((pid, parent));
+    }
+    let mut found = Vec::new();
+    let mut pending = vec![root];
+    while let Some(parent) = pending.pop() {
+        for &(pid, _) in parents.iter().filter(|(_, of)| *of == parent) {
+            if !found.contains(&pid) {
+                found.push(pid);
+                pending.push(pid);
+            }
+        }
+    }
+    found
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_vendor = "apple", target_os = "linux", target_os = "android"))
+))]
+fn descendants(_root: libc::pid_t) -> Vec<libc::pid_t> {
+    Vec::new()
+}
+
+/// Refuses an argument holding a line break for a Windows batch file, which
+/// `cmd.exe` would cut short there; std refuses it too, in words that name
+/// neither the program nor a way out.
+pub(crate) fn refuse_batch_line_breaks<'a>(
+    program: &std::ffi::OsStr,
+    mut args: impl Iterator<Item = &'a std::ffi::OsStr>,
+) -> Result<(), AgentError> {
+    let program = std::path::Path::new(program);
+    let batch = program
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        });
+    if cfg!(windows)
+        && batch
+        && args.any(|arg| {
+            arg.as_encoded_bytes()
+                .iter()
+                .any(|byte| matches!(byte, b'\r' | b'\n'))
+        })
+    {
+        return Err(AgentError::BatchLineBreak {
+            program: program.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 /// An async (`smol`) command with the console suppressed. `async_process`
@@ -233,6 +609,69 @@ pub(crate) fn test_echo_command() -> std::process::Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Claude Code starts a background shell in a session of its own, out of
+    /// its process group; stopping the harness stops that shell too.
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_harness_stops_the_work_it_started_out_of_its_group() {
+        const ROLE: &str = "TCODE_TEST_TREE_ROLE";
+        let this_test = |mut child: std::process::Command, role: &str| {
+            child
+                .args([
+                    "--exact",
+                    "process::tests::stopping_a_harness_stops_the_work_it_started_out_of_its_group",
+                    "--quiet",
+                    "--nocapture",
+                ])
+                .env(ROLE, role)
+                .stdin(std::process::Stdio::null());
+            child
+        };
+        let exe = std::env::current_exe().unwrap();
+        let idle = || std::thread::sleep(std::time::Duration::from_secs(120));
+        match std::env::var(ROLE).as_deref() {
+            Ok("work") => return idle(),
+            Ok("harness") => {
+                use std::os::unix::process::CommandExt as _;
+                let mut work = this_test(command(exe), "work")
+                    .process_group(0)
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+                println!("work {}", work.id());
+                idle();
+                let _ = work.kill();
+                let _ = work.wait();
+                return;
+            }
+            _ => {}
+        }
+
+        let mut harness = ProcessTree::new(
+            this_test(harness_command(exe), "harness")
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let work: libc::pid_t = BufReader::new(harness.stdout.take().unwrap())
+            .lines()
+            .find_map(|line| line.unwrap().strip_prefix("work ")?.parse().ok())
+            .unwrap();
+
+        harness.kill().unwrap();
+        harness.wait().unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // SAFETY: probing a process id with no signal.
+        while unsafe { libc::kill(work, 0) } == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the harness's background work {work} outlived it"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 
     #[test]
     fn line_reader_preserves_record_framing_and_reports_invalid_utf8() {

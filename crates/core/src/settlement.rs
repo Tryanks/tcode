@@ -118,8 +118,10 @@ impl ThreadActivity {
 #[serde(rename_all = "snake_case")]
 pub enum AgentExecution {
     Working,
-    /// Waiting on a request, or on work of its own, inside the child.
+    /// Waiting on a request inside the child.
     Waiting,
+    /// No turn runs, while its background work or its own agents do.
+    Background,
     Finished,
     Failed,
     Cancelled,
@@ -128,12 +130,12 @@ pub enum AgentExecution {
 
 impl AgentExecution {
     pub fn running(self) -> bool {
-        matches!(self, Self::Working | Self::Waiting)
+        matches!(self, Self::Working | Self::Waiting | Self::Background)
     }
 }
 
-/// What a dispatched child owes its lead. Every message the lead sends a child
-/// (the dispatch brief, each `send`) opens one expectation; the child's
+/// What a subagent owes its lead. Every message the lead sends it (the
+/// `start_thread` message, each queued or steered `send_message`) opens one expectation; the child's
 /// `report_result` call closes it. The child's own turns, wake-ups and
 /// background work never reach the lead on their own.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

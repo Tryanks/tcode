@@ -27,9 +27,12 @@ use tcode_traverse::{DeviceInfo, HostConfig, HostMux, Invitation, TraverseHost};
 use super::access::AccessSection;
 use super::spaces::{SpacesObserver, this_machine};
 use crate::material::{group_row, group_row_stacked};
-use crate::settings_rows::{FIELD_WIDTH, ToggleRow, row_labels, settings_group};
+use crate::settings_rows::{ToggleRow, row_labels, settings_group};
 use crate::store::WorkspaceStore;
 use crate::widgets::input::{Input, InputEvent, InputState};
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub struct RemoteController {
     mux: HostMux,
@@ -251,6 +254,18 @@ impl RemoteController {
             .map_err(|error| error.message)
     }
 
+    /// How each Traverse source is doing after every change, while this
+    /// machine hosts; see [`TraverseHost::traverse_events`].
+    pub fn traverse_events(&self) -> Option<async_channel::Receiver<Vec<TraverseSourceStatus>>> {
+        self.host.as_ref().map(TraverseHost::traverse_events)
+    }
+
+    /// This machine's hosting state after every change, while it hosts; see
+    /// [`TraverseHost::hosting_events`].
+    pub fn hosting_events(&self) -> Option<async_channel::Receiver<HostingState>> {
+        self.host.as_ref().map(TraverseHost::hosting_events)
+    }
+
     /// Answers hosting queries off the UI thread while hosting.
     pub fn hosting_handle(&self) -> Option<tcode_traverse::host::HostingHandle> {
         self.host.as_ref().map(TraverseHost::hosting_handle)
@@ -316,6 +331,26 @@ pub(super) fn field_row(compact: bool, cx: &App) -> gpui::Div {
     } else {
         group_row(cx).flex_wrap()
     }
+}
+
+/// A [`field_row`] of `labels` and the controls `field` builds: they glide
+/// to where a wrap under the labels, or a window turning compact, puts
+/// them, on clocks `motion` keeps.
+pub(super) fn reflowing_field_row(
+    id: impl Into<SharedString>,
+    labels: impl IntoElement,
+    field: impl FnOnce(&crate::settings_rows::FlipRow, &App) -> AnyElement,
+    compact: bool,
+    motion: &crate::motion::owned::Owned,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let row = crate::settings_rows::flip_row_in(motion, id, compact, window, cx);
+    let field = field(&row, cx);
+    let layout = field_row(compact, cx)
+        .child(labels)
+        .child(row.part("field", field));
+    row.render(layout)
 }
 
 /// The width a [`field_row`]'s label keeps before its field wraps under it.
@@ -391,7 +426,10 @@ pub struct HostingPanel {
     host_name_input: Entity<InputState>,
     access: Entity<AccessSection>,
     observer: SpacesObserver,
-    _subscription: gpui::Subscription,
+    /// The panel's size-class motion: the window draws it under another
+    /// parent when it turns compact or wide.
+    motion: crate::motion::owned::Owned,
+    _subscriptions: [gpui::Subscription; 2],
 }
 
 impl HostingPanel {
@@ -417,11 +455,23 @@ impl HostingPanel {
                 InputEvent::Change | InputEvent::Focus => {}
             },
         );
+        // Each host's settings page has its own panel: a name saved on one
+        // shows on the others, but for the field being typed in.
+        let follow = cx.observe_global_in::<RemoteController>(window, |this, window, cx| {
+            let saved = cx
+                .global::<RemoteController>()
+                .local_settings()
+                .remote_host_name
+                .clone()
+                .unwrap_or_default();
+            crate::settings_rows::follow_input(&this.host_name_input, &saved, window, cx);
+        });
         Self {
             host_name_input,
             access: cx.new(|_| AccessSection::new(store, this_machine, false)),
             observer: SpacesObserver::default(),
-            _subscription: subscription,
+            motion: Default::default(),
+            _subscriptions: [subscription, follow],
         }
     }
 
@@ -470,7 +520,12 @@ impl HostingPanel {
         cx.notify();
     }
 
-    fn render_machine(&mut self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_machine(
+        &mut self,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let (hosting, pairing, failure) = cx
             .try_global::<RemoteController>()
             .map(|controller| {
@@ -494,42 +549,46 @@ impl HostingPanel {
             .error(failure)
             .into_any_element(),
         ];
-        if hosting {
-            rows.push(
-                ToggleRow::new(
-                    "remote-pairing",
-                    crate::tr!("remote.pairing.title"),
-                    pairing,
-                    compact,
-                    cx.listener(|this, checked: &bool, window, cx| {
-                        this.set_pairing_enabled(*checked, window, cx);
-                    }),
-                )
-                .into_any_element(),
-            );
+        // Pairing is a setting of a running host, so it folds in and out
+        // with hosting.
+        if let Some(shown) =
+            crate::motion::shown("remote-pairing", hosting.then_some(()), SHOW, window, cx)
+        {
+            rows.push(shown.fold(ToggleRow::new(
+                "remote-pairing",
+                crate::tr!("remote.pairing.title"),
+                pairing,
+                compact,
+                cx.listener(|this, checked: &bool, window, cx| {
+                    this.set_pairing_enabled(*checked, window, cx);
+                }),
+            )));
         }
-        rows.push(
-            field_row(compact, cx)
-                .child(field_labels(
-                    crate::tr!("remote.host_name.title").into_owned().into(),
-                    Some(
-                        crate::tr!("remote.host_name.description")
-                            .into_owned()
-                            .into(),
-                    ),
-                    compact,
-                    cx,
-                ))
-                .child(
-                    div()
-                        .when(compact, |field| field.w_full())
-                        .when(!compact, |field| {
-                            field.w(px(FIELD_WIDTH)).min_w_0().flex_shrink(1.)
-                        })
-                        .child(Input::new(&self.host_name_input)),
-                )
-                .into_any_element(),
+        let labels = field_labels(
+            crate::tr!("remote.host_name.title").into_owned().into(),
+            Some(
+                crate::tr!("remote.host_name.description")
+                    .into_owned()
+                    .into(),
+            ),
+            compact,
+            cx,
         );
+        let input = self.host_name_input.clone();
+        rows.push(reflowing_field_row(
+            "remote-host-name",
+            labels,
+            |row, cx| {
+                row.field(Input::new(&input), cx)
+                    .min_w_0()
+                    .flex_shrink(1.)
+                    .into_any_element()
+            },
+            compact,
+            &self.motion,
+            window,
+            cx,
+        ));
         settings_group(crate::tr!("remote.host.section"), rows, cx).into_any_element()
     }
 }
@@ -542,13 +601,19 @@ impl Render for HostingPanel {
         let spaces = super::spaces::local(cx);
         self.observer.watch(spaces.as_ref(), cx);
         let hosting = spaces.is_some();
+        // The section folds itself in and out with hosting, so it stays
+        // mounted; its gap rides inside the fold.
+        let gap = crate::material::section_gap(cx);
+        let access =
+            crate::motion::shown("remote-access-gap", hosting.then_some(()), SHOW, window, cx)
+                .map(|shown| shown.fold(div().h(gap)));
         v_flex()
             .w_full()
             .min_w_0()
-            .gap(crate::material::section_gap(cx))
             .debug_selector(|| "hosting-settings".into())
-            .child(self.render_machine(compact, cx))
-            .when(hosting, |column| column.child(self.access.clone()))
+            .child(self.render_machine(compact, window, cx))
+            .children(access)
+            .child(self.access.clone())
     }
 }
 
@@ -557,13 +622,69 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
 
+    /// Every host's settings page has its own Remote panel; the machine's
+    /// name saved on one shows on another, which was opened before it.
+    #[gpui::test]
+    fn a_machine_name_saved_on_one_page_shows_on_another(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let root = crate::store::tests::scratch_root("hosting-name");
+        let (to_host, _host_rx) = async_channel::unbounded::<String>();
+        let (_host_tx, from_host) = async_channel::unbounded::<String>();
+        let (attachments, _attachment_rx) = async_channel::unbounded();
+        cx.update(crate::theme::init);
+        cx.update(|cx| {
+            cx.set_global(RemoteController::new(
+                HostMux::new(attachments, from_host.clone()),
+                root,
+                HostLink::new(to_host.clone(), from_host.clone()),
+                Settings::default(),
+            ))
+        });
+        let pages: Vec<gpui::WindowHandle<HostingPanel>> = (0..2)
+            .map(|_| {
+                cx.add_window(|window, cx| {
+                    let store = cx.new(|cx| {
+                        WorkspaceStore::new_attached(
+                            HostLink::new(to_host.clone(), from_host.clone()),
+                            crate::store::WorkspaceAttachment::Local,
+                            None,
+                            None,
+                            cx,
+                        )
+                    });
+                    HostingPanel::new(store, window, cx)
+                })
+            })
+            .collect();
+        pages[0]
+            .update(cx, |panel, window, cx| {
+                panel.host_name_input.update(cx, |input, cx| {
+                    input.set_value("Studio", window, cx);
+                    cx.emit(InputEvent::Blur);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        pages[1]
+            .update(cx, |panel, _, cx| {
+                assert_eq!(panel.host_name_input.read(cx).value(), "Studio");
+            })
+            .unwrap();
+    }
+
+    /// The transport publishes to the enabled sources, in order. A
+    /// self-hosted instance is named by the base URL its manifest is served
+    /// from; anything a browser would not fetch is refused.
     /// Settings → Remote, driven as a user does: the pairing switch exists
-    /// only while hosting; with it on, the invitation the switch produces is
-    /// on the same page, and turning it off reaches the transport, which
-    /// drops the invitation. A typed name is saved when its field is left.
+    /// only while hosting; with it on, the invitation is on the same page,
+    /// and turning it off reaches the transport, which drops the invitation.
+    /// A typed name is saved when its field is left.
     #[gpui::test]
     fn the_remote_page_shows_the_invitation_while_accepting_devices(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        // The machine's host runs on its own threads and tells the window
+        // of hosting changes from there, as it does in the app.
+        cx.executor().allow_parking();
         let root = crate::store::tests::scratch_root("hosting-pairing");
         std::fs::create_dir_all(&root).unwrap();
         // Idle pipes: the host is never attached to here.
@@ -587,23 +708,13 @@ mod tests {
                     crate::store::WorkspaceAttachment::Local,
                     None,
                     None,
-                    false,
                     cx,
                 )
             });
             HostingPanel::new(store, window, cx)
         });
         cx.simulate_resize(gpui::size(px(900.), px(1200.)));
-        let draw = |cx: &mut gpui::VisualTestContext| {
-            for _ in 0..2 {
-                cx.run_until_parked();
-                cx.update(|window, cx| {
-                    window.refresh();
-                    _ = window.draw(cx);
-                });
-            }
-        };
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(
             cx.debug_bounds("remote-pairing").is_none(),
             "no pairing switch while not hosting"
@@ -642,7 +753,7 @@ mod tests {
         cx.update(|_, cx| {
             cx.update_global::<RemoteController, _>(|controller, _| controller.adopt_host(host));
         });
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("remote-pairing").is_some());
         assert!(
             cx.debug_bounds("remote-invitation").is_some(),
@@ -651,7 +762,7 @@ mod tests {
 
         let switch = cx.debug_bounds("remote-pairing").unwrap();
         cx.simulate_click(switch.center(), gpui::Modifiers::default());
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         cx.read(|cx| {
             let controller = cx.global::<RemoteController>();
             assert!(!controller.pairing_enabled());
@@ -665,7 +776,7 @@ mod tests {
 
         let switch = cx.debug_bounds("remote-pairing").unwrap();
         cx.simulate_click(switch.center(), gpui::Modifiers::default());
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(
             cx.debug_bounds("remote-invitation").is_some(),
             "turning pairing on mints an invitation at once"
@@ -674,15 +785,12 @@ mod tests {
         cx.update(|_, cx| {
             cx.update_global::<RemoteController, _>(|controller, _| controller.stop_hosting());
         });
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("remote-pairing").is_none());
         assert!(cx.debug_bounds("remote-invitation").is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// The transport publishes to the enabled sources, in order. A
-    /// self-hosted instance is named by the base URL its manifest is served
-    /// from; anything a browser would not fetch is refused.
     #[test]
     fn a_self_hosted_traverse_needs_a_fetchable_base_url() {
         let custom = |url: &str, enabled| TraverseSource {

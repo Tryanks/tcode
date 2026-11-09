@@ -7,9 +7,7 @@ use tcode_core::{
     control::{ControlGrant, FollowUp, SettlementAutomation},
     git::GitAction,
     session::ReviewComment,
-    settings::{
-        ChildApprovalMode, ImageMode, OrchestrateChildModel, ProfileSettingsPatch, SidebarLayout,
-    },
+    settings::{ChildApprovalMode, ImageMode, ProfileSettingsPatch},
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 use tcode_protocol::{
@@ -17,7 +15,10 @@ use tcode_protocol::{
     SettingsPatch,
 };
 
-use super::{ArchivedDeletion, KEPT_THREADS, StoreChange, TopicKind, WorkspaceStore};
+use super::{
+    ArchivedDeletion, KEPT_THREADS, ShowThread, StoreChange, TopicKind, WorkspaceStore,
+    thread::ThreadReplica,
+};
 
 impl WorkspaceStore {
     pub(crate) fn local_settings_changed(&self, cx: &mut Context<Self>) {
@@ -45,11 +46,13 @@ impl WorkspaceStore {
                 | Command::ApplyPendingRelaunch
                 | Command::PatchSettings { .. }
                 | Command::ResetSettings
-                | Command::SetSidebarCollapsed { .. }
                 | Command::CycleProjectSort
                 | Command::ToggleFavoriteModel { .. }
                 | Command::ToggleProjectCollapsed { .. }
                 | Command::PreviewReply { .. }
+                | Command::ShowPreviewHere { .. }
+                | Command::ReportPreviewTabs { .. }
+                | Command::ReportPreviewInput { .. }
                 | Command::ReloadProvider
                 | Command::SetProfileSecret { .. }
                 | Command::UpdateProfileSettings { .. }
@@ -63,6 +66,7 @@ impl WorkspaceStore {
                 | Command::RefreshProviderStatus
                 | Command::RefreshProviderUsage
                 | Command::CheckProviderVersions
+                | Command::MeasureDiskUsage
                 | Command::UpdateProviders { .. }
                 | Command::RefreshAcpRegistry
                 | Command::InstallAcpAgent { .. }
@@ -83,9 +87,6 @@ impl WorkspaceStore {
     pub(super) fn dispatch(&mut self, command: Command) {
         if !self.scope.is_full() {
             match &command {
-                Command::SetSidebarCollapsed { collapsed } => {
-                    self.settings_replica.sidebar_collapsed = *collapsed
-                }
                 Command::ToggleProjectCollapsed { project_id } => {
                     if self
                         .settings_replica
@@ -104,15 +105,15 @@ impl WorkspaceStore {
                 Command::CycleProjectSort => {
                     self.settings_replica.project_sort = self.settings_replica.project_sort.next()
                 }
-                Command::ToggleFavoriteModel { model } => {
-                    if self.settings_replica.favorite_models.contains(model) {
-                        self.settings_replica
-                            .favorite_models
-                            .retain(|id| id != model);
-                    } else {
-                        self.settings_replica.favorite_models.push(model.clone());
-                    }
-                }
+                Command::ToggleFavoriteModel {
+                    provider,
+                    profile_id,
+                    model,
+                } => self.settings_replica.toggle_favorite_model(
+                    *provider,
+                    profile_id.clone(),
+                    model.clone(),
+                ),
                 Command::MarkSessionRead {
                     session_id,
                     through,
@@ -136,6 +137,7 @@ impl WorkspaceStore {
                     return;
                 }
             }
+            self.thread_list_revision += 1;
             self.save_member_settings();
             return;
         }
@@ -171,14 +173,8 @@ impl WorkspaceStore {
         if !self.scope.is_full() {
             match patch {
                 SettingsPatch::LastProject(id) => self.settings_replica.last_project_id = id,
-                SettingsPatch::SidebarLayout(layout) => {
-                    self.settings_replica.sidebar_layout = layout
-                }
                 SettingsPatch::WordWrapDiffs(value) => {
                     self.settings_replica.word_wrap_diffs = value
-                }
-                SettingsPatch::AutoOpenTaskPanel(value) => {
-                    self.settings_replica.auto_open_task_panel = value
                 }
                 SettingsPatch::LiveCommandPanelDisabled(value) => {
                     self.settings_replica.live_command_panel_disabled = value
@@ -189,8 +185,12 @@ impl WorkspaceStore {
                 SettingsPatch::InactiveFrameThrottleDisabled(value) => {
                     self.settings_replica.inactive_frame_throttle_disabled = value
                 }
+                SettingsPatch::ScrollToLatestOnSend(value) => {
+                    self.settings_replica.scroll_to_latest_on_send = value
+                }
                 _ => return,
             }
+            self.thread_list_revision += 1;
             self.save_member_settings();
             return;
         }
@@ -200,7 +200,7 @@ impl WorkspaceStore {
     /// Record the project the user navigated into. Called only from user
     /// navigation (opening a thread, starting a draft), because the empty
     /// workspace returns here: background activity must not move it.
-    fn remember_project(&mut self, project_id: Option<String>) {
+    pub(super) fn remember_project(&mut self, project_id: Option<String>) {
         let Some(project_id) = project_id else {
             return;
         };
@@ -211,14 +211,21 @@ impl WorkspaceStore {
         self.patch_settings(SettingsPatch::LastProject(Some(project_id)));
     }
 
+    pub(super) fn remember_project_of(&mut self, session_id: &str) {
+        let project_id = self
+            .index_replica
+            .0
+            .iter()
+            .find(|meta| meta.id == session_id)
+            .and_then(|meta| meta.project_id.clone());
+        self.remember_project(project_id);
+    }
+
     pub fn set_word_wrap_diffs(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::WordWrapDiffs(value));
     }
     pub fn set_skip_delete_confirmation(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::SkipDeleteConfirmation(value));
-    }
-    pub fn set_auto_open_task_panel(&mut self, value: bool) {
-        self.patch_settings(SettingsPatch::AutoOpenTaskPanel(value));
     }
     pub fn set_live_command_panel_disabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::LiveCommandPanelDisabled(value));
@@ -232,25 +239,16 @@ impl WorkspaceStore {
     pub fn set_inactive_frame_throttle_disabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::InactiveFrameThrottleDisabled(value));
     }
-    pub fn set_abort_on_model_fallback(&mut self, value: bool) {
-        self.patch_settings(SettingsPatch::AbortOnModelFallback(value));
+    pub fn set_scroll_to_latest_on_send(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::ScrollToLatestOnSend(value));
     }
     pub fn set_resume_on_limit_reset(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ResumeOnLimitReset(value));
     }
-    pub fn set_fallback_review_advisor(&mut self, value: bool) {
-        self.patch_settings(SettingsPatch::FallbackReviewAdvisor(value));
-    }
-    pub fn set_orchestrate_decision_models(&mut self, value: Vec<OrchestrateChildModel>) {
-        self.patch_settings(SettingsPatch::OrchestrateDecisionModels(value));
-    }
-    pub fn set_orchestrate_child_models(&mut self, value: Vec<OrchestrateChildModel>) {
-        self.patch_settings(SettingsPatch::OrchestrateChildModels(value));
-    }
-    pub fn set_orchestrate_child_approval(&mut self, value: ChildApprovalMode) {
+    pub fn set_child_approval(&mut self, value: ChildApprovalMode) {
         self.patch_settings(SettingsPatch::OrchestrateChildApproval(value));
     }
-    pub fn set_orchestrate_child_worktrees(&mut self, value: bool) {
+    pub fn set_child_worktrees(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::OrchestrateChildWorktrees(value));
     }
     pub fn set_computer_use_enabled(&mut self, value: bool) {
@@ -262,9 +260,6 @@ impl WorkspaceStore {
     pub fn set_computer_use_allow_input(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ComputerUseAllowInput(value));
     }
-    pub fn set_computer_use_allow_foreground_fallback(&mut self, value: bool) {
-        self.patch_settings(SettingsPatch::ComputerUseAllowForegroundFallback(value));
-    }
     pub fn set_computer_use_show_agent_cursor(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ComputerUseShowAgentCursor(value));
     }
@@ -273,6 +268,15 @@ impl WorkspaceStore {
     }
     pub fn set_browser_home_url(&mut self, value: Option<String>) {
         self.patch_settings(SettingsPatch::BrowserHomeUrl(value));
+    }
+    pub fn set_new_project_dir(&mut self, value: Option<String>) {
+        self.patch_settings(SettingsPatch::NewProjectDir(value));
+    }
+    pub fn set_project_start(&mut self, value: tcode_core::settings::ProjectStart) {
+        self.patch_settings(SettingsPatch::ProjectStart(value));
+    }
+    pub fn set_project_start_custom(&mut self, value: Option<String>) {
+        self.patch_settings(SettingsPatch::ProjectStartCustom(value));
     }
     pub fn set_browser_allow_evaluate(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::BrowserAllowEvaluate(value));
@@ -286,33 +290,17 @@ impl WorkspaceStore {
     pub fn set_title_generation_profile_id(&mut self, value: Option<String>) {
         self.patch_settings(SettingsPatch::TitleGenerationProfileId(value));
     }
-    pub fn set_fallback_review_provider(&mut self, value: ProviderKind) {
-        self.patch_settings(SettingsPatch::FallbackReviewProvider(value));
-    }
-    pub fn set_fallback_review_model(&mut self, value: String) {
-        self.patch_settings(SettingsPatch::FallbackReviewModel(value));
-    }
-    pub fn set_fallback_review_profile_id(&mut self, value: Option<String>) {
-        self.patch_settings(SettingsPatch::FallbackReviewProfileId(value));
-    }
-    pub fn set_sidebar_layout(&mut self, value: SidebarLayout) {
-        self.patch_settings(SettingsPatch::SidebarLayout(value));
-    }
     pub fn reset_settings(&mut self) {
         self.dispatch(Command::ResetSettings);
     }
-    pub fn write_relaunch_marker(&mut self, reopen_settings: String) {
+    pub fn write_relaunch_marker_for(&mut self, session_id: String, reopen_settings: String) {
         self.dispatch(Command::WriteRelaunchMarker {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             reopen_settings,
         });
     }
     pub fn clear_relaunch_marker(&mut self) {
         self.dispatch(Command::ClearRelaunchMarker);
-    }
-    pub fn set_sidebar_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
-        self.dispatch(Command::SetSidebarCollapsed { collapsed });
-        self.local_settings_changed(cx);
     }
 }
 
@@ -329,6 +317,24 @@ impl WorkspaceStore {
     }
     pub fn interrupt_session(&mut self, session_id: String) {
         self.dispatch(Command::Interrupt { session_id });
+    }
+    /// Kill a thread's provider process that no longer answers a stop.
+    pub fn force_terminate(&mut self, session_id: String) {
+        self.dispatch(Command::ForceTerminate { session_id });
+    }
+    /// Move a thread's running call into the background.
+    pub fn move_to_background(&mut self, session_id: String, item_id: String) {
+        self.dispatch(Command::MoveToBackground {
+            session_id,
+            item_id,
+        });
+    }
+    /// Stop one piece of a thread's background work, or all of it with `None`.
+    pub fn stop_background_task(&mut self, session_id: String, task_id: Option<String>) {
+        self.dispatch(Command::StopBackgroundTask {
+            session_id,
+            task_id,
+        });
     }
     pub fn set_auto_settle(&mut self, session_id: String, enabled: bool) {
         self.dispatch(Command::SetAutoSettle {
@@ -430,7 +436,42 @@ impl WorkspaceStore {
         self.dispatch(Command::RegenerateSessionTitle { session_id });
     }
     pub fn fork_thread(&mut self, id: String, cx: &mut Context<Self>) {
-        self.create_and_select(Command::ForkThread { id }, cx);
+        self.create_and_show(Command::ForkThread { id, at: None }, true, cx);
+    }
+
+    /// A new thread holding everything through the finished absolute `turn`.
+    pub fn fork_through_turn(
+        &mut self,
+        id: String,
+        turn: usize,
+        checkpoint_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let at = Some(tcode_protocol::ForkAt {
+            turn,
+            checkpoint_id,
+        });
+        self.create_and_show(Command::ForkThread { id, at }, true, cx);
+    }
+
+    /// Show the thread going on in the branch the rewind of the divider at
+    /// absolute `turn` left.
+    pub fn open_rewound_branch(
+        &mut self,
+        session_id: String,
+        turn: usize,
+        checkpoint_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_and_show(
+            Command::OpenRewoundBranch {
+                session_id,
+                turn,
+                checkpoint_id,
+            },
+            true,
+            cx,
+        );
     }
     pub fn merge_worktree(&mut self, session_id: String) {
         self.dispatch(Command::MergeWorktree { session_id });
@@ -452,121 +493,204 @@ impl WorkspaceStore {
         self.dispatch(Command::MarkSessionUnread { session_id });
         self.local_settings_changed(cx);
     }
-    pub(crate) fn leave_session(&mut self) {
-        self.selection_generation = self.selection_generation.wrapping_add(1);
-        self.draft_fallback_pending = false;
-        self.history_task = None;
-        self.history_trim = None;
-        self.history_error = None;
-        self.history_pages_fetched = 0;
-        self.history_logged_records = None;
-        self.session_turn_offset = 0;
-        self.session_catching_up = false;
-        self.clear_terminal_topics();
-        self.clear_command_outputs();
-        if let Some(session_id) = self.selected_session_id.take() {
-            if let Some(thread) = self.threads.get_mut(&session_id) {
-                thread.left_at = self.selection_generation;
-                // The thread reopens at its tail.
-                if let Some(held) = &mut thread.history {
-                    held.drop_pages_above_tail();
-                }
-            }
-            self.release_left_threads();
-            for topic in [
-                tcode_protocol::Topic::SessionEvents {
-                    session_id: session_id.clone(),
-                },
-                tcode_protocol::Topic::SessionStatus {
-                    session_id: session_id.clone(),
-                },
-                tcode_protocol::Topic::SessionPlan {
-                    session_id: session_id.clone(),
-                },
-                tcode_protocol::Topic::GitStatus { session_id },
-            ] {
-                let _ = self.host.unsubscribe(tcode_protocol::Subscription {
-                    known_index: None,
-                    topic,
-                    after: None,
-                });
-            }
-        }
-        self.session_status_replica = None;
-        self.session_replica = None;
-        self.read_acknowledged = None;
-        self.active_destination = None;
-        self.git_status_replica = Default::default();
+    /// The agent shown beside `lead` in the lead's chat.
+    pub(crate) fn side_thread_for(&self, lead: &str) -> Option<String> {
+        self.conversation_ui
+            .get(&self.side_destination(lead))?
+            .side_thread
+            .clone()
     }
 
-    /// Keep the replicas of the [`KEPT_THREADS`] threads left most recently.
-    fn release_left_threads(&mut self) {
-        if self.threads.len() <= KEPT_THREADS {
+    /// Show `side` beside `lead` in the lead's chat, or nothing there.
+    pub(crate) fn set_side_thread(
+        &mut self,
+        lead: &str,
+        side: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let destination = self.side_destination(lead);
+        let wrap = self.settings_replica.word_wrap_diffs;
+        let ui = self
+            .conversation_ui
+            .entry(destination)
+            .or_insert_with(|| crate::conversation_ui::ConversationUiState::new(wrap, false, 240.));
+        if ui.side_thread != side {
+            ui.side_thread = side;
+            cx.notify();
+        }
+    }
+
+    /// Where `lead`'s conversation state lives, as [`Self::open_tab_for`]
+    /// finds it: also for a lead whose status has not arrived yet.
+    fn side_destination(&self, lead: &str) -> tcode_core::ui::ConversationDestination {
+        self.threads
+            .get(lead)
+            .filter(|thread| thread.open)
+            .and_then(|thread| thread.destination.clone())
+            .unwrap_or_else(|| tcode_core::ui::ConversationDestination::Thread(lead.to_owned()))
+    }
+
+    /// Whether a surface shows the thread, so its topics are subscribed.
+    pub(crate) fn is_thread_open(&self, session_id: &str) -> bool {
+        self.threads
+            .get(session_id)
+            .is_some_and(|thread| thread.open)
+    }
+
+    /// Stop showing a thread: its topics are unsubscribed and its paging
+    /// state forgotten, while its replicas stay for a while so reopening it
+    /// fetches only what it missed.
+    pub(crate) fn close_thread(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        cx.notify();
+        self.clear_command_outputs(session_id);
+        if let Some(thread) = self.threads.get_mut(session_id) {
+            thread.open = false;
+            thread.generation = thread.generation.wrapping_add(1);
+            thread.left_at = self.selection_generation;
+            thread.reset_paging();
+            if !self.timeline_leases.contains_key(session_id) {
+                thread.timeline = None;
+            }
+            thread.read_acknowledged = None;
+            thread.destination = None;
+            // The thread reopens at its tail.
+            if let Some(held) = &mut thread.history {
+                held.drop_pages_above_tail();
+            }
+        }
+        self.release_left_threads();
+        self.unfollow_preview(session_id);
+        for topic in [
+            tcode_protocol::Topic::SessionEvents {
+                session_id: session_id.to_owned(),
+            },
+            tcode_protocol::Topic::SessionStatus {
+                session_id: session_id.to_owned(),
+            },
+            tcode_protocol::Topic::SessionPlan {
+                session_id: session_id.to_owned(),
+            },
+            tcode_protocol::Topic::GitStatus {
+                session_id: session_id.to_owned(),
+            },
+        ] {
+            let _ = self.host.unsubscribe(tcode_protocol::Subscription {
+                known_index: None,
+                topic,
+                after: None,
+            });
+        }
+        self.sync_terminal_topics(cx);
+    }
+
+    /// Hold `session_id`'s timeline for a surface that draws it, so if the
+    /// thread closes while it is drawn (a pane fading out), it still shows
+    /// the thread rather than nothing. Each lease is released once.
+    pub(crate) fn lease_timeline(&mut self, session_id: &str) {
+        *self
+            .timeline_leases
+            .entry(session_id.to_owned())
+            .or_default() += 1;
+    }
+
+    /// Let go of a lease from [`Self::lease_timeline`]: a closed thread no
+    /// surface holds any more drops its timeline, as closing it would have.
+    pub(crate) fn release_timeline(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let Some(count) = self.timeline_leases.get_mut(session_id) else {
+            return;
+        };
+        *count -= 1;
+        if *count > 0 {
             return;
         }
+        self.timeline_leases.remove(session_id);
+        if let Some(thread) = self.threads.get_mut(session_id)
+            && !thread.open
+        {
+            thread.timeline = None;
+            self.release_left_threads();
+            cx.notify();
+        }
+    }
+
+    /// Keep the replicas of the [`KEPT_THREADS`] threads left most recently,
+    /// besides the open ones.
+    fn release_left_threads(&mut self) {
         let mut left: Vec<(u64, String)> = self
             .threads
             .iter()
+            .filter(|(id, thread)| !thread.open && !self.timeline_leases.contains_key(*id))
             .map(|(id, thread)| (thread.left_at, id.clone()))
             .collect();
+        if left.len() <= KEPT_THREADS {
+            return;
+        }
         left.sort_unstable_by(|a, b| b.cmp(a));
         for (_, id) in &left[KEPT_THREADS..] {
             self.threads.remove(id);
         }
     }
 
-    pub fn select_session(&mut self, session_id: String) {
-        self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
-        self.draft_fallback_pending = false;
-        if self.selected_session_id.as_ref() == Some(&session_id) {
-            return;
-        }
-        let project_id = self
-            .index_replica
-            .0
+    pub(crate) fn open_threads(&self) -> Vec<String> {
+        self.threads
             .iter()
-            .find(|meta| meta.id == session_id)
-            .and_then(|meta| meta.project_id.clone());
-        self.remember_project(project_id);
-        self.leave_session();
-        self.selected_session_id = Some(session_id.clone());
+            .filter(|(_, thread)| thread.open)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Show a thread: subscribe its topics and fold what the client already
+    /// holds of it, so a kept thread is ready to draw as soon as its window
+    /// brings it up to date.
+    pub(crate) fn open_thread(&mut self, session_id: &str, cx: &mut gpui::App) {
         self.baseline_topics
             .remove(&tcode_protocol::Topic::SessionStatus {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             });
         self.baseline_topics
             .remove(&tcode_protocol::Topic::SessionPlan {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             });
         self.baseline_topics
             .remove(&tcode_protocol::Topic::SessionEvents {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             });
-        let thread = self.threads.entry(session_id.clone()).or_default();
-        self.session_status_replica = thread.status.clone();
-        self.git_status_replica = thread.git.clone().unwrap_or_default();
+        let thread = self
+            .threads
+            .entry(session_id.to_owned())
+            .or_insert_with(|| ThreadReplica::new(cx));
+        if !thread.open {
+            thread.open = true;
+            thread.generation = thread.generation.wrapping_add(1);
+        }
+        thread.reset_paging();
+        thread.timeline = None;
         let after = thread.history.as_ref().map(|held| held.end);
-        let total_turns = thread.total_turns;
-        if let Some(total_turns) = total_turns.filter(|_| after.is_some()) {
-            let mut timeline = self.fold_held_records(&session_id);
-            self.session_turn_offset = total_turns.saturating_sub(timeline.turns.len());
-            self.settle_running_turn(&mut timeline);
-            self.session_replica = Some((session_id.clone(), timeline));
+        if let Some(total_turns) = thread.total_turns.filter(|_| after.is_some()) {
+            thread.refold(total_turns);
         }
         if !self.baseline_topics.contains(&tcode_protocol::Topic::Scope) {
             return;
         }
+        // What the client held is the thread as it was left; it is the
+        // thread's state only once the window brings it to the host's
+        // position.
+        if let Some(thread) = self.threads.get_mut(session_id) {
+            thread.catching_up = true;
+        }
         for topic in [
             tcode_protocol::Topic::SessionStatus {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             },
             tcode_protocol::Topic::SessionPlan {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             },
             tcode_protocol::Topic::GitStatus {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             },
-            tcode_protocol::Topic::SessionEvents { session_id },
+            tcode_protocol::Topic::SessionEvents {
+                session_id: session_id.to_owned(),
+            },
         ] {
             let _ = self.host.subscribe(tcode_protocol::Subscription {
                 known_index: None,
@@ -578,26 +702,75 @@ impl WorkspaceStore {
                 topic,
             });
         }
-        self.sync_terminal_topics();
-        self.sync_active_conversation_ui();
+        self.follow_preview(session_id, cx);
+        self.sync_terminal_topics(cx);
+        self.sync_conversation_ui(session_id);
     }
-    pub fn select_session_at_turn(&mut self, session_id: String, turn: usize) {
+    /// The user moved to another pane, which a reply in flight no longer
+    /// lands in.
+    pub(crate) fn selection_moved_on(&mut self) {
+        self.selection_generation = self.selection_generation.wrapping_add(1);
+    }
+
+    /// Show a thread where the user is: the shell places it, opens it and
+    /// gives it the keyboard.
+    pub fn show_thread(&mut self, session_id: String, cx: &mut Context<Self>) {
+        self.place_thread(session_id, None, true, cx);
+    }
+
+    /// Show a thread in the pane showing `replacing`, for a control of that
+    /// pane.
+    pub fn show_thread_replacing(
+        &mut self,
+        session_id: String,
+        replacing: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.place_thread(session_id, replacing, true, cx);
+    }
+
+    /// Put back a thread that went from a pane, unasked: it leaves the compact
+    /// stack, and any keyboard something holds, alone.
+    pub(crate) fn put_back_thread(&mut self, session_id: String, cx: &mut Context<Self>) {
+        self.place_thread(session_id, None, false, cx);
+    }
+
+    pub(super) fn place_thread(
+        &mut self,
+        session_id: String,
+        replacing: Option<String>,
+        asked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.selection_generation = self.selection_generation.wrapping_add(1);
+        self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
+        self.draft_fallback_pending = false;
         self.anchor_turn_task = None;
+        self.remember_project_of(&session_id);
+        cx.emit(ShowThread {
+            session_id,
+            replacing,
+            asked,
+        });
+    }
+
+    pub fn show_thread_at_turn(&mut self, session_id: String, turn: usize, cx: &mut Context<Self>) {
         self.pending_chat_turn = Some((session_id.clone(), turn));
-        self.select_session(session_id);
+        self.show_thread(session_id, cx);
+        // Showing the thread already shown changes nothing else.
+        cx.notify();
     }
     /// Open a thread, then scroll it to the turn holding the entry at
     /// `position` once the host names that turn. Only the host can: the
     /// records a client holds are merged and carry no row.
-    pub fn select_session_at_position(
+    pub fn show_thread_at_position(
         &mut self,
         session_id: String,
         position: u64,
         cx: &mut Context<Self>,
     ) {
         self.pending_chat_turn = None;
-        self.select_session(session_id.clone());
-        let generation = self.selection_generation;
+        self.show_thread(session_id.clone(), cx);
         let host = self.host.clone();
         self.anchor_turn_task = Some(cx.spawn(async move |this, cx| {
             let response = host
@@ -607,9 +780,6 @@ impl WorkspaceStore {
                 })
                 .await;
             _ = this.update(cx, |store, cx| {
-                if store.selection_generation != generation {
-                    return;
-                }
                 store.anchor_turn_task = None;
                 match response {
                     Ok(QueryResponse::ThreadAnchorTurn(Some(turn))) => {
@@ -628,133 +798,152 @@ impl WorkspaceStore {
             });
         }));
     }
-    pub fn send_turn(&mut self, text: String, attachment_paths: Vec<PathBuf>) {
+    pub fn send_turn_for(
+        &mut self,
+        session_id: String,
+        text: String,
+        attachment_paths: Vec<PathBuf>,
+    ) {
         self.dispatch(Command::SendTurn {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             text,
             attachment_paths,
         });
     }
-    pub fn schedule_turn(
+    pub fn schedule_turn_for(
         &mut self,
+        session_id: String,
         text: String,
         attachment_paths: Vec<PathBuf>,
         fire_at_unix_secs: u64,
     ) {
         self.dispatch(Command::ScheduleTurn {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             text,
             attachment_paths,
             fire_at_unix_secs,
         });
     }
-    pub fn confirm_relay_and_send(&mut self, text: String, attachment_paths: Vec<PathBuf>) {
+    pub fn confirm_relay_and_send_for(
+        &mut self,
+        session_id: String,
+        text: String,
+        attachment_paths: Vec<PathBuf>,
+    ) {
         self.dispatch(Command::ConfirmRelayAndSend {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             text,
             attachment_paths,
         });
     }
-    pub fn orchestrate_turn(&mut self, text: String, attachment_paths: Vec<PathBuf>) {
-        self.dispatch(Command::OrchestrateTurn {
-            session_id: self.active_session_id().unwrap_or_default(),
-            text,
-            attachment_paths,
-        });
-    }
-    pub fn steer(&mut self, text: String, attachment_paths: Vec<PathBuf>) {
+    pub fn steer_for(&mut self, session_id: String, text: String, attachment_paths: Vec<PathBuf>) {
         self.dispatch(Command::Steer {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             text,
             attachment_paths,
         });
     }
-    pub fn steer_queued(&mut self, id: u64) {
-        self.dispatch(Command::SteerQueued {
-            session_id: self.active_session_id().unwrap_or_default(),
-            id,
-        });
+    pub fn steer_queued_for(&mut self, session_id: String, id: u64) {
+        self.dispatch(Command::SteerQueued { session_id, id });
     }
-    pub fn drop_queued(&mut self, id: u64) {
-        self.dispatch(Command::DropQueued {
-            session_id: self.active_session_id().unwrap_or_default(),
-            id,
-        });
+    pub fn drop_queued_for(&mut self, session_id: String, id: u64) {
+        self.dispatch(Command::DropQueued { session_id, id });
     }
-    pub fn move_queued(&mut self, id: u64, before: Option<u64>) {
+    pub fn move_queued_for(&mut self, session_id: String, id: u64, before: Option<u64>) {
         self.dispatch(Command::MoveQueued {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             id,
             before,
         });
     }
-    pub fn retry_turn(&mut self, turn_id: String) {
+    pub fn retry_turn_for(&mut self, session_id: String, turn_id: String) {
         self.dispatch(Command::RetryTurn {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             turn_id,
         });
     }
-    pub fn interrupt(&mut self) {
-        self.dispatch(Command::Interrupt {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
+    pub fn interrupt_for(&mut self, session_id: String) {
+        self.dispatch(Command::Interrupt { session_id });
     }
-    pub fn compact_context(&mut self) {
-        self.dispatch(Command::CompactContext {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
+    pub fn compact_context_for(&mut self, session_id: String) {
+        self.dispatch(Command::CompactContext { session_id });
     }
-    pub fn set_goal(&mut self, objective: Option<String>, status: Option<agent::GoalStatus>) {
+    pub fn set_goal_for(
+        &mut self,
+        session_id: String,
+        objective: Option<String>,
+        status: Option<agent::GoalStatus>,
+    ) {
         self.dispatch(Command::SetGoal {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             objective,
             status,
         });
     }
-    pub fn clear_goal(&mut self) {
-        self.dispatch(Command::ClearGoal {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
+    pub fn clear_goal_for(&mut self, session_id: String) {
+        self.dispatch(Command::ClearGoal { session_id });
     }
-    pub fn respond_approval(&mut self, request_id: String, decision: ApprovalDecision) {
-        if self.approval_delivery_pending(&request_id) {
+    pub fn respond_approval_for(
+        &mut self,
+        session_id: String,
+        request_id: String,
+        decision: ApprovalDecision,
+    ) {
+        if self.approval_delivery_pending_for(Some(&session_id), &request_id) {
             return;
         }
         self.dispatch(Command::RespondApproval {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             request_id,
             decision,
         });
     }
-    pub fn respond_user_input(
+    pub fn respond_user_input_for(
         &mut self,
+        session_id: String,
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,
     ) {
         self.dispatch(Command::RespondUserInput {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             request_id,
             answers,
         });
     }
-    pub fn rewind_turn(&mut self, turn: usize, mode: RewindMode) {
+    /// Rewind to the message at `turn` (or the steer in it) whose restore
+    /// point this client saw as `checkpoint_id`.
+    pub fn rewind_turn_for(
+        &mut self,
+        session_id: String,
+        turn: usize,
+        steer: Option<String>,
+        checkpoint_id: Option<String>,
+        mode: RewindMode,
+    ) {
+        let client_id = Some(self.client_id().to_owned());
         self.dispatch(Command::RewindTurn {
-            session_id: self.active_session_id().unwrap_or_default(),
-            turn: self.absolute_turn(turn),
+            steer,
+            checkpoint_id,
+            client_id,
+            turn: self.absolute_turn_for(Some(&session_id), turn),
+            session_id,
             mode,
         });
     }
-    pub fn add_review_comment(&mut self, comment: ReviewComment) {
+    pub fn undo_rewind_for(&mut self, session_id: String, checkpoint_id: String) {
+        self.dispatch(Command::UndoRewind {
+            session_id,
+            checkpoint_id,
+        });
+    }
+    pub fn add_review_comment_for(&mut self, session_id: String, comment: ReviewComment) {
         self.dispatch(Command::AddReviewComment {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             comment,
         });
     }
-    pub fn remove_review_comment(&mut self, index: usize) {
-        self.dispatch(Command::RemoveReviewComment {
-            session_id: self.active_session_id().unwrap_or_default(),
-            index,
-        });
+    pub fn remove_review_comment_for(&mut self, session_id: String, index: usize) {
+        self.dispatch(Command::RemoveReviewComment { session_id, index });
     }
 }
 
@@ -769,9 +958,10 @@ impl WorkspaceStore {
     pub fn create_new_project(
         &self,
         name: String,
+        parent: Option<String>,
         cx: &mut App,
     ) -> Task<Result<CommandResponse, ProtocolError>> {
-        self.command(Command::CreateNewProject { name }, cx)
+        self.command(Command::CreateNewProject { name, parent }, cx)
     }
     pub fn set_project_root(
         &self,
@@ -798,12 +988,53 @@ impl WorkspaceStore {
     }
     pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut Context<Self>) {
         self.remember_project(Some(project_id.clone()));
-        self.create_and_select(Command::StartDraft { project_id, cwd }, cx);
+        self.create_and_show(Command::StartDraft { project_id, cwd }, true, cx);
     }
     pub fn start_scratch_draft(&mut self, cx: &mut Context<Self>) {
-        self.create_and_select(Command::StartScratchDraft, cx);
+        self.create_and_show(Command::StartScratchDraft, true, cx);
     }
-    fn create_and_select(&mut self, command: Command, cx: &mut Context<Self>) {
+    /// A project's draft for a workspace left with nothing to show, unasked:
+    /// it leaves the compact stack, and any keyboard something holds, alone.
+    pub(super) fn fall_back_to_draft(
+        &mut self,
+        project_id: String,
+        cwd: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        self.remember_project(Some(project_id.clone()));
+        self.create_and_show(Command::StartDraft { project_id, cwd }, false, cx);
+    }
+    /// Start a draft in the project `session_id` belongs to, or a scratch
+    /// draft when it belongs to none. Beside a draft nothing starts: the host
+    /// answers a project's or a quick chat's draft request with its standing
+    /// draft, which would be that same draft.
+    pub(crate) fn start_draft_beside(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
+        if self
+            .session_status_for(session_id, cx)
+            .is_some_and(|status| status.draft)
+        {
+            return;
+        }
+        let project = session_id
+            .and_then(|id| {
+                self.index_replica
+                    .0
+                    .iter()
+                    .find(|meta| meta.id == id)
+                    .and_then(|meta| meta.project_id.clone())
+                    .or_else(|| self.threads.get(id)?.status.as_ref()?.project_id.clone())
+            })
+            .and_then(|project_id| self.project(&project_id))
+            .filter(|project| !project.quick_chat)
+            .map(|project| (project.id.clone(), project.root.clone()));
+        match project {
+            Some((project_id, root)) => self.start_draft(project_id, root, cx),
+            None => self.start_scratch_draft(cx),
+        }
+    }
+    /// Ask the host for a thread and show what it answers, unless the user
+    /// has moved on by then.
+    fn create_and_show(&mut self, command: Command, asked: bool, cx: &mut Context<Self>) {
         self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
         let request_generation = self.creation_request_generation;
         let selection_generation = self.selection_generation;
@@ -812,35 +1043,36 @@ impl WorkspaceStore {
         cx.spawn(async move |this, cx| {
             let response = request.await;
             let _ = this.update(cx, |store, cx| {
+                let created = match response {
+                    Ok(CommandResponse::SessionId(id)) => id,
+                    _ => None,
+                };
                 if store.creation_request_generation != request_generation {
                     return;
                 }
                 store.draft_fallback_pending = false;
                 if store.selection_generation == selection_generation
-                    && let Ok(CommandResponse::SessionId(Some(id))) = response
+                    && let Some(id) = created
                 {
-                    store.select_session(id);
-                    cx.notify();
+                    store.place_thread(id, None, asked, cx);
                 }
             });
         })
         .detach();
     }
-    pub fn set_draft_workspace(&mut self, mode: WorkspaceMode) {
-        self.dispatch(Command::SetDraftWorkspace {
-            session_id: self.active_session_id().unwrap_or_default(),
-            mode,
-        });
+    pub fn set_draft_workspace_for(&mut self, session_id: String, mode: WorkspaceMode) {
+        self.dispatch(Command::SetDraftWorkspace { session_id, mode });
     }
-    pub fn run_git_action(
+    pub fn run_git_action_for(
         &mut self,
+        session_id: String,
         action: GitAction,
         message: Option<String>,
         included: Option<Vec<String>>,
         feature_branch: Option<String>,
     ) {
         self.dispatch(Command::RunGitAction {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             action,
             message,
             included,
@@ -856,16 +1088,11 @@ impl WorkspaceStore {
             feature_branch: request.feature_branch,
         });
     }
-    pub fn load_branches(&mut self) {
-        self.dispatch(Command::LoadBranches {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
+    pub fn load_branches_for(&mut self, session_id: String) {
+        self.dispatch(Command::LoadBranches { session_id });
     }
-    pub fn checkout_branch(&mut self, branch: String) {
-        self.dispatch(Command::CheckoutBranch {
-            session_id: self.active_session_id().unwrap_or_default(),
-            branch,
-        });
+    pub fn checkout_branch_for(&mut self, session_id: String, branch: String) {
+        self.dispatch(Command::CheckoutBranch { session_id, branch });
     }
     pub fn cycle_project_sort(&mut self, cx: &mut Context<Self>) {
         self.dispatch(Command::CycleProjectSort);
@@ -874,92 +1101,88 @@ impl WorkspaceStore {
 }
 
 impl WorkspaceStore {
-    pub fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_terminal_panel_for(&mut self, session_id: String, cx: &mut Context<Self>) {
         let opening = !self
-            .active_conversation_ui()
+            .thread_conversation_ui(Some(&session_id))
             .is_some_and(|ui| ui.terminal_open);
-        if let Some(ui) = self.active_conversation_ui_mut() {
+        if let Some(ui) = self.thread_conversation_ui_mut(Some(&session_id)) {
             ui.terminal_open = opening;
         }
         if opening {
-            self.dispatch(Command::ToggleTerminalPanel {
-                session_id: self.active_session_id().unwrap_or_default(),
-            });
+            self.dispatch(Command::ToggleTerminalPanel { session_id });
         } else {
-            self.dispatch(Command::CloseTerminalPanel {
-                session_id: self.active_session_id().unwrap_or_default(),
-            });
+            self.dispatch(Command::CloseTerminalPanel { session_id });
         }
         cx.emit(StoreChange {
-            topic: TopicKind::ActiveSession,
+            topic: TopicKind::Terminal,
         });
         cx.notify();
     }
-    pub fn close_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
+    pub fn close_terminal_panel_for(&mut self, session_id: String, cx: &mut Context<Self>) {
+        if let Some(ui) = self.thread_conversation_ui_mut(Some(&session_id)) {
             ui.terminal_open = false;
         }
-        self.dispatch(Command::CloseTerminalPanel {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
+        self.dispatch(Command::CloseTerminalPanel { session_id });
         cx.emit(StoreChange {
-            topic: TopicKind::ActiveSession,
+            topic: TopicKind::Terminal,
         });
         cx.notify();
     }
-    pub fn set_terminal_height(&mut self, height: f32, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
+    pub fn set_terminal_height_for(
+        &mut self,
+        session_id: String,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ui) = self.thread_conversation_ui_mut(Some(&session_id)) {
             ui.terminal_height = height;
         }
-        self.dispatch(Command::SetTerminalHeight {
-            session_id: self.active_session_id().unwrap_or_default(),
-            height,
-        });
+        self.dispatch(Command::SetTerminalHeight { session_id, height });
         cx.emit(StoreChange {
-            topic: TopicKind::ActiveSession,
+            topic: TopicKind::Terminal,
         });
         cx.notify();
     }
-    pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
+    pub fn close_terminal_for(
+        &mut self,
+        session_id: String,
+        terminal_id: u64,
+        cx: &mut Context<Self>,
+    ) {
         let closes_drawer = self
-            .session_status_replica
-            .as_ref()
+            .thread_status(Some(&session_id), cx)
             .is_some_and(|status| status.terminals.len() <= 1);
-        if closes_drawer && let Some(ui) = self.active_conversation_ui_mut() {
+        if closes_drawer && let Some(ui) = self.thread_conversation_ui_mut(Some(&session_id)) {
             ui.terminal_open = false;
         }
         self.dispatch(Command::CloseTerminal {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             terminal_id,
         });
         cx.emit(StoreChange {
-            topic: TopicKind::ActiveSession,
+            topic: TopicKind::Terminal,
         });
         cx.notify();
     }
-    pub fn restart_terminal(&mut self) {
-        self.dispatch(Command::RestartTerminal {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
+    pub fn restart_terminal_for(&mut self, session_id: String) {
+        self.dispatch(Command::RestartTerminal { session_id });
     }
-    pub fn new_terminal(&mut self) {
-        self.dispatch(Command::NewTerminal {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
+    pub fn new_terminal_for(&mut self, session_id: String) {
+        self.dispatch(Command::NewTerminal { session_id });
     }
-    pub fn split_terminal(&mut self, direction: TerminalSplitDirection) {
+    pub fn split_terminal_for(&mut self, session_id: String, direction: TerminalSplitDirection) {
         self.dispatch(Command::SplitTerminal {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             direction,
         });
     }
-    pub fn activate_terminal(&mut self, terminal_id: u64) {
+    pub fn activate_terminal_for(&mut self, session_id: String, terminal_id: u64) {
         self.dispatch(Command::ActivateTerminal {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             terminal_id,
         });
     }
-    pub fn capture_terminal_selection(&mut self, terminal_id: u64) {
+    pub fn capture_terminal_selection_for(&mut self, session_id: String, terminal_id: u64) {
         let selection = self
             .client_terminal(terminal_id)
             .and_then(|terminal| terminal.selected_text())
@@ -969,14 +1192,14 @@ impl WorkspaceStore {
                 text: selection.text,
             });
         self.dispatch(Command::CaptureTerminalSelection {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             terminal_id,
             selection,
         });
     }
-    pub fn remove_terminal_context(&mut self, context_id: u64) {
+    pub fn remove_terminal_context_for(&mut self, session_id: String, context_id: u64) {
         self.dispatch(Command::RemoveTerminalContext {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             context_id,
         });
     }
@@ -1002,6 +1225,16 @@ impl WorkspaceStore {
     /// that takes one authenticates it with.
     pub fn set_host_token(&mut self, host: String, token: Option<String>, email: Option<String>) {
         self.dispatch(Command::SetHostToken { host, token, email });
+    }
+    /// Asks the host whose `token` is; the host saves it only when the platform takes it.
+    pub fn verify_host_token(
+        &self,
+        host: String,
+        token: String,
+        email: Option<String>,
+        cx: &mut App,
+    ) -> Task<Result<CommandResponse, ProtocolError>> {
+        self.command(Command::VerifyHostToken { host, token, email }, cx)
     }
     pub fn patch_source_control_host(
         &mut self,
@@ -1039,6 +1272,7 @@ impl WorkspaceStore {
     }
     pub fn create_third_party_profile(
         &mut self,
+        provider: ProviderKind,
         name: String,
         base_url: String,
         model: Option<String>,
@@ -1046,6 +1280,7 @@ impl WorkspaceStore {
         inherit_config: bool,
     ) {
         self.dispatch(Command::CreateThirdPartyProfile {
+            provider,
             name,
             base_url,
             model,
@@ -1087,26 +1322,42 @@ impl WorkspaceStore {
     pub fn update_providers(&mut self, providers: Vec<ProviderKind>) {
         self.dispatch(Command::UpdateProviders { providers });
     }
-    pub fn set_active_model(
+    pub fn set_active_model_for(
         &mut self,
+        session_id: String,
         provider: ProviderKind,
         model: Option<String>,
         profile_id: Option<String>,
     ) {
         self.dispatch(Command::SetActiveModel {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             provider,
             model,
             profile_id,
         });
     }
-    pub fn toggle_favorite_model(&mut self, model: String, cx: &mut Context<Self>) {
-        self.dispatch(Command::ToggleFavoriteModel { model });
+    pub fn toggle_favorite_model(
+        &mut self,
+        provider: agent::ProviderKind,
+        profile_id: Option<String>,
+        model: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.dispatch(Command::ToggleFavoriteModel {
+            provider,
+            profile_id,
+            model,
+        });
         self.local_settings_changed(cx);
     }
-    pub fn set_active_option(&mut self, id: String, value: Option<serde_json::Value>) {
+    pub fn set_active_option_for(
+        &mut self,
+        session_id: String,
+        id: String,
+        value: Option<serde_json::Value>,
+    ) {
         self.dispatch(Command::SetActiveOption {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             id,
             value,
         });
@@ -1123,38 +1374,22 @@ impl WorkspaceStore {
     pub fn remove_acp_agent(&mut self, id: String) {
         self.dispatch(Command::RemoveAcpAgent { id });
     }
-    pub fn add_custom_acp_agent(
-        &mut self,
-        name: String,
-        command: String,
-        args: Vec<String>,
-        env: Vec<(String, String)>,
-    ) {
+    pub fn add_custom_acp_agent(&mut self, name: String, command: String, args: Vec<String>) {
         self.dispatch(Command::AddCustomAcpAgent {
             name,
             command,
             args,
-            env,
         });
     }
     pub fn update_acp_agent(&mut self, id: String, patch: AcpAgentPatch) {
         self.dispatch(Command::UpdateAcpAgent { id, patch });
     }
-    pub fn set_active_acp_agent(&mut self, id: String) {
-        self.dispatch(Command::SetActiveAcpAgent {
-            session_id: self.active_session_id().unwrap_or_default(),
-            id,
-        });
+    pub fn set_active_acp_agent_for(&mut self, session_id: String, id: String) {
+        self.dispatch(Command::SetActiveAcpAgent { session_id, id });
     }
 }
 
 impl WorkspaceStore {
-    pub fn set_plugin_management_enabled(&mut self, enabled: bool) {
-        self.patch_settings(SettingsPatch::PluginManagementEnabled(enabled));
-    }
-    pub fn set_provider_plugin_management(&mut self, provider: ProviderKind, enabled: bool) {
-        self.patch_settings(SettingsPatch::PluginManagementProvider { provider, enabled });
-    }
     pub fn refresh_provider_plugins(&mut self, profile_id: String, cwd: Option<PathBuf>) {
         self.dispatch(Command::RefreshProviderPlugins { profile_id, cwd });
     }

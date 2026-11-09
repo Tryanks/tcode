@@ -9,6 +9,7 @@
 //! services, MCP and option mapping, the standard `session/update` mapping and
 //! cancellation. What an agent family does differently is its [`Dialect`].
 
+use crate::{RewindFailure, RewindFailureReason};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::future::Future;
@@ -36,7 +37,8 @@ use crate::{
     ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus,
     McpRegistration, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderCommand,
     ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
-    SessionOptions, ThreadItem, TokenUsage, TurnStatus, UserInputDelivery, UserInputQuestion,
+    SessionOptions, ThreadItem, TokenUsage, ToolName, ToolOutput, TurnStatus, UserInputDelivery,
+    UserInputQuestion,
 };
 
 /// Option-descriptor ids. The composer renders an ACP agent's own
@@ -185,6 +187,23 @@ pub(crate) trait Dialect: Send + Sync + 'static {
         Vec::new()
     }
 
+    /// Answer [`SessionCommand::Rewind`], [`SessionCommand::PreviewRewind`]
+    /// or [`SessionCommand::UndoRewind`] with the agent's own rewind. It runs
+    /// as its own task, so it may wait for an interrupted turn to end. ACP has
+    /// no rewind of its own: by default the command is refused.
+    fn rewind(
+        self: Arc<Self>,
+        _session: Session,
+        command: SessionCommand,
+    ) -> impl Future<Output = Option<AgentEvent>> + Send {
+        async move {
+            command.rewind_refusal(RewindFailure::new(
+                RewindFailureReason::Unsupported,
+                "this ACP agent does not advertise a native rewind operation".to_owned(),
+            ))
+        }
+    }
+
     /// Whether `initialize` offers the client's `fs/*` and `terminal/*`
     /// services. An agent offered them runs its file and shell tools through
     /// tcode instead of its own implementation.
@@ -330,6 +349,90 @@ impl Session {
         f(&mut self.state.lock_recover())
     }
 
+    /// Cancel the open turn as [`SessionCommand::Interrupt`] does. The turn
+    /// ends when the agent answers its `session/prompt`.
+    pub(crate) async fn interrupt(&self, session_id: &acp::SessionId) {
+        // The open turn may be one the agent started itself.
+        if self.state.lock_recover().turn.is_none() {
+            return;
+        }
+        // Every in-flight permission request must be answered with
+        // `cancelled` first: the protocol requires it, and the agent will
+        // not settle the turn otherwise.
+        cancel_pending(&self.state, &self.events).await;
+        let _ = self
+            .connection
+            .send_notification(acp::CancelNotification::new(session_id.clone()));
+    }
+
+    /// Ask for a decision and wait for [`SessionCommand::RespondApproval`]; an
+    /// interrupt or shutdown decides [`ApprovalDecision::Cancel`].
+    pub(crate) async fn ask_approval(
+        &self,
+        kind: ApprovalKind,
+        options: Vec<ApprovalOption>,
+    ) -> ApprovalDecision {
+        let (responder, decided) = smol::channel::bounded(1);
+        let (id, turn_id) = self.with_state(|state| {
+            state.approval_seq += 1;
+            let id = format!("acp-approval-{}", state.approval_seq);
+            state.approvals.insert(id.clone(), responder);
+            (id, state.turn().map(str::to_owned))
+        });
+        self.emit(AgentEvent::ApprovalRequested(ApprovalRequest {
+            id: id.clone(),
+            turn_id,
+            parent_item_id: None,
+            kind,
+            options,
+        }))
+        .await;
+        let decision = decided.recv().await.unwrap_or(ApprovalDecision::Cancel);
+        self.with_state(|state| state.approvals.remove(&id));
+        decision
+    }
+
+    /// Show the plan a dialect's plan request carries in the timeline, then
+    /// ask for its decision among the dialect's own `options`. `params` holds
+    /// the plan under `field` and the agent's `toolCallId`.
+    pub(crate) async fn ask_plan<const N: usize>(
+        &self,
+        params: &Value,
+        field: &str,
+        options: [(&str, &str, ApprovalOptionKind); N],
+    ) -> ApprovalDecision {
+        let markdown = params
+            .get(field)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let item_id = match params.get("toolCallId").and_then(Value::as_str) {
+            Some(id) => format!("plan:{id}"),
+            None => self.with_state(|state| {
+                state.approval_seq += 1;
+                format!("plan:{}", state.approval_seq)
+            }),
+        };
+        self.emit(AgentEvent::ItemCompleted(ThreadItem {
+            id: item_id.clone(),
+            parent_item_id: None,
+            content: ItemContent::Plan {
+                markdown: markdown.clone(),
+            },
+        }))
+        .await;
+        let options = options
+            .into_iter()
+            .map(|(id, label, kind)| ApprovalOption {
+                id: id.into(),
+                label: label.into(),
+                kind,
+            })
+            .collect();
+        self.ask_approval(ApprovalKind::Plan { item_id, markdown }, options)
+            .await
+    }
+
     /// Ask the user and wait for [`SessionCommand::RespondUserInput`]. `None`
     /// when the request was cancelled by an interrupt or shutdown.
     pub(crate) async fn ask_user(
@@ -469,8 +572,8 @@ fn spawn_agent(
     provider: ProviderKind,
     launch: &Launch,
     opts: &SessionOptions,
-) -> Result<smol::process::Child, AgentError> {
-    let mut cmd = crate::process::async_command(&launch.program);
+) -> Result<crate::process::ProcessTree<smol::process::Child>, AgentError> {
+    let mut cmd = crate::process::async_harness_command(&launch.program);
     cmd.args(&launch.args)
         .current_dir(&opts.cwd)
         .stdin(std::process::Stdio::piped())
@@ -488,12 +591,15 @@ fn spawn_agent(
         launch.program.display(),
         launch.args
     );
-    cmd.spawn().map_err(|err| {
-        AgentError::Spawn(format!(
-            "could not launch ACP agent `{name}` ({}): {err}",
-            launch.program.display()
-        ))
-    })
+    crate::process::refuse_batch_line_breaks(cmd.get_program(), cmd.get_args())?;
+    cmd.spawn()
+        .map(crate::process::ProcessTree::new)
+        .map_err(|err| {
+            AgentError::Spawn(format!(
+                "could not launch ACP agent `{name}` ({}): {err}",
+                launch.program.display()
+            ))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -690,7 +796,7 @@ async fn run_actor<D: Dialect>(
                     &executor,
                     provider,
                     connection,
-                    dialect.as_ref(),
+                    &dialect,
                     &launch,
                     &opts,
                     &commands,
@@ -754,7 +860,7 @@ async fn connected_actor<D: Dialect>(
     executor: &Rc<smol::LocalExecutor<'static>>,
     provider: ProviderKind,
     connection: Connection,
-    dialect: &D,
+    dialect: &Arc<D>,
     launch: &Launch,
     opts: &SessionOptions,
     commands: &Receiver<SessionCommand>,
@@ -938,7 +1044,7 @@ struct TurnOutcome {
 /// whether the agent can close sessions.
 async fn handshake<D: Dialect>(
     connection: &Connection,
-    dialect: &D,
+    dialect: &Arc<D>,
     launch: &Launch,
     opts: &SessionOptions,
     state: &Arc<Mutex<State>>,
@@ -1017,7 +1123,7 @@ async fn initialize(
 #[allow(clippy::too_many_arguments)]
 async fn handle_command<D: Dialect>(
     command: SessionCommand,
-    dialect: &D,
+    dialect: &Arc<D>,
     executor: &Rc<smol::LocalExecutor<'static>>,
     session: &Session,
     session_id: &acp::SessionId,
@@ -1071,42 +1177,19 @@ async fn handle_command<D: Dialect>(
                 })
                 .detach();
         }
-        SessionCommand::Interrupt => {
-            // The open turn may be one the agent started itself.
-            if state.lock_recover().turn.is_none() {
-                return;
-            }
-            // Every in-flight permission request must be answered with
-            // `cancelled` first: the protocol requires it, and the agent will
-            // not settle the turn otherwise.
-            cancel_pending(state, events).await;
-            let _ = connection.send_notification(acp::CancelNotification::new(session_id.clone()));
-            // The agent still owes us the `session/prompt` response carrying
-            // `stopReason: cancelled`; the turn completes when it lands.
-        }
+        // The agent still owes us the `session/prompt` response carrying
+        // `stopReason: cancelled`; the turn completes when it lands.
+        SessionCommand::Interrupt => session.interrupt(session_id).await,
         SessionCommand::RespondApproval {
             request_id,
             decision,
         } => {
             let approval = state.lock_recover().approvals.remove(&request_id);
-            let Some((responder, options)) = approval else {
+            let Some(responder) = approval else {
                 log::warn!("acp: no pending approval {request_id}");
                 return;
             };
-            let outcome = match approval_outcome(&decision, &options) {
-                Some(outcome) => outcome,
-                None => {
-                    let _ = events
-                        .send(AgentEvent::Warning {
-                            message:
-                            "the agent offered no matching permission option; cancelling instead"
-                                .into(),
-                         })
-                        .await;
-                    acp::RequestPermissionOutcome::Cancelled
-                }
-            };
-            let _ = responder.send(outcome).await;
+            let _ = responder.send(decision.clone()).await;
             let _ = events
                 .send(AgentEvent::ApprovalResolved {
                     request_id,
@@ -1164,17 +1247,18 @@ async fn handle_command<D: Dialect>(
                 })
                 .await;
         }
-        SessionCommand::Rewind {
-            checkpoint_id,
-            mode,
-        } => {
-            let _ = events
-                .send(AgentEvent::RewindFailed {
-                    checkpoint_id,
-                    mode,
-                    error: "this ACP agent does not advertise a native rewind operation".into(),
+        command @ (SessionCommand::Rewind { .. }
+        | SessionCommand::PreviewRewind { .. }
+        | SessionCommand::UndoRewind { .. }) => {
+            let rewind = dialect.clone().rewind(session.clone(), command);
+            let events = events.clone();
+            executor
+                .spawn(async move {
+                    if let Some(event) = rewind.await {
+                        let _ = events.send(event).await;
+                    }
                 })
-                .await;
+                .detach();
         }
         SessionCommand::Compact => {
             let _ = events
@@ -1185,8 +1269,12 @@ async fn handle_command<D: Dialect>(
                 .await;
         }
         SessionCommand::RetryTurn { .. }
+        | SessionCommand::ApplySettings { .. }
+        | SessionCommand::StopBackgroundTask { .. }
+        | SessionCommand::MoveToBackground { .. }
         | SessionCommand::SetGoal { .. }
-        | SessionCommand::ClearGoal => {}
+        | SessionCommand::ClearGoal
+        | SessionCommand::ReadAccountUsage { .. } => {}
         SessionCommand::Shutdown => unreachable!("handled by the caller"),
     }
 }
@@ -1200,7 +1288,7 @@ async fn cancel_pending(state: &Arc<Mutex<State>>, events: &Sender<AgentEvent>) 
             state
                 .approvals
                 .drain()
-                .map(|(_, (responder, _))| responder)
+                .map(|(_, responder)| responder)
                 .collect(),
             state
                 .inputs
@@ -1210,9 +1298,7 @@ async fn cancel_pending(state: &Arc<Mutex<State>>, events: &Sender<AgentEvent>) 
         )
     };
     for responder in approvals {
-        let _ = responder
-            .send(acp::RequestPermissionOutcome::Cancelled)
-            .await;
+        let _ = responder.send(ApprovalDecision::Cancel).await;
     }
     for request_id in inputs {
         let _ = events
@@ -1227,7 +1313,7 @@ async fn cancel_pending(state: &Arc<Mutex<State>>, events: &Sender<AgentEvent>) 
 /// Complete a sent turn with its `session/prompt` result, unless the dialect
 /// already completed it from the agent's own signal ([`State::end_turn`]).
 async fn finish_turn<D: Dialect>(
-    dialect: &D,
+    dialect: &Arc<D>,
     state: &Arc<Mutex<State>>,
     events: &Sender<AgentEvent>,
     outcome: TurnOutcome,
@@ -1451,6 +1537,10 @@ fn approval_outcome(
             .iter()
             .any(|option| &option.id == id)
             .then(|| id.clone()),
+        ApprovalDecision::Feedback(_) => options
+            .iter()
+            .find(|option| option.kind == ApprovalOptionKind::RejectOnce)
+            .map(|option| option.id.clone()),
     }?;
     Some(acp::RequestPermissionOutcome::Selected(
         acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(selected)),
@@ -1700,6 +1790,9 @@ fn descriptor_id(descriptor: &OptionDescriptor) -> &str {
 /// merged state lives here and every update re-renders the whole item.
 #[derive(Debug, Clone, Default)]
 struct ToolState {
+    /// The tool's own name when the wire carries one; `title` is the agent's
+    /// human description of the call.
+    name: Option<String>,
     title: String,
     kind: acp::ToolKind,
     status: acp::ToolCallStatus,
@@ -1727,7 +1820,7 @@ pub(crate) struct State {
     loading: bool,
     tools: HashMap<String, ToolState>,
     text: Option<TextStream>,
-    approvals: HashMap<String, (Sender<acp::RequestPermissionOutcome>, Vec<ApprovalOption>)>,
+    approvals: HashMap<String, Sender<ApprovalDecision>>,
     approval_seq: u64,
     inputs: HashMap<String, Sender<Map<String, Value>>>,
     input_seq: u64,
@@ -1938,6 +2031,7 @@ impl State {
                 let mut events = self.flush_text();
                 let id = call.tool_call_id.0.to_string();
                 let tool = ToolState {
+                    name: tool_name(call.meta.as_ref(), call.raw_input.as_ref()),
                     title: call.title,
                     kind: call.kind,
                     status: call.status,
@@ -1985,6 +2079,9 @@ impl State {
                 }
                 if let Some(raw_output) = fields.raw_output {
                     entry.raw_output = Some(raw_output);
+                }
+                if let Some(name) = tool_name(update.meta.as_ref(), entry.raw_input.as_ref()) {
+                    entry.name = Some(name);
                 }
                 let announced = std::mem::replace(&mut entry.announced, true);
                 let status = entry.status;
@@ -2090,6 +2187,9 @@ impl State {
         for content in &tool.content {
             match content {
                 acp::ToolCallContent::Content(block) => {
+                    if matches!(block.content, acp::ContentBlock::Image(_)) {
+                        continue;
+                    }
                     let text = content_text(&block.content);
                     if !text.is_empty() {
                         parts.push(text);
@@ -2193,41 +2293,58 @@ fn command_of(tool: &ToolState) -> String {
 }
 
 fn tool_call_content(tool: &ToolState, status: ItemStatus, output: String) -> ItemContent {
+    let mut image_reads: Vec<_> = tool
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            acp::ToolCallContent::Content(block) => match &block.content {
+                acp::ContentBlock::Image(image) => {
+                    crate::tool_output::image(Some(&image.mime_type), &image.data)
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    if image_reads.is_empty()
+        && let Some(raw) = &tool.raw_output
+    {
+        image_reads = ToolOutput::from_content(raw.get("content").unwrap_or(raw)).images;
+    }
     ItemContent::ToolCall {
-        image_reads: if tool.kind == acp::ToolKind::Read && status == ItemStatus::Completed {
-            let images: Vec<_> = tool
-                .content
-                .iter()
-                .filter_map(|content| match content {
-                    acp::ToolCallContent::Content(block) => match &block.content {
-                        acp::ContentBlock::Image(image)
-                            if image.mime_type.starts_with("image/") && !image.data.is_empty() =>
-                        {
-                            Some(Attachment {
-                                media_type: image.mime_type.clone(),
-                                data_base64: image.data.clone(),
-                                source_path: None,
-                            })
-                        }
-                        _ => None,
-                    },
-                    _ => None,
-                })
-                .collect();
-            if images.is_empty() {
-                let raw = tool.raw_output.as_ref().unwrap_or(&Value::Null);
-                crate::image_reads::content_images(raw.get("content").unwrap_or(raw))
-            } else {
-                images
-            }
-        } else {
-            Vec::new()
-        },
-        name: tool.title.clone(),
+        image_reads,
+        name: tool.name.clone().unwrap_or_else(|| tool.title.clone()),
         input: tool.raw_input.clone().unwrap_or(Value::Null),
         output: (!output.is_empty()).then_some(output),
         status,
     }
+}
+
+/// The tool's own name, where the wire has one: Grok's `_meta["x.ai/tool"]`
+/// (whose `use_tool` dispatches the MCP tool named in its input, named here
+/// `server/tool`), Cursor's `rawInput._toolName`.
+fn tool_name(meta: Option<&acp::Meta>, raw_input: Option<&Value>) -> Option<String> {
+    let input = |key: &str| {
+        raw_input
+            .and_then(|input| input.get(key))
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+    };
+    let name = match meta
+        .and_then(|meta| meta.get("x.ai/tool"))
+        .and_then(|tool| tool.get("name"))
+        .and_then(Value::as_str)
+    {
+        Some("use_tool") => {
+            return Some(match input("tool_name") {
+                Some(name) => ToolName::slashed(name).unwrap_or_else(|| name.to_owned()),
+                None => "use_tool".to_owned(),
+            });
+        }
+        Some(name) => Some(name),
+        None => input("_toolName"),
+    };
+    name.map(str::to_owned)
 }
 
 /// `diff` content blocks → canonical [`FileChange`]s (with a unified diff, so
@@ -2250,6 +2367,7 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
                         &path,
                         diff.old_text.as_deref().unwrap_or(""),
                         &diff.new_text,
+                        hunk_start(diff.meta.as_ref()),
                     )),
                     path,
                 })
@@ -2275,10 +2393,38 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
     changes
 }
 
-/// A whole-file unified diff. ACP hands us before/after text rather than a
-/// patch, and the diff panel wants `@@` hunks; a single hunk covering the file
+/// Where a diff's texts begin in the old and new file, when the agent says;
+/// ACP's own diff is whole-file text. Grok sends hunk-sized texts with
+/// `_meta.old_line` / `new_line` while asking, and with one
+/// `_meta.details[]` entry per replacement once applied.
+fn hunk_start(meta: Option<&acp::Meta>) -> (usize, usize) {
+    let lines = meta.and_then(|meta| match meta.get("details").and_then(Value::as_array) {
+        Some(details) => match details.as_slice() {
+            [only] => only.as_object(),
+            _ => None,
+        },
+        None => Some(meta),
+    });
+    let line = |key: &str| {
+        lines
+            .and_then(|lines| lines.get(key))
+            .and_then(Value::as_u64)
+            .and_then(|line| usize::try_from(line).ok())
+            .filter(|line| *line > 0)
+            .unwrap_or(1)
+    };
+    (line("old_line"), line("new_line"))
+}
+
+/// A unified diff of one before/after pair. ACP hands us texts rather than a
+/// patch, and the diff panel wants `@@` hunks; a single hunk covering the pair
 /// is exactly what the panel's full-file path already renders.
-fn unified_diff(path: &str, old: &str, new: &str) -> String {
+fn unified_diff(
+    path: &str,
+    old: &str,
+    new: &str,
+    (old_start, new_start): (usize, usize),
+) -> String {
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
     let mut out = String::new();
@@ -2295,9 +2441,9 @@ fn unified_diff(path: &str, old: &str, new: &str) -> String {
     let _ = writeln!(
         out,
         "@@ -{},{} +{},{} @@",
-        usize::from(!old_lines.is_empty()),
+        if old_lines.is_empty() { 0 } else { old_start },
         old_lines.len(),
-        usize::from(!new_lines.is_empty()),
+        if new_lines.is_empty() { 0 } else { new_start },
         new_lines.len()
     );
     // Trim the common prefix/suffix so the (very common) single-line edit does
@@ -2412,7 +2558,8 @@ fn approval_request(
             ApprovalKind::FileRead { detail: title }
         }
         _ => ApprovalKind::ToolUse {
-            name: title.clone(),
+            name: tool_name(tool.meta.as_ref(), fields.raw_input.as_ref())
+                .unwrap_or_else(|| title.clone()),
             input: raw_input,
             detail: title,
         },
@@ -2473,12 +2620,11 @@ impl Client {
             )
         };
         let request = approval_request(request_id.clone(), turn, &args.tool_call, &args.options);
+        let options = request.options.clone();
         let (responder, decided) = smol::channel::bounded(1);
         {
             let mut state = self.state.lock_recover();
-            state
-                .approvals
-                .insert(request_id.clone(), (responder, request.options.clone()));
+            state.approvals.insert(request_id.clone(), responder);
             // Keep the tool card in step with what we are asking about.
             let id = args.tool_call.tool_call_id.0.to_string();
             let entry = state.tools.entry(id).or_default();
@@ -2497,11 +2643,22 @@ impl Client {
             .send(AgentEvent::ApprovalRequested(request))
             .await;
 
-        let outcome = decided
-            .recv()
-            .await
-            .unwrap_or(acp::RequestPermissionOutcome::Cancelled);
+        let decision = decided.recv().await.unwrap_or(ApprovalDecision::Cancel);
         self.state.lock_recover().approvals.remove(&request_id);
+        let outcome = match approval_outcome(&decision, &options) {
+            Some(outcome) => outcome,
+            None => {
+                let _ = self
+                    .events
+                    .send(AgentEvent::Warning {
+                        message:
+                            "the agent offered no matching permission option; cancelling instead"
+                                .into(),
+                    })
+                    .await;
+                acp::RequestPermissionOutcome::Cancelled
+            }
+        };
         Ok(acp::RequestPermissionResponse::new(outcome))
     }
 
@@ -2636,7 +2793,7 @@ impl Client {
 /// folded into the owning tool card (`ToolCallContent::Terminal`). Wiring these
 /// into the terminal drawer needs a canonical event the contract does not have.
 struct Terminal {
-    child: Mutex<smol::process::Child>,
+    child: Mutex<crate::process::ProcessTree<smol::process::Child>>,
     output: Mutex<String>,
     truncated: Mutex<bool>,
     exit: Mutex<Option<acp::TerminalExitStatus>>,
@@ -2655,7 +2812,7 @@ impl Terminal {
     ) -> Result<Arc<Self>, acp::Error> {
         let program = crate::resolve_binary(None, command)
             .map_err(|err| acp::Error::new(-32603, err.to_string()))?;
-        let mut cmd = crate::process::async_command(&program);
+        let mut cmd = crate::process::async_harness_command(&program);
         cmd.args(args)
             .current_dir(cwd)
             .stdin(std::process::Stdio::null())
@@ -2664,9 +2821,10 @@ impl Terminal {
         for var in env {
             cmd.env(&var.name, &var.value);
         }
-        let mut child = cmd
-            .spawn()
-            .map_err(|err| acp::Error::new(-32603, format!("could not run `{command}`: {err}")))?;
+        let mut child =
+            crate::process::ProcessTree::new(cmd.spawn().map_err(|err| {
+                acp::Error::new(-32603, format!("could not run `{command}`: {err}"))
+            })?);
         let stdout = child.stdout.take().ok_or_else(|| {
             acp::Error::new(-32603, format!("`{command}` started without piped stdout"))
         })?;
@@ -2837,20 +2995,20 @@ mod tests {
         // No preview server running → nothing to send, capability or not.
         assert!(mcp_servers(&[], &caps).is_empty());
 
-        let orchestrate = McpRegistration {
-            name: McpRegistration::SERVER_NAME_ORCHESTRATE.into(),
+        let control = McpRegistration {
+            name: McpRegistration::SERVER_NAME_CONTROL.into(),
             url: "http://127.0.0.1:5321/mcp".into(),
             bearer_token: "other".into(),
         };
-        assert_eq!(mcp_servers(&[&registration, &orchestrate], &caps).len(), 2);
-        assert_eq!(mcp_servers(&[&orchestrate], &caps).len(), 1);
+        assert_eq!(mcp_servers(&[&registration, &control], &caps).len(), 2);
+        assert_eq!(mcp_servers(&[&control], &caps).len(), 1);
 
         let computer_use = McpRegistration {
             name: McpRegistration::SERVER_NAME_COMPUTER_USE.into(),
             url: "http://127.0.0.1:5322/mcp".into(),
             bearer_token: "computer-token".into(),
         };
-        let servers = mcp_servers(&[&registration, &orchestrate, &computer_use], &caps);
+        let servers = mcp_servers(&[&registration, &control, &computer_use], &caps);
         assert_eq!(servers.len(), 3);
         let value = serde_json::to_value(&servers[2]).unwrap();
         assert_eq!(value["name"], "tcode_computer_use");
@@ -3091,27 +3249,34 @@ mod tests {
         );
     }
 
+    /// ACP carries a tool's images as `image` content blocks: they become
+    /// the item's images whatever the tool's kind, never text.
     #[test]
-    fn image_read_results_follow_partial_updates_and_exclude_generation() {
-        for (kind, name, status, expected) in [
-            ("read", "file", "completed", 1),
-            ("read", "file", "failed", 0),
-            ("other", "generate_image", "completed", 0),
-        ] {
+    fn image_content_blocks_become_image_reads() {
+        for kind in ["read", "other"] {
             let mut mapper = state();
-            mapper.apply_update(update(json!({"sessionUpdate":"tool_call","toolCallId":"read","title":"Image operation","kind":kind,"name":name,"status":"in_progress"})));
-            let events = mapper.apply_update(update(json!({"sessionUpdate":"tool_call_update","toolCallId":"read","status":status,"content":[{"type":"content","content":{"type":"image","mimeType":"image/png","data":"AQID"}}]})));
-            let AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::ToolCall { image_reads, .. },
-                ..
-            }) = &events[0]
+            mapper.apply_update(update(json!({"sessionUpdate":"tool_call","toolCallId":"shot","title":"Screenshot","kind":kind,"status":"in_progress"})));
+            let events = mapper.apply_update(update(json!({"sessionUpdate":"tool_call_update","toolCallId":"shot","status":"completed","content":[
+                {"type":"content","content":{"type":"text","text":"captured"}},
+                {"type":"content","content":{"type":"image","mimeType":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg=="}}
+            ]})));
+            let [
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content:
+                        ItemContent::ToolCall {
+                            image_reads,
+                            output,
+                            ..
+                        },
+                    ..
+                }),
+            ] = &events[..]
             else {
                 panic!("tool completion: {events:?}")
             };
-            assert_eq!(image_reads.len(), expected, "{kind}, {name}, {status}");
-            if expected != 0 {
-                assert_eq!(image_reads[0].data_base64, "AQID");
-            }
+            assert_eq!(output.as_deref(), Some("captured"), "{kind}");
+            assert_eq!(image_reads.len(), 1, "{kind}");
+            assert_eq!(image_reads[0].media_type, "image/png");
         }
     }
 

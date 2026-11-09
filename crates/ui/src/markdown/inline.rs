@@ -11,9 +11,9 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
     App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, Entity, GlobalElementId,
-    HighlightStyle, Hitbox, InspectorElementId, InteractiveText, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
-    StyledText, TextLayout, Window, point, px, quad,
+    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, InteractiveText, IntoElement,
+    LayoutId, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText,
+    TextLayout, Window, point, px, quad,
 };
 
 use super::{
@@ -54,6 +54,16 @@ pub(super) struct Inline {
     origin: Option<RunOrigin>,
     /// The part of the text selected, as of prepaint.
     selected: Option<Range<usize>>,
+    /// Each row of each link, as of prepaint.
+    link_rows: Rc<Vec<LinkRow>>,
+}
+
+/// A row of a link: which link, its hitbox over the characters of the link
+/// on the row, and where the link's tooltip is placed beside.
+struct LinkRow {
+    link: usize,
+    hitbox: Hitbox,
+    placement: Bounds<Pixels>,
 }
 
 impl Inline {
@@ -84,6 +94,7 @@ impl Inline {
             text_layout,
             origin: None,
             selected: None,
+            link_rows: Rc::default(),
         }
     }
 
@@ -103,6 +114,47 @@ impl Inline {
         position: Point<Pixels>,
     ) -> Option<LinkMark> {
         Self::link_and_range_for_position(layout, links, position).map(|(_, link)| link)
+    }
+
+    /// The rows `range` is laid out on: on each, where
+    /// [`TextLayout::index_for_position`] finds a character of the range, and
+    /// where its tooltip is placed, which runs on to the text's edge on a row
+    /// the range continues past.
+    fn rows(layout: &TextLayout, range: &Range<usize>) -> Vec<(Bounds<Pixels>, Bounds<Pixels>)> {
+        let text = layout.bounds();
+        let line_height = layout.line_height();
+        let (Some(start), Some(end)) = (
+            layout.position_for_index(range.start),
+            layout.position_for_index(range.end),
+        ) else {
+            return Vec::new();
+        };
+        let last = ((end.y - start.y) / line_height).round().max(0.) as usize;
+        (0..=last)
+            .filter_map(|row| {
+                let top = start.y + line_height * row as f32;
+                let left = if row == 0 { start.x } else { text.left() };
+                let (right, edge) = if row == last {
+                    (end.x, end.x)
+                } else {
+                    // Past a row's end, `index_for_position` finds the index
+                    // the row ends at, which `position_for_index` puts at the
+                    // end of that row.
+                    let ends_at = layout
+                        .index_for_position(point(Pixels::MAX, top + line_height / 2.))
+                        .unwrap_or_else(|ix| ix);
+                    let right = layout
+                        .position_for_index(ends_at)
+                        .map_or(text.right(), |position| position.x);
+                    (right, text.right())
+                };
+                let rect =
+                    |right| Bounds::from_corners(point(left, top), point(right, top + line_height));
+                // A range that starts where a row wraps is placed at the end
+                // of the row above, which holds none of it.
+                (right > left).then(|| (rect(right), rect(edge.max(left))))
+            })
+            .collect()
     }
 
     fn link_and_range_for_position(
@@ -211,9 +263,24 @@ impl Element for Inline {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let text_style = window.text_style();
+        let fades = self
+            .origin
+            .as_ref()
+            .map(|origin| {
+                let fades = self.view.read(cx).fades(origin, self.text.len());
+                super::stream_fade::on_chars(&self.text, fades)
+            })
+            .unwrap_or_default();
+        let faded;
+        let highlights = if fades.is_empty() {
+            &self.highlights
+        } else {
+            faded = super::stream_fade::fade_highlights(&self.highlights, &fades);
+            &faded
+        };
         let mut runs = Vec::new();
         let mut ix = 0;
-        for (range, highlight) in &self.highlights {
+        for (range, highlight) in highlights {
             if ix < range.start {
                 runs.push(text_style.clone().to_run(range.start - ix));
             }
@@ -227,15 +294,18 @@ impl Element for Inline {
             .with_runs(runs)
             .with_font_family_overrides(self.font_overrides.clone());
         self.text_layout = styled_text.layout().clone();
-        let links = self.links.clone();
-        let view = self.view.clone();
-        self.interactive_text = InteractiveText::new(self.id.clone(), styled_text).tooltip(
-            move |position, window, cx| {
-                let (_, link) = links.iter().find(|(range, _)| range.contains(&position))?;
-                let text = view.read(cx).resolve_link(&link.url).tooltip_text();
-                Some(Tooltip::new(text).build(window, cx))
-            },
-        );
+        let interactive_text = InteractiveText::new(self.id.clone(), styled_text);
+        self.interactive_text = if self.links.is_empty() {
+            interactive_text
+        } else {
+            // For the hand InteractiveText sets over the links' own hitboxes.
+            // Its click is not used: it fires for any button, for a drag that
+            // starts and ends on one link and for each press of a double
+            // click, and a press released outside the text stays pending for
+            // the next release. Selectable text needs the click in `paint`.
+            let ranges = self.links.iter().map(|(range, _)| range.clone()).collect();
+            interactive_text.on_click(ranges, |_, _, _| {})
+        };
         let (layout, _) = self
             .interactive_text
             .request_layout(global_id, inspector_id, window, cx);
@@ -254,23 +324,31 @@ impl Element for Inline {
         let hitbox = self
             .interactive_text
             .prepaint(id, inspector_id, bounds, &mut (), window, cx);
+        self.link_rows = Rc::new(
+            self.links
+                .iter()
+                .enumerate()
+                .flat_map(|(link, (range, _))| {
+                    Self::rows(&self.text_layout, range)
+                        .into_iter()
+                        .map(move |row| (link, row))
+                })
+                .map(|(link, (row, placement))| LinkRow {
+                    link,
+                    hitbox: window.insert_hitbox(row, HitboxBehavior::Normal),
+                    placement,
+                })
+                .collect(),
+        );
         let view = self.view.read(cx);
-        if let (Some(origin), Some(membership)) = (&self.origin, &view.selection) {
+        if let (Some(origin), Some(_)) = (&self.origin, &view.selection) {
             self.selected = view.selected_range(origin, self.text.len(), cx);
-            if let Some(selected) = &self.selected {
-                membership.document.read(cx).register_edge(
-                    membership.entry,
-                    origin,
-                    selected,
-                    &self.text_layout,
-                    window.content_mask().bounds,
-                );
-            }
             view.register_run(PaintedRun {
                 origin: origin.clone(),
                 text: self.text.clone(),
                 layout: self.text_layout.clone(),
                 bounds,
+                visible: window.content_mask().bounds,
             });
         }
         hitbox
@@ -286,8 +364,12 @@ impl Element for Inline {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let current_view = window.current_view();
         let text_layout = self.text_layout.clone();
+        // Before the text paints its links' hand, which the window takes
+        // over the I-beam because it is set later.
+        if self.origin.is_some() && self.view.read(cx).is_selectable() {
+            window.set_cursor_style(CursorStyle::IBeam, hitbox);
+        }
         if let Some((glyph, baseline)) = self.math_glyph {
             let style = window.text_style();
             let font_id = window.text_system().resolve_font(&style.font());
@@ -303,34 +385,37 @@ impl Element for Inline {
                 .paint(global_id, None, bounds, &mut (), hitbox, window, cx);
         }
 
-        if self.origin.is_some() && self.view.read(cx).is_selectable() {
-            window.set_cursor_style(CursorStyle::IBeam, hitbox);
-        }
-        if Self::link_for_position(&text_layout, &self.links, window.mouse_position()).is_some() {
-            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
-        }
         if let Some(selected) = &self.selected {
             Self::paint_selection(selected, &text_layout, bounds, window, cx);
         }
 
-        window.on_mouse_event({
-            let hitbox = hitbox.clone();
-            let layout = text_layout.clone();
-            let links = self.links.clone();
-            let mut hovered_link =
-                Self::link_for_position(&layout, &links, window.mouse_position()).is_some();
-            move |event: &MouseMoveEvent, phase, window, cx| {
-                if !phase.bubble() {
-                    return;
-                }
-                let updated = hitbox.is_hovered(window)
-                    && Self::link_for_position(&layout, &links, event.position).is_some();
-                if updated != hovered_link {
-                    hovered_link = updated;
-                    cx.notify(current_view);
-                }
-            }
+        let owner = window.use_keyed_state("tcode-tooltip-trigger", cx, |_, _| {
+            crate::overlay::TooltipOwner::default()
         });
+        crate::widgets::tooltip::track_parts(
+            owner,
+            {
+                // Asked as the text paints too: through the rows' hover, a
+                // pointer move redraws the text only when it enters or
+                // leaves a link.
+                let rows = self.link_rows.clone();
+                let links = self.links.clone();
+                let view = self.view.clone();
+                move |window, cx| {
+                    if cx.has_active_drag() {
+                        return None;
+                    }
+                    let row = rows.iter().find(|row| row.hitbox.is_hovered(window))?;
+                    let (view, url) = (view.clone(), links.get(row.link)?.1.url.clone());
+                    let build: crate::overlay::TooltipBuilder = Rc::new(move |_, cx| {
+                        Tooltip::new(view.read(cx).resolve_link(&url).tooltip_text())
+                    });
+                    Some((row.link, row.placement, build))
+                }
+            },
+            window,
+            cx,
+        );
 
         window.on_mouse_event({
             let hitbox = hitbox.clone();

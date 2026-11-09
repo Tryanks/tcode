@@ -1,32 +1,10 @@
-use std::time::Duration;
-
 use core_graphics::event::{
-    CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
-    ScrollEventUnit,
+    CGEvent, CGEventFlags, CGEventType, CGMouseButton, EventField, ScrollEventUnit,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
 use super::super::{BackendError, BackendErrorCode, KeyModifiers, MouseButton, parse_key_chord};
-
-pub(super) fn click(
-    x: f64,
-    y: f64,
-    button: MouseButton,
-    click_count: u32,
-) -> Result<(), BackendError> {
-    for (click_index, (down_event, up_event)) in click_events(x, y, button, click_count)?
-        .into_iter()
-        .enumerate()
-    {
-        down_event.post(CGEventTapLocation::HID);
-        up_event.post(CGEventTapLocation::HID);
-        if click_index + 1 < click_count as usize {
-            std::thread::sleep(Duration::from_millis(45));
-        }
-    }
-    Ok(())
-}
 
 pub(super) fn scroll_event(x: f64, y: f64) -> Result<CGEvent, BackendError> {
     if !x.is_finite() || !y.is_finite() {
@@ -84,13 +62,6 @@ pub(super) fn drag_events(
     Ok(events)
 }
 
-pub(super) fn keypress(keys: &[String]) -> Result<(), BackendError> {
-    for event in keypress_events(keys)? {
-        event.post(CGEventTapLocation::HID);
-    }
-    Ok(())
-}
-
 pub(super) fn keypress_events(keys: &[String]) -> Result<[CGEvent; 2], BackendError> {
     let chord = parse_key_chord(keys).map_err(invalid)?;
     let flags = modifier_flags(chord.modifiers);
@@ -101,15 +72,6 @@ pub(super) fn keypress_events(keys: &[String]) -> Result<[CGEvent; 2], BackendEr
         .map_err(|()| operation("CoreGraphics could not create a key-up event"))?;
     up.set_flags(flags);
     Ok([down, up])
-}
-
-pub(super) fn type_text(text: &str) -> Result<(), BackendError> {
-    for [down, up] in text_event_pairs(text)? {
-        down.post(CGEventTapLocation::HID);
-        up.post(CGEventTapLocation::HID);
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    Ok(())
 }
 
 pub(super) fn text_event_pairs(text: &str) -> Result<Vec<[CGEvent; 2]>, BackendError> {

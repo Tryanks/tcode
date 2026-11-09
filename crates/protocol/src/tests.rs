@@ -5,6 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 
 use super::*;
+use tcode_core::session::LatestActivity;
 use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
 
 #[test]
@@ -586,6 +587,7 @@ fn terminal_delta_wire_shape_carries_only_what_changed() {
         cursor: None,
         lines_evicted: 0,
         styles: vec![TerminalStyle::default()],
+        scrolled: 1,
         rows_replaced: vec![TerminalRowUpdate {
             index: 5,
             row: TerminalRow {
@@ -620,6 +622,7 @@ fn terminal_delta_wire_shape_carries_only_what_changed() {
                     "rows": 24,
                     "modes": {"mode": 0, "keyboard": 0},
                     "styles": [{"fg": {"type": "foreground"}, "bg": {"type": "background"}}],
+                    "scrolled": 1,
                     "rows_replaced": [{"index": 5, "row": {"cells": [{"text": "y"}]}}],
                     "history": {"type": "appended", "content": [{}]},
                     "bell": true,
@@ -809,6 +812,65 @@ fn command_output_subscription_uses_its_documented_wire_shape() {
         decode_host_line(&encode_line(&pushed).unwrap()).unwrap(),
         pushed
     );
+
+    // A push to a subscriber holding a screen: a row that scrolled into the
+    // history and the screen's last row.
+    let changed = HostMessage::Event(EventEnvelope {
+        request_id: None,
+        topic: Topic::CommandOutput {
+            session_id: "session-1".into(),
+            item_id: "cmd-1".into(),
+            cols: 40,
+        },
+        event: ServerEvent::CommandOutputDelta(Box::new(crate::terminal::TerminalDelta {
+            cols: 40,
+            rows: 16,
+            styles: vec![TerminalStyle::default()],
+            scrolled: 1,
+            rows_replaced: vec![crate::terminal::TerminalRowUpdate {
+                index: 15,
+                row: TerminalRow {
+                    cells: vec![TerminalCell {
+                        text: "y".into(),
+                        ..TerminalCell::default()
+                    }],
+                    wrapped: false,
+                },
+            }],
+            history: Some(crate::terminal::TerminalHistoryUpdate::Appended(vec![
+                TerminalRow::default(),
+            ])),
+            ..crate::terminal::TerminalDelta::default()
+        })),
+    });
+    assert_eq!(
+        serde_json::to_value(&changed).unwrap(),
+        json!({
+            "type": "event",
+            "content": {
+                "topic": {
+                    "type": "command_output",
+                    "content": {"session_id": "session-1", "item_id": "cmd-1", "cols": 40},
+                },
+                "event": {
+                    "type": "command_output_delta",
+                    "content": {
+                        "cols": 40,
+                        "rows": 16,
+                        "modes": {"mode": 0, "keyboard": 0},
+                        "styles": [{"fg": {"type": "foreground"}, "bg": {"type": "background"}}],
+                        "scrolled": 1,
+                        "rows_replaced": [{"index": 15, "row": {"cells": [{"text": "y"}]}}],
+                        "history": {"type": "appended", "content": [{}]},
+                    },
+                },
+            },
+        })
+    );
+    assert_eq!(
+        decode_host_line(&encode_line(&changed).unwrap()).unwrap(),
+        changed
+    );
 }
 
 /// Rendering an export and registering a project both moved a decision to the
@@ -948,6 +1010,139 @@ fn history_paging_literal_json_contract() {
     ));
 }
 
+/// The activity entry as this and later builds write it, for each kind of
+/// work a thread can report, read back from the literal bytes.
+#[test]
+fn session_activity_carries_the_latest_activity_literal_json() {
+    let entry = |latest: serde_json::Value| {
+        json!({
+            "working": true,
+            "turn_running": true,
+            "waiting_for_approval": false,
+            "waiting_for_input": false,
+            "failed": false,
+            "unread": false,
+            "fork": "available",
+            "latest_activity": latest,
+        })
+    };
+    for (literal, activity) in [
+        (json!({"type": "thinking"}), LatestActivity::Thinking),
+        (json!({"type": "writing"}), LatestActivity::Writing),
+        (
+            json!({"type": "command", "content": {"text": "cargo test"}}),
+            LatestActivity::Command {
+                text: "cargo test".into(),
+            },
+        ),
+        (
+            json!({"type": "edit", "content": {"path": "src/lib.rs"}}),
+            LatestActivity::Edit {
+                path: Some("src/lib.rs".into()),
+            },
+        ),
+        (
+            json!({"type": "read", "content": {"path": "shot.png"}}),
+            LatestActivity::Read {
+                path: "shot.png".into(),
+            },
+        ),
+        (
+            json!({"type": "web_search", "content": {"query": "gpui"}}),
+            LatestActivity::WebSearch {
+                query: "gpui".into(),
+            },
+        ),
+        (
+            json!({"type": "tool", "content": {"name": "mcp__s__t", "target": null}}),
+            LatestActivity::Tool {
+                name: "mcp__s__t".into(),
+                target: None,
+            },
+        ),
+        (
+            json!({"type": "subagent", "content": {"description": "Audit"}}),
+            LatestActivity::Subagent {
+                description: "Audit".into(),
+            },
+        ),
+        (
+            json!({"type": "other", "content": {"kind": "compaction", "summary": null}}),
+            LatestActivity::Other {
+                kind: "compaction".into(),
+                summary: None,
+            },
+        ),
+    ] {
+        let decoded: SessionActivity = serde_json::from_value(entry(literal.clone())).unwrap();
+        assert_eq!(decoded.latest_activity.as_ref(), Some(&activity));
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), entry(literal));
+    }
+}
+
+/// What keeps a thread going, as this and later builds write it: what runs
+/// in its background, the agents awaiting its settle and what wakes it
+/// later; and a piece of its background work as the status lists it.
+#[test]
+fn session_activity_names_what_keeps_a_thread_going_literal_json() {
+    let literal = json!({
+        "working": false,
+        "turn_running": false,
+        "background": {"tasks": 2, "agents": 1},
+        "unsettled": 1,
+        "wakes": {"pull_requests": [812], "scheduled_at": 1_800_000_000, "notify": 1},
+        "waiting_for_approval": false,
+        "waiting_for_input": false,
+        "failed": false,
+        "unread": false,
+        "fork": "available",
+    });
+    let decoded: SessionActivity = serde_json::from_value(literal.clone()).unwrap();
+    assert_eq!((decoded.background.count(), decoded.unsettled), (3, 1));
+    assert_eq!(decoded.wakes.pull_requests, [812]);
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), literal);
+
+    let task = json!({
+        "task": {"id": "bg-1", "name": "npm run dev", "kind": "command",
+            "item_id": "toolu-1", "started_at": 1_000},
+        "listed": true,
+        "stopping_since": 2_000,
+    });
+    let decoded: crate::BackgroundTaskStatus = serde_json::from_value(task.clone()).unwrap();
+    assert_eq!(decoded.task.kind, agent::BackgroundKind::Command);
+    assert_eq!(decoded.task.item_id.as_deref(), Some("toolu-1"));
+    assert!(!decoded.ended && !decoded.task.started_reported);
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), task);
+
+    let moved = json!({"type": "move_to_background",
+        "content": {"session_id": "s", "item_id": "toolu-1"}});
+    assert_eq!(
+        serde_json::from_value::<crate::Command>(moved.clone()).unwrap(),
+        crate::Command::MoveToBackground {
+            session_id: "s".into(),
+            item_id: "toolu-1".into(),
+        }
+    );
+}
+
+/// A peer built before the field sends entries without it, and every thread
+/// with nothing to report is written the same way.
+#[test]
+fn session_activity_without_a_latest_activity_keeps_the_older_shape() {
+    let older = json!({
+        "working": false,
+        "turn_running": false,
+        "waiting_for_approval": false,
+        "waiting_for_input": false,
+        "failed": false,
+        "unread": true,
+        "fork": "available",
+    });
+    let decoded: SessionActivity = serde_json::from_value(older.clone()).unwrap();
+    assert_eq!(decoded.latest_activity, None);
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), older);
+}
+
 #[test]
 fn version_six_index_visits_output_and_elision_literal_json() {
     let index = IndexSnapshot {
@@ -959,13 +1154,16 @@ fn version_six_index_visits_output_and_elision_literal_json() {
                     SessionActivity {
                         working: false,
                         turn_running: false,
-                        waiting: false,
+                        background: Default::default(),
+                        unsettled: 0,
+                        wakes: Default::default(),
                         waiting_for_approval: false,
                         waiting_for_input: false,
                         failed: false,
                         unread: true,
                         fork: ForkAvailability::Available,
                         agent: None,
+                        latest_activity: None,
                     },
                 ),
                 (
@@ -973,7 +1171,9 @@ fn version_six_index_visits_output_and_elision_literal_json() {
                     SessionActivity {
                         working: false,
                         turn_running: false,
-                        waiting: false,
+                        background: Default::default(),
+                        unsettled: 0,
+                        wakes: Default::default(),
                         waiting_for_approval: false,
                         waiting_for_input: false,
                         failed: false,
@@ -986,6 +1186,7 @@ fn version_six_index_visits_output_and_elision_literal_json() {
                             run_started_at: Some(1_000),
                             run_completed_at: Some(81_000),
                         }),
+                        latest_activity: None,
                     },
                 ),
             ]
@@ -998,10 +1199,10 @@ fn version_six_index_visits_output_and_elision_literal_json() {
     };
     assert_eq!(
         serde_json::to_value(&index).unwrap(),
-        json!({"activity": {"cold": {"working":false,"turn_running":false,"waiting":false,
+        json!({"activity": {"cold": {"working":false,"turn_running":false,
             "waiting_for_approval":false,"waiting_for_input":false,"failed":false,"unread":true,
             "fork":"available"},
-            "child": {"working":false,"turn_running":false,"waiting":false,
+            "child": {"working":false,"turn_running":false,
             "waiting_for_approval":false,"waiting_for_input":false,"failed":false,"unread":false,
             "fork":"available","agent":{"execution":"finished","delivery":"awaiting_settle","report":"reported",
             "run_started_at":1000,"run_completed_at":81000}}},
@@ -1014,6 +1215,23 @@ fn version_six_index_visits_output_and_elision_literal_json() {
         ))
         .unwrap(),
         json!({"type": "last_visited_changed", "content": {"s": 5}})
+    );
+    assert_eq!(
+        serde_json::to_value(ServerEvent::ProviderUsageChanged {
+            provider_usage: [(
+                "codex".to_string(),
+                tcode_core::usage::ProviderUsage {
+                    fetched_at: 9,
+                    ..Default::default()
+                }
+            )]
+            .into(),
+            usage_checking: ["claude".to_string()].into(),
+        })
+        .unwrap(),
+        json!({"type": "provider_usage_changed", "content": {
+            "provider_usage": {"codex": {"fetched_at": 9, "plan": null, "windows": [], "error": null}},
+            "usage_checking": ["claude"]}})
     );
     assert_eq!(
         serde_json::from_str::<Query>(
@@ -1036,15 +1254,15 @@ fn version_six_index_visits_output_and_elision_literal_json() {
         "queued_messages":[{"id":3,"delivery_key":"send-key","text":"Next","fire_at_unix_secs":null,"editable":false}],
         "review_comment_drafts":[], "terminals":[], "active_terminal_id":null, "terminal_splits":[],
         "terminal_contexts":[], "terminal_open":false, "terminal_height":240.0, "delivery_in_flight":3,
-        "activity":{"working":true,"turn_running":false,"waiting":false,"waiting_for_approval":false,
+        "activity":{"working":true,"turn_running":false,"waiting_for_approval":false,
             "waiting_for_input":false,"failed":false,"unread":false,"fork":"available"},
-        "stopping":false,"native_rewind_blocked":true,"checkout_blocked":false,"conversation_read_only":false,
+        "stopping":false,"checkout_blocked":false,"conversation_read_only":false,
         "terminal_limit_reached":false,"terminal_split_available":false,"usage":null,"context_window":200000,
         "running_turn":null,"pending_approvals":[],"pending_user_input":null,"supports_steering":true,
         "provider_option_descriptors":[],"provider_option_selections":[],"provider_option_requested_selections":[],"provider_commands":[],
         "git_branch":null,"branches":[],"draft":false,"draft_workspace":{"kind":"local_checkout"},"worktree":null,
-        "preparing_worktree":false,"relay_confirmation":null,"native_rewind_pending":false,
-        "native_rewind_prefill_available":false,"model_pending_restart":false,"options_pending_restart":false
+        "preparing_worktree":false,"relay_confirmation":null,
+        "model_pending_restart":false,"options_pending_restart":false
     }}"#).unwrap();
     let status = serde_json::from_value::<ServerEvent>(status_wire.clone()).unwrap();
     assert_eq!(serde_json::to_value(status).unwrap(), status_wire);
@@ -1506,10 +1724,12 @@ fn profile_creation_commands_use_their_documented_wire_shapes() {
 
     assert_eq!(
         serde_json::from_value::<Command>(json!({"type": "create_third_party_profile", "content": {
-            "name": "Kimi", "base_url": "https://api.kimi.com/coding/", "model": null, "api_key": "sk"
+            "provider": "claude_code", "name": "Kimi", "base_url": "https://api.kimi.com/coding/",
+            "model": null, "api_key": "sk"
         }}))
         .unwrap(),
         Command::CreateThirdPartyProfile {
+            provider: agent::ProviderKind::ClaudeCode,
             name: "Kimi".into(),
             base_url: "https://api.kimi.com/coding/".into(),
             model: None,
@@ -1548,9 +1768,12 @@ fn provider_plugin_catalog_and_commands_use_their_documented_wire_shapes() {
             "id": "alpha@tcode-probe",
             "name": "alpha",
             "version": "1.0.0",
+            "latest_version": "1.1.0",
+            "always_on": "~32 tok",
             "source": {"marketplace": "tcode-probe", "kind": "local_path"},
             "installations": [{"scope": "project", "location": "/cache/alpha/1.0.0",
-                "version": "1.0.0", "scope_enabled": true}],
+                "version": "1.0.0", "scope_enabled": true},
+                {"scope": "local", "version": "1.0.0", "other_project": true}],
             "enabled": "yes",
             "declared": {"skills": ["greet", "hello"], "hooks": ["SessionStart"],
                 "mcp_servers": ["alpha-dead"]},
@@ -1587,8 +1810,12 @@ fn provider_plugin_catalog_and_commands_use_their_documented_wire_shapes() {
             location: Some(PathBuf::from("/cache/alpha/1.0.0")),
             version: Some("1.0.0".into()),
             scope_enabled: Some(true),
+            other_project: false,
         }
     );
+    assert!(alpha.installations[1].other_project);
+    assert_eq!(alpha.latest_version.as_deref(), Some("1.1.0"));
+    assert_eq!(alpha.always_on.as_deref(), Some("~32 tok"));
     let declared = alpha.declared.as_ref().unwrap();
     assert_eq!(declared.agents, None);
     assert_eq!(
@@ -1659,6 +1886,7 @@ fn scope_subscriptions_and_provider_choices_have_literal_wire_contracts() {
             },
             json!({"type":"space_index","content":{"space_id":"s"}}),
         ),
+        (Topic::Hosting, json!({"type":"hosting"})),
     ] {
         let wire = json!({"id":1,"principal":{"type":"full"},"payload":{"type":"subscribe","content":{"topic":wire,"after":null}}});
         let request = ClientMessage {
@@ -1710,4 +1938,32 @@ fn scope_subscriptions_and_provider_choices_have_literal_wire_contracts() {
         assert_eq!(serde_json::to_value(&response).unwrap(), wire);
         assert_eq!(decode_host_line(&wire.to_string()).unwrap(), response);
     }
+}
+
+/// The fork through a turn as clients and hosts of one release exchange it.
+#[test]
+fn a_fork_through_a_turn_has_its_wire_shape() {
+    assert_eq!(
+        serde_json::to_value(Command::ForkThread {
+            id: "source".into(),
+            at: Some(ForkAt {
+                turn: 2,
+                checkpoint_id: Some("prompt-3".into()),
+            }),
+        })
+        .unwrap(),
+        serde_json::json!({"type": "fork_thread", "content": {
+            "id": "source", "at": {"turn": 2, "checkpoint_id": "prompt-3"},
+        }})
+    );
+    assert_eq!(
+        serde_json::from_value::<Command>(serde_json::json!({
+            "type": "fork_thread", "content": {"id": "source"},
+        }))
+        .unwrap(),
+        Command::ForkThread {
+            id: "source".into(),
+            at: None,
+        }
+    );
 }

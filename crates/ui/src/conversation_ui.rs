@@ -6,7 +6,7 @@ use tcode_core::ui::RightTab;
 pub(crate) struct DiffFocus {
     pub session: String,
     pub turn: usize,
-    pub path: String,
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -21,9 +21,9 @@ pub(crate) struct ConversationUiState {
     pub diff_refresh_generation: u64,
     pub terminal_open: bool,
     pub terminal_height: f32,
-    pub auto_open_task_suppressed: bool,
-    pub preview_url: Option<String>,
-    pub preview_canvas: Option<(u32, u32)>,
+    /// The agent shown beside this conversation in its chat. Kept for the
+    /// session only: a reopened lead shows it again, a restart does not.
+    pub side_thread: Option<String>,
 }
 
 impl ConversationUiState {
@@ -39,9 +39,7 @@ impl ConversationUiState {
             diff_refresh_generation: 0,
             terminal_open,
             terminal_height,
-            auto_open_task_suppressed: false,
-            preview_url: None,
-            preview_canvas: None,
+            side_thread: None,
         }
     }
 
@@ -72,7 +70,7 @@ mod tests {
         ui.pending_diff_focus = Some(DiffFocus {
             session: "session-a".into(),
             turn: 3,
-            path: "src/second.rs".into(),
+            path: Some("src/second.rs".into()),
         });
         assert_eq!(ui.take_diff_focus("session-a", 2), None);
         assert!(ui.pending_diff_focus.is_some());
@@ -81,14 +79,14 @@ mod tests {
             Some(DiffFocus {
                 session: "session-a".into(),
                 turn: 3,
-                path: "src/second.rs".into(),
+                path: Some("src/second.rs".into()),
             })
         );
         assert_eq!(ui.take_diff_focus("session-a", 3), None);
         ui.pending_diff_focus = Some(DiffFocus {
             session: "session-a".into(),
             turn: 3,
-            path: "src/second.rs".into(),
+            path: Some("src/second.rs".into()),
         });
         ui.discard_diff_focus();
         assert!(ui.pending_diff_focus.is_none());

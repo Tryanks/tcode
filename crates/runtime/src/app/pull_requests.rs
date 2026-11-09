@@ -923,13 +923,11 @@ impl AppState {
         let sweep_generation = self.pull_requests.generation;
         let now = now_secs();
         let mut groups: HashMap<PullRequestKey, SyncGroup> = HashMap::new();
-        let metas: Vec<_> = self
+        for meta in self
             .sessions
             .iter()
-            .filter_map(|meta| self.find_meta(&meta.id))
             .filter(|meta| meta.archived_at.is_none())
-            .collect();
-        for meta in metas {
+        {
             let links = meta
                 .pull_requests
                 .iter()

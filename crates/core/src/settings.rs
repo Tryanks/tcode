@@ -1,20 +1,14 @@
 //! Persisted application settings domain data.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
-use agent::{ModelSpec, OptionDescriptor, ProviderKind};
+use agent::ProviderKind;
 use serde::{Deserialize, Serialize};
 
 use crate::acp::InstalledAcpAgent;
 pub use crate::provider_colors::{PROVIDER_COLOR_PALETTE, builtin_provider_color};
 use crate::pull_request::HostKind;
-use orchestrate_fleet::Role;
-use orchestrate_legacy::LegacyOrchestrateModel;
-
-mod orchestrate_fleet;
-mod orchestrate_legacy;
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceControlSettings {
     #[serde(default)]
@@ -108,6 +102,34 @@ pub enum HostProblem {
     /// The token in use is a saved one the host has not yet answered a request with, so
     /// nothing has shown that it works.
     Unverified,
+    /// The host refused the token in use, saved or from the environment, with `status` at
+    /// `at` (seconds since the Unix epoch). It stays refused until the token changes.
+    Rejected { status: u16, at: u64 },
+}
+
+/// The account a token signs in as. Only names cross to clients, never the token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostAccount {
+    pub login: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// What a host answered when asked whose a token is, before the token is saved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TokenCheck {
+    /// The host took the token; `account` is whose it is, when the host says.
+    Accepted { account: Option<HostAccount> },
+    /// The host refused the token (401 or 403).
+    Rejected { status: u16 },
+    /// The token works but lacks these scopes, as the host names them.
+    MissingScopes { scopes: Vec<String> },
+    /// The host could not be asked: no answer (`status` none), or an answer about something
+    /// other than the token.
+    Unreachable { status: Option<u16> },
+    /// The host never says whose a token of this kind is, so nothing can confirm it before use.
+    Unconfirmed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +153,9 @@ pub struct HostStatus {
     pub access_token_url: Option<String>,
     /// The scopes a token needs, as the host's token page names them.
     pub token_scopes: Vec<String>,
+    /// The account the token in use signs in as, once the host has said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,16 +223,13 @@ pub fn acp_color_key(agent_id: &str) -> String {
     format!("acp:{agent_id}")
 }
 
-/// The provider's short display name used for card titles and picker labels.
+/// The provider's product name used for card titles and picker labels. ACP
+/// agents are named by their own registry entry, so their kind reads as the
+/// protocol alone.
 pub fn provider_label(provider: ProviderKind) -> &'static str {
     match provider {
-        ProviderKind::Codex => "Codex",
-        ProviderKind::ClaudeCode => "Claude",
-        ProviderKind::Pi => "pi",
-        ProviderKind::OpenCode => "OpenCode",
-        ProviderKind::Cursor => "Cursor",
-        ProviderKind::Grok => "Grok",
         ProviderKind::Acp => "ACP",
+        provider => provider.display_name(),
     }
 }
 
@@ -226,7 +248,7 @@ pub struct EnvVar {
     pub sensitive: bool,
 }
 
-/// Per-provider configuration (Settings → Providers card).
+/// Per-provider configuration (Settings → Harnesses card).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderSettings {
     /// Whether the provider may be used for new sessions.
@@ -241,7 +263,13 @@ pub struct ProviderSettings {
     /// Environment variables merged into every child process for this provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<EnvVar>,
-    /// Override for the CLI binary (`None` = resolve from PATH).
+    /// On a built-in card, the variables every account and endpoint profile
+    /// of its harness gets before its own `env`, whose values win. Sensitive
+    /// values are stored under [`harness_secret_id`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_env: Vec<EnvVar>,
+    /// Override for the CLI binary (`None` = resolve from PATH). On a user
+    /// profile, a binary of its own instead of its harness's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary_path: Option<PathBuf>,
     /// The provider's config-directory variable ([`agent::LaunchEnv::home`]),
@@ -254,6 +282,10 @@ pub struct ProviderSettings {
     pub launch_args: Option<String>,
     #[serde(flatten)]
     pub pi: PiProviderSettings,
+    /// On a built-in card, the permission value a new thread of the harness
+    /// starts with where its project names none (`None` = the recommended one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_permission: Option<String>,
     /// Model slugs added by hand in the Models section.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_models: Vec<String>,
@@ -262,28 +294,35 @@ pub struct ProviderSettings {
     pub hidden_models: Vec<String>,
 }
 
-/// Serializable edits the UI can make to one provider profile.
+/// Serializable edits the UI can make to one provider profile, one field at
+/// a time. The harness-wide fields (binary, launch arguments, shared
+/// environment, switches) are edits of its built-in profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ProfileSettingsPatch {
-    SetEnabled { enabled: bool },
-    ReplaceConfiguration(Box<ProfileConfigurationPatch>),
-}
-
-/// The provider-dialog configuration payload of
-/// [`ProfileSettingsPatch::ReplaceConfiguration`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProfileConfigurationPatch {
-    pub display_name: Option<String>,
-    pub accent_color: Option<String>,
-    pub env: Vec<EnvVar>,
-    pub binary_path: Option<PathBuf>,
-    pub home_path: Option<PathBuf>,
-    pub launch_args: Option<String>,
-    #[serde(flatten)]
-    pub pi: PiProviderSettings,
-    pub custom_models: Vec<String>,
-    pub hidden_models: Vec<String>,
+    SetEnabled {
+        enabled: bool,
+    },
+    /// Every profile of the harness at once.
+    SetHarnessEnabled {
+        enabled: bool,
+    },
+    SetDisplayName(Option<String>),
+    SetAccentColor(Option<String>),
+    SetEnv(Vec<EnvVar>),
+    SetSharedEnv(Vec<EnvVar>),
+    SetBinaryPath(Option<PathBuf>),
+    /// Only a built-in profile's config directory is the user's to move; a
+    /// profile's own directory holds its sign-in.
+    SetHomePath(Option<PathBuf>),
+    SetLaunchArgs(Option<String>),
+    SetToggle {
+        id: String,
+        enabled: bool,
+    },
+    SetDefaultPermission(Option<String>),
+    SetCustomModels(Vec<String>),
+    SetHiddenModels(Vec<String>),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,10 +343,12 @@ impl Default for ProviderSettings {
             display_name: None,
             accent_color: None,
             env: Vec::new(),
+            shared_env: Vec::new(),
             binary_path: None,
             home_path: None,
             launch_args: None,
             pi: PiProviderSettings::default(),
+            default_permission: None,
             custom_models: Vec::new(),
             hidden_models: Vec::new(),
         }
@@ -324,6 +365,20 @@ impl ProviderSettings {
             .flatten()
     }
 
+    /// The state of a harness switch by its [`agent::HarnessFacts::toggles`] id.
+    pub fn toggle(&self, id: &str) -> bool {
+        match id {
+            agent::harness::TRUST_PROJECT_EXTENSIONS => self.pi.trust_project_extensions,
+            _ => false,
+        }
+    }
+
+    pub fn set_toggle(&mut self, id: &str, enabled: bool) {
+        if id == agent::harness::TRUST_PROJECT_EXTENSIONS {
+            self.pi.trust_project_extensions = enabled;
+        }
+    }
+
     /// A native provider's `Launch arguments` field, split on whitespace.
     pub fn extra_args(&self) -> Vec<String> {
         self.launch_args
@@ -333,7 +388,7 @@ impl ProviderSettings {
     }
 }
 
-/// A user-created provider profile (Settings → Providers "+ New profile").
+/// A user-created provider profile (Settings → Harnesses "+ New profile").
 ///
 /// A profile pairs a *protocol* ([`ProviderKind`] — which native CLI/adapter
 /// spawns it) with a full [`ProviderSettings`] card. Several profiles may share
@@ -365,8 +420,12 @@ pub struct ResolvedProfile {
     pub id: String,
     /// The protocol this profile drives.
     pub kind: ProviderKind,
-    /// The effective card settings.
+    /// The effective card settings: a user profile's binary and launch
+    /// arguments fall back to its harness's, and its switches are the
+    /// harness's.
     pub settings: ProviderSettings,
+    /// The harness's shared variables, which `settings.env` follows.
+    pub shared_env: Vec<EnvVar>,
 }
 
 impl ResolvedProfile {
@@ -378,126 +437,41 @@ impl ResolvedProfile {
 
     /// Whether this endpoint/auth configuration can query native account limits.
     pub fn supports_account_usage(&self) -> bool {
-        let (endpoint_key, native_endpoint, credentials, backends): (&str, &str, &[&str], &[&str]) =
-            match self.kind {
-                ProviderKind::ClaudeCode => (
-                    "ANTHROPIC_BASE_URL",
-                    "https://api.anthropic.com",
-                    &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
-                    &[
-                        "CLAUDE_CODE_USE_BEDROCK",
-                        "CLAUDE_CODE_USE_VERTEX",
-                        "CLAUDE_CODE_USE_FOUNDRY",
-                    ],
-                ),
-                ProviderKind::Codex => (
-                    "OPENAI_BASE_URL",
-                    "https://api.openai.com/v1",
-                    &["OPENAI_API_KEY", "CODEX_API_KEY"],
-                    &[],
-                ),
-                _ => return false,
-            };
+        let Some(endpoint) = self.kind.harness().endpoint else {
+            return false;
+        };
+        let env: Vec<&EnvVar> = self.shared_env.iter().chain(&self.settings.env).collect();
         // Secret presence is enough to classify API-key auth; never inspect or
         // replicate secret values. Missing native sign-in remains a probe error.
-        !self.settings.env.iter().enumerate().any(|(index, env)| {
+        !env.iter().enumerate().any(|(index, var)| {
             // LaunchEnv uses the last occurrence of a repeated environment key.
-            if self.settings.env[index + 1..]
-                .iter()
-                .any(|later| later.name == env.name)
-            {
+            if env[index + 1..].iter().any(|later| later.name == var.name) {
                 return false;
             }
-            let configured = env.sensitive || !env.value.trim().is_empty();
+            let configured = var.sensitive || !var.value.trim().is_empty();
             configured
-                && (credentials.contains(&env.name.as_str())
-                    || (backends.contains(&env.name.as_str())
-                        && env.value != "0"
-                        && env.value != "false")
-                    || (env.name == endpoint_key
-                        && (env.sensitive
-                            || env.value.trim().trim_end_matches('/').to_ascii_lowercase()
-                                != native_endpoint)))
+                && (endpoint.key_envs.contains(&var.name.as_str())
+                    || (endpoint.backend_switches.contains(&var.name.as_str())
+                        && var.value != "0"
+                        && var.value != "false")
+                    || (var.name == endpoint.base_url_env
+                        && (var.sensitive
+                            || var.value.trim().trim_end_matches('/').to_ascii_lowercase()
+                                != endpoint.native_base_url)))
         })
     }
-}
 
-/// One configured model, unique by provider and model ID within its role.
-/// Reasoning effort is selected per tool call from the provider's capabilities.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OrchestrateChildModel {
-    pub provider: ProviderKind,
-    pub model: String,
-    /// Which provider profile (endpoint config) the dispatch launches against;
-    /// `None` = the kind's built-in profile.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    /// Controls availability as a collaboration peer or executor in this list.
-    /// Disabled entries retain their configuration and are omitted from the fleet.
-    /// This never controls whether the model can run as the main decision model.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Dispatch with the provider's fast mode (Claude `fastMode`, Codex `fast`
-    /// service tier). Ignored by providers without one.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub fast: bool,
-    /// The user's own guidance; empty uses the bundled guidance, see [`Self::guidance`].
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub description: String,
-    /// The bundled fleet profile an untouched row follows when the bundle
-    /// moves it to another model. Maintained by [`OrchestrateSettings`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bundled: Option<String>,
-}
-
-impl OrchestrateChildModel {
-    /// Bundled guidance for this model in the collaboration or execution list.
-    pub fn bundled_guidance(&self, collaboration: bool) -> Option<&'static str> {
-        orchestrate_fleet::bundled()
-            .profile_for(Role::of(collaboration), self.provider, &self.model)
-            .map(|profile| profile.guidance.as_str())
-    }
-
-    /// The guidance the model is given for this row.
-    pub fn guidance(&self, collaboration: bool) -> &str {
-        if self.description.trim().is_empty() {
-            self.bundled_guidance(collaboration).unwrap_or_default()
-        } else {
-            &self.description
-        }
-    }
-}
-
-/// Live catalogs are authoritative. Bundled fallbacks cover startup before discovery.
-/// Collaboration is deliberately capped at medium/high, independent of execution.
-pub fn orchestrate_efforts(
-    provider: ProviderKind,
-    model: &str,
-    catalog: &[ModelSpec],
-    collaboration: bool,
-) -> Vec<String> {
-    let mut efforts = if let Some(spec) = catalog.iter().find(|spec| spec.id == model) {
-        spec.options
-            .iter()
-            .find_map(|option| match option {
-                OptionDescriptor::Select { id, options, .. } if id == "reasoningEffort" => Some(
-                    options
-                        .iter()
-                        .map(|choice| choice.value.clone())
-                        .collect::<Vec<_>>(),
-                ),
-                _ => None,
+    /// Whether this profile is an endpoint profile: one that reaches a model
+    /// API through its own variables rather than an account.
+    pub fn is_endpoint_profile(&self) -> bool {
+        let Some(endpoint) = self.kind.harness().endpoint else {
+            return false;
+        };
+        !Settings::is_builtin_profile_id(&self.id)
+            && self.settings.env.iter().any(|var| {
+                var.name == endpoint.base_url_env || endpoint.key_envs.contains(&var.name.as_str())
             })
-            .unwrap_or_default()
-    } else {
-        orchestrate_fleet::bundled()
-            .effort_fallback(provider, model)
-            .to_vec()
-    };
-    if collaboration {
-        efforts.retain(|effort| matches!(effort.as_str(), "medium" | "high"));
     }
-    efforts
 }
 
 /// Who answers the permission requests and questions raised by dispatched
@@ -513,142 +487,51 @@ pub enum ChildApprovalMode {
     Auto,
 }
 
-/// Settings for tcode's built-in orchestration layer.
-///
-/// Decision profiles support peer consultation; execution profiles receive tasks.
-/// Any session may invoke the workflow. The bundled fleet is
-/// `assets/orchestrate/fleet.json`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "OrchestrateSettingsData")]
-pub struct OrchestrateSettings {
-    /// Collaboration invite list, not an allow list for the main decision model.
-    pub decision_models: Vec<OrchestrateChildModel>,
-    pub child_models: Vec<OrchestrateChildModel>,
-    #[serde(default)]
+/// How `tcode_control` starts a subagent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SubagentSettings {
     pub child_approval: ChildApprovalMode,
-    /// Give dispatched children dedicated Git worktrees when their resolved cwd
-    /// is itself a repository root. Dispatch-level `worktree` overrides this.
-    #[serde(default)]
+    /// Give subagents dedicated Git worktrees when their resolved cwd is itself a
+    /// repository root. `start_thread`'s `workspace` overrides this.
     pub child_worktrees: bool,
 }
 
-impl Default for OrchestrateSettings {
-    fn default() -> Self {
-        let fleet = orchestrate_fleet::bundled();
-        let rows = |role| {
-            fleet
-                .defaults(role)
-                .map(|profile| OrchestrateChildModel {
-                    provider: profile.provider,
-                    model: profile.model.clone(),
-                    profile_id: None,
-                    enabled: true,
-                    fast: false,
-                    description: String::new(),
-                    bundled: Some(profile.id.clone()),
-                })
-                .collect()
-        };
-        Self {
-            decision_models: rows(Role::Collaboration),
-            child_models: rows(Role::Execution),
-            child_approval: ChildApprovalMode::default(),
-            child_worktrees: false,
-        }
-    }
-}
-
-/// Ignore retired lead identities and consume old fixed efforts only for migration.
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct OrchestrateSettingsData {
-    decision_models: Option<Vec<LegacyOrchestrateModel>>,
-    child_models: Vec<LegacyOrchestrateModel>,
-    child_approval: ChildApprovalMode,
-    child_worktrees: bool,
-}
-
-impl From<OrchestrateSettingsData> for OrchestrateSettings {
-    fn from(data: OrchestrateSettingsData) -> Self {
-        let (decision_models, child_models) = orchestrate_legacy::migrate(
-            data.decision_models,
-            data.child_models,
-            Self::default().decision_models,
-        );
-        let mut settings = Self {
-            decision_models,
-            child_models,
-            child_approval: data.child_approval,
-            child_worktrees: data.child_worktrees,
-        };
-        settings.normalize_models(true);
-        settings
-    }
-}
-
-impl OrchestrateSettings {
+impl SubagentSettings {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
+}
 
-    /// A model occurs once per role; loading combines distinct notes within
-    /// each list, patches keep the first row without mutating it. Rows store
-    /// bundled guidance as an empty description, and an untouched row on the
-    /// built-in endpoint tracks its bundled profile, whose model it takes on load.
-    fn normalize_models(&mut self, loading: bool) {
-        let fleet = orchestrate_fleet::bundled();
-        for (role, models) in [
-            (Role::Collaboration, &mut self.decision_models),
-            (Role::Execution, &mut self.child_models),
-        ] {
-            let mut unique: Vec<OrchestrateChildModel> = Vec::new();
-            for mut entry in std::mem::take(models) {
-                entry.model = entry.model.trim().to_string();
-                let tracked = entry.bundled.take();
-                let description = entry.description.trim();
-                if description.is_empty()
-                    || fleet
-                        .profile_for(role, entry.provider, &entry.model)
-                        .is_some_and(|profile| profile.guidance == description)
-                {
-                    entry.description.clear();
-                }
-                if loading
-                    && entry.description.is_empty()
-                    && entry.profile_id.is_none()
-                    && let Some(profile) = tracked
-                        .and_then(|id| fleet.profile(&id))
-                        .filter(|profile| profile.role == role)
-                {
-                    entry.provider = profile.provider;
-                    entry.model = profile.model.clone();
-                }
-                if let Some(existing) = unique.iter_mut().find(|existing| {
-                    existing.provider == entry.provider && existing.model == entry.model
-                }) {
-                    if loading
-                        && !entry.description.is_empty()
-                        && !existing.description.contains(&entry.description)
-                    {
-                        if !existing.description.is_empty() {
-                            existing.description.push_str("\n\n");
-                        }
-                        existing.description.push_str(&entry.description);
-                    }
-                } else {
-                    unique.push(entry);
-                }
-            }
-            for entry in &mut unique {
-                entry.bundled = if entry.description.is_empty() && entry.profile_id.is_none() {
-                    fleet
-                        .profile_for(role, entry.provider, &entry.model)
-                        .map(|profile| profile.id.clone())
-                } else {
-                    None
-                };
-            }
-            *models = unique;
+/// A star in the model picker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FavoriteModel {
+    /// One model under one account: `profile_id` is `None` on the provider's
+    /// built-in profile, as on a thread.
+    Row {
+        provider: ProviderKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile_id: Option<String>,
+        model: String,
+    },
+    /// An id saved before stars named an account. Nothing records which
+    /// provider or account it was starred under, so it stars every row with
+    /// that id.
+    Id(String),
+}
+
+impl FavoriteModel {
+    /// The model id this star lights on an account, if any.
+    fn id_on(&self, provider: ProviderKind, profile_id: Option<&str>) -> Option<&str> {
+        match self {
+            Self::Row {
+                provider: starred_provider,
+                profile_id: starred_profile,
+                model,
+            } => (*starred_provider == provider && starred_profile.as_deref() == profile_id)
+                .then_some(model),
+            Self::Id(id) => Some(id),
         }
     }
 }
@@ -694,32 +577,6 @@ impl TitleGenerationSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FallbackReviewSettings {
-    #[serde(default = "default_title_provider")]
-    pub provider: ProviderKind,
-    #[serde(default = "default_title_model")]
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-}
-
-impl Default for FallbackReviewSettings {
-    fn default() -> Self {
-        Self {
-            provider: default_title_provider(),
-            model: default_title_model(),
-            profile_id: None,
-        }
-    }
-}
-
-impl FallbackReviewSettings {
-    fn is_default(&self) -> bool {
-        self == &Self::default()
-    }
-}
-
 /// When a computer-use observation carries a screenshot alongside the folded
 /// accessibility outline. Mirrors `computer_use_mcp::config::ImageMode`; kept in
 /// core so settings stay GPUI/backend-free and the app maps one to the other.
@@ -741,17 +598,12 @@ pub struct ComputerUseSettings {
     /// Whether newly spawned provider sessions receive the computer-use MCP server.
     #[serde(default)]
     pub enabled: bool,
-    /// When observations include a screenshot. Absent in legacy files → `auto`.
+    /// When observations include a screenshot.
     #[serde(default)]
     pub image_mode: ImageMode,
     /// When false the tools are observe-only (`act_ui` rejects every action).
-    /// Defaults to TRUE and tolerates an absent field in legacy files.
     #[serde(default = "default_true")]
     pub allow_input: bool,
-    /// Permit an opt-in foreground HID retry for keyboard actions when
-    /// background PID delivery cannot be initialized.
-    #[serde(default)]
-    pub allow_foreground_fallback: bool,
     /// Show the agent cursor overlay.
     #[serde(default = "default_true")]
     pub show_agent_cursor: bool,
@@ -763,13 +615,12 @@ impl Default for ComputerUseSettings {
             enabled: false,
             image_mode: ImageMode::default(),
             allow_input: true,
-            allow_foreground_fallback: false,
             show_agent_cursor: true,
         }
     }
 }
 
-/// Settings for the embedded preview browser (Settings → Browser) and the
+/// Settings for the embedded preview browser (Settings → Preview) and the
 /// `tcode_preview` MCP server it backs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserSettings {
@@ -784,52 +635,6 @@ pub struct BrowserSettings {
     /// TRUE; absent in legacy files → allowed.
     #[serde(default = "default_true")]
     pub allow_evaluate: bool,
-}
-
-/// Which providers' native plugins Settings → Plugins manages. Off, Tcode
-/// never runs that CLI's plugin commands.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginManagementSettings {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Per-provider switches keyed by [`provider_key`]; an absent key takes
-    /// [`Self::provider_default`]. Keyed by string rather than
-    /// [`ProviderKind`] so a provider this build does not know survives a
-    /// load and save instead of failing the whole file.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub providers: BTreeMap<String, bool>,
-}
-
-impl Default for PluginManagementSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            providers: BTreeMap::new(),
-        }
-    }
-}
-
-impl PluginManagementSettings {
-    pub fn provider_default(kind: ProviderKind) -> bool {
-        kind == ProviderKind::Codex
-    }
-
-    /// The provider's own switch, regardless of the master switch.
-    pub fn provider_switch(&self, kind: ProviderKind) -> bool {
-        self.providers
-            .get(provider_key(kind))
-            .copied()
-            .unwrap_or_else(|| Self::provider_default(kind))
-    }
-
-    /// Whether Tcode may touch this provider's plugin state at all.
-    pub fn provider_enabled(&self, kind: ProviderKind) -> bool {
-        self.enabled && self.provider_switch(kind)
-    }
-
-    fn is_default(&self) -> bool {
-        self == &Self::default()
-    }
 }
 
 /// A field-scoped mutation of persisted application settings.
@@ -854,14 +659,12 @@ pub enum SettingsPatch {
     ThemeMode(ThemeMode),
     WordWrapDiffs(bool),
     SkipDeleteConfirmation(bool),
-    AutoOpenTaskPanel(bool),
     LiveCommandPanelDisabled(bool),
     SidebarProviderMarks(bool),
     ProviderUpdateChecksDisabled(bool),
     InactiveFrameThrottleDisabled(bool),
-    AbortOnModelFallback(bool),
+    ScrollToLatestOnSend(bool),
     ResumeOnLimitReset(bool),
-    FallbackReviewAdvisor(bool),
     AutoSettleAfterDays(Option<f64>),
     AutoSettleOnMerge(bool),
     ProjectSettlement {
@@ -873,23 +676,15 @@ pub enum SettingsPatch {
         method: crate::pull_request::PullRequestMergeMethod,
     },
     RemoveAgentCreditsOnMerge(bool),
-    OrchestrateDecisionModels(Vec<OrchestrateChildModel>),
-    OrchestrateChildModels(Vec<OrchestrateChildModel>),
     OrchestrateChildApproval(ChildApprovalMode),
     OrchestrateChildWorktrees(bool),
     ComputerUseEnabled(bool),
     ComputerUseImageMode(ImageMode),
     ComputerUseAllowInput(bool),
-    ComputerUseAllowForegroundFallback(bool),
     ComputerUseShowAgentCursor(bool),
     BrowserEnabled(bool),
     BrowserHomeUrl(Option<String>),
     BrowserAllowEvaluate(bool),
-    PluginManagementEnabled(bool),
-    PluginManagementProvider {
-        provider: ProviderKind,
-        enabled: bool,
-    },
     ControlEnabled(bool),
     ControlDefaultGrant(crate::control::ControlGrant),
     ControlProjectGrant {
@@ -900,14 +695,50 @@ pub enum SettingsPatch {
     TitleGenerationProvider(ProviderKind),
     TitleGenerationModel(String),
     TitleGenerationProfileId(Option<String>),
-    FallbackReviewProvider(ProviderKind),
-    FallbackReviewModel(String),
-    FallbackReviewProfileId(Option<String>),
     SidebarLayout(SidebarLayout),
     RemoteHostingEnabled(bool),
     Traverse(TraverseSetting),
     RemoteHostName(Option<String>),
     LastProject(Option<String>),
+    NewProjectDir(Option<String>),
+    ProjectStart(ProjectStart),
+    ProjectStartCustom(Option<String>),
+}
+
+/// Where Create puts a new project when Settings names no folder.
+pub const DEFAULT_NEW_PROJECT_DIR: &str = "~/TcodeProjects";
+
+/// A folder Settings name on the host: `~` (its home) or a path under it, or
+/// an absolute path by this host's rules. A blank one is no folder.
+fn host_folder(value: Option<String>) -> Result<Option<String>, &'static str> {
+    let Some(value) = value.filter(|dir| !dir.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let path = std::path::Path::new(value.trim());
+    if path.strip_prefix("~").is_ok() || path.is_absolute() {
+        Ok(Some(value))
+    } else {
+        Err("A folder must be an absolute path, ~ or a path under ~.")
+    }
+}
+
+/// Where Add Project's folder list opens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectStart {
+    /// The host's home.
+    #[default]
+    Home,
+    /// Where Create puts a new project.
+    NewProjectDir,
+    /// The folder `Settings.project_start_custom` names.
+    Custom,
+}
+
+impl ProjectStart {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// The Traverse instances this machine publishes to while hosting: relay
@@ -1058,7 +889,7 @@ pub struct Settings {
     /// None follows the operating-system language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-    /// Per-provider cards (Settings → Providers), keyed by [`provider_key`].
+    /// Per-provider cards (Settings → Harnesses), keyed by [`provider_key`].
     /// These are the built-in native-provider profiles.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, ProviderSettings>,
@@ -1089,11 +920,6 @@ pub struct Settings {
     /// dialog on by default. Surfaced as the "Delete confirmation" toggle.
     #[serde(default)]
     pub skip_delete_confirmation: bool,
-    /// When true, the right-side plan/task panel opens automatically the first
-    /// time steps appear in a turn (unless the user closed it during that turn).
-    /// Absent in legacy files (defaults to off).
-    #[serde(default)]
-    pub auto_open_task_panel: bool,
     /// Whether the live command panel is DISABLED. Stored inverted so absent
     /// legacy settings keep the feature enabled.
     #[serde(default)]
@@ -1110,12 +936,12 @@ pub struct Settings {
     /// the throttle defaults to on even for legacy settings files that lack the field.
     #[serde(default)]
     pub inactive_frame_throttle_disabled: bool,
+    /// Whether a conversation scrolled back from its end goes to it once a
+    /// message sent from it reaches the host.
     #[serde(default = "default_true")]
-    pub abort_on_model_fallback: bool,
+    pub scroll_to_latest_on_send: bool,
     #[serde(default = "default_true")]
     pub resume_on_limit_reset: bool,
-    #[serde(default)]
-    pub fallback_review_advisor: bool,
     #[serde(default = "default_auto_settle_after_days")]
     pub auto_settle_after_days: Option<f64>,
     #[serde(default)]
@@ -1129,19 +955,22 @@ pub struct Settings {
     /// Whether a merge leaves agents' credit lines out of GitHub's merge message by default.
     #[serde(default)]
     pub remove_agent_credits_on_merge: bool,
-    /// Built-in orchestration identities and child-model routing table.
-    #[serde(default, skip_serializing_if = "OrchestrateSettings::is_default")]
-    pub orchestrate: OrchestrateSettings,
+    /// Stored under the name of the removed Orchestrate page, so files that
+    /// page wrote keep these values; its model lists there are ignored.
+    #[serde(
+        default,
+        rename = "orchestrate",
+        skip_serializing_if = "SubagentSettings::is_default"
+    )]
+    pub subagents: SubagentSettings,
     /// Global desktop computer-use feature settings. Absent in legacy files,
     /// where the feature remains disabled by default.
     #[serde(default)]
     pub computer_use: ComputerUseSettings,
     /// Embedded preview browser settings. Skipped when default (like
-    /// `orchestrate`), so legacy files stay clean and load with the defaults.
+    /// `subagents`), so legacy files stay clean and load with the defaults.
     #[serde(default, skip_serializing_if = "BrowserSettings::is_default")]
     pub browser: BrowserSettings,
-    #[serde(default, skip_serializing_if = "PluginManagementSettings::is_default")]
-    pub plugins: PluginManagementSettings,
     /// What a thread's model may do in Tcode through `tcode_control`.
     #[serde(
         default,
@@ -1156,15 +985,13 @@ pub struct Settings {
     /// Provider/model used to generate a concise title for new threads.
     #[serde(default, skip_serializing_if = "TitleGenerationSettings::is_default")]
     pub title_generation: TitleGenerationSettings,
-    #[serde(default, skip_serializing_if = "FallbackReviewSettings::is_default")]
-    pub fallback_review: FallbackReviewSettings,
     /// Ids of project groups the user has collapsed in the sidebar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed_projects: Vec<String>,
-    /// Model ids the user has starred in the model picker (favorites float to
+    /// Models the user has starred in the model picker (favorites float to
     /// the top and are shown first under the star filter).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub favorite_models: Vec<String>,
+    pub favorite_models: Vec<FavoriteModel>,
     /// Sidebar PROJECTS ordering (cycled by the sort button).
     #[serde(default)]
     pub project_sort: ProjectSort,
@@ -1196,6 +1023,19 @@ pub struct Settings {
     /// background activity cannot move it. UI state; absent in legacy files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_project_id: Option<String>,
+    /// The host directory Create puts a new project in, one folder each, `~`
+    /// standing for the host's home. `None` is [`DEFAULT_NEW_PROJECT_DIR`];
+    /// absent in legacy files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_project_dir: Option<String>,
+    /// Where Add Project's folder list opens; absent in legacy files.
+    #[serde(default, skip_serializing_if = "ProjectStart::is_default")]
+    pub project_start: ProjectStart,
+    /// The folder [`ProjectStart::Custom`] opens on, kept while another choice
+    /// is made so choosing Custom again brings it back. `~` stands for the
+    /// host's home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_start_custom: Option<String>,
     /// ACP agents the user installed from the marketplace (or defined by hand),
     /// keyed by registry id. Each carries its resolved launch recipe, so a
     /// session can start without consulting the registry again.
@@ -1256,27 +1096,23 @@ impl Default for Settings {
             sidebar_collapsed: false,
             word_wrap_diffs: false,
             skip_delete_confirmation: false,
-            auto_open_task_panel: false,
             live_command_panel_disabled: false,
             sidebar_provider_marks: false,
             provider_update_checks_disabled: false,
             inactive_frame_throttle_disabled: false,
-            abort_on_model_fallback: true,
+            scroll_to_latest_on_send: true,
             resume_on_limit_reset: true,
-            fallback_review_advisor: false,
             auto_settle_after_days: default_auto_settle_after_days(),
             auto_settle_on_merge: false,
             project_settlement_overrides: BTreeMap::new(),
             project_merge_methods: BTreeMap::new(),
             remove_agent_credits_on_merge: false,
-            orchestrate: OrchestrateSettings::default(),
+            subagents: SubagentSettings::default(),
             computer_use: ComputerUseSettings::default(),
             browser: BrowserSettings::default(),
-            plugins: PluginManagementSettings::default(),
             control: crate::control::ControlSettings::default(),
             settlement_automation: crate::control::SettlementAutomation::default(),
             title_generation: TitleGenerationSettings::default(),
-            fallback_review: FallbackReviewSettings::default(),
             collapsed_projects: Vec::new(),
             favorite_models: Vec::new(),
             project_sort: ProjectSort::default(),
@@ -1286,6 +1122,9 @@ impl Default for Settings {
             remote_host_name: None,
             last_visited: HashMap::new(),
             last_project_id: None,
+            new_project_dir: None,
+            project_start: ProjectStart::default(),
+            project_start_custom: None,
             acp_agents: BTreeMap::new(),
             unknown: serde_json::Map::new(),
         }
@@ -1293,6 +1132,23 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Where Create puts a new project, `~` standing for the host's home.
+    pub fn new_project_dir(&self) -> &str {
+        self.new_project_dir
+            .as_deref()
+            .unwrap_or(DEFAULT_NEW_PROJECT_DIR)
+    }
+
+    /// The folder Add Project's list opens on, `~` standing for the host's
+    /// home: a Custom choice with no folder named yet opens on the home.
+    pub fn project_start_dir(&self) -> &str {
+        match self.project_start {
+            ProjectStart::Home => "~",
+            ProjectStart::NewProjectDir => self.new_project_dir(),
+            ProjectStart::Custom => self.project_start_custom.as_deref().unwrap_or("~"),
+        }
+    }
+
     /// Apply one field-scoped mutation without replacing sibling fields. A
     /// value outside its field's range is refused and changes nothing.
     pub fn apply(&mut self, patch: SettingsPatch) -> Result<(), &'static str> {
@@ -1329,7 +1185,6 @@ impl Settings {
             SettingsPatch::SkipDeleteConfirmation(value) => {
                 self.skip_delete_confirmation = value;
             }
-            SettingsPatch::AutoOpenTaskPanel(value) => self.auto_open_task_panel = value,
             SettingsPatch::LiveCommandPanelDisabled(value) => {
                 self.live_command_panel_disabled = value;
             }
@@ -1342,14 +1197,11 @@ impl Settings {
             SettingsPatch::InactiveFrameThrottleDisabled(value) => {
                 self.inactive_frame_throttle_disabled = value;
             }
-            SettingsPatch::AbortOnModelFallback(value) => {
-                self.abort_on_model_fallback = value;
+            SettingsPatch::ScrollToLatestOnSend(value) => {
+                self.scroll_to_latest_on_send = value;
             }
             SettingsPatch::ResumeOnLimitReset(value) => {
                 self.resume_on_limit_reset = value;
-            }
-            SettingsPatch::FallbackReviewAdvisor(value) => {
-                self.fallback_review_advisor = value;
             }
             SettingsPatch::AutoSettleAfterDays(value) => {
                 self.auto_settle_after_days = auto_settle_days(value)?;
@@ -1371,38 +1223,21 @@ impl Settings {
             SettingsPatch::RemoveAgentCreditsOnMerge(value) => {
                 self.remove_agent_credits_on_merge = value;
             }
-            SettingsPatch::OrchestrateDecisionModels(value) => {
-                self.orchestrate.decision_models = value;
-                self.orchestrate.normalize_models(false);
-            }
-            SettingsPatch::OrchestrateChildModels(value) => {
-                self.orchestrate.child_models = value;
-                self.orchestrate.normalize_models(false);
-            }
             SettingsPatch::OrchestrateChildApproval(value) => {
-                self.orchestrate.child_approval = value;
+                self.subagents.child_approval = value;
             }
             SettingsPatch::OrchestrateChildWorktrees(value) => {
-                self.orchestrate.child_worktrees = value;
+                self.subagents.child_worktrees = value;
             }
             SettingsPatch::ComputerUseEnabled(value) => self.computer_use.enabled = value,
             SettingsPatch::ComputerUseImageMode(value) => self.computer_use.image_mode = value,
             SettingsPatch::ComputerUseAllowInput(value) => self.computer_use.allow_input = value,
-            SettingsPatch::ComputerUseAllowForegroundFallback(value) => {
-                self.computer_use.allow_foreground_fallback = value
-            }
             SettingsPatch::ComputerUseShowAgentCursor(value) => {
                 self.computer_use.show_agent_cursor = value
             }
             SettingsPatch::BrowserEnabled(value) => self.browser.enabled = value,
             SettingsPatch::BrowserHomeUrl(value) => self.browser.home_url = value,
             SettingsPatch::BrowserAllowEvaluate(value) => self.browser.allow_evaluate = value,
-            SettingsPatch::PluginManagementEnabled(value) => self.plugins.enabled = value,
-            SettingsPatch::PluginManagementProvider { provider, enabled } => {
-                self.plugins
-                    .providers
-                    .insert(provider_key(provider).to_string(), enabled);
-            }
             SettingsPatch::ControlEnabled(value) => self.control.enabled = value,
             SettingsPatch::ControlDefaultGrant(value) => self.control.default_grant = value,
             SettingsPatch::ControlProjectGrant { project_id, value } => match value {
@@ -1421,18 +1256,18 @@ impl Settings {
             SettingsPatch::TitleGenerationProfileId(value) => {
                 self.title_generation.profile_id = value;
             }
-            SettingsPatch::FallbackReviewProvider(value) => {
-                self.fallback_review.provider = value;
-            }
-            SettingsPatch::FallbackReviewModel(value) => self.fallback_review.model = value,
-            SettingsPatch::FallbackReviewProfileId(value) => {
-                self.fallback_review.profile_id = value;
-            }
             SettingsPatch::SidebarLayout(value) => self.sidebar_layout = value,
             SettingsPatch::RemoteHostingEnabled(value) => self.remote_hosting_enabled = value,
             SettingsPatch::Traverse(value) => self.traverse = TraverseSetting::new(value.sources),
             SettingsPatch::RemoteHostName(value) => self.remote_host_name = value,
             SettingsPatch::LastProject(value) => self.last_project_id = value,
+            SettingsPatch::NewProjectDir(value) => {
+                self.new_project_dir = host_folder(value)?;
+            }
+            SettingsPatch::ProjectStart(value) => self.project_start = value,
+            SettingsPatch::ProjectStartCustom(value) => {
+                self.project_start_custom = host_folder(value)?;
+            }
         }
         Ok(())
     }
@@ -1473,6 +1308,38 @@ impl Settings {
         }
     }
 
+    /// The model ids starred on one account.
+    pub fn favorite_ids(&self, provider: ProviderKind, profile_id: &str) -> Vec<String> {
+        let profile_id = Some(profile_id).filter(|id| !Self::is_builtin_profile_id(id));
+        self.favorite_models
+            .iter()
+            .filter_map(|favorite| favorite.id_on(provider, profile_id))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Star a model on one account, or take the star off. Taking off a star
+    /// saved as a bare id takes it off every account it lit.
+    pub fn toggle_favorite_model(
+        &mut self,
+        provider: ProviderKind,
+        profile_id: Option<String>,
+        model: String,
+    ) {
+        let profile_id = profile_id.filter(|id| !Self::is_builtin_profile_id(id));
+        let starred = self.favorite_models.len();
+        self.favorite_models.retain(|favorite| {
+            favorite.id_on(provider, profile_id.as_deref()) != Some(model.as_str())
+        });
+        if self.favorite_models.len() == starred {
+            self.favorite_models.push(FavoriteModel::Row {
+                provider,
+                profile_id,
+                model,
+            });
+        }
+    }
+
     /// Whether `id` names a built-in provider profile.
     pub fn is_builtin_profile_id(id: &str) -> bool {
         Self::builtin_kind_from_id(id).is_some()
@@ -1492,65 +1359,123 @@ impl Settings {
     /// a user-created `profiles` entry. `None` for an unknown id.
     pub fn resolved_profile(&self, id: &str) -> Option<ResolvedProfile> {
         if let Some(kind) = Self::builtin_kind_from_id(id) {
+            let settings = self.provider(kind);
             return Some(ResolvedProfile {
                 id: id.to_string(),
                 kind,
-                settings: self.provider(kind),
+                shared_env: settings.shared_env.clone(),
+                settings,
             });
         }
-        self.profiles.get(id).map(|profile| ResolvedProfile {
+        let profile = self.profiles.get(id)?;
+        Some(self.resolve_user_profile(id, profile))
+    }
+
+    /// A user profile on top of its harness: the harness's binary, launch
+    /// arguments and switches unless the profile has a binary or arguments
+    /// of its own.
+    fn resolve_user_profile(&self, id: &str, profile: &ProviderProfile) -> ResolvedProfile {
+        let harness = self.provider(profile.kind);
+        let mut settings = profile.settings.clone();
+        settings.binary_path = settings.binary_path.or(harness.binary_path);
+        settings.launch_args = settings.launch_args.or(harness.launch_args);
+        settings.pi = harness.pi;
+        settings.shared_env = Vec::new();
+        ResolvedProfile {
             id: id.to_string(),
             kind: profile.kind,
-            settings: profile.settings.clone(),
-        })
+            settings,
+            shared_env: harness.shared_env,
+        }
+    }
+
+    /// The secrets key of a harness's shared variables.
+    pub fn harness_secret_id(kind: ProviderKind) -> String {
+        format!("harness:{}", provider_key(kind))
+    }
+
+    /// The secrets key of an installed ACP agent's variables.
+    pub fn acp_secret_id(agent_id: &str) -> String {
+        acp_color_key(agent_id)
+    }
+
+    /// Whether `id` keys secrets: a profile, a harness's shared variables or
+    /// an installed ACP agent's.
+    pub fn owns_secrets(&self, id: &str) -> bool {
+        self.resolved_profile(id).is_some()
+            || ProviderKind::NATIVE
+                .into_iter()
+                .any(|kind| Self::harness_secret_id(kind) == id)
+            || id
+                .strip_prefix("acp:")
+                .is_some_and(|agent| self.acp_agents.contains_key(agent))
     }
 
     /// Every selectable profile that drives `kind`: the built-in first, then any
     /// user profiles of that kind in id order. This is what the provider/model
     /// picker iterates.
     pub fn profiles_for_kind(&self, kind: ProviderKind) -> Vec<ResolvedProfile> {
+        let builtin = self.provider(kind);
         let mut out = vec![ResolvedProfile {
             id: Self::builtin_profile_id(kind).to_string(),
             kind,
-            settings: self.provider(kind),
+            shared_env: builtin.shared_env.clone(),
+            settings: builtin,
         }];
         for (id, profile) in &self.profiles {
             if profile.kind == kind {
-                out.push(ResolvedProfile {
-                    id: id.clone(),
-                    kind,
-                    settings: profile.settings.clone(),
-                });
+                out.push(self.resolve_user_profile(id, profile));
             }
         }
         out
     }
 
-    /// A profile's card title: its display-name override, else — for built-ins —
-    /// the driver label, else the id. Used by the sidebar / picker / status row.
+    /// A profile as the UI names it: the provider's product name, followed for
+    /// a named or user-created profile by its display name (else its id) in
+    /// parentheses, so an account never reads as a provider of its own.
     pub fn profile_display_name(&self, id: &str) -> String {
+        self.profile_display_name_as(id, None)
+    }
+
+    /// [`Self::profile_display_name`], given the email the profile is signed
+    /// in as. Once its harness has a second account or endpoint profile, an
+    /// unnamed built-in account is named for that email's local part, so
+    /// two accounts never both read as the bare product name.
+    pub fn profile_display_name_as(&self, id: &str, signed_in_as: Option<&str>) -> String {
         let Some(profile) = self.resolved_profile(id) else {
             return id.to_string();
         };
-        if let Some(name) = profile
+        let product = provider_label(profile.kind);
+        let builtin = Self::is_builtin_profile_id(id);
+        let account = signed_in_as
+            .filter(|_| {
+                builtin
+                    && self
+                        .profiles
+                        .values()
+                        .any(|other| other.kind == profile.kind)
+            })
+            .and_then(|email| email.split('@').next())
+            .map(str::trim)
+            .filter(|local| !local.is_empty());
+        let qualifier = profile
             .settings
             .display_name
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty())
-        {
-            return name.to_string();
-        }
-        if Self::is_builtin_profile_id(id) {
-            provider_label(profile.kind).to_string()
-        } else {
-            id.to_string()
+            .or(account)
+            .or_else(|| (!builtin).then_some(id));
+        match qualifier {
+            Some(name) => format!("{product} ({name})"),
+            None => product.to_string(),
         }
     }
 
-    /// Turn a human name into a stable, unique profile id (slug). Never collides
-    /// with a built-in id or an existing profile id.
-    pub fn allocate_profile_id(&self, name: &str) -> String {
+    /// The ids a new profile named `name` may take, best first: the name as a
+    /// slug, then `<slug>-2`, `<slug>-3`, …, skipping built-in ids and the ids
+    /// of these settings' profiles.
+    pub fn profile_id_candidates(&self, name: &str) -> impl Iterator<Item = String> + use<> {
         let base: String = name
             .trim()
             .to_lowercase()
@@ -1558,20 +1483,11 @@ impl Settings {
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
             .collect();
         let base = base.trim_matches('-');
-        let base = if base.is_empty() { "profile" } else { base };
-        let taken =
-            |id: &str, s: &Settings| Self::is_builtin_profile_id(id) || s.profiles.contains_key(id);
-        if !taken(base, self) {
-            return base.to_string();
-        }
-        let mut n = 2;
-        loop {
-            let candidate = format!("{base}-{n}");
-            if !taken(&candidate, self) {
-                return candidate;
-            }
-            n += 1;
-        }
+        let base = if base.is_empty() { "profile" } else { base }.to_string();
+        let taken: BTreeSet<String> = self.profiles.keys().cloned().collect();
+        std::iter::once(base.clone())
+            .chain((2..).map(move |n| format!("{base}-{n}")))
+            .filter(move |id| !Self::is_builtin_profile_id(id) && !taken.contains(id))
     }
 
     /// The `0xRRGGBB` color for a provider color key (see
@@ -1637,12 +1553,49 @@ impl Settings {
                 }
             }
         }
+        // A binary and launch arguments belong to the harness. Earlier builds
+        // copied the built-in's into each new account; a copy is dropped, and
+        // only a value of the profile's own stays, as its override.
+        let harnesses = self.providers.clone();
+        for profile in self.profiles.values_mut() {
+            let harness = harnesses
+                .get(provider_key(profile.kind))
+                .cloned()
+                .unwrap_or_default();
+            let own = &mut profile.settings;
+            if own.binary_path == harness.binary_path {
+                own.binary_path = None;
+            }
+            if own.launch_args == harness.launch_args {
+                own.launch_args = None;
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Files written while an app could be brought to the front for typing
+    /// still load, keeping the rest of what they say.
+    #[test]
+    fn computer_use_settings_from_the_foreground_typing_era_still_load() {
+        for file in [
+            r#"{"enabled":true,"allow_input":false,"allow_foreground_fallback":true}"#,
+            r#"{"enabled":true,"allow_input":false,"foreground_default":"deny","foreground_apps":{"com.apple.Notes":{"name":"Notes","allow":true}}}"#,
+        ] {
+            let settings: ComputerUseSettings = serde_json::from_str(file).unwrap();
+            assert_eq!(
+                settings,
+                ComputerUseSettings {
+                    enabled: true,
+                    allow_input: false,
+                    ..ComputerUseSettings::default()
+                }
+            );
+        }
+    }
 
     #[test]
     fn child_approval_settings_preserve_old_orchestrator_and_default_to_auto() {
@@ -1663,11 +1616,11 @@ mod tests {
                 ChildApprovalMode::Auto,
             ),
         ] {
-            let settings: OrchestrateSettings = serde_json::from_str(json).unwrap();
+            let settings: SubagentSettings = serde_json::from_str(json).unwrap();
             assert_eq!(settings.child_approval, expected, "{json}");
         }
         assert_eq!(
-            OrchestrateSettings::default().child_approval,
+            SubagentSettings::default().child_approval,
             ChildApprovalMode::Auto
         );
         assert_eq!(
@@ -1682,6 +1635,7 @@ mod tests {
         assert_eq!(legacy.auto_settle_after_days, Some(3.0));
         assert!(!legacy.auto_settle_on_merge);
         assert!(!legacy.sidebar_provider_marks);
+        assert!(legacy.scroll_to_latest_on_send);
         assert!(!legacy.sidebar_collapsed);
         assert!(!legacy.remote_hosting_enabled);
         assert_eq!(legacy.remote_host_name, None);
@@ -1691,19 +1645,6 @@ mod tests {
         assert!(legacy.browser.enabled);
         assert!(legacy.browser.allow_evaluate);
         assert_eq!(legacy.browser.home_url, None);
-        for settings in [&legacy, &Settings::default()] {
-            assert!(settings.plugins.provider_enabled(ProviderKind::Codex));
-            for kind in [
-                ProviderKind::ClaudeCode,
-                ProviderKind::Pi,
-                ProviderKind::OpenCode,
-                ProviderKind::Cursor,
-                ProviderKind::Grok,
-                ProviderKind::Acp,
-            ] {
-                assert!(!settings.plugins.provider_enabled(kind), "{kind:?}");
-            }
-        }
 
         let partial: Settings = serde_json::from_str(
             r#"{
@@ -1718,28 +1659,36 @@ mod tests {
         assert!(partial.computer_use.enabled);
         assert_eq!(partial.computer_use.image_mode, ImageMode::Auto);
         assert!(partial.computer_use.allow_input);
-        assert!(!partial.computer_use.allow_foreground_fallback);
         assert!(partial.computer_use.show_agent_cursor);
         assert!(!partial.browser.enabled);
         assert!(partial.browser.allow_evaluate);
-        assert!(!partial.orchestrate.child_worktrees);
+        assert!(!partial.subagents.child_worktrees);
         assert_eq!(partial.title_generation.profile_id, None);
-        assert!(partial.plugins.provider_enabled(ProviderKind::ClaudeCode));
-        assert!(partial.plugins.provider_enabled(ProviderKind::Codex));
-        let master_off: Settings =
-            serde_json::from_str(r#"{"plugins":{"enabled":false,"providers":{"claude":true}}}"#)
-                .unwrap();
-        assert!(!master_off.plugins.provider_enabled(ProviderKind::Codex));
-        assert!(
-            !master_off
-                .plugins
-                .provider_enabled(ProviderKind::ClaudeCode)
-        );
+    }
 
-        let child: OrchestrateChildModel =
-            serde_json::from_str(r#"{"provider":"codex","model":"m","enabled":true}"#).unwrap();
-        assert_eq!(child.profile_id, None);
-        assert!(!child.fast);
+    #[test]
+    fn an_orchestrate_block_with_its_model_lists_keeps_only_the_subagent_settings() {
+        let older: Settings = serde_json::from_str(
+            r#"{"orchestrate":{
+                "decision_models":[{"provider":"claude","model":"claude-fable-5-1","bundled":"fable"}],
+                "child_models":[{"provider":"codex","model":"gpt-6.1-sol","fast":true,"description":"notes"}],
+                "child_approval":"manual",
+                "child_worktrees":true
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            older.subagents,
+            SubagentSettings {
+                child_approval: ChildApprovalMode::Manual,
+                child_worktrees: true,
+            }
+        );
+        assert!(older.unknown.is_empty());
+        assert_eq!(
+            serde_json::to_value(&older).unwrap()["orchestrate"],
+            serde_json::json!({"child_approval": "manual", "child_worktrees": true})
+        );
     }
 
     #[test]
@@ -1878,520 +1827,74 @@ mod tests {
         let serialized = serde_json::to_value(&settings).unwrap();
         assert_eq!(serialized["pi_trust_project_extensions"], true);
         assert!(serialized.get("pi").is_none());
+    }
 
-        let legacy_patch: ProfileConfigurationPatch = serde_json::from_str(
-            r#"{
-                "display_name": null,
-                "accent_color": null,
-                "env": [],
-                "binary_path": null,
-                "home_path": null,
-                "launch_args": null,
-                "custom_models": [],
-                "hidden_models": []
-            }"#,
+    #[test]
+    fn favorites_read_older_bare_ids_beside_rows() {
+        let mut settings: Settings = serde_json::from_str(
+            r#"{"favorite_models":["opus",
+                {"provider":"codex","model":"gpt-6.1-sol","profile_id":"second"},
+                {"provider":"codex","model":"gpt-6-astra"}]}"#,
         )
         .unwrap();
-        assert!(!legacy_patch.pi.trust_project_extensions);
-    }
-
-    fn persisted(name: &str) -> String {
-        let texts: HashMap<String, String> = serde_json::from_str(include_str!(
-            "../tests/fixtures/orchestrate/persisted_bundled_texts.json"
-        ))
-        .unwrap();
-        texts[name].clone()
-    }
-
-    fn orchestrate(value: serde_json::Value) -> OrchestrateSettings {
-        serde_json::from_value(value).unwrap()
-    }
-
-    #[test]
-    fn orchestrate_defaults_and_legacy_migration() {
-        let defaults = OrchestrateSettings::default();
         assert_eq!(
-            defaults
-                .decision_models
-                .iter()
-                .map(|entry| entry.model.as_str())
-                .collect::<Vec<_>>(),
-            ["gpt-6-astra", "claude-fable-5-1"]
+            settings.favorite_ids(ProviderKind::ClaudeCode, "claude"),
+            ["opus"]
         );
-        assert_eq!(defaults.child_models.len(), 2);
-        assert_eq!(defaults.child_models[0].model, "gpt-6.1-sol");
-        assert_eq!(defaults.child_models[0].provider, ProviderKind::Codex);
-        assert!(!defaults.child_models[0].fast);
-        assert!(
-            defaults.child_models[0]
-                .guidance(false)
-                .contains("Start at medium")
-        );
-        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
-        assert_eq!(legacy.orchestrate, defaults);
-        let migrated = orchestrate(serde_json::json!({
-            "child_models": [
-                {"provider": "codex", "model": "gpt-5.6-sol", "enabled": true, "fast": false,
-                 "description": persisted("sol_5_6_execution")},
-                {"provider": "claude_code", "model": "claude-opus-5-5", "enabled": true, "fast": false,
-                 "description": persisted("opus_5_5_execution")},
-                {"provider": "codex", "model": "gpt-6-astra", "enabled": true, "fast": false,
-                 "description": persisted("astra_collaboration")},
-                {"provider": "claude_code", "model": "claude-fable-5-1", "enabled": false, "fast": false,
-                 "description": "Custom consultation guidance"}
-            ],
-            "generic_identity": "old self-concept",
-            "model_identities": [{"provider":"codex","model":"gpt-5.6-sol","identity":"old identity"}]
-        }));
-        assert_eq!(migrated.child_models, defaults.child_models);
         assert_eq!(
-            migrated.decision_models,
-            [
-                defaults.decision_models[0].clone(),
-                OrchestrateChildModel {
-                    enabled: false,
-                    description: "Custom consultation guidance".into(),
-                    bundled: None,
-                    ..defaults.decision_models[1].clone()
-                }
-            ]
+            settings.favorite_ids(ProviderKind::ClaudeCode, "second-claude"),
+            ["opus"]
         );
-        let json = serde_json::to_string(&migrated).unwrap();
-        assert!(!json.contains("identity"));
         assert_eq!(
-            serde_json::from_str::<OrchestrateSettings>(&json).unwrap(),
-            migrated
+            settings.favorite_ids(ProviderKind::Codex, "codex"),
+            ["opus", "gpt-6-astra"]
         );
-        let empty: OrchestrateSettings =
-            serde_json::from_str(r#"{"decision_models":[],"child_models":[]}"#).unwrap();
-        let legacy_empty: OrchestrateSettings =
-            serde_json::from_str(r#"{"generic_identity":"old instructions"}"#).unwrap();
-        assert!(
-            legacy_empty.child_models.is_empty(),
-            "omitted legacy execution list stays empty"
-        );
-        assert!(empty.decision_models.is_empty());
-        assert!(empty.child_models.is_empty());
         assert_eq!(
-            serde_json::from_str::<OrchestrateSettings>(&serde_json::to_string(&empty).unwrap())
-                .unwrap(),
-            empty
+            settings.favorite_ids(ProviderKind::Codex, "second"),
+            ["opus", "gpt-6.1-sol"]
         );
-    }
-
-    #[test]
-    fn orchestrate_rows_store_bundled_guidance_by_reference() {
-        let bundled_copies = serde_json::json!({
-            "decision_models": [
-                {"provider": "codex", "model": "gpt-6-astra", "enabled": true,
-                 "description": persisted("astra_collaboration")},
-                {"provider": "claude_code", "model": "claude-fable-5-1", "enabled": true,
-                 "description": persisted("fable_5_1_collaboration")}
-            ],
-            "child_models": [
-                {"provider": "codex", "model": "gpt-6.1-sol", "enabled": true,
-                 "description": persisted("sol_6_1_execution")},
-                {"provider": "claude_code", "model": "claude-opus-5-5", "enabled": true,
-                 "description": persisted("opus_5_5_execution")}
-            ]
-        });
-        let mut settings = Settings {
-            orchestrate: orchestrate(bundled_copies),
-            ..Settings::default()
-        };
-        assert!(settings.orchestrate.is_default());
-        assert!(serde_json::to_value(&settings).unwrap()["orchestrate"].is_null());
-
-        let mut children = settings.orchestrate.child_models.clone();
-        children[1].enabled = false;
-        children[1].description = format!("{}\n", children[1].guidance(false));
-        children.push(OrchestrateChildModel {
-            provider: ProviderKind::Codex,
-            model: "gpt-6-astra".into(),
-            profile_id: None,
-            enabled: true,
-            fast: false,
-            description: String::new(),
-            bundled: None,
-        });
-        settings
-            .apply(SettingsPatch::OrchestrateChildModels(children))
-            .unwrap();
-        let mut decisions = settings.orchestrate.decision_models.clone();
-        decisions[0].description = "Mine.".into();
-        settings
-            .apply(SettingsPatch::OrchestrateDecisionModels(decisions))
-            .unwrap();
-        let saved = serde_json::to_value(&settings.orchestrate).unwrap();
         assert_eq!(
-            saved["decision_models"],
+            serde_json::to_value(&settings).unwrap()["favorite_models"],
             serde_json::json!([
-                {"provider": "codex", "model": "gpt-6-astra", "enabled": true, "description": "Mine."},
-                {"provider": "claude_code", "model": "claude-fable-5-1", "enabled": true, "bundled": "fable"}
+                "opus",
+                {"provider":"codex","model":"gpt-6.1-sol","profile_id":"second"},
+                {"provider":"codex","model":"gpt-6-astra"}
             ])
         );
-        assert_eq!(
-            saved["child_models"],
-            serde_json::json!([
-                {"provider": "codex", "model": "gpt-6.1-sol", "enabled": true, "bundled": "sol"},
-                {"provider": "claude_code", "model": "claude-opus-5-5", "enabled": false, "bundled": "opus"},
-                {"provider": "codex", "model": "gpt-6-astra", "enabled": true, "bundled": "astra-executor"}
-            ])
-        );
-        assert_eq!(
-            settings.orchestrate.child_models[2].guidance(false),
-            persisted("astra_execution")
-        );
-        assert_eq!(orchestrate(saved), settings.orchestrate);
-    }
 
-    #[test]
-    fn orchestrate_tracking_rows_follow_their_bundled_profile() {
-        let loaded = orchestrate(serde_json::json!({
-            "decision_models": [],
-            "child_models": [
-                {"provider": "codex", "model": "gpt-6-sol", "enabled": false, "fast": true, "bundled": "sol"},
-                {"provider": "codex", "model": "gpt-9-sol", "bundled": "retired"}
-            ]
-        }));
+        settings.toggle_favorite_model(ProviderKind::ClaudeCode, None, "opus".into());
         assert_eq!(
-            loaded.child_models,
-            [
-                OrchestrateChildModel {
-                    enabled: false,
-                    fast: true,
-                    ..OrchestrateSettings::default().child_models[0].clone()
-                },
-                OrchestrateChildModel {
-                    provider: ProviderKind::Codex,
-                    model: "gpt-9-sol".into(),
-                    profile_id: None,
-                    enabled: true,
-                    fast: false,
-                    description: String::new(),
-                    bundled: None,
-                }
-            ]
+            settings.favorite_ids(ProviderKind::ClaudeCode, "second-claude"),
+            Vec::<String>::new(),
+            "a bare id has one star to take off"
         );
     }
 
     #[test]
-    fn orchestrate_recognizes_every_persisted_bundled_text() {
-        let defaults = OrchestrateSettings::default();
-        let sol = || vec![defaults.child_models[0].clone()];
-        let opus = || vec![defaults.child_models[1].clone()];
-        for (model, text, expected) in [
-            ("gpt-5.6-sol", "sol_5_6_execution", sol()),
-            ("gpt-6-sol", "sol_6_execution", sol()),
-            ("gpt-6.1-sol", "sol_6_1_execution", sol()),
-            ("gpt-6-astra", "astra_low_execution", sol()),
-            ("gpt-6-astra", "astra_execution", sol()),
-            ("claude-opus-5", "opus_5_execution", opus()),
-            ("claude-opus-5", "opus_across_providers_execution", opus()),
-            ("claude-opus-5", "opus_5_5_execution", opus()),
-            ("claude-opus-5-5", "opus_across_providers_execution", opus()),
-            ("claude-opus-5-5", "opus_5_5_execution", opus()),
-        ] {
-            let provider = if model.starts_with("gpt") {
-                "codex"
-            } else {
-                "claude_code"
-            };
-            let loaded = orchestrate(serde_json::json!({
-                "decision_models": [],
-                "child_models": [{"provider": provider, "model": model, "description": persisted(text)}]
-            }));
-            assert_eq!(loaded.child_models, expected, "{model}: {text}");
-        }
-        for (provider, model, text, index) in [
-            ("codex", "gpt-6-astra", "astra_collaboration", 0),
-            (
-                "claude_code",
-                "claude-fable-5-1",
-                "fable_5_1_collaboration",
-                1,
-            ),
-        ] {
-            let loaded = orchestrate(serde_json::json!({
-                "decision_models": [{"provider": provider, "model": model, "description": persisted(text)}],
-                "child_models": []
-            }));
-            assert_eq!(
-                loaded.decision_models,
-                [defaults.decision_models[index].clone()],
-                "{text}"
-            );
-        }
-        // (collaboration, index of the bundled default row it becomes)
-        for (provider, model, text, expected) in [
-            ("codex", "gpt-5.6-sol", "tier_gpt_medium", Some((false, 0))),
-            ("codex", "gpt-5.6-sol", "tier_gpt_default", Some((false, 0))),
-            ("codex", "gpt-5.6-sol", "tier_gpt_max", Some((false, 0))),
-            (
-                "codex",
-                "gpt-5.6-sol",
-                "tier_top_judgment",
-                Some((false, 0)),
-            ),
-            (
-                "claude_code",
-                "claude-opus-4-8",
-                "tier_opus",
-                Some((false, 1)),
-            ),
-            ("codex", "gpt-6-astra", "tier_astra", Some((true, 0))),
-            (
-                "claude_code",
-                "claude-fable-5",
-                "tier_fable",
-                Some((true, 1)),
-            ),
-            ("claude_code", "claude-sonnet-5", "tier_sonnet", None),
-        ] {
-            let loaded = orchestrate(serde_json::json!({
-                "child_models": [{"provider": provider, "model": model, "effort": "high",
-                                  "enabled": false, "description": persisted(text)}]
-            }));
-            let mut decisions = defaults.decision_models.clone();
-            let mut children = Vec::new();
-            match expected {
-                Some((true, index)) => decisions[index].enabled = false,
-                Some((false, index)) => children.push(OrchestrateChildModel {
-                    enabled: false,
-                    ..defaults.child_models[index].clone()
-                }),
-                None => {}
-            }
-            assert_eq!(
-                (loaded.decision_models, loaded.child_models),
-                (decisions, children),
-                "{text}"
-            );
-        }
-    }
-
-    #[test]
-    fn orchestrate_keeps_customised_opus_5_rows() {
-        let old_json = r#"{
-            "decision_models": [],
-            "child_models": [
-                {"provider": "claude_code", "model": "claude-opus-5", "profile_id": "corp", "description": "Execution model for agentic coding, cross-file implementation, refactoring, debugging, and review across providers, including user-facing behavior and API or UI details. Use medium for clear bounded work, high for substantial implementation, and xhigh or max when difficult reasoning justifies the extra work; low can suit small mechanical tasks. Match verification to the changed behavior and avoid repetitive self-checking. Report evidence and unresolved limitations concisely."},
-                {"provider": "claude_code", "model": "claude-opus-5", "description": "Reviewer only."}
-            ]
-        }"#;
-        let migrated: OrchestrateSettings = serde_json::from_str(old_json).unwrap();
-        assert_eq!(
-            migrated.child_models.len(),
-            1,
-            "same model merges into one row"
-        );
-        let opus = &migrated.child_models[0];
-        assert_eq!(opus.model, "claude-opus-5");
-        assert_eq!(opus.profile_id.as_deref(), Some("corp"));
-        assert!(opus.description.contains("Reviewer only."));
-
-        // An untouched Opus 5 row merges into the Opus 5.5 row the user already added.
-        let migrated = orchestrate(serde_json::json!({
-            "decision_models": [],
-            "child_models": [
-                {"provider": "claude_code", "model": "claude-opus-5-5", "description": "Mine."},
-                {"provider": "claude_code", "model": "claude-opus-5", "description": persisted("opus_5_execution")}
-            ]
-        }));
-        let models: Vec<_> = migrated
-            .child_models
-            .iter()
-            .map(|entry| (entry.model.as_str(), entry.description.as_str()))
-            .collect();
-        assert_eq!(models, [("claude-opus-5-5", "Mine.")]);
-    }
-
-    #[test]
-    fn orchestrate_moves_untouched_codex_executors_to_sol_6_1() {
-        let sol = OrchestrateSettings::default().child_models[0].clone();
-        for (model, text, endpoint_guidance) in [
-            ("gpt-5.6-sol", "sol_5_6_execution", "sol_5_6_execution"),
-            ("gpt-6-astra", "astra_low_execution", "astra_execution"),
-            ("gpt-6-astra", "astra_execution", "astra_execution"),
-            ("gpt-6-sol", "sol_6_execution", "sol_6_execution"),
-        ] {
-            let text = persisted(text);
-            for (enabled, fast) in [(true, false), (false, false), (true, true)] {
-                let migrated = orchestrate(serde_json::json!({
-                    "decision_models": [],
-                    "child_models": [{
-                        "provider": "codex", "model": model, "description": text,
-                        "enabled": enabled, "fast": fast
-                    }]
-                }));
-                assert_eq!(
-                    migrated.child_models,
-                    [OrchestrateChildModel {
-                        enabled,
-                        fast,
-                        ..sol.clone()
-                    }],
-                    "{model}: enabled={enabled}, fast={fast}"
-                );
-            }
-            let kept = orchestrate(serde_json::json!({
-                "decision_models": [],
-                "child_models": [{"provider": "codex", "model": model, "description": "custom"}]
-            }));
-            assert_eq!(
-                (
-                    kept.child_models[0].model.as_str(),
-                    kept.child_models[0].description.as_str()
-                ),
-                (model, "custom")
-            );
-            let endpoint = orchestrate(serde_json::json!({
-                "decision_models": [],
-                "child_models": [{
-                    "provider": "codex", "model": model, "description": text,
-                    "profile_id": "custom"
-                }]
-            }));
-            let row = &endpoint.child_models[0];
-            assert_eq!(
-                (
-                    row.model.as_str(),
-                    row.profile_id.as_deref(),
-                    row.guidance(false)
-                ),
-                (model, Some("custom"), persisted(endpoint_guidance).as_str()),
-                "{model}: an endpoint profile keeps its model"
-            );
-            let migrated = orchestrate(serde_json::json!({
-                "decision_models": [],
-                "child_models": [{
-                    "provider": "codex", "model": model, "description": text
-                }, {
-                    "provider": "codex", "model": "gpt-6.1-sol", "profile_id": "custom-codex",
-                    "enabled": false, "fast": true, "description": "User execution guidance"
-                }]
-            }));
-            assert_eq!(
-                migrated.child_models,
-                [OrchestrateChildModel {
-                    provider: ProviderKind::Codex,
-                    model: "gpt-6.1-sol".into(),
-                    profile_id: Some("custom-codex".into()),
-                    enabled: false,
-                    fast: true,
-                    description: "User execution guidance".into(),
-                    bundled: None,
-                }],
-                "{model}: existing destination stays unchanged"
-            );
-        }
-    }
-
-    #[test]
-    fn orchestrate_merges_legacy_tiers_and_upgrades_bundled_models() {
-        let settings = orchestrate(serde_json::json!({
-            "child_models": [
-                {"provider":"codex", "model":"gpt-5.6-sol", "default_effort":"medium", "description":"Routine work", "enabled":false, "profile_id":"custom", "fast":true},
-                {"provider":"codex", "model":"gpt-5.6-sol", "effort":"max", "description":"Difficult bugs"},
-                {"provider":"claude_code", "model":"claude-sonnet-5", "effort":"high", "description":persisted("tier_sonnet")},
-                {"provider":"claude_code", "model":"claude-opus-4-8", "effort":"high", "description":persisted("tier_opus")},
-                {"provider":"claude_code", "model":"claude-fable-5", "effort":"high", "description":persisted("tier_fable")}
-            ]
-        }));
-        let defaults = OrchestrateSettings::default();
-        assert_eq!(settings.child_models.len(), 2);
-        let sol = &settings.child_models[0];
-        assert!(sol.description.contains("medium effort: Routine work"));
-        assert!(sol.description.contains("max effort: Difficult bugs"));
-        assert!(!sol.enabled);
-        assert!(sol.fast);
-        assert_eq!(sol.profile_id.as_deref(), Some("custom"));
-        assert_eq!(settings.child_models[1], defaults.child_models[1]);
-        assert_eq!(settings.decision_models, defaults.decision_models);
-        let serialized = serde_json::to_string(&settings).unwrap();
-        assert!(!serialized.contains("\"effort\""));
-        assert_eq!(
-            serde_json::from_str::<OrchestrateSettings>(&serialized).unwrap(),
-            settings
-        );
-    }
-
-    #[test]
-    fn orchestrate_capabilities_use_catalog_and_cap_collaboration() {
-        let catalog = vec![ModelSpec {
-            id: "custom".into(),
-            display_name: "Custom".into(),
-            is_default: false,
-            options: vec![OptionDescriptor::Select {
-                role: Default::default(),
-                apply: Default::default(),
-                recommended: None,
-                permissive: None,
-                id: "reasoningEffort".into(),
-                label: "Effort".into(),
-                default_value: None,
-                options: ["medium", "high", "deep"]
-                    .into_iter()
-                    .map(|value| agent::SelectOption {
-                        unavailable: None,
-                        value: value.into(),
-                        label: value.into(),
-                        description: None,
-                    })
-                    .collect(),
-            }],
-        }];
-        assert_eq!(
-            orchestrate_efforts(ProviderKind::Codex, "custom", &catalog, false),
-            ["medium", "high", "deep"]
-        );
-        assert_eq!(
-            orchestrate_efforts(ProviderKind::Codex, "custom", &catalog, true),
-            ["medium", "high"]
-        );
-        assert!(orchestrate_efforts(ProviderKind::Codex, "unknown", &catalog, false).is_empty());
-        for entry in OrchestrateSettings::default().decision_models {
-            assert_eq!(
-                orchestrate_efforts(entry.provider, &entry.model, &[], true),
-                ["medium", "high"]
-            );
-        }
-    }
-
-    #[test]
-    fn orchestrate_settings_patches_deduplicate_within_each_role() {
+    fn a_favorite_stars_one_account() {
         let mut settings = Settings::default();
-        let peer = settings.orchestrate.decision_models[0].clone();
-        // The same model serves both roles with role-specific guidance.
-        let executor = OrchestrateChildModel {
-            description: "Executor notes".into(),
-            bundled: None,
-            ..peer.clone()
-        };
-        settings.orchestrate.child_models[0] = executor.clone();
+        settings.toggle_favorite_model(ProviderKind::Codex, Some("second".into()), "model".into());
+        settings.toggle_favorite_model(
+            ProviderKind::Codex,
+            Some("codex".into()),
+            "built-in".into(),
+        );
+        assert_eq!(
+            settings.favorite_ids(ProviderKind::Codex, "second"),
+            ["model"]
+        );
+        assert_eq!(
+            settings.favorite_ids(ProviderKind::Codex, "codex"),
+            ["built-in"]
+        );
+        assert_eq!(
+            settings.favorite_ids(ProviderKind::ClaudeCode, "claude"),
+            Vec::<String>::new()
+        );
 
-        let mut duplicate = executor.clone();
-        duplicate.profile_id = Some("another-endpoint".into());
-        duplicate.description = "must not overwrite".into();
-        let mut children = settings.orchestrate.child_models.clone();
-        children.push(duplicate);
-        settings
-            .apply(SettingsPatch::OrchestrateChildModels(children))
-            .unwrap();
-        assert_eq!(settings.orchestrate.child_models.len(), 2);
-        assert_eq!(settings.orchestrate.child_models[0], executor);
-
-        let mut duplicate = peer.clone();
-        duplicate.profile_id = Some("another-endpoint".into());
-        duplicate.description = "must not overwrite".into();
-        let mut decisions = settings.orchestrate.decision_models.clone();
-        decisions.push(duplicate);
-        settings
-            .apply(SettingsPatch::OrchestrateDecisionModels(decisions))
-            .unwrap();
-        assert_eq!(settings.orchestrate.decision_models.len(), 2);
-        assert_eq!(settings.orchestrate.decision_models[0], peer);
-        assert_eq!(settings.orchestrate.child_models[0], executor);
+        settings.toggle_favorite_model(ProviderKind::Codex, Some("second".into()), "model".into());
+        settings.toggle_favorite_model(ProviderKind::Codex, None, "built-in".into());
+        assert!(settings.favorite_models.is_empty());
     }
 
     #[test]
@@ -2401,7 +1904,10 @@ mod tests {
         settings.provider_mut(ProviderKind::ClaudeCode).display_name = Some("Claude".into());
 
         // A user profile driving the same protocol (third-party Claude).
-        let id = settings.allocate_profile_id("Klaude Kode");
+        let id = settings
+            .profile_id_candidates("Klaude Kode")
+            .next()
+            .unwrap();
         assert_eq!(id, "klaude-kode");
         settings.profiles.insert(
             id.clone(),
@@ -2448,13 +1954,25 @@ mod tests {
             ProviderKind::OpenCode
         );
 
-        // Display names: built-in falls back to label; user shows its name.
-        assert_eq!(settings.profile_display_name("claude"), "Claude");
-        assert_eq!(settings.profile_display_name(&id), "Klaude Kode");
+        // Display names: the product name, then the display name in parentheses.
+        assert_eq!(
+            settings.profile_display_name("claude"),
+            "Claude Code (Claude)"
+        );
+        assert_eq!(
+            settings.profile_display_name(&id),
+            "Claude Code (Klaude Kode)"
+        );
         assert_eq!(settings.resolved_profile("nope"), None);
 
         // A second profile of the same name gets a distinct id.
-        assert_eq!(settings.allocate_profile_id("Klaude Kode"), "klaude-kode-2");
+        assert_eq!(
+            settings
+                .profile_id_candidates("Klaude Kode")
+                .next()
+                .unwrap(),
+            "klaude-kode-2"
+        );
     }
 
     #[test]
@@ -2478,7 +1996,7 @@ mod tests {
             ProviderKind::Cursor
         );
         assert!(!Settings::is_builtin_profile_id(
-            &settings.allocate_profile_id(&builtin.id)
+            &settings.profile_id_candidates(&builtin.id).next().unwrap()
         ));
         let thread = crate::project::SessionMeta::new(ProviderKind::Cursor, "/x".into(), None);
         assert_ne!(
@@ -2604,6 +2122,85 @@ mod account_usage_tests {
         assert!(
             custom.supports_account_usage(),
             "a custom profile using native account auth remains eligible, even signed out"
+        );
+    }
+}
+
+#[cfg(test)]
+mod harness_settings_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Earlier builds copied the built-in binary and launch arguments into
+    /// each new account. A settings file from then loads with the copies
+    /// dropped, so the account follows its harness, while a binary or
+    /// arguments of the account's own stay its override.
+    #[test]
+    fn account_copies_of_the_harness_binary_are_dropped_and_their_own_kept() {
+        let mut settings: Settings = serde_json::from_str(
+            r#"{
+                "providers": {"claude": {"binary_path": "/a/claude", "launch_args": "--chrome"}},
+                "profiles": {
+                    "work": {"kind": "claude_code", "display_name": "Work",
+                             "binary_path": "/a/claude", "launch_args": "--debug"},
+                    "kimi": {"kind": "claude_code", "binary_path": "/b/claude",
+                             "launch_args": "--chrome"}
+                }
+            }"#,
+        )
+        .unwrap();
+        settings.migrate_legacy();
+        let own = |id: &str| settings.profiles[id].settings.clone();
+        assert_eq!(own("work").binary_path, None);
+        assert_eq!(own("work").launch_args.as_deref(), Some("--debug"));
+        assert_eq!(
+            own("kimi").binary_path.as_deref(),
+            Some(Path::new("/b/claude"))
+        );
+        assert_eq!(own("kimi").launch_args, None);
+
+        // The harness's binary moves, and the account without its own moves with it.
+        settings.provider_mut(ProviderKind::ClaudeCode).binary_path = Some("/c/claude".into());
+        let work = settings.resolved_profile("work").unwrap().settings;
+        assert_eq!(work.binary_path.as_deref(), Some(Path::new("/c/claude")));
+        assert_eq!(work.launch_args.as_deref(), Some("--debug"));
+        let kimi = settings.resolved_profile("kimi").unwrap().settings;
+        assert_eq!(kimi.binary_path.as_deref(), Some(Path::new("/b/claude")));
+        assert_eq!(kimi.launch_args.as_deref(), Some("--chrome"));
+    }
+
+    /// An unnamed default account reads as its harness alone until the
+    /// harness has another account or endpoint profile; then it is named for
+    /// the local part of the email it is signed in as, unless the user named
+    /// it.
+    #[test]
+    fn the_default_account_is_named_for_its_email_beside_another() {
+        let mut settings = Settings::default();
+        let email = Some("tryanks@example.com");
+        assert_eq!(
+            settings.profile_display_name_as("claude", email),
+            "Claude Code"
+        );
+        settings.profiles.insert(
+            "kimi".into(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings::default(),
+            },
+        );
+        assert_eq!(
+            settings.profile_display_name_as("claude", email),
+            "Claude Code (tryanks)"
+        );
+        assert_eq!(
+            settings.profile_display_name_as("claude", None),
+            "Claude Code"
+        );
+        assert_eq!(settings.profile_display_name_as("codex", email), "Codex");
+        settings.provider_mut(ProviderKind::ClaudeCode).display_name = Some("Mine".into());
+        assert_eq!(
+            settings.profile_display_name_as("claude", email),
+            "Claude Code (Mine)"
         );
     }
 }

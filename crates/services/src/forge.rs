@@ -3,6 +3,7 @@
 //! it; what crosses is Tcode's own model. Each host of a kind is served by that kind's
 //! implementation. Call blocking entries via HostCx::unblock.
 
+pub(crate) mod account;
 pub(crate) mod anchors;
 pub(crate) mod checkout;
 pub use checkout::Checkout;
@@ -27,7 +28,7 @@ use tcode_core::{
     },
     pull_request_watch::{PullRequestRemark, PullRequestWatchRead},
     session::ReviewSide,
-    settings::{HostSettings, HostStatus},
+    settings::{HostSettings, HostStatus, TokenCheck},
 };
 use tcode_protocol::{
     PullRequestAction, PullRequestActionResult as Outcome, PullRequestCapabilities,
@@ -70,6 +71,12 @@ pub trait Forge: Send + Sync {
     fn credential_status(&self) -> BTreeMap<String, HostStatus>;
     /// Drops what is held of the host's credential, so the next request resolves it again.
     fn forget_credential(&self, host: &str);
+    /// Asks the host whose `token` is (sent with `email` where the kind takes one) without
+    /// saving it.
+    fn check_token(&self, host: &str, token: &str, email: Option<&str>) -> TokenCheck;
+    /// Learns whose the saved or environment token the host uses is, when that is not yet
+    /// known, for [`credential_status`](Self::credential_status) to report.
+    fn identify(&self, host: &str);
 
     /// The key and canonical URL of a pull request's web URL, or `None` for any other URL.
     fn pull_request_url(&self, url: &str) -> Option<(PullRequestKey, String)>;
@@ -482,6 +489,14 @@ impl Forge for Hosts {
 
     fn forget_credential(&self, host: &str) {
         self.host(host).forget_credential(host);
+    }
+
+    fn check_token(&self, host: &str, token: &str, email: Option<&str>) -> TokenCheck {
+        self.host(host).check_token(host, token, email)
+    }
+
+    fn identify(&self, host: &str) {
+        self.host(host).identify(host);
     }
 
     fn pull_request_url(&self, url: &str) -> Option<(PullRequestKey, String)> {

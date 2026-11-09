@@ -4,18 +4,28 @@ use crate::store::ComposerState;
 
 use agent::context_window::{self, OPTION_ID};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The context-window choice for the active model: its presets, each applied
 /// as it is chosen, and a custom size.
 pub(in super::super) struct ContextWindowDialog {
     store: Entity<WorkspaceStore>,
+    /// The thread whose model the dialog sizes.
+    session_id: Option<String>,
     custom: Entity<InputState>,
     invalid: bool,
     _custom_events: Subscription,
 }
 
 impl ContextWindowDialog {
-    fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let max = context_window::format(largest_window(&store, cx));
+    fn new(
+        store: Entity<WorkspaceStore>,
+        session_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let max = context_window::format(largest_window(&store, session_id.as_deref(), cx));
         let custom = cx.new(|cx| {
             InputState::new(window, cx).placeholder(crate::tr!(
                 "composer.context_window_custom_placeholder",
@@ -33,6 +43,7 @@ impl ContextWindowDialog {
             });
         Self {
             store,
+            session_id,
             custom,
             invalid: false,
             _custom_events: custom_events,
@@ -41,13 +52,18 @@ impl ContextWindowDialog {
 
     fn apply_custom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let value = self.custom.read(cx).value().to_string();
-        let max = largest_window(&self.store, cx);
+        let max = largest_window(&self.store, self.session_id.as_deref(), cx);
         match context_window::parse_tokens(&serde_json::Value::String(value))
             .filter(|tokens| *tokens <= max)
         {
             Some(tokens) => {
+                let session_id = self.session_id.clone().unwrap_or_default();
                 self.store.update(cx, |store, _cx| {
-                    store.set_active_option(OPTION_ID.to_string(), Some(serde_json::json!(tokens)));
+                    store.set_active_option_for(
+                        session_id,
+                        OPTION_ID.to_string(),
+                        Some(serde_json::json!(tokens)),
+                    );
                 });
                 window.close_dialog(cx);
             }
@@ -61,7 +77,10 @@ impl ContextWindowDialog {
 
 impl Render for ContextWindowDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let composer = self.store.read(cx).composer_state();
+        let composer = self
+            .store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref(), cx);
         let Some((options, default_value)) = context_window_descriptor(&composer) else {
             return div().into_any_element();
         };
@@ -82,17 +101,23 @@ impl Render for ContextWindowDialog {
                 .any(|option| tokens_of(&option.value) == Some(selected))
         });
         let compact = crate::window_seam::window_is_compact(window, cx);
+        let invalid = crate::motion::shown(
+            "context-window-invalid",
+            self.invalid.then_some(()),
+            SHOW,
+            window,
+            cx,
+        );
         let primary = cx.theme().primary;
         let default_suffix = crate::tr!("composer.option_default").into_owned();
 
         let row = |id: gpui::SharedString, label: String, checked: bool, cx: &App| {
-            crate::material::menu_item_frame(compact, cx)
+            crate::material::menu_item_frame(compact, crate::material::ItemFill::Hover, cx)
                 .id(id)
                 .w_full()
                 .items_center()
                 .cursor_pointer()
                 .text_body(compact, cx)
-                .hover(|style| style.bg(cx.theme().muted))
                 .child(div().flex_1().min_w_0().child(label))
                 .when(checked, |row| {
                     row.child(Icon::new(IconName::Check).text_color(primary))
@@ -107,13 +132,15 @@ impl Render for ContextWindowDialog {
             }
             let checked = selected.is_some() && tokens_of(&option.value) == selected;
             let store = self.store.clone();
+            let session_id = self.session_id.clone().unwrap_or_default();
             let value = option.value.clone();
             list = list.child(
                 row(format!("context-window-{index}").into(), label, checked, cx).on_click(
                     move |_, window, cx| {
                         let value = value.clone();
                         store.update(cx, |store, _cx| {
-                            store.set_active_option(
+                            store.set_active_option_for(
+                                session_id.clone(),
                                 OPTION_ID.to_string(),
                                 Some(serde_json::Value::String(value)),
                             );
@@ -143,19 +170,25 @@ impl Render for ContextWindowDialog {
             v_flex()
                 .px_2()
                 .pt_1()
-                .gap_1()
                 .child(Input::new(&self.custom))
-                .when(self.invalid, |this| {
-                    this.child(
+                // The error folds in under the field on Apply and away as
+                // the field is edited.
+                .children(invalid.map(|shown| {
+                    shown.fold(
                         div()
+                            .pt_1()
                             .text_secondary(compact, cx)
                             .text_color(cx.theme().danger)
                             .child(crate::tr!(
                                 "composer.context_window_invalid",
-                                max = context_window::format(largest_window(&self.store, cx))
+                                max = context_window::format(largest_window(
+                                    &self.store,
+                                    self.session_id.as_deref(),
+                                    cx
+                                ))
                             )),
                     )
-                }),
+                })),
         )
         .into_any_element()
     }
@@ -178,18 +211,29 @@ pub(in super::super) fn context_window_descriptor(
 /// The largest preset of the active model: a custom size cannot exceed the
 /// window the model can launch with. A model whose presets are unknown is
 /// capped at the largest window any provider offers today.
-fn largest_window(store: &Entity<WorkspaceStore>, cx: &App) -> u64 {
-    context_window::largest(&store.read(cx).composer_state().active_option_descriptors)
-        .unwrap_or(1_000_000)
+fn largest_window(store: &Entity<WorkspaceStore>, session_id: Option<&str>, cx: &App) -> u64 {
+    context_window::largest(
+        &store
+            .read(cx)
+            .composer_state_for(session_id, cx)
+            .active_option_descriptors,
+    )
+    .unwrap_or(1_000_000)
 }
 
-/// Open the context-window dialog for the active model.
-pub(in super::super) fn open(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut App) {
-    let dialog = cx.new(|cx| ContextWindowDialog::new(store, window, cx));
+/// Open the context-window dialog for the model of `session_id`'s thread.
+pub(in super::super) fn open(
+    store: Entity<WorkspaceStore>,
+    session_id: Option<String>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let dialog = cx.new(|cx| ContextWindowDialog::new(store, session_id, window, cx));
     window.open_dialog(cx, move |builder, _, _| {
         let content = dialog.clone();
         let apply = dialog.clone();
         builder
+            .sheet()
             .title(crate::tr!("composer.context_window_title").into_owned())
             .content(move |content_el, _, _| content_el.child(content.clone()))
             .footer(

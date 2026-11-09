@@ -2,13 +2,22 @@ use super::super::*;
 use crate::scroll::ScrollableElement as _;
 use tcode_core::session::PendingUserInput;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl Composer {
     /// The active session's pending user-input request, if any.
     pub(in super::super) fn pending_user_input(&self, cx: &App) -> Option<PendingUserInput> {
-        self.workspace_store
-            .read(cx)
-            .composer_state()
-            .pending_user_input
+        self.composer_state(cx).pending_user_input.clone()
     }
 
     /// Keep the per-request question state in sync: reset the index/selections
@@ -18,11 +27,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let current = self
-            .workspace_store
-            .read(cx)
-            .composer_state()
-            .pending_user_input;
+        let current = self.composer_state(cx).pending_user_input.clone();
         let current_id = current.as_ref().map(|pending| pending.request_id.clone());
         if current_id != self.ui_request_id {
             self.ui_request_id = current_id;
@@ -50,36 +55,74 @@ impl Composer {
     /// leaves the screen however long the question runs. A blocking question
     /// arrives open, because the agent is waiting; a non-blocking one arrives
     /// closed and can be hidden, because the agent keeps working.
+    ///
+    /// Hiding the card folds it away as the pill that brings it back folds
+    /// in, and back.
     pub(in super::super) fn render_user_input_panel(
         &self,
         pending: &PendingUserInput,
-        window: &Window,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Hiding is local to this client; the question stays open on the host,
+        // so a way back remains while the sidebar still asks for an answer.
+        let hidden = !pending.delivery.is_blocking()
+            && self.ui_dismissed_request_id.as_ref() == Some(&pending.request_id);
+        crate::motion::keyed::keyed_owned(
+            &self.motion,
+            self.motion_key(format_args!("user-input-{}", pending.request_id)),
+            crate::motion::keyed::Fold::Down,
+            [(
+                gpui::SharedString::from(if hidden { "pill" } else { "card" }),
+                hidden,
+            )],
+            ROWS,
+            window,
+            cx,
+            |_, hidden, window, cx| {
+                if *hidden {
+                    self.render_user_input_pill(cx)
+                } else {
+                    self.render_user_input_card(pending, window, cx)
+                }
+            },
+        )
+        .render(v_flex().w_full())
+    }
+
+    fn render_user_input_pill(&self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .w_full()
+            .child(
+                Button::new("ui-reveal")
+                    .motion(&self.button_motion())
+                    .debug_selector(|| "ui-reveal".into())
+                    .ghost()
+                    .xsmall()
+                    .touch(self.compact)
+                    .icon(IconName::Info)
+                    .label(crate::tr!("userinput.async_header"))
+                    .tooltip(crate::tr!("userinput.answer"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.ui_dismissed_request_id = None;
+                        this.ui_expanded = true;
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The question card: a strip naming the question, over the answer area
+    /// that folds open and shut under it. Moving to another question
+    /// cross-fades the question and its options.
+    fn render_user_input_card(
+        &self,
+        pending: &PendingUserInput,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let request_id = pending.request_id.clone();
         let blocking = pending.delivery.is_blocking();
-        // Hiding is local to this client; the question stays open on the host,
-        // so a way back remains while the sidebar still asks for an answer.
-        if !blocking && self.ui_dismissed_request_id.as_ref() == Some(&request_id) {
-            return h_flex()
-                .w_full()
-                .child(
-                    Button::new("ui-reveal")
-                        .debug_selector(|| "ui-reveal".into())
-                        .ghost()
-                        .xsmall()
-                        .touch(self.compact)
-                        .icon(IconName::Info)
-                        .label(crate::tr!("userinput.async_header"))
-                        .tooltip(crate::tr!("userinput.answer"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.ui_dismissed_request_id = None;
-                            this.ui_expanded = true;
-                            cx.notify();
-                        })),
-                )
-                .into_any_element();
-        }
         let questions = pending.questions.clone();
         let total = questions.len();
         let index = self.ui_question_index.min(total.saturating_sub(1));
@@ -92,14 +135,22 @@ impl Composer {
         let multi = question.multi_select;
 
         let toggle = Button::new("ui-toggle")
+            .motion(&self.button_motion())
             .debug_selector(|| "ui-toggle".into())
             .ghost()
             .xsmall()
             .touch(self.compact)
-            .icon(if expanded {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronUp
+            .icon({
+                // Up while shut, turning to point down as the answer area
+                // opens.
+                let turn = self.motion.transition(
+                    self.motion_key(format_args!("ui-toggle-{request_id}")),
+                    if expanded { 1f32 } else { 0. },
+                    GLIDE,
+                    window,
+                    cx,
+                );
+                Icon::new(IconName::ChevronUp).rotate(gpui::radians(turn * std::f32::consts::PI))
             })
             .tooltip(if expanded {
                 crate::tr!("userinput.collapse")
@@ -136,24 +187,34 @@ impl Composer {
                 .text_title(cx)
                 .child(crate::widgets::fade_text(title)),
         )
-        .when(!expanded, |strip| {
-            strip.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_body(self.compact, cx)
-                    .text_color(muted)
-                    .child(crate::widgets::fade_text(question.question.clone())),
-            )
+        // The question, previewed beside the title while the answer area is
+        // shut, fades as it opens; its room stays the strip's spacer.
+        .child({
+            let preview = self.motion.transition(
+                self.motion_key(format_args!("ui-preview-{request_id}")),
+                if expanded { 0f32 } else { 1. },
+                GLIDE,
+                window,
+                cx,
+            );
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .opacity(preview)
+                .text_body(self.compact, cx)
+                .text_color(muted)
+                .when(preview > 0., |text| {
+                    text.child(crate::widgets::fade_text(question.question.clone()))
+                })
         })
-        .when(expanded, |strip| strip.child(div().flex_1()))
         .when(total > 1, |strip| {
             let questions_previous = questions.clone();
             let questions_next = questions.clone();
             strip
                 .child(
                     Button::new("ui-prev")
+                        .motion(&self.button_motion())
                         .debug_selector(|| "ui-prev".into())
                         .ghost()
                         .xsmall()
@@ -179,6 +240,7 @@ impl Composer {
                 )
                 .child(
                     Button::new("ui-next")
+                        .motion(&self.button_motion())
                         .debug_selector(|| "ui-next".into())
                         .ghost()
                         .xsmall()
@@ -198,6 +260,7 @@ impl Composer {
             let request_dismiss = request_id.clone();
             strip = strip.child(
                 Button::new("ui-dismiss")
+                    .motion(&self.button_motion())
                     .debug_selector(|| "ui-dismiss".into())
                     .ghost()
                     .xsmall()
@@ -216,127 +279,48 @@ impl Composer {
             cx.notify();
         }));
 
-        let card = crate::material::card_raised(cx).w_full().child(strip);
-        if !expanded {
-            return card.into_any_element();
-        }
-
-        let selected = self
-            .ui_selections
-            .get(&question.id)
-            .cloned()
-            .unwrap_or_default();
-        let mut options = v_flex()
-            .id("ui-options")
-            .role(Role::ListBox)
-            .aria_label(question.question.clone())
+        let card = crate::material::card_raised(cx)
             .w_full()
-            .gap_1();
-        for (opt_index, option) in question.options.iter().enumerate() {
-            let is_selected = selected.iter().any(|l| l == &option.label);
-            let label = option.label.clone();
-            let question_for_click = question.clone();
-            let questions_for_click = questions.clone();
-            let request_for_click = request_id.clone();
-            let mark = div()
-                .size(px(16.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(if multi {
-                    px(5.)
-                } else {
-                    crate::material::radius_input(cx)
-                })
-                .border_1()
-                .border_color(if is_selected { primary } else { muted })
-                .when(is_selected, |mark| {
-                    mark.bg(primary)
-                        .child(div().size(px(6.)).rounded_full().bg(gpui::white()))
-                });
-            options = options.child(
-                crate::material::menu_item_frame(self.compact, cx)
-                    .id(("ui-opt", opt_index))
-                    .role(Role::ListBoxOption)
-                    .aria_label(option.label.clone())
-                    .aria_selected(is_selected)
-                    .flex_none()
-                    .w_full()
-                    .items_start()
-                    .text_body(self.compact, cx)
-                    .cursor_pointer()
-                    .when(is_selected, |s| s.bg(cx.theme().list_active))
-                    .hover(|s| s.bg(cx.theme().muted))
-                    .child(
-                        div()
-                            .flex_none()
-                            .pt(cx.theme().tokens.spacing.xxs)
-                            .child(mark),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_0p5()
-                            .child(
-                                h_flex()
-                                    .gap_1p5()
-                                    .items_center()
-                                    // Digits select only while the agent is
-                                    // blocked; the composer keeps them otherwise.
-                                    .when(blocking, |row| {
-                                        row.child(
-                                            div()
-                                                .flex_none()
-                                                .text_color(muted)
-                                                .child(format!("{}", opt_index + 1)),
-                                        )
-                                    })
-                                    .child(div().child(option.label.clone())),
-                            )
-                            .when(!option.description.is_empty(), |this| {
-                                this.child(
-                                    div()
-                                        .text_secondary(self.compact, cx)
-                                        .child(option.description.clone()),
-                                )
-                            }),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.ui_toggle_option(&question_for_click, label.clone(), cx);
-                        // Single-select answers flow onward by themselves: next
-                        // unanswered question, or submission when none remain.
-                        if !multi {
-                            this.ui_advance_or_submit(
-                                &questions_for_click,
-                                request_for_click.clone(),
-                                window,
-                                cx,
-                            );
-                        }
-                    })),
-            );
-        }
-        // The question and its options scroll together within a share of the
-        // window, leaving the rest to the conversation and the composer.
-        let body_cap = px((f32::from(window.viewport_size().height) * 0.4).clamp(120., 360.));
-        let body = div()
-            .id("user-input-body-scroll")
-            .w_full()
-            .max_h(body_cap)
-            .overflow_y_scroll_area()
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_body(self.compact, cx)
-                            .child(question.question.clone()),
-                    )
-                    .when(!question.options.is_empty(), |this| this.child(options)),
-            );
-
+            .gap_0()
+            .child(strip);
+        let body = self.motion.cross_fade(
+            self.motion_key(format_args!("ui-question-{request_id}")),
+            index,
+            CHANGE,
+            window,
+            cx,
+            |index, window, cx| {
+                let question = questions[*index].clone();
+                self.render_user_input_question(&questions, &question, &request_id, window, cx)
+            },
+        );
+        let multi_done = multi && user_input_all_answered(&questions, &self.ui_selections);
+        let done = self
+            .motion
+            .shown(
+                self.motion_key(format_args!("ui-done-{request_id}")),
+                multi_done.then_some(()),
+                SHOW,
+                window,
+                cx,
+            )
+            .map(|shown| {
+                let questions_submit = questions.clone();
+                let request_id = request_id.clone();
+                shown.fold_across(
+                    div().pl_2().child(
+                        Button::new("ui-done")
+                            .motion(&self.button_motion())
+                            .primary()
+                            .chip()
+                            .touch(self.compact)
+                            .label(crate::tr!("userinput.done"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.ui_submit(&questions_submit, request_id.clone(), window, cx);
+                            })),
+                    ),
+                )
+            });
         let custom_input = self.user_input_custom.clone();
         let custom_has_text = !custom_input.read(cx).value().trim().is_empty();
         let custom_answer = h_flex()
@@ -357,6 +341,7 @@ impl Composer {
             )
             .child(
                 Button::new("ui-custom-submit")
+                    .motion(&self.button_motion())
                     .ghost()
                     .xsmall()
                     .touch(self.compact)
@@ -371,8 +356,6 @@ impl Composer {
         // Answers submit themselves: a single-select click that completes the
         // set submits it, so the only finishing affordance is Done on a
         // multi-select question, where clicks cannot signal "I'm finished".
-        let all_answered = user_input_all_answered(&questions, &self.ui_selections);
-        let questions_submit = questions.clone();
         let hint = if multi {
             Some(crate::tr!("userinput.multi_hint"))
         } else if !blocking {
@@ -382,7 +365,6 @@ impl Composer {
         };
         let footer = h_flex()
             .w_full()
-            .gap_2()
             .items_center()
             .child(
                 div()
@@ -391,22 +373,190 @@ impl Composer {
                     .text_secondary(self.compact, cx)
                     .children(hint),
             )
-            .when(multi && all_answered, |this| {
-                this.child(
-                    Button::new("ui-done")
-                        .primary()
-                        .chip()
-                        .touch(self.compact)
-                        .label(crate::tr!("userinput.done"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.ui_submit(&questions_submit, request_id.clone(), window, cx);
-                        })),
-                )
-            });
+            .children(done);
 
-        card.child(body)
-            .child(custom_answer)
-            .child(footer)
+        // The card's gap is carried above each part of the answer area, so
+        // it folds with it.
+        let gap = cx.theme().tokens.spacing.sm;
+        card.child(
+            crate::widgets::Collapsible::new(
+                self.motion_id(format_args!("ui-answer-{request_id}")),
+                expanded,
+            )
+            .motion(&self.motion)
+            .w_full()
+            .content(
+                v_flex()
+                    .w_full()
+                    .gap(gap)
+                    .pt(gap)
+                    .child(body)
+                    .child(custom_answer)
+                    .child(footer),
+            ),
+        )
+        .into_any_element()
+    }
+
+    /// One question and its options, scrolling together within a share of
+    /// the window.
+    fn render_user_input_question(
+        &self,
+        questions: &[UserInputQuestion],
+        question: &UserInputQuestion,
+        request_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let request_id = request_id.to_owned();
+        let muted = cx.theme().muted_foreground;
+        let primary = cx.theme().primary;
+        let multi = question.multi_select;
+        let blocking = self
+            .pending_user_input(cx)
+            .is_none_or(|pending| pending.delivery.is_blocking());
+        let selected = self
+            .ui_selections
+            .get(&question.id)
+            .cloned()
+            .unwrap_or_default();
+        let mut options = v_flex()
+            .id("ui-options")
+            .role(Role::ListBox)
+            .aria_label(question.question.clone())
+            .w_full()
+            .gap_1();
+        for (opt_index, option) in question.options.iter().enumerate() {
+            let is_selected = selected.iter().any(|l| l == &option.label);
+            let label = option.label.clone();
+            let question_for_click = question.clone();
+            let questions_for_click = questions.to_vec();
+            let request_for_click = request_id.clone();
+            // The mark fills and its dot comes in as the option is chosen, so
+            // the choice registers before the card moves on.
+            let chosen = self.motion.transition(
+                self.motion_key(format_args!(
+                    "ui-opt-{request_id}-{}-{opt_index}",
+                    question.id
+                )),
+                if is_selected { 1f32 } else { 0. },
+                GLIDE,
+                window,
+                cx,
+            );
+            let mark = div()
+                .size(px(16.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(if multi {
+                    px(5.)
+                } else {
+                    crate::material::radius_input(cx)
+                })
+                .border_1()
+                .border_color(self.motion.transition(
+                    self.motion_key(format_args!(
+                        "ui-opt-border-{request_id}-{}-{opt_index}",
+                        question.id
+                    )),
+                    if is_selected { primary } else { muted },
+                    GLIDE,
+                    window,
+                    cx,
+                ))
+                .bg(primary.opacity(chosen))
+                .child(
+                    div()
+                        .size(px(6.) * chosen)
+                        .rounded_full()
+                        .bg(gpui::white().opacity(chosen)),
+                );
+            options = options.child(
+                crate::material::menu_item_frame(
+                    self.compact,
+                    crate::material::ItemFill::Hover,
+                    cx,
+                )
+                .id(("ui-opt", opt_index))
+                .role(Role::ListBoxOption)
+                .aria_label(option.label.clone())
+                .aria_selected(is_selected)
+                .flex_none()
+                .w_full()
+                .items_start()
+                .text_body(self.compact, cx)
+                .cursor_pointer()
+                .bg(cx.theme().list_active.opacity(chosen))
+                .child(
+                    div()
+                        .flex_none()
+                        .pt(cx.theme().tokens.spacing.xxs)
+                        .child(mark),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                // Digits select only while the agent is
+                                // blocked; the composer keeps them otherwise.
+                                .when(blocking, |row| {
+                                    row.child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(muted)
+                                            .child(format!("{}", opt_index + 1)),
+                                    )
+                                })
+                                .child(div().child(option.label.clone())),
+                        )
+                        .when(!option.description.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .text_secondary(self.compact, cx)
+                                    .child(option.description.clone()),
+                            )
+                        }),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.ui_toggle_option(&question_for_click, label.clone(), cx);
+                    // Single-select answers flow onward by themselves: next
+                    // unanswered question, or submission when none remain.
+                    if !multi {
+                        this.ui_advance_or_submit(
+                            &questions_for_click,
+                            request_for_click.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                })),
+            );
+        }
+        // The question and its options scroll together within a share of the
+        // window, leaving the rest to the conversation and the composer.
+        let body_cap = px((f32::from(window.viewport_size().height) * 0.4).clamp(120., 360.));
+        div()
+            .id("user-input-body-scroll")
+            .w_full()
+            .max_h(body_cap)
+            .overflow_y_scroll_area()
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_body(self.compact, cx)
+                            .child(question.question.clone()),
+                    )
+                    .when(!question.options.is_empty(), |this| this.child(options)),
+            )
             .into_any_element()
     }
 
@@ -600,7 +750,11 @@ impl Composer {
         self.ui_selections.clear();
         self.ui_question_index = 0;
         self.workspace_store.update(cx, |store, _cx| {
-            store.respond_user_input(request_id, answers)
+            store.respond_user_input_for(
+                self.session_id.clone().unwrap_or_default(),
+                request_id,
+                answers,
+            )
         });
         cx.notify();
     }
@@ -666,25 +820,29 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         driver.wait_until(cx, &store, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "selected conversation", |cx| {
-            store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.chat_loading()
+            store.read_with(cx, |store, cx| {
+                store.baseline_ready()
+                    && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
         store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, timeline, cx);
+            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
-        let (composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let (composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new(store.clone(), Some(session_id), window, cx)
+        });
         cx.simulate_resize(size(px(800.), px(600.)));
+        // The turn the question arrived in runs throughout, so motion is
+        // reduced and each click's outcome is drawn at rest.
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         move |selector: &'static str| {
             cx.update(|window, cx| window.draw(cx).clear(cx));
             if !selector.is_empty() {

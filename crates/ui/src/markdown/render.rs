@@ -1,42 +1,39 @@
 //! Block renderer adapted from gpui-component's Apache-2.0 `text/node.rs` and
 //! `text/document.rs`, with rushdown IR and syntect highlighting.
 
-use std::{
-    cell::RefCell,
-    collections::{HashMap, VecDeque},
-    hash::Hash,
-    ops::Range,
-    rc::Rc,
-    sync::Arc,
-};
+use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc};
 
 use crate::highlight::HighlightTheme;
+use crate::recent_cache::RecentCache;
 use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::copy::copy_button;
-use crate::widgets::tooltip::Tooltip;
+use crate::widgets::tooltip::{Tooltip, tooltip_area};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Display, Element, ElementId, Entity, EntityId,
-    FlexDirection, FontStyle, FontWeight, Global, GlobalElementId, HighlightStyle, Image,
-    ImageSource, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, ListState,
-    MouseButton, ObjectFit, ParentElement as _, Pixels, Rems, Role, SharedString,
+    FlexDirection, FontStyle, FontWeight, Global, GlobalElementId, HighlightStyle,
+    InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, ListState, MouseButton,
+    ObjectFit, ParentElement as _, Pixels, Rems, Role, SharedString,
     StatefulInteractiveElement as _, Style, Styled as _, StyledImage as _, StyledText, TextLayout,
     Window, div, img, prelude::FluentBuilder as _, px, relative, rems, size,
 };
 use gpui_base::{h_flex, v_flex};
 
-use crate::{diff::model::sub_runs, highlight};
+use crate::highlight;
 
 use super::{
     fitted_image::FittedImage,
     inline::{Inline, InlineState},
     inline_flow::{InlineCodeStyle, InlineFlow, InlineFlowItem},
     mermaid,
-    nodes::{BlockNode, CodeBlock, ColumnumnAlign, Paragraph, Table, TextMark},
+    nodes::{BlockNode, CodeBlock, ColumnumnAlign, HeldHighlights, Paragraph, Table, TextMark},
     selection::RunOrigin,
     state::{MarkdownState, PendingContextTarget},
     utils::list_item_prefix,
 };
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 
 const BLOCK_OVERDRAW: Pixels = px(300.);
 const CODE_LINES_PER_ITEM: usize = 32;
@@ -48,81 +45,6 @@ type LinkRuns = Vec<(Range<usize>, super::nodes::LinkMark)>;
 type FontOverrides = Vec<(Range<usize>, SharedString)>;
 type ParagraphTextStyle = (String, LinkRuns, HighlightRuns, FontOverrides);
 type MarkRuns = (LinkRuns, HighlightRuns, FontOverrides);
-
-#[derive(Clone, Hash, PartialEq, Eq)]
-struct CodeCacheKey {
-    code: SharedString,
-    lang: SharedString,
-    theme: HighlightTheme,
-}
-
-thread_local! {
-    static CODE_HIGHLIGHTS: RefCell<RecentCache<CodeCacheKey, SharedHighlightRuns>> =
-        RefCell::new(RecentCache::with_weight_limit(64, 32 * 1024 * 1024, |key, value| {
-            key.code.len() + key.lang.len()
-                + value.runs.capacity() * std::mem::size_of::<(Range<usize>, HighlightStyle)>()
-        }));
-}
-
-/// The most recent results of a render step keyed by its inputs, so a repaint
-/// reuses the work and a long conversation does not keep every result.
-pub(super) struct RecentCache<K, V> {
-    capacity: usize,
-    entries: HashMap<K, V>,
-    order: VecDeque<K>,
-    weight: usize,
-    weight_limit: usize,
-    weigh: fn(&K, &V) -> usize,
-}
-
-impl<K: Clone + Eq + Hash, V: Clone> RecentCache<K, V> {
-    pub(super) fn new(capacity: usize) -> Self {
-        Self::with_weight_limit(capacity, capacity, |_, _| 1)
-    }
-
-    fn with_weight_limit(capacity: usize, weight_limit: usize, weigh: fn(&K, &V) -> usize) -> Self {
-        Self {
-            capacity,
-            entries: HashMap::new(),
-            order: VecDeque::new(),
-            weight: 0,
-            weight_limit,
-            weigh,
-        }
-    }
-
-    fn remove(&mut self, key: &K) {
-        if let Some(value) = self.entries.remove(key) {
-            self.weight -= (self.weigh)(key, &value);
-            self.order.retain(|entry| entry != key);
-        }
-    }
-
-    pub(super) fn get_or_insert_with(&mut self, key: K, compute: impl FnOnce() -> V) -> V {
-        if let Some(value) = self.entries.get(&key) {
-            return value.clone();
-        }
-        let value = compute();
-        let weight = (self.weigh)(&key, &value);
-        // Keep the newest result even when it alone exceeds the budget: a single
-        // large block's visible slices must share one highlighting pass.
-        while !self.entries.is_empty()
-            && (self.entries.len() >= self.capacity
-                || self.weight.saturating_add(weight) > self.weight_limit)
-        {
-            let Some(oldest) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(value) = self.entries.remove(&oldest) {
-                self.weight -= (self.weigh)(&oldest, &value);
-            }
-        }
-        self.weight = self.weight.saturating_add(weight);
-        self.order.push_back(key.clone());
-        self.entries.insert(key, value.clone());
-        value
-    }
-}
 
 // These are input-size weights, not a claim about GPUI's allocation size.
 const CODE_MEASUREMENT_WEIGHT_LIMIT: usize = 8 * 1024 * 1024;
@@ -316,6 +238,33 @@ pub(super) fn render_root(
         .into_any_element()
 }
 
+/// The item that draws the text at render `path`, `line`: a long code block's
+/// items hold its lines, a long list's its items.
+pub(super) fn item_at(items: &[RootItem], path: &[u32], line: u32) -> usize {
+    let block = path[0] as usize;
+    let first = items.partition_point(|item| item.block < block);
+    let place = path.get(1).copied().unwrap_or(line) as usize;
+    items[first..]
+        .iter()
+        .position(|item| {
+            item.block == block && item.span.as_ref().is_some_and(|s| s.contains(&place))
+        })
+        .map_or(first, |offset| first + offset)
+}
+
+/// Whether `item` of `root` is drawn as a picture rather than as lines of
+/// text, whatever its source says.
+pub(super) fn draws_no_text(root: &BlockNode, item: &RootItem) -> bool {
+    let BlockNode::Root { children } = root else {
+        return false;
+    };
+    matches!(
+        &children[item.block],
+        BlockNode::CodeBlock(code)
+            if mermaid::is_mermaid(code.lang.as_deref()) || super::math::is_math(code.lang.as_deref())
+    )
+}
+
 /// The root block a render path such as `root-3-1/image/0` lies in.
 pub(super) fn root_block_of(path: &str) -> Option<usize> {
     let rest = path.strip_prefix("root-")?;
@@ -359,8 +308,13 @@ impl ItemHeights {
         self.splice(0, count);
     }
 
-    fn total(&self) -> Pixels {
-        self.heights
+    pub(super) fn total(&self) -> Pixels {
+        self.top_of(self.heights.len())
+    }
+
+    /// Where item `ix` starts: the height of the items before it.
+    pub(super) fn top_of(&self, ix: usize) -> Pixels {
+        self.heights[..ix]
             .iter()
             .flatten()
             .fold(px(0.), |sum, h| sum + *h)
@@ -840,19 +794,36 @@ fn pending_images(
                     .zip(pending)
                     .enumerate()
                     .map(|(ix, (image, pending))| {
-                        pending.unwrap_or_else(|| {
+                        // The picture fades in where its stand-in stood, and
+                        // the slot's height glides from one to the other.
+                        let slot = format!("{path}/image/{ix}/slot");
+                        let standing = pending.is_some();
+                        let arrived = state.read(cx).motion().transition(
+                            slot.clone(),
+                            if standing { 0f32 } else { 1. },
+                            GLIDE,
+                            window,
+                            cx,
+                        );
+                        let content = pending.unwrap_or_else(|| {
                             let source = state.read(cx).image_source(&image.url);
-                            FittedImage::new(
-                                source.clone(),
-                                img(source).object_fit(ObjectFit::Contain).with_fallback(
-                                    crate::image_viewer::unpreviewed(true, true, cx),
-                                ),
-                                state,
-                                format!("{path}/image/{ix}"),
-                                cx,
-                            )
+                            div()
+                                .w_full()
+                                .opacity(arrived)
+                                .child(FittedImage::new(
+                                    source.clone(),
+                                    img(source).object_fit(ObjectFit::Contain).with_fallback(
+                                        crate::image_viewer::unpreviewed(true, true, cx),
+                                    ),
+                                    state,
+                                    format!("{path}/image/{ix}"),
+                                    cx,
+                                ))
+                                .into_any_element()
+                        });
+                        crate::motion::SizeGlide::new(&state.read(cx).glide(&slot), content)
+                            .on_change(standing as u64)
                             .into_any_element()
-                        })
                     }),
             )
             .into_any_element(),
@@ -904,6 +875,7 @@ fn render_paragraph(
                 let opened = view.read(cx).opened_image_source(&image.url);
                 let image_owner = view.clone();
                 let link = image.link.clone();
+                let has_link = link.is_some();
                 let context_view = view.clone();
                 let context_url = image.url.clone();
                 let context_title = title.clone();
@@ -924,11 +896,6 @@ fn render_paragraph(
                         .object_fit(ObjectFit::Contain)
                         .with_fallback(crate::image_viewer::unpreviewed(true, true, cx))
                         .cursor_pointer()
-                        .when(link.is_some(), |image| {
-                            image.tooltip(move |window, cx| {
-                                Tooltip::new(tooltip_title.clone()).build(window, cx)
-                            })
-                        })
                         .on_mouse_down(MouseButton::Right, move |_, _, cx| {
                             context_view.update(cx, |state, cx| {
                                 state.set_pending_context(
@@ -953,7 +920,16 @@ fn render_paragraph(
                                 );
                             }
                         });
-                FittedImage::new(source, image, &image_owner, format!("{id}/image/{ix}"), cx)
+                let image =
+                    FittedImage::new(source, image, &image_owner, format!("{id}/image/{ix}"), cx);
+                if has_link {
+                    tooltip_area(("image-tooltip", ix), image, move |_, _| {
+                        Tooltip::new(tooltip_title.clone())
+                    })
+                    .into_any_element()
+                } else {
+                    image.into_any_element()
+                }
             }))
             .into_any_element();
     }
@@ -1247,6 +1223,12 @@ fn render_list_item(
         };
         match child {
             BlockNode::Paragraph(_) if ix == 0 => {
+                // The marker shows with the item's first character.
+                let marker_opacity = {
+                    let origin = RunOrigin::new(super::selection::render_path(&child_options.path));
+                    let fades = state.read(cx).fades(&origin, 1);
+                    super::stream_fade::surround_opacity(&fades, 1)
+                };
                 let content = div().flex_1().min_w_0().child(render_block(
                     child,
                     child_options,
@@ -1265,16 +1247,19 @@ fn render_list_item(
                         .min_w_0()
                         .items_start()
                         .when(checked.is_none(), |this| {
-                            this.child(list_item_prefix(
-                                item_ix,
-                                options.ordered,
-                                options.list_start,
-                                options.depth,
+                            this.child(div().flex_none().opacity(marker_opacity).child(
+                                list_item_prefix(
+                                    item_ix,
+                                    options.ordered,
+                                    options.list_start,
+                                    options.depth,
+                                ),
                             ))
                         })
                         .when_some(*checked, |this, checked| {
                             this.child(
                                 div()
+                                    .opacity(marker_opacity)
                                     .mt(rems(0.35))
                                     .mr_1p5()
                                     .size(rems(0.875))
@@ -1324,39 +1309,40 @@ fn render_list_item(
 
 fn cached_highlights(code: &CodeBlock, theme: &HighlightTheme) -> SharedHighlightRuns {
     let prepared = code.prepared();
-    let compute = || {
-        let key = CodeCacheKey {
-            code: prepared.text.clone(),
-            lang: code.lang.clone().unwrap_or_else(|| "text".into()),
-            theme: theme.clone(),
-        };
-        CODE_HIGHLIGHTS.with(|cache| {
-            cache.borrow_mut().get_or_insert_with(key, || {
-                let previous = prepared
-                    .previous_highlights
-                    .get()
-                    .and_then(std::sync::Weak::upgrade);
-                Arc::new(highlight::HighlightedSource::new(
-                    prepared.text.clone(),
-                    code.lang.clone().unwrap_or_else(|| "text".into()),
-                    theme,
-                    previous.as_deref(),
-                ))
-            })
-        })
-    };
+    let language = code.lang.clone().unwrap_or_else(|| "text".into());
     let Ok(mut cache) = prepared.highlights.lock() else {
-        return compute();
+        return highlight::highlighted(prepared.text.clone(), language, theme);
     };
-    if let Some((cached_theme, runs)) = cache.as_ref()
+    if let Some((cached_theme, held)) = cache.as_ref()
         && cached_theme == theme
-        && let Some(runs) = runs.upgrade()
+        && let Some(runs) = held.get()
     {
         return runs;
     }
-    let runs = compute();
-    // The global cache bounds retention; the block's shortcut must not keep evicted runs alive.
-    *cache = Some((theme.clone(), Arc::downgrade(&runs)));
+    let previous = prepared
+        .previous_highlights
+        .lock()
+        .ok()
+        .and_then(|mut previous| previous.take());
+    let (runs, held) = match previous {
+        Some(previous) => {
+            let runs = Arc::new(highlight::HighlightedSource::new(
+                prepared.text.clone(),
+                language,
+                theme,
+                Some(&previous),
+            ));
+            (runs.clone(), HeldHighlights::Own(runs))
+        }
+        None => {
+            let runs = highlight::highlighted(prepared.text.clone(), language, theme);
+            // The shared cache bounds retention; the block's shortcut must
+            // not keep evicted runs alive.
+            let held = HeldHighlights::Shared(Arc::downgrade(&runs));
+            (runs, held)
+        }
+    };
+    *cache = Some((theme.clone(), held));
     runs
 }
 
@@ -1370,22 +1356,12 @@ fn render_code_lines(
     let path = super::selection::render_path(path);
     let prepared = code.prepared();
     let highlighted = cached_highlights(code, &cx.theme().highlight_theme);
-    let all_runs = &highlighted.runs;
-    let states = code.states_for_lines(prepared, span.clone());
-    let mut offset = prepared.lines.get(span.start).map_or(0, |line| line.start);
-    let span_end = span
-        .end
-        .checked_sub(1)
-        .and_then(|ix| prepared.lines.get(ix))
-        .map_or(offset, |line| line.end + 1);
-    // Highlight runs are ordered and disjoint; only those in the span matter.
-    let span_runs = &all_runs[all_runs.partition_point(|(range, _)| range.end <= offset)
-        ..all_runs.partition_point(|(range, _)| range.start < span_end)];
     let mut rendered_lines = Vec::with_capacity(span.len());
     let mono_font_family = cx.theme().mono_font_family.clone();
-    for (line_state, ix) in states.into_iter().zip(span.clone()) {
-        let end = prepared.lines[ix].end;
-        let runs = sub_runs(span_runs, offset, end);
+    for ix in span {
+        let line = prepared.lines[ix].clone();
+        let runs = highlighted.runs_between(line.start, line.end);
+        let line_state = InlineState::shared(prepared.text[line].to_string().into());
         let line = div()
             .id(("code-line", ix))
             .min_h(px(18.))
@@ -1399,7 +1375,6 @@ fn render_code_lines(
         #[cfg(test)]
         let line = line.debug_selector(move || format!("markdown-code-line-{ix}"));
         rendered_lines.push(line);
-        offset = end.saturating_add(1);
     }
     v_flex()
         .w_full()
@@ -1456,11 +1431,8 @@ impl Element for CodeSliceMeasure {
         {
             let start = prepared.lines[self.span.start].start;
             let end = prepared.lines[self.span.end - 1].end;
-            let highlighted = cached_highlights(&self.code, &cx.theme().highlight_theme);
-            let all_runs = &highlighted.runs;
-            let runs = &all_runs[all_runs.partition_point(|(range, _)| range.end <= start)
-                ..all_runs.partition_point(|(range, _)| range.start < end)];
-            let runs = sub_runs(runs, start, end);
+            let runs =
+                cached_highlights(&self.code, &cx.theme().highlight_theme).runs_between(start, end);
             let text = StyledText::new(prepared.text[start..end].to_string()).with_highlights(runs);
             text_layout = Some((text.layout().clone(), end - start));
             text.into_any_element()
@@ -1508,25 +1480,17 @@ impl Element for CodeSliceMeasure {
     }
 }
 
-fn render_code_block(
+/// The lines `span` of `code`: laid out as one text while the document
+/// measures a block it never paints, and as selectable lines otherwise.
+fn code_lines(
     code: &CodeBlock,
-    span: Option<Range<usize>>,
+    span: Range<usize>,
     options: &RenderOptions,
     view: &Entity<MarkdownState>,
-    window: &Window,
     cx: &mut App,
 ) -> AnyElement {
-    let prepared = code.prepared();
-    let code_text = prepared.text.as_ref();
-    if mermaid::is_mermaid(code.lang.as_deref())
-        && let Some(image) = mermaid::diagram(code_text, cx.theme().mode.is_dark())
-    {
-        return render_diagram(image, code_text, options, view, cx);
-    }
-    let span = span.unwrap_or(0..prepared.lines.len());
-    let (first, last) = (span.start == 0, span.end == prepared.lines.len());
-    let lines = if let Some(measurement) = &options.measurement {
-        div()
+    match &options.measurement {
+        Some(measurement) => div()
             .w_full()
             .whitespace_normal()
             .font_family(cx.theme().mono_font_family.clone())
@@ -1534,14 +1498,40 @@ fn render_code_block(
             .child(CodeSliceMeasure {
                 measurement: measurement.clone(),
                 code: code.clone(),
-                span: span.clone(),
+                span,
                 path: options.path.clone(),
                 view: view.clone(),
             })
-            .into_any_element()
-    } else {
-        render_code_lines(code, span.clone(), &options.path, view, cx)
-    };
+            .into_any_element(),
+        None => render_code_lines(code, span, &options.path, view, cx),
+    }
+}
+
+fn render_code_block(
+    code: &CodeBlock,
+    span: Option<Range<usize>>,
+    options: &RenderOptions,
+    view: &Entity<MarkdownState>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let prepared = code.prepared();
+    let code_text = prepared.text.as_ref();
+    let span = span.unwrap_or(0..prepared.lines.len());
+    if mermaid::is_mermaid(code.lang.as_deref()) {
+        let lines = |cx: &mut App| code_lines(code, span.clone(), options, view, cx);
+        return mermaid::block(
+            code,
+            &options.path,
+            options.is_last,
+            lines,
+            view,
+            window,
+            cx,
+        );
+    }
+    let (first, last) = (span.start == 0, span.end == prepared.lines.len());
+    let lines = code_lines(code, span.clone(), options, view, cx);
     let radius = crate::material::radius_card(cx);
     // The whole fence, not the painted span: a long block is split across
     // list items and the menu copies the code a reader sees as one block.
@@ -1552,6 +1542,7 @@ fn render_code_block(
     let copy = (first && !is_math).then(|| {
         let copied = view.read(cx).copied.is(&options.path);
         let compact = crate::window_seam::window_is_compact(window, cx);
+        let buttons = view.read(cx).motion();
         let (view, path, code) = (view.clone(), options.path.clone(), whole_code.clone());
         let button = copy_button(
             &format!("code-{}", options.path),
@@ -1568,7 +1559,8 @@ fn render_code_block(
                 });
             },
             cx,
-        );
+        )
+        .motion(&buttons);
         let corner = div()
             .absolute()
             .block_mouse_except_scroll()
@@ -1627,71 +1619,6 @@ fn render_code_block(
     } else {
         content
     }
-}
-
-/// A Mermaid fence whose source laid out: the picture replaces the code, and
-/// the context menu still copies the source a reader would otherwise see.
-fn render_diagram(
-    image: Arc<Image>,
-    source: &str,
-    options: &RenderOptions,
-    view: &Entity<MarkdownState>,
-    cx: &mut App,
-) -> AnyElement {
-    let whole_code = source.strip_suffix('\n').unwrap_or(source).to_string();
-    let context_view = view.clone();
-    let label: SharedString = crate::tr!("markdown.mermaid_diagram").into_owned().into();
-    let lightbox_label = label.clone();
-    let source = ImageSource::Image(image);
-    let lightbox_source = source.clone();
-    let diagram = crate::material::accessible_clickable(
-        img(source.clone()),
-        SharedString::from(format!("markdown-mermaid-{}", options.path)),
-        Role::Button,
-        label,
-        cx,
-    )
-    .object_fit(ObjectFit::Contain)
-    .cursor_pointer()
-    .on_click(move |_, window, cx| {
-        cx.stop_propagation();
-        crate::image_viewer::open(
-            lightbox_source.clone(),
-            lightbox_label.to_string(),
-            window,
-            cx,
-        );
-    });
-    let block = div()
-        .id(options.path.clone())
-        .when(!options.is_last, |block| block.pb(rems(1.)))
-        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
-            context_view.update(cx, |state, cx| {
-                state.set_pending_context(
-                    Some(PendingContextTarget::CodeBlock(whole_code.clone())),
-                    cx,
-                )
-            });
-        })
-        .child(
-            div()
-                .p_3()
-                .rounded(crate::material::radius_card(cx))
-                .bg(cx.theme().tokens.colors.muted)
-                .child(FittedImage::new(
-                    source,
-                    diagram,
-                    view,
-                    options.path.clone(),
-                    cx,
-                )),
-        );
-    #[cfg(test)]
-    let block = {
-        let path = options.path.clone();
-        block.debug_selector(move || format!("markdown-mermaid-{path}"))
-    };
-    block.into_any_element()
 }
 
 fn render_table(

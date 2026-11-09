@@ -215,7 +215,7 @@ pub fn detail(api: &GitHubApi, key: &PullRequestKey) -> Result<PullRequestWatchR
         ("", "")
     };
     let document = format!(
-        "query PullRequestWatchDetail($owner: String!, $name: String!, $number: Int!, $checksAfter: String) {{ viewer {{ login }} repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ number state mergedAt mergeable headRefOid baseRefName author {{ login }}{rules} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100, after: $checksAfter) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ __typename ... on StatusContext {{ context state targetUrl createdAt{required} }} ... on CheckRun {{ name status conclusion startedAt completedAt detailsUrl{required} checkSuite {{ workflowRun {{ workflow {{ name }} }} }} }} }} }} }} }} }} }} }} }} }}"
+        "query PullRequestWatchDetail($owner: String!, $name: String!, $number: Int!, $checksAfter: String) {{ viewer {{ login }} repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ number state mergedAt mergeable headRefOid baseRefName author {{ login }}{rules} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100, after: $checksAfter) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ __typename ... on StatusContext {{ context state targetUrl createdAt{required} }} ... on CheckRun {{ name status conclusion startedAt completedAt detailsUrl{required} checkSuite {{ workflowRun {{ runNumber workflow {{ databaseId name }} }} }} }} }} }} }} }} }} }} }} }} }}"
     );
     let mut variables = repository_variables(key)?;
     let mut contexts = Vec::new();
@@ -333,8 +333,7 @@ fn unreported_required(
         Err(GitHubError::NotFound) => Value::Null,
         Err(error) => return Err(error),
     };
-    let reported: HashSet<String> = contexts
-        .iter()
+    let reported: HashSet<String> = current(contexts)
         .filter_map(|raw| trimmed(&raw["name"]).or_else(|| trimmed(&raw["context"])))
         .collect();
     let mut expected: Vec<String> = Vec::new();
@@ -405,6 +404,28 @@ fn check_status(raw: &Value) -> CheckStatus {
     }
 }
 
+/// The contexts that speak for the head now. A check run from a workflow run that a newer run of
+/// the same workflow on the head superseded is dropped: the newer run's jobs that wait on others
+/// do not exist yet, and the older run's verdict on them (skipped on a draft, say) is not the
+/// workflow's current one.
+fn current(contexts: &[Value]) -> impl Iterator<Item = &Value> {
+    let run = |raw: &Value| {
+        let run = &raw["checkSuite"]["workflowRun"];
+        Some((
+            run["workflow"]["databaseId"].as_i64()?,
+            run["runNumber"].as_i64()?,
+        ))
+    };
+    let mut newest: HashMap<i64, i64> = HashMap::new();
+    for (workflow, number) in contexts.iter().filter_map(run) {
+        let kept = newest.entry(workflow).or_insert(number);
+        *kept = (*kept).max(number);
+    }
+    contexts
+        .iter()
+        .filter(move |raw| run(raw).is_none_or(|(workflow, number)| newest[&workflow] == number))
+}
+
 /// One check per name and workflow, keeping its newest run: a rerun replaces the run before it
 /// where it stood. Survivors sharing a name across workflows are written `workflow / name`.
 pub(super) fn checks(contexts: &[Value]) -> Vec<PullRequestCheck> {
@@ -413,7 +434,7 @@ pub(super) fn checks(contexts: &[Value]) -> Vec<PullRequestCheck> {
     };
     let mut order: Vec<(String, PullRequestCheck, Option<String>)> = Vec::new();
     let mut positions: HashMap<String, usize> = HashMap::new();
-    for raw in contexts {
+    for raw in current(contexts) {
         let Some(name) = trimmed(&raw["name"]).or_else(|| trimmed(&raw["context"])) else {
             continue;
         };
@@ -700,32 +721,38 @@ fn read_tail(
 mod tests {
     use super::*;
 
+    fn run(workflow: (i64, &str, i64), name: &str, conclusion: &str, completed: &str) -> Value {
+        let (id, workflow, number) = workflow;
+        json!({
+            "__typename": "CheckRun",
+            "name": name,
+            "status": if conclusion == "PENDING" { "IN_PROGRESS" } else { "COMPLETED" },
+            "conclusion": (conclusion != "PENDING").then_some(conclusion),
+            "completedAt": completed,
+            "checkSuite": {"workflowRun": {"runNumber": number, "workflow": {"databaseId": id, "name": workflow}}},
+        })
+    }
+
+    fn statuses(checks: &[PullRequestCheck]) -> Vec<(&str, CheckStatus)> {
+        checks
+            .iter()
+            .map(|check| (check.name.as_str(), check.status))
+            .collect()
+    }
+
     #[test]
     fn checks_keep_the_newest_run_and_name_twins_by_workflow() {
-        let run = |workflow: &str, name: &str, conclusion: &str, completed: &str| {
-            json!({
-                "__typename": "CheckRun",
-                "name": name,
-                "status": "COMPLETED",
-                "conclusion": conclusion,
-                "completedAt": completed,
-                "checkSuite": {"workflowRun": {"workflow": {"name": workflow}}},
-            })
-        };
+        let (ci, release) = ((1, "CI", 7), (2, "Release", 3));
         let contexts = [
-            run("CI", "test", "FAILURE", "2026-10-08T10:00:00Z"),
-            run("Release", "test", "SUCCESS", "2026-10-08T10:00:00Z"),
-            run("CI", "test", "SUCCESS", "2026-10-08T10:05:00Z"),
+            run(ci, "test", "FAILURE", "2026-10-08T10:00:00Z"),
+            run(release, "test", "SUCCESS", "2026-10-08T10:00:00Z"),
+            run(ci, "test", "SUCCESS", "2026-10-08T10:05:00Z"),
             json!({"__typename": "CheckRun", "name": "lint", "status": "IN_PROGRESS", "conclusion": "FAILURE"}),
             json!({"__typename": "StatusContext", "context": "deploy", "state": "ERROR", "targetUrl": "https://ci.test"}),
             json!({"__typename": "StatusContext", "state": "SUCCESS"}),
         ];
-        let checks = checks(&contexts);
         assert_eq!(
-            checks
-                .iter()
-                .map(|check| (check.name.as_str(), check.status))
-                .collect::<Vec<_>>(),
+            statuses(&checks(&contexts)),
             vec![
                 ("CI / test", CheckStatus::Success),
                 ("Release / test", CheckStatus::Success),
@@ -733,6 +760,28 @@ mod tests {
                 ("deploy", CheckStatus::Failure),
             ],
             "a rerun replaces the failed run where it stood"
+        );
+    }
+
+    /// The draft-time run skipped every job; marking the pull request ready started a new run of
+    /// the same workflow on the same head, whose aggregate job waits on the others.
+    #[test]
+    fn checks_drop_a_workflow_run_a_newer_run_on_the_head_superseded() {
+        let (draft, ready) = ((1, "CI", 7), (1, "CI", 8));
+        let contexts = [
+            run(
+                draft,
+                "Linux x64 / clippy",
+                "SKIPPED",
+                "2026-10-08T10:00:00Z",
+            ),
+            run(draft, "Linux x64", "SKIPPED", "2026-10-08T10:00:00Z"),
+            run(ready, "Linux x64 / clippy", "PENDING", ""),
+        ];
+        assert_eq!(
+            statuses(&checks(&contexts)),
+            vec![("Linux x64 / clippy", CheckStatus::Pending)],
+            "the skipped aggregate of the superseded run does not stand for the new run's"
         );
     }
 }

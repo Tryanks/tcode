@@ -21,7 +21,7 @@ use crate::{
 use agent::FileChange;
 use gpui::{
     Action, AnyElement, App, AppContext as _, AvailableSpace, Context, Entity, HighlightStyle,
-    InteractiveElement as _, IntoElement, ListOffset, ParentElement as _, Render, Role,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, Role,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, canvas, div,
     prelude::FluentBuilder as _, px, size,
 };
@@ -38,7 +38,7 @@ use super::model::{
 use super::parse::{RowKind, is_binary_patch};
 use crate::agents_panel::{Agents, AgentsPanel};
 use crate::plan_panel::PlanPanel;
-use crate::store::WorkspaceStore;
+use crate::store::{StoreChange, WorkspaceStore};
 use crate::widgets::menu::DropdownMenu as _;
 use crate::window_caption;
 use crate::window_state::WindowState;
@@ -49,6 +49,18 @@ use tcode_core::{
     ui::RightTab,
 };
 use tcode_protocol::{GitDiffResult, GitDiffScope, GitFileText};
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The widest the chip naming an agent whose panel is shown grows.
+const SUBJECT_WIDEST: f32 = 180.;
 
 /// A diff view toggle. The compact toolbar reaches these through its overflow
 /// menu, which addresses items by action rather than by callback.
@@ -152,6 +164,26 @@ struct RenderAppearance {
     whitespace_style: HighlightStyle,
 }
 
+impl RenderAppearance {
+    /// The colours a rendered file bakes into its text, from the shown
+    /// mode's palette at rest: the file is kept until the mode changes
+    /// again, so colours sampled while the theme glides would stay.
+    fn of(cx: &App) -> Self {
+        let theme = crate::theme::palette(cx.theme().mode, cx);
+        Self {
+            theme: theme.highlight_theme.clone(),
+            colors: DiffColors {
+                added_word_bg: theme.success.opacity(0.30),
+                removed_word_bg: theme.danger.opacity(0.28),
+            },
+            whitespace_style: HighlightStyle {
+                color: Some(theme.muted_foreground),
+                ..Default::default()
+            },
+        }
+    }
+}
+
 struct GitPreview {
     session: String,
     scope: DiffScope,
@@ -170,6 +202,12 @@ struct GitPreviewOptions {
 pub struct DiffPanel {
     workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
+    /// The thread the drawer shows, which the pane tells it.
+    session_id: Option<String>,
+    /// The thread the pane shows, where the panel shows an agent beside it.
+    lead: Option<String>,
+    /// Whether the panel's pane reaches the window's top right corner.
+    at_window_corner: bool,
     /// The Plan/Tasks tab content (the other tab in this right panel).
     plan: Entity<PlanPanel>,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
@@ -184,6 +222,12 @@ pub struct DiffPanel {
     render_loading_key: Option<RenderKey>,
     comment_input: Option<Entity<InputState>>,
     observed_review_comments: Vec<ReviewComment>,
+    /// The panel's size-class motion: the window draws the panel as a wide
+    /// tab or a compact page, under different parents.
+    motion: crate::motion::owned::Owned,
+    /// Whether the tab strip last measured too narrow for its labels; only
+    /// its layout knows, and its prepaint writes it here.
+    tab_icons: Rc<std::cell::Cell<Option<bool>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -191,28 +235,39 @@ impl DiffPanel {
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
+        session_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
         let pull_requests = cx.new(|cx| {
             crate::pull_requests::PullRequestsPanel::new(
                 workspace_store.clone(),
                 window_state.clone(),
+                session_id.clone(),
                 cx,
             )
         });
-        let plan = cx.new(|cx| PlanPanel::new(workspace_store.clone(), cx));
-        let agents = cx.new(|cx| AgentsPanel::new(workspace_store.clone(), cx));
-        let subscriptions = vec![cx.observe(&workspace_store, |this, store, cx| {
-            let comments = store.read(cx).review_comments();
-            if this.observed_review_comments != comments {
-                this.observed_review_comments = comments;
-                this.remeasure_lists();
-            }
-            cx.notify();
-        })];
-        Self {
+        let plan = cx.new(|_| PlanPanel::new(workspace_store.clone(), session_id.clone()));
+        let agents = cx.new(|cx| AgentsPanel::new(workspace_store.clone(), session_id.clone(), cx));
+        let subscriptions = vec![
+            cx.observe(&workspace_store, |this, _, cx| {
+                this.sync_agents_shown(cx);
+                this.sync_review_comments(cx);
+                cx.notify();
+            }),
+            // A status replaced notifies only its thread's readers, and the
+            // drafts it carries are compared here, not as the panel renders.
+            cx.subscribe(&workspace_store, |this, _, change: &StoreChange, cx| {
+                if change.topic == crate::store::TopicKind::SessionStatus {
+                    this.sync_review_comments(cx);
+                }
+            }),
+        ];
+        let mut panel = Self {
             workspace_store,
             window_state,
+            session_id,
+            lead: None,
+            at_window_corner: false,
             plan,
             pull_requests,
             agents,
@@ -226,8 +281,112 @@ impl DiffPanel {
             render_loading_key: None,
             comment_input: None,
             observed_review_comments: Vec::new(),
+            motion: Default::default(),
+            tab_icons: Default::default(),
             _subscriptions: subscriptions,
+        };
+        panel.sync_agents_shown(cx);
+        panel.sync_review_comments(cx);
+        panel
+    }
+
+    /// Hold the thread's review comments, which every row the panel draws
+    /// reads, and lay the rows out again when they change.
+    fn sync_review_comments(&mut self, cx: &App) {
+        let comments = self
+            .workspace_store
+            .read(cx)
+            .session_status_for(self.session_id.as_deref(), cx)
+            .map_or(&[][..], |status| &status.review_comment_drafts);
+        if self.observed_review_comments != comments {
+            self.observed_review_comments = comments.to_vec();
+            self.remeasure_lists();
         }
+    }
+
+    /// Show the tabs of `session_id`'s thread, or none.
+    pub(crate) fn set_session(this: &Entity<Self>, session_id: Option<String>, cx: &mut App) {
+        if this.read(cx).session_id == session_id {
+            return;
+        }
+        this.update(cx, |panel, cx| {
+            panel.session_id = session_id.clone();
+            panel.sync_review_comments(cx);
+            panel
+                .plan
+                .update(cx, |plan, cx| plan.set_session(session_id.clone(), cx));
+            panel.pull_requests.update(cx, |pull_requests, cx| {
+                pull_requests.set_session(session_id.clone(), cx)
+            });
+            panel
+                .agents
+                .update(cx, |agents, cx| agents.set_session(session_id, cx));
+            panel.sync_agents_shown(cx);
+            cx.notify();
+        });
+    }
+
+    pub(crate) fn set_lead(this: &Entity<Self>, lead: Option<String>, cx: &mut App) {
+        if this.read(cx).lead != lead {
+            this.update(cx, |panel, cx| {
+                panel.lead = lead;
+                cx.notify();
+            });
+        }
+    }
+
+    pub(crate) fn set_at_window_corner(this: &Entity<Self>, at_corner: bool, cx: &mut App) {
+        if this.read(cx).at_window_corner != at_corner {
+            this.update(cx, |panel, cx| {
+                panel.at_window_corner = at_corner;
+                cx.notify();
+            });
+        }
+    }
+
+    fn sync_agents_shown(&mut self, cx: &mut Context<Self>) {
+        let panel = self
+            .workspace_store
+            .read(cx)
+            .panel_state_for(self.session_id.as_deref());
+        self.agents.update(cx, |agents, cx| {
+            agents.set_shown(
+                panel.right_panel_open && panel.right_tab == RightTab::Agents,
+                cx,
+            )
+        });
+    }
+
+    /// Keep the panel's motion in `scene`, the right panel's: what it shows
+    /// is what the tabs show.
+    pub(crate) fn share_scene(&mut self, scene: &crate::motion::Epoch, cx: &mut Context<Self>) {
+        self.motion = crate::motion::owned::Owned::in_scene(scene);
+        self.pull_requests
+            .update(cx, |pull_requests, cx| pull_requests.share_scene(scene, cx));
+    }
+
+    /// The held turn `turn`'s number in the whole thread: the turns of its
+    /// log before the held ones count too.
+    fn turn_number(&self, session: &str, turn: usize, cx: &App) -> usize {
+        self.workspace_store
+            .read(cx)
+            .absolute_turn_for(Some(session), turn)
+            + 1
+    }
+
+    /// Let go of what was built to draw the diffs — the host's answer, the
+    /// rendered and highlighted files — and of the pull requests' rendered
+    /// pages, once the right panel has taken the panel down. The scope, base
+    /// and options chosen, and a comment being written, stay; the next draw
+    /// reads and renders again. A read or render under way lands nowhere:
+    /// its key is no longer the one awaited.
+    pub(crate) fn release(&mut self, cx: &mut Context<Self>) {
+        self.cache = None;
+        self.git_preview = None;
+        self.loading_key = None;
+        self.render_loading_key = None;
+        self.pull_requests
+            .update(cx, |pull_requests, cx| pull_requests.release(cx));
     }
 
     fn selected_scope(&self, session: &str, cx: &App) -> Option<DiffScope> {
@@ -237,7 +396,7 @@ impl DiffPanel {
             .or_else(|| {
                 self.workspace_store
                     .read(cx)
-                    .diff_selected_turn()
+                    .diff_selected_turn_for(self.session_id.as_deref(), cx)
                     .map(DiffScope::Turn)
             })
             .or(Some(DiffScope::WorkingTree))
@@ -261,10 +420,10 @@ impl DiffPanel {
         let (request, cwd) = {
             let store = self.workspace_store.read(cx);
             let request = store
-                .pending_diff_focus()
+                .pending_diff_focus_for(self.session_id.as_deref())
                 .filter(|request| request.session == session && request.turn == turn);
             let cwd = store
-                .diff_active_state()
+                .diff_active_state_for(self.session_id.as_deref(), cx)
                 .filter(|active| active.session == session)
                 .map(|active| active.cwd);
             (request, cwd)
@@ -280,23 +439,16 @@ impl DiffPanel {
             return;
         };
         let list = &cache.list;
-        if let Some(index) =
-            file_header_index(&list.files, &list.unified_items, &request.path, &cwd)
-        {
-            list.unified_list.scroll_to(ListOffset {
-                item_ix: index,
-                offset_in_item: px(0.),
-            });
-        }
-        if let Some(index) = file_header_index(&list.files, &list.split_items, &request.path, &cwd)
-        {
-            list.split_list.scroll_to(ListOffset {
-                item_ix: index,
-                offset_in_item: px(0.),
-            });
+        if let Some(path) = &request.path {
+            if let Some(index) = file_header_index(&list.files, &list.unified_items, path, &cwd) {
+                list.glide_to(false, index, cx);
+            }
+            if let Some(index) = file_header_index(&list.files, &list.split_items, path, &cwd) {
+                list.glide_to(true, index, cx);
+            }
         }
         self.workspace_store.update(cx, |store, _cx| {
-            store.take_diff_focus(session, turn);
+            store.take_diff_focus_for(self.session_id.as_deref(), session, turn);
         });
     }
 
@@ -499,26 +651,24 @@ impl DiffPanel {
     /// Rebuild the rendered-file cache when its key (session / turn / theme)
     /// changed. Returns whether there is anything to show.
     fn ensure_cache(&mut self, cx: &mut Context<Self>) -> bool {
-        let pending_focus = self.workspace_store.read(cx).pending_diff_focus();
+        let pending_focus = self
+            .workspace_store
+            .read(cx)
+            .pending_diff_focus_for(self.session_id.as_deref());
         if let Some(request) = pending_focus {
-            let is_active = self
-                .workspace_store
-                .read(cx)
-                .active_session_id()
-                .is_some_and(|session| session == request.session);
-            if is_active {
+            if self.session_id.as_deref() == Some(request.session.as_str()) {
                 self.scopes
                     .insert(request.session.clone(), DiffScope::Turn(request.turn));
             } else {
                 self.workspace_store.update(cx, |store, cx| {
-                    store.discard_diff_focus(cx);
+                    store.discard_diff_focus_for(self.session_id.as_deref(), cx);
                 });
             }
         }
         let dark = cx.theme().mode.is_dark();
         let (session, scope, revision, cwd) = {
             let store = self.workspace_store.read(cx);
-            let Some(active) = store.diff_active_state() else {
+            let Some(active) = store.diff_active_state_for(self.session_id.as_deref(), cx) else {
                 self.cache = None;
                 return false;
             };
@@ -527,7 +677,12 @@ impl DiffPanel {
                 self.cache = None;
                 return false;
             };
-            (session, scope, store.diff_refresh_generation(), active.cwd)
+            (
+                session,
+                scope,
+                store.diff_refresh_generation_for(self.session_id.as_deref()),
+                active.cwd,
+            )
         };
         // Another view's files and build are dropped; this view's stay on screen while a
         // newer build is pending, so a refresh never blanks the panel.
@@ -583,26 +738,21 @@ impl DiffPanel {
                 || c.show_invisibles != self.show_invisibles
         });
         if fresh {
-            let appearance = RenderAppearance {
-                theme: cx.theme().highlight_theme.clone(),
-                colors: DiffColors {
-                    added_word_bg: cx.theme().success.opacity(0.30),
-                    removed_word_bg: cx.theme().danger.opacity(0.28),
-                },
-                whitespace_style: HighlightStyle {
-                    color: Some(cx.theme().muted_foreground),
-                    ..Default::default()
-                },
-            };
+            let appearance = RenderAppearance::of(cx);
             let (changes, texts) = match scope {
                 DiffScope::Turn(turn) => {
                     let changes = self
                         .workspace_store
                         .read(cx)
-                        .with_diff_turn_changes(turn, |changes, completeness| {
-                            let _completeness = completeness;
-                            changes.to_vec()
-                        })
+                        .with_diff_turn_changes_for(
+                            self.session_id.as_deref(),
+                            turn,
+                            |changes, completeness| {
+                                let _completeness = completeness;
+                                changes.to_vec()
+                            },
+                            cx,
+                        )
                         .unwrap_or_default();
                     (changes, Vec::new())
                 }
@@ -638,7 +788,10 @@ impl DiffPanel {
     }
 
     fn render_tab_strip(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let chrome = self.workspace_store.read(cx).panel_state();
+        let chrome = self
+            .workspace_store
+            .read(cx)
+            .panel_state_for(self.session_id.as_deref());
         let panel_open = chrome.right_panel_open;
         let expanded = chrome.right_panel_expanded;
         let active = chrome.right_tab;
@@ -646,39 +799,46 @@ impl DiffPanel {
         // strip hosts the caption buttons. It is shorter than the 52px shell
         // header, so grow it to match — the buttons must reach the window top,
         // and a taller strip keeps the tabs aligned with the chat header.
-        let hosts_caption = window_caption::hosts_caption_for_state(
-            window_caption::CaptionSurface::RightPanel,
-            self.window_state.read(cx).route(),
-            panel_open,
-            active,
-        );
+        let hosts_caption = self.at_window_corner
+            && window_caption::hosts_caption_for_state(
+                window_caption::CaptionSurface::RightPanel,
+                self.window_state.read(cx).route(),
+                panel_open,
+                active,
+            );
         let store = self.workspace_store.clone();
         let store_close = self.workspace_store.clone();
-        let tab_store = self.workspace_store.clone();
+        let session_expand = self.session_id.clone();
+        let session_close = self.session_id.clone();
+        let select_tab = {
+            let store = self.workspace_store.clone();
+            let session_id = self.session_id.clone();
+            move |tab, cx: &mut App| {
+                store.update(cx, |store, cx| {
+                    store.set_right_tab_for(session_id.as_deref(), tab, cx)
+                });
+            }
+        };
         let agents = {
             let store = self.workspace_store.read(cx);
-            store.active_session_id().and_then(|id| {
-                let agents = Agents::of(store, &id);
+            self.session_id.as_deref().and_then(|id| {
+                let agents = Agents::of(store, id, cx);
                 (!agents.is_empty() || active == RightTab::Agents).then(|| agents.outstanding())
             })
         };
-        let count = self
-            .workspace_store
-            .read(cx)
-            .active_session_id()
-            .map_or(0, |id| {
-                self.workspace_store
-                    .read(cx)
-                    .pull_requests(&id)
-                    .iter()
-                    .filter(|link| link.visible())
-                    .count()
-            });
+        let count = self.session_id.as_deref().map_or(0, |id| {
+            self.workspace_store
+                .read(cx)
+                .pull_requests(id)
+                .iter()
+                .filter(|link| link.visible())
+                .count()
+        });
         let build_tabs = move |icon_only| {
-            let store_diff = tab_store.clone();
-            let store_plan = tab_store.clone();
-            let store_pr = tab_store.clone();
-            let store_agents = tab_store.clone();
+            let select_diff = select_tab.clone();
+            let select_plan = select_tab.clone();
+            let select_pr = select_tab.clone();
+            let select_agents = select_tab.clone();
             let tabs = TabBar::new("right-panel-tabs")
                 .underline()
                 .hairline(false)
@@ -689,19 +849,13 @@ impl DiffPanel {
                     TabItem::new("diff-tab", crate::tr!("diff.title").into_owned())
                         .icon(IconName::File)
                         .selected(active == RightTab::Diff)
-                        .on_click(move |_, _, cx| {
-                            store_diff
-                                .update(cx, |store, cx| store.set_right_tab(RightTab::Diff, cx));
-                        }),
+                        .on_click(move |_, _, cx| select_diff(RightTab::Diff, cx)),
                 )
                 .item(
                     TabItem::new("plan-tab", crate::tr!("tasks.tab").into_owned())
                         .icon(IconName::Map)
                         .selected(active == RightTab::Plan)
-                        .on_click(move |_, _, cx| {
-                            store_plan
-                                .update(cx, |store, cx| store.set_right_tab(RightTab::Plan, cx));
-                        }),
+                        .on_click(move |_, _, cx| select_plan(RightTab::Plan, cx)),
                 );
             let tabs = if let Some(outstanding) = agents {
                 tabs.item(
@@ -709,10 +863,7 @@ impl DiffPanel {
                         .icon(IconName::Bot)
                         .selected(active == RightTab::Agents)
                         .count(outstanding)
-                        .on_click(move |_, _, cx| {
-                            store_agents
-                                .update(cx, |store, cx| store.set_right_tab(RightTab::Agents, cx));
-                        }),
+                        .on_click(move |_, _, cx| select_agents(RightTab::Agents, cx)),
                 )
             } else {
                 tabs
@@ -725,38 +876,109 @@ impl DiffPanel {
                 .icon(IconName::GitPullRequest)
                 .selected(active == RightTab::PullRequests)
                 .count(count)
-                .on_click(move |_, _, cx| {
-                    store_pr.update(cx, |store, cx| {
-                        store.set_right_tab(RightTab::PullRequests, cx)
-                    });
-                }),
+                .on_click(move |_, _, cx| select_pr(RightTab::PullRequests, cx)),
             )
         };
         // Measure the labelled bar even when icons are shown, so growing the
         // panel can restore labels without alternating between the two widths.
+        // The labels dropping or coming back cross-fades the two bars: the
+        // width that decides it is measured as the strip lays out, so the
+        // frame after it changes starts the fade, on the panel's clock.
+        let measured = self.tab_icons.get();
+        let icons = measured.map(|icons| {
+            self.motion.transition(
+                "tab-icons",
+                if icons { 1f32 } else { 0. },
+                GLIDE,
+                window,
+                cx,
+            )
+        });
+        let tab_icons = self.tab_icons.clone();
+        let panel = cx.entity_id();
+        // Whose panel it is, where it shows an agent's.
+        let subject = {
+            let store = self.workspace_store.read(cx);
+            self.lead
+                .as_deref()
+                .zip(self.session_id.as_deref())
+                .map(|(lead, agent)| {
+                    let title = Agents::of(store, lead, cx).title(store, agent);
+                    crate::tr!("diff.agent_subject", title = title.as_str()).into_owned()
+                })
+        };
+        let subject = self
+            .motion
+            .shown("diff-subject", subject, SHOW, window, cx)
+            .map(|shown| {
+                let label = shown.value.clone();
+                shown.fold_across(
+                    material::chip_surface(cx.theme().secondary, cx.theme().foreground, cx)
+                        .debug_selector(|| "diff-subject".into())
+                        .max_w(px(SUBJECT_WIDEST))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(crate::widgets::fade_text(label)),
+                        ),
+                )
+            });
         let tabs = canvas(
             move |bounds, window, cx| {
-                let mut tabs = build_tabs(false).into_any_element();
-                let labelled = tabs.layout_as_root(
+                let labelled = build_tabs(false).into_any_element().layout_as_root(
                     size(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
                     window,
                     cx,
                 );
-                if labelled.width > bounds.size.width {
-                    tabs = build_tabs(true).into_any_element();
+                let narrow = labelled.width > bounds.size.width;
+                if tab_icons.replace(Some(narrow)) != Some(narrow) {
+                    window.on_next_frame(move |_, cx| cx.notify(panel));
                 }
-                tabs.layout_as_root(
-                    size(
-                        AvailableSpace::Definite(bounds.size.width),
-                        AvailableSpace::Definite(bounds.size.height),
-                    ),
-                    window,
-                    cx,
-                );
-                tabs.prepaint_at(bounds.origin, window, cx);
-                tabs
+                let shown = measured.unwrap_or(narrow);
+                // The bar leaving is drawn first, under the one coming in,
+                // and takes no clicks.
+                let layers = match icons {
+                    Some(icons) if shown => vec![(false, 1. - icons), (true, icons)],
+                    Some(icons) => vec![(true, icons), (false, 1. - icons)],
+                    None => vec![(shown, 1.)],
+                };
+                layers
+                    .into_iter()
+                    .filter(|(_, opacity)| *opacity > 0.)
+                    .map(|(icon_only, opacity)| {
+                        let mut tabs = div()
+                            .id(if icon_only {
+                                "tabs-icons"
+                            } else {
+                                "tabs-labelled"
+                            })
+                            .relative()
+                            .size_full()
+                            .opacity(opacity)
+                            .child(build_tabs(icon_only))
+                            .when(icon_only != shown, |tabs| {
+                                tabs.child(crate::motion::shield())
+                            })
+                            .into_any_element();
+                        tabs.layout_as_root(
+                            size(
+                                AvailableSpace::Definite(bounds.size.width),
+                                AvailableSpace::Definite(bounds.size.height),
+                            ),
+                            window,
+                            cx,
+                        );
+                        tabs.prepaint_at(bounds.origin, window, cx);
+                        tabs
+                    })
+                    .collect::<Vec<_>>()
             },
-            |_, mut tabs, window, cx| tabs.paint(window, cx),
+            |_, layers, window, cx| {
+                for mut tabs in layers {
+                    tabs.paint(window, cx);
+                }
+            },
         )
         .flex_1()
         .min_w_0()
@@ -771,6 +993,7 @@ impl DiffPanel {
         material::bar_divider_below(material::bar("right-panel-header", kind, false, cx), cx)
             .when(hosts_caption, |strip| strip.pr_0())
             .child(tabs)
+            .children(subject)
             // The gap between the tabs and the icon cluster holds nothing, so
             // it doubles as the window's drag handle: `window_drag_area` for the
             // app-owned move (macOS), `drag_region` for native HTCAPTION
@@ -802,18 +1025,9 @@ impl DiffPanel {
                 .flex_none()
                 .on_click(move |_, _, cx| {
                     store.update(cx, |store, cx| {
-                        store.toggle_diff_expanded(cx);
+                        store.toggle_diff_expanded_for(session_expand.as_deref(), cx);
                     });
                 }),
-            )
-            .child(
-                material::toolbar_icon_button(
-                    "diff-layout",
-                    IconName::PanelRight,
-                    crate::tr!("diff.layout_soon"),
-                    false,
-                )
-                .flex_none(),
             )
             .child(
                 material::toolbar_icon_button(
@@ -826,7 +1040,7 @@ impl DiffPanel {
                 .flex_none()
                 .on_click(move |_, _, cx| {
                     store_close.update(cx, |store, cx| {
-                        store.close_diff_panel(cx);
+                        store.close_right_panel_for(session_close.as_deref(), cx);
                     });
                 }),
             )
@@ -883,7 +1097,11 @@ impl DiffPanel {
         if path.is_absolute() {
             return file.path.clone();
         }
-        match self.workspace_store.read(cx).diff_active_state() {
+        match self
+            .workspace_store
+            .read(cx)
+            .diff_active_state_for(self.session_id.as_deref(), cx)
+        {
             Some(active) => active.cwd.join(path).to_string_lossy().into_owned(),
             None => file.path.clone(),
         }
@@ -892,14 +1110,16 @@ impl DiffPanel {
     fn apply_view_option(&mut self, option: DiffViewOption, cx: &mut Context<Self>) {
         match option {
             DiffViewOption::Split => {
-                let split = self.workspace_store.read(cx).diff_split();
-                self.workspace_store
-                    .update(cx, |store, cx| store.set_diff_split(!split, cx));
+                self.workspace_store.update(cx, |store, cx| {
+                    let split = store.diff_split_for(self.session_id.as_deref());
+                    store.set_diff_split_for(self.session_id.as_deref(), !split, cx);
+                });
                 self.remeasure_lists();
             }
             DiffViewOption::Wrap => {
-                self.workspace_store
-                    .update(cx, |store, cx| store.toggle_diff_wrap(cx));
+                self.workspace_store.update(cx, |store, cx| {
+                    store.toggle_diff_wrap_for(self.session_id.as_deref(), cx)
+                });
                 self.remeasure_lists();
             }
             DiffViewOption::Whitespace => {
@@ -913,8 +1133,11 @@ impl DiffPanel {
         cx.notify();
     }
 
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let active_state = self.workspace_store.read(cx).diff_active_state();
+    fn render_toolbar(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+        let active_state = self
+            .workspace_store
+            .read(cx)
+            .diff_active_state_for(self.session_id.as_deref(), cx);
         let session = active_state
             .as_ref()
             .map(|active| active.session.clone())
@@ -923,18 +1146,19 @@ impl DiffPanel {
         let turns: Rc<[usize]> = self
             .workspace_store
             .read(cx)
-            .diff_turns()
+            .diff_turns_for(self.session_id.as_deref(), cx)
             .into_iter()
             .rev()
             .collect();
         let label = match selected_scope {
-            Some(DiffScope::Turn(turn)) => crate::tr!("diff.turn", count = turn + 1).into_owned(),
+            Some(DiffScope::Turn(turn)) => {
+                crate::tr!("diff.turn", count = self.turn_number(&session, turn, cx)).into_owned()
+            }
             Some(DiffScope::WorkingTree) => crate::tr!("diff.working_tree").into_owned(),
             Some(DiffScope::Branch) => crate::tr!("diff.branch_changes").into_owned(),
             None => crate::tr!("diff.no_changes").into_owned(),
         };
         let muted = cx.theme().muted_foreground;
-        let compact = self.compact(cx);
         let panel = cx.entity();
         let session_selector = session.clone();
 
@@ -983,7 +1207,10 @@ impl DiffPanel {
                                         this.scopes.insert(session.clone(), scope);
                                         this.cache = None;
                                         this.workspace_store.update(cx, |store, cx| {
-                                            store.discard_diff_focus(cx);
+                                            store.discard_diff_focus_for(
+                                                this.session_id.as_deref(),
+                                                cx,
+                                            );
                                         });
                                         cx.notify();
                                     });
@@ -1060,7 +1287,8 @@ impl DiffPanel {
                         .children(turn_rows)
                 });
 
-        let base_selector = (selected_scope == Some(DiffScope::Branch)).then(|| {
+        let branch_scope = selected_scope == Some(DiffScope::Branch);
+        let base_selector = {
             let mut branches: Rc<[String]> = self
                 .git_preview
                 .as_ref()
@@ -1159,10 +1387,25 @@ impl DiffPanel {
                         )
                 })
                 .into_any_element()
+        };
+        // The base picker fades in beside the scope picker when Branch is chosen, and out.
+        let base_selector = crate::motion::Sampled::new(move |window, cx| {
+            match crate::motion::shown(
+                "diff-base-selector",
+                branch_scope.then_some(()),
+                SHOW,
+                window,
+                cx,
+            ) {
+                Some(shown) => shown.fade(base_selector),
+                // Out of flow, so an absent picker takes no gap in the toolbar.
+                None => div().absolute().into_any_element(),
+            }
         });
 
-        let wrap_on = self.workspace_store.read(cx).diff_word_wrap();
-        let split_on = self.workspace_store.read(cx).diff_split();
+        let store = self.workspace_store.read(cx);
+        let wrap_on = store.diff_word_wrap_for(self.session_id.as_deref());
+        let split_on = store.diff_split_for(self.session_id.as_deref());
         // One description of the view options, rendered as four dense toggles on
         // the desktop and as one overflow menu on a page with no room for them.
         let options = [
@@ -1205,7 +1448,7 @@ impl DiffPanel {
         if compact {
             // The scope and base pickers are the row; everything else is one
             // overflow menu, so a 393pt page never has to choose what to clip.
-            toolbar = toolbar.children(base_selector).child(div().flex_1()).child(
+            toolbar = toolbar.child(base_selector).child(div().flex_1()).child(
                 material::toolbar_icon_button(
                     "diff-view-options",
                     IconName::Ellipsis,
@@ -1230,7 +1473,7 @@ impl DiffPanel {
                         ),
                 );
             }
-            toolbar = toolbar.children(base_selector);
+            toolbar = toolbar.child(base_selector);
         }
         toolbar.into_any_element()
     }
@@ -1293,10 +1536,19 @@ impl DiffPanel {
         if text.is_empty() {
             return;
         }
-        let (section_id, section_title) = match self.cache.as_ref().map(|cache| cache.scope) {
-            Some(DiffScope::Turn(turn)) => (format!("turn:{turn}"), format!("Turn {}", turn + 1)),
-            Some(DiffScope::WorkingTree) => ("unstaged".to_string(), "Working tree".to_string()),
-            Some(DiffScope::Branch) => ("branch".to_string(), "Branch changes".to_string()),
+        let (section_id, section_title) = match self
+            .cache
+            .as_ref()
+            .map(|cache| (cache.scope, cache.session.as_str()))
+        {
+            Some((DiffScope::Turn(turn), session)) => {
+                let number = self.turn_number(session, turn, cx);
+                (format!("turn:{number}"), format!("Turn {number}"))
+            }
+            Some((DiffScope::WorkingTree, _)) => {
+                ("unstaged".to_string(), "Working tree".to_string())
+            }
+            Some((DiffScope::Branch, _)) => ("branch".to_string(), "Branch changes".to_string()),
             None => ("diff".to_string(), "Review".to_string()),
         };
         let comment = ReviewComment::new(
@@ -1311,8 +1563,9 @@ impl DiffPanel {
             selection.start_index,
             selection.end_index,
         );
+        let session_id = self.session_id.clone().unwrap_or_default();
         self.workspace_store.update(cx, |store, _cx| {
-            store.add_review_comment(comment);
+            store.add_review_comment_for(session_id, comment);
         });
         if let Some(cache) = self.cache.as_mut() {
             cache.list.selection = None;
@@ -1322,7 +1575,45 @@ impl DiffPanel {
         cx.notify();
     }
 
+    /// The diff, cross-fading over the Loading line it replaces.
     fn render_body(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let loading = self.cache.is_none()
+            && (self.loading_key.is_some() || self.render_loading_key.is_some());
+        let fade = crate::motion::CrossFade::new(
+            "diff-loading",
+            usize::from(!loading),
+            2,
+            CHANGE,
+            window,
+            cx,
+        )
+        .fill();
+        let column = |body: AnyElement| {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(body)
+                .into_any_element()
+        };
+        let mut layers = Vec::new();
+        if fade.shows(0) {
+            layers.push((
+                0,
+                column(self.render_status(crate::tr!("diff.loading").into_owned(), cx)),
+            ));
+        }
+        if !loading {
+            layers.push((1, column(self.render_loaded(window, cx))));
+        }
+        fade.render(layers)
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .into_any_element()
+    }
+
+    fn render_loaded(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(cache) = self.cache.as_ref() else {
             if self.loading_key.is_some() || self.render_loading_key.is_some() {
                 return self.render_status(crate::tr!("diff.loading").into_owned(), cx);
@@ -1332,8 +1623,9 @@ impl DiffPanel {
         let viewport = if cache.list.files.is_empty() {
             self.render_empty(cx)
         } else {
-            let split = self.workspace_store.read(cx).diff_split();
-            let wrap = self.workspace_store.read(cx).diff_word_wrap();
+            let store = self.workspace_store.read(cx);
+            let split = store.diff_split_for(self.session_id.as_deref());
+            let wrap = store.diff_word_wrap_for(self.session_id.as_deref());
             render_list(self, "diff-body", split, wrap, window, cx)
         };
         // A compact page holds its content clear of the window edges; the code
@@ -1342,22 +1634,31 @@ impl DiffPanel {
         let mut content = v_flex()
             .size_full()
             .min_h_0()
-            .when(self.compact(cx), |body| {
-                body.px(px(material::COMPACT_PAGE_INSET))
-            })
+            .px(self.motion.transition(
+                "page-inset",
+                if self.compact(cx) {
+                    px(material::COMPACT_PAGE_INSET)
+                } else {
+                    px(0.)
+                },
+                GLIDE,
+                window,
+                cx,
+            ))
             .child(viewport);
 
-        if let Some(preview) = self
+        let preview = self
             .git_preview
             .as_ref()
-            .filter(|preview| preview.session == cache.session && preview.scope == cache.scope)
-        {
-            if preview.result.truncated {
-                content =
-                    content.child(render_notice(crate::tr!("diff.truncated").into_owned(), cx));
-            }
-            if let Some(error) = &preview.result.error {
-                content = content.child(render_notice(error.clone(), cx));
+            .filter(|preview| preview.session == cache.session && preview.scope == cache.scope);
+        // The truncated and error notices fold in under the diff and out when they clear.
+        let truncated = preview
+            .is_some_and(|preview| preview.result.truncated)
+            .then(|| crate::tr!("diff.truncated").into_owned());
+        let error = preview.and_then(|preview| preview.result.error.clone());
+        for (id, notice) in [("diff-truncated", truncated), ("diff-error", error)] {
+            if let Some(shown) = crate::motion::shown(id, notice, SHOW, window, cx) {
+                content = content.child(shown.fold(render_notice(shown.value.clone(), cx)));
             }
         }
 
@@ -1382,9 +1683,7 @@ impl DiffPanel {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut rows = self
-            .workspace_store
-            .read(cx)
-            .review_comments()
+            .observed_review_comments
             .iter()
             .filter(|comment| {
                 comment.file == file
@@ -1491,9 +1790,13 @@ fn menu_row(
     selected: bool,
     compact: bool,
     cx: &App,
-) -> gpui::Stateful<gpui::Div> {
+) -> material::Clickable<gpui::Div> {
     material::accessible_clickable(
-        material::menu_item_frame(compact, cx),
+        material::menu_item_frame(
+            compact,
+            material::ItemFill::highlight(selected, cx.theme().muted),
+            cx,
+        ),
         id,
         Role::MenuItem,
         label,
@@ -1505,8 +1808,6 @@ fn menu_row(
     .items_center()
     .text_body(compact, cx)
     .cursor_pointer()
-    .hover(|row| row.bg(cx.theme().muted))
-    .when(selected, |row| row.bg(cx.theme().muted))
 }
 
 fn turn_row(
@@ -1521,9 +1822,8 @@ fn turn_row(
     let panel = panel.clone();
     let session = session.to_string();
     let popover = popover.clone();
-    let label: gpui::SharedString = crate::tr!("diff.turn", count = turn + 1)
-        .into_owned()
-        .into();
+    let number = panel.read(cx).turn_number(&session, turn, cx);
+    let label: gpui::SharedString = crate::tr!("diff.turn", count = number).into_owned().into();
     menu_row(
         ("diff-turn-item", turn).into(),
         label.clone(),
@@ -1544,7 +1844,7 @@ fn turn_row(
             this.scopes.insert(session.clone(), DiffScope::Turn(turn));
             this.cache = None;
             this.workspace_store.update(cx, |store, cx| {
-                store.select_diff_turn(turn, cx);
+                store.select_diff_turn_for(this.session_id.as_deref(), turn, cx);
             });
             cx.notify();
         });
@@ -1615,7 +1915,7 @@ impl DiffListHost for DiffPanel {
         let cwd = self
             .workspace_store
             .read(cx)
-            .diff_active_state()
+            .diff_active_state_for(self.session_id.as_deref(), cx)
             .map(|active| active.cwd);
         Rc::new(move |menu, _, _| menu.path_items(&path, cwd.as_deref()))
     }
@@ -1648,33 +1948,79 @@ impl DiffListHost for DiffPanel {
 impl Render for DiffPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_cache(cx);
-        let tab = self.workspace_store.read(cx).panel_state().right_tab;
+        let tab = self
+            .workspace_store
+            .read(cx)
+            .panel_state_for(self.session_id.as_deref())
+            .right_tab;
         // Compact: the Panel page's segmented control is the only selector, and
         // Back is the only way off the page. This panel's own tab row and its
         // expand / split / close cluster are wide-layout affordances, so the
         // whole strip stays unbuilt rather than being drawn and ignored.
         let compact = self.compact(cx);
-        let mut root = v_flex()
+        // The strip folds away as the window turns compact and back as it
+        // turns wide.
+        let strip = self
+            .motion
+            .swap("tab-strip", usize::from(!compact), 2, CHANGE, window, cx);
+        let strip_layer = strip
+            .shows(1)
+            .then(|| (1, self.render_tab_strip(window, cx)));
+        let root = v_flex()
             .size_full()
             .min_w_0()
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_view_option))
             .on_action(cx.listener(Self::on_selection_menu))
-            .when(!compact, |root| {
-                root.child(self.render_tab_strip(window, cx))
-            });
-        root = match tab {
-            // AppShell mounts Preview separately; this container handles Diff/Plan.
-            RightTab::Diff | RightTab::Preview => root
-                .child(self.render_toolbar(cx))
-                .child(self.render_body(window, cx)),
-            RightTab::PullRequests => {
-                root.child(div().flex_1().min_h_0().child(self.pull_requests.clone()))
-            }
-            RightTab::Plan => root.child(div().flex_1().min_h_0().child(self.plan.clone())),
-            RightTab::Agents => root.child(div().flex_1().min_h_0().child(self.agents.clone())),
+            .child(div().flex_none().child(strip.render(strip_layer)));
+        // Tab bodies cross-fade, each in its own layer, built only while it shows.
+        let layer = match tab {
+            RightTab::Diff | RightTab::Preview => 0,
+            RightTab::PullRequests => 1,
+            RightTab::Plan => 2,
+            RightTab::Agents => 3,
         };
-        root
+        let fade =
+            crate::motion::CrossFade::new("right-tab-body", layer, 4, CHANGE, window, cx).fill();
+        let body = || v_flex().size_full().min_h_0();
+        let mut layers = Vec::new();
+        if fade.shows(0) {
+            layers.push((
+                0,
+                body()
+                    .debug_selector(|| "diff-tab-body".into())
+                    .child({
+                        // The overflow menu and the four toggles trade places
+                        // as the window turns.
+                        let toolbar = self.motion.swap(
+                            "toolbar",
+                            usize::from(compact),
+                            2,
+                            CHANGE,
+                            window,
+                            cx,
+                        );
+                        let layers = [(0, false), (1, true)]
+                            .into_iter()
+                            .filter(|(layer, _)| toolbar.shows(*layer))
+                            .map(|(layer, compact)| (layer, self.render_toolbar(compact, cx)))
+                            .collect::<Vec<_>>();
+                        toolbar.render(layers)
+                    })
+                    .child(self.render_body(window, cx))
+                    .into_any_element(),
+            ));
+        }
+        for (index, view) in [
+            (1, self.pull_requests.clone().into_any_element()),
+            (2, self.plan.clone().into_any_element()),
+            (3, self.agents.clone().into_any_element()),
+        ] {
+            if fade.shows(index) {
+                layers.push((index, body().child(view).into_any_element()));
+            }
+        }
+        root.child(fade.render(layers).flex_1().min_h_0())
     }
 }
 
@@ -1697,12 +2043,11 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
-        let window_state = cx.new(|_| WindowState::new(false));
-        let panel = cx.new(|cx| DiffPanel::new(store, window_state, cx));
+        let window_state = cx.new(|_| WindowState::default());
+        let panel = cx.new(|cx| DiffPanel::new(store, window_state, None, cx));
         panel.update(cx, |panel, cx| {
             panel.request_rendered_files(
                 RenderKey {
@@ -1793,8 +2138,7 @@ mod tests {
         let pump = link.clone();
         let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            pump.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
-                .await;
+            pump.pump_with_timer(|delay| executor.timer(delay)).await;
         });
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -1802,12 +2146,11 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
-        let window_state = cx.new(|_| WindowState::new(false));
-        let panel = cx.new(|cx| DiffPanel::new(store, window_state, cx));
+        let window_state = cx.new(|_| WindowState::default());
+        let panel = cx.new(|cx| DiffPanel::new(store, window_state, None, cx));
         panel.update(cx, |panel, cx| {
             panel.request_rendered_files(
                 RenderKey {

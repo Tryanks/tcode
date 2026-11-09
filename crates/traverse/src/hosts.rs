@@ -2,7 +2,11 @@
 //! updates from the UI and the transport, possibly from several app processes
 //! sharing one profile, serialize on a lock file; readers see either complete
 //! version via rename.
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use tcode_client::pairing::{MAX_ADDRS, PairedHost, valid_host_id};
 
@@ -148,7 +152,34 @@ fn lock_exclusive(file: &fs::File) -> io::Result<()> {
 fn write_hosts(data_dir: &Path, hosts: &[PairedHost]) -> io::Result<()> {
     fs::create_dir_all(data_dir)?;
     let bytes = serde_json::to_vec_pretty(hosts).map_err(io::Error::other)?;
-    crate::identity::write_private(&data_dir.join("hosts.json"), &bytes)
+    crate::identity::write_private(&data_dir.join("hosts.json"), &bytes)?;
+    changed(data_dir);
+    Ok(())
+}
+
+/// Who listens to each data directory's `hosts.json`.
+static WATCHERS: Mutex<Vec<(PathBuf, async_channel::Sender<()>)>> = Mutex::new(Vec::new());
+
+/// Wakes after every write to `data_dir`'s `hosts.json` from this process,
+/// the machine hosted here included, for as long as it is held. Writes
+/// close together wake it once.
+pub fn watch(data_dir: &Path) -> async_channel::Receiver<()> {
+    let (sender, receiver) = async_channel::bounded(1);
+    WATCHERS
+        .lock()
+        .unwrap()
+        .push((data_dir.to_path_buf(), sender));
+    receiver
+}
+
+fn changed(data_dir: &Path) {
+    WATCHERS.lock().unwrap().retain(|(watched, sender)| {
+        if watched == data_dir {
+            // Full: a wake is already waiting to be read.
+            let _ = sender.try_send(());
+        }
+        !sender.is_closed()
+    });
 }
 
 #[cfg(test)]

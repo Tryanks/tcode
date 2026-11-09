@@ -312,24 +312,26 @@ async fn pump(
             }
             Input::Client(Err(_)) | Input::Host(Err(_)) => break,
             Input::Host(Ok(line)) => {
-                let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                let Ok(header) = serde_json::from_str::<HostLine>(&line) else {
                     continue;
                 };
-                match value.get("type").and_then(serde_json::Value::as_str) {
-                    Some("event") => {
-                        let Some(content) = value.get("content") else {
-                            continue;
-                        };
-                        let Some(topic) = content
-                            .get("topic")
-                            .and_then(|topic| serde_json::to_string(topic).ok())
+                match header.kind.as_ref() {
+                    "event" => {
+                        let Some(HostContent {
+                            request_id,
+                            topic: Some(topic),
+                            event,
+                        }) = header.content
                         else {
                             continue;
                         };
-                        if let Some(request_id) = content
-                            .get("request_id")
-                            .and_then(serde_json::Value::as_u64)
-                        {
+                        let Ok(topic) = serde_json::to_string(&topic) else {
+                            continue;
+                        };
+                        let terminal = event.as_ref().is_some_and(|event| {
+                            matches!(event.kind.as_ref(), "terminal_frame" | "terminal_delta")
+                        });
+                        if let Some(request_id) = request_id {
                             if let Some((connection_id, local_id)) =
                                 routes.get(&request_id).copied()
                             {
@@ -345,19 +347,18 @@ async fn pump(
                                     .is_some_and(|topics| topics.contains(&topic))
                                     && let Some(sender) = clients.get(&connection_id)
                                 {
-                                    value["content"]["request_id"] = local_id.into();
-                                    if matches!(
-                                        value
-                                            .pointer("/content/event/type")
-                                            .and_then(serde_json::Value::as_str),
-                                        Some("terminal_frame" | "terminal_delta")
-                                    ) {
-                                        if let Ok(tcode_protocol::HostMessage::Event(envelope)) =
-                                            serde_json::from_value(value.clone())
+                                    if terminal {
+                                        if let Ok(tcode_protocol::HostMessage::Event(
+                                            mut envelope,
+                                        )) = tcode_protocol::decode_host_line(&line)
                                         {
+                                            envelope.request_id = Some(local_id);
                                             let _ = sender.outbox.try_send_terminal(envelope);
                                         }
-                                    } else {
+                                    } else if let Ok(mut value) =
+                                        serde_json::from_str::<serde_json::Value>(&line)
+                                    {
+                                        value["content"]["request_id"] = local_id.into();
                                         let _ = sender
                                             .outbox
                                             .try_send(encode_line(&value).unwrap(), None);
@@ -365,10 +366,9 @@ async fn pump(
                                 }
                             }
                         } else {
-                            let replace = content
-                                .get("event")
-                                .and_then(|event| event.get("type"))
-                                .and_then(serde_json::Value::as_str)
+                            let replace = event
+                                .as_ref()
+                                .map(|event| event.kind.as_ref())
                                 .filter(|kind| {
                                     matches!(
                                         *kind,
@@ -377,24 +377,32 @@ async fn pump(
                                             | "command_output_replaced"
                                             | "providers_replaced"
                                             | "index_summary_replaced"
+                                            | "preview_session_replaced"
+                                            | "preview_rendering_replaced"
+                                            | "dev_servers_replaced"
+                                            | "storage_migration_replaced"
+                                            | "disk_usage_replaced"
                                     )
                                 })
                                 .map(|kind| format!("{kind}:{topic}"));
+                            let mut envelope = None;
                             for (id, sender) in &clients {
                                 if subscriptions
                                     .get(id)
                                     .is_some_and(|topics| topics.contains(&topic))
                                 {
-                                    if matches!(
-                                        content
-                                            .pointer("/event/type")
-                                            .and_then(serde_json::Value::as_str),
-                                        Some("terminal_frame" | "terminal_delta")
-                                    ) {
-                                        if let Ok(tcode_protocol::HostMessage::Event(envelope)) =
-                                            serde_json::from_value(value.clone())
-                                        {
-                                            let _ = sender.outbox.try_send_terminal(envelope);
+                                    if terminal {
+                                        let envelope = envelope.get_or_insert_with(|| {
+                                            match tcode_protocol::decode_host_line(&line) {
+                                                Ok(tcode_protocol::HostMessage::Event(
+                                                    envelope,
+                                                )) => Some(envelope),
+                                                _ => None,
+                                            }
+                                        });
+                                        if let Some(envelope) = envelope {
+                                            let _ =
+                                                sender.outbox.try_send_terminal(envelope.clone());
                                         }
                                     } else {
                                         let _ =
@@ -404,7 +412,10 @@ async fn pump(
                             }
                         }
                     }
-                    Some("ack" | "query_result") => {
+                    "ack" | "query_result" => {
+                        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                            continue;
+                        };
                         let Some(global_id) = value
                             .get("content")
                             .and_then(|content| content.get("id"))
@@ -450,6 +461,32 @@ async fn pump(
             }
         }
     }
+}
+
+/// What the mux routes a host line on. Deserializing only this skips the
+/// event itself without building it.
+#[derive(serde::Deserialize)]
+struct HostLine<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: std::borrow::Cow<'a, str>,
+    #[serde(default, borrow)]
+    content: Option<HostContent<'a>>,
+}
+
+#[derive(serde::Deserialize)]
+struct HostContent<'a> {
+    #[serde(default)]
+    request_id: Option<u64>,
+    #[serde(default)]
+    topic: Option<serde_json::Value>,
+    #[serde(default, borrow)]
+    event: Option<EventKind<'a>>,
+}
+
+#[derive(serde::Deserialize)]
+struct EventKind<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: std::borrow::Cow<'a, str>,
 }
 
 // A departing client may have a snapshot still in flight. Keep the host's
@@ -650,6 +687,97 @@ mod tests {
             released,
             HashSet::from([session_topic.to_string(), index_topic.to_string()])
         );
+    }
+
+    /// A terminal's subscription reply reaches its client under the
+    /// client's own request id, and the frames broadcast after it reach every
+    /// subscriber as the host sent them.
+    #[test]
+    fn terminal_frames_reach_their_subscribers_intact() {
+        use tcode_protocol::terminal::{TerminalDelta, TerminalFrame};
+        use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic};
+
+        let (to_host, host_rx) = async_channel::unbounded();
+        let (host_tx, from_host) = async_channel::unbounded();
+        let mux = HostMux::new(to_host, from_host);
+        let topic = Topic::Terminal { terminal_id: 3 };
+        let clients: Vec<_> = (0..2)
+            .map(|_| mux.attach(Principal::Full, AttachmentPolicy::network()))
+            .collect();
+        let frame = TerminalFrame {
+            cols: 80,
+            rows: 24,
+            ..TerminalFrame::default()
+        };
+        for (local_id, client) in [(7, &clients[0]), (8, &clients[1])] {
+            client
+                .to_host
+                .send_blocking(
+                    encode_line(&serde_json::json!({
+                        "id": local_id,
+                        "payload": {"type": "subscribe", "content": {"topic": topic}},
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            let forwarded: serde_json::Value =
+                serde_json::from_str(&host_rx.recv_blocking().unwrap().line).unwrap();
+            let global_id = forwarded["id"].as_u64().unwrap();
+            let reply = |request_id| {
+                HostMessage::Event(EventEnvelope {
+                    request_id,
+                    topic: topic.clone(),
+                    event: ServerEvent::TerminalFrame {
+                        terminal_id: 3,
+                        frame: Box::new(frame.clone()),
+                    },
+                })
+            };
+            host_tx
+                .send_blocking(encode_line(&reply(Some(global_id))).unwrap())
+                .unwrap();
+            assert_eq!(
+                tcode_protocol::decode_host_line(&client.from_host.recv_blocking().unwrap())
+                    .unwrap(),
+                reply(Some(local_id))
+            );
+            host_tx
+                .send_blocking(
+                    encode_line(&HostMessage::Ack {
+                        id: global_id,
+                        result: Ok(tcode_protocol::CommandResponse::Unit),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            assert!(matches!(
+                tcode_protocol::decode_host_line(&client.from_host.recv_blocking().unwrap())
+                    .unwrap(),
+                HostMessage::Ack { id, result: Ok(_) } if id == local_id
+            ));
+        }
+
+        let delta = HostMessage::Event(EventEnvelope {
+            request_id: None,
+            topic: topic.clone(),
+            event: ServerEvent::TerminalDelta {
+                terminal_id: 3,
+                delta: Box::new(TerminalDelta {
+                    cols: 80,
+                    rows: 24,
+                    bell: true,
+                    ..TerminalDelta::default()
+                }),
+            },
+        });
+        host_tx.send_blocking(encode_line(&delta).unwrap()).unwrap();
+        for client in &clients {
+            assert_eq!(
+                tcode_protocol::decode_host_line(&client.from_host.recv_blocking().unwrap())
+                    .unwrap(),
+                delta
+            );
+        }
     }
 
     #[test]

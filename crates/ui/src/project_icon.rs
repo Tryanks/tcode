@@ -1,4 +1,5 @@
 //! Shared project artwork and an in-app picker over the attached host's files.
+use crate::widgets::scrollbar::Scrollbar;
 use crate::{
     icon::{Icon, IconName},
     overlay::OverlayExt as _,
@@ -11,15 +12,24 @@ use crate::{
     },
 };
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, Role, ScrollStrategy, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription,
+    AnyElement, App, AppContext as _, Context, Entity, ImageSource, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, RenderOnce, Role, ScrollStrategy,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription,
     UniformListScrollHandle, Window, div, img, prelude::FluentBuilder as _, px, uniform_list,
 };
-use gpui_base::{ElementExt as _, Scrollbar, h_flex, v_flex};
+use gpui_base::{ElementExt as _, h_flex, v_flex};
 use std::{path::PathBuf, rc::Rc};
 use tcode_core::project::Project;
 use tcode_protocol::{IconImageEntry, QueryResponse};
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a picture drawn here takes to fade in once it has decoded.
+const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
 
 const TILE_WIDTH: f32 = 96.;
 const TILE_GAP: f32 = 8.;
@@ -40,7 +50,7 @@ pub(crate) fn group_label(project: &Project) -> String {
     }
 }
 
-pub(crate) fn artwork(project: &Project, size: f32) -> AnyElement {
+pub(crate) fn artwork(host: images::ImageHost, project: &Project, size: f32) -> AnyElement {
     if project.quick_chat {
         return Icon::empty()
             .path("icons/message-square.svg")
@@ -48,15 +58,45 @@ pub(crate) fn artwork(project: &Project, size: f32) -> AnyElement {
             .flex_none()
             .into_any_element();
     }
-    img(images::project_icon(project, size))
-        .size(px(size))
-        .flex_none()
-        .with_fallback(move || {
-            Icon::new(IconName::Folder)
-                .size(px(size))
-                .into_any_element()
-        })
-        .into_any_element()
+    Artwork {
+        id: format!("project-artwork-{}-{size}", project.id).into(),
+        source: images::project_icon(host, project, size),
+        size,
+    }
+    .into_any_element()
+}
+
+/// A project's picture, or its folder when it has none, fading in once it
+/// is known rather than appearing at once after the blank `img` draws while
+/// it decodes.
+#[derive(IntoElement)]
+struct Artwork {
+    id: SharedString,
+    source: ImageSource,
+    size: f32,
+}
+
+impl RenderOnce for Artwork {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let size = self.size;
+        let arrived = crate::motion::image_arrival(
+            crate::motion::Clock::Element,
+            self.id,
+            &self.source,
+            ARRIVE,
+            window,
+            cx,
+        );
+        img(self.source)
+            .size(px(size))
+            .flex_none()
+            .opacity(arrived)
+            .with_fallback(move || {
+                Icon::new(IconName::Folder)
+                    .size(px(size))
+                    .into_any_element()
+            })
+    }
 }
 
 pub(crate) fn open(
@@ -209,7 +249,12 @@ impl Picker {
         cx.notify();
     }
 
-    fn render_tile(&self, entry: &IconImageEntry, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tile(
+        &self,
+        entry: &IconImageEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let path = entry.path.clone();
         let is_dir = entry.is_dir;
         let is_selected = self.selected.as_ref() == Some(&path);
@@ -219,8 +264,18 @@ impl Picker {
                 .text_color(cx.theme().muted_foreground)
                 .into_any_element()
         } else {
-            img(images::icon_thumbnail(path.clone()))
+            let source = images::icon_thumbnail(self.store.read(cx).image_host(), path.clone());
+            let arrived = crate::motion::image_arrival(
+                crate::motion::Clock::Element,
+                SharedString::from(format!("icon-thumbnail-{}", entry.name)),
+                &source,
+                ARRIVE,
+                window,
+                cx,
+            );
+            img(source)
                 .size(px(64.))
+                .opacity(arrived)
                 .with_fallback(|| {
                     Icon::empty()
                         .path("icons/image.svg")
@@ -229,66 +284,90 @@ impl Picker {
                 })
                 .into_any_element()
         };
-        crate::material::accessible_clickable(
-            v_flex(),
-            SharedString::from(format!("icon-file-{}", entry.name)),
-            Role::Button,
-            entry.name.clone(),
+        let id = SharedString::from(format!("icon-file-{}", entry.name));
+        let (border, bg) = if is_selected {
+            (cx.theme().primary, cx.theme().accent)
+        } else {
+            (cx.theme().border, cx.theme().background)
+        };
+        // Selection and hover glide; the hover fill lies over the tile's own.
+        let border = gpui_base::motion::transition(
+            (id.clone(), "border"),
+            border,
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
             cx,
-        )
-        .aria_selected(is_selected)
-        .debug_selector({
-            let name = entry.name.clone();
-            move || format!("icon-file-{name}")
-        })
-        .w(px(TILE_WIDTH))
-        .h(px(108.))
-        .p_2()
-        .gap_1()
-        .items_center()
-        .justify_center()
-        .rounded(crate::material::radius_card(cx))
-        .border_1()
-        .border_color(if is_selected {
-            cx.theme().primary
-        } else {
-            cx.theme().border
-        })
-        .bg(if is_selected {
-            cx.theme().accent
-        } else {
-            cx.theme().background
-        })
-        .hover(|el| el.bg(cx.theme().accent))
-        .cursor_pointer()
-        .child(
-            div()
-                .h(px(68.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(content),
-        )
-        .child(
-            div()
-                .w_full()
-                .overflow_hidden()
-                .text_secondary(false, cx)
-                .child(crate::widgets::fade_text(entry.name.clone())),
-        )
-        .on_click(cx.listener(move |this, _, window, cx| {
-            if this.saving {
-                return;
-            }
-            if is_dir {
-                this.browse(path.clone(), window, cx);
-            } else {
-                this.selected = Some(path.clone());
-                this.error = None;
-                cx.notify();
-            }
-        }))
-        .into_any_element()
+        );
+        let bg = gpui_base::motion::transition(
+            (id.clone(), "bg"),
+            bg,
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        let (hover, on_hover) = crate::motion::hover_fill(
+            crate::motion::Clock::Element,
+            id.clone(),
+            cx.theme().accent.opacity(0.),
+            cx.theme().accent,
+            &crate::material::HOVER.into(),
+            window,
+            cx,
+        );
+        crate::material::accessible_clickable(v_flex(), id, Role::Button, entry.name.clone(), cx)
+            .aria_selected(is_selected)
+            .debug_selector({
+                let name = entry.name.clone();
+                move || format!("icon-file-{name}")
+            })
+            .w(px(TILE_WIDTH))
+            .h(px(108.))
+            .p_2()
+            .gap_1()
+            .items_center()
+            .justify_center()
+            .relative()
+            .rounded(crate::material::radius_card(cx))
+            .border_1()
+            .border_color(border)
+            .bg(bg)
+            .on_hover(on_hover)
+            .cursor_pointer()
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(crate::material::radius_card(cx))
+                    .bg(hover),
+            )
+            .child(
+                div()
+                    .h(px(68.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(content),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .overflow_hidden()
+                    .text_secondary(false, cx)
+                    .child(crate::widgets::fade_text(entry.name.clone())),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if this.saving {
+                    return;
+                }
+                if is_dir {
+                    this.browse(path.clone(), window, cx);
+                } else {
+                    this.selected = Some(path.clone());
+                    this.error = None;
+                    cx.notify();
+                }
+            }))
+            .into_any_element()
     }
 }
 
@@ -318,6 +397,21 @@ impl Render for Picker {
         // window leaves instead of DIALOG_LIST_HEIGHT.
         let viewport_height =
             (f32::from(window.viewport_size().height) * 0.9 - 360.).clamp(48., 320.);
+        // Loading… fades out over the folder it loaded, which fades in.
+        let leaving = crate::motion::shown(
+            "icon-file-loading",
+            self.loading.then_some(()),
+            SHOW,
+            window,
+            cx,
+        );
+        let arriving = gpui_base::motion::transition(
+            ("icon-file-grid", "opacity"),
+            if self.loading { 0. } else { 1. },
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
         let content = if self.loading {
             crate::material::empty_row(crate::tr!("project_icon.loading"), cx).into_any_element()
         } else if matches.is_empty() {
@@ -327,15 +421,15 @@ impl Render for Picker {
             let list = uniform_list(
                 "icon-file-rows",
                 rows,
-                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                     range
                         .map(|row| {
                             let tiles =
                                 &matches[row * columns..matches.len().min((row + 1) * columns)];
                             h_flex().gap(px(TILE_GAP)).pb(px(TILE_GAP)).children(
-                                tiles
-                                    .iter()
-                                    .map(|&index| this.render_tile(&this.entries[index], cx)),
+                                tiles.iter().map(|&index| {
+                                    this.render_tile(&this.entries[index], window, cx)
+                                }),
                             )
                         })
                         .collect()
@@ -365,7 +459,11 @@ impl Render for Picker {
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(artwork(&self.project, 32.))
+                    .child(artwork(
+                        self.store.read(cx).image_host(),
+                        &self.project,
+                        32.,
+                    ))
                     .child(
                         v_flex()
                             .child(div().text_body(false, cx).child(self.project.name.clone()))
@@ -427,7 +525,26 @@ impl Render for Picker {
                 div()
                     .id("icon-file-grid")
                     .h(px(viewport_height))
-                    .child(content)
+                    .relative()
+                    .child(
+                        div()
+                            .size_full()
+                            .when(!self.loading, |grid| grid.opacity(arriving))
+                            .child(content),
+                    )
+                    .when_some(leaving.filter(|_| !self.loading), |grid, leaving| {
+                        grid.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .child(leaving.fade(crate::material::empty_row(
+                                    crate::tr!("project_icon.loading"),
+                                    cx,
+                                ))),
+                        )
+                    })
                     .on_prepaint(move |bounds, _, cx| {
                         _ = picker.update(cx, |picker, cx| {
                             if picker.grid_width != bounds.size.width {
@@ -437,14 +554,19 @@ impl Render for Picker {
                         });
                     }),
             )
-            .when_some(self.error.clone(), |el, error| {
-                el.child(
-                    div()
-                        .text_secondary(false, cx)
-                        .text_color(cx.theme().danger)
-                        .child(error),
-                )
-            })
+            .when_some(
+                crate::motion::shown("icon-error", self.error.clone(), SHOW, window, cx),
+                |el, error| {
+                    el.child(
+                        error.fold(
+                            div()
+                                .text_secondary(false, cx)
+                                .text_color(cx.theme().danger)
+                                .child(error.value.clone()),
+                        ),
+                    )
+                },
+            )
             .child(
                 div().text_secondary(false, cx).child(
                     self.entries
@@ -530,7 +652,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -590,7 +711,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -671,14 +791,12 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            link.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
-                .await;
+            link.pump_with_timer(|delay| executor.timer(delay)).await;
         });
         let requested_folder = folder.clone();
         let _host = cx.background_executor.spawn(async move {

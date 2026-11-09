@@ -182,6 +182,11 @@ fn original_entries_are_read_by_anchor_after_compaction_rewind_retry_and_fork() 
         checkpoint_id: "cp-2".into(),
         mode: RewindMode::Conversation,
         prefill: None,
+        prefill_attachments: Vec::new(),
+        later_history: agent::LaterHistory::Truncated,
+        files: None,
+        incomplete: None,
+        undo_token: None,
     });
     let (_, retried) = target.turn(3, "Try a channel", "Working on it.");
     target.record(AgentEvent::TurnRetry {
@@ -261,6 +266,49 @@ fn original_entries_are_read_by_anchor_after_compaction_rewind_retry_and_fork() 
 /// A long thread is answered within the budget with what was left out named, a huge output
 /// shown head and tail with a cursor that continues it, and a long outline cut to the newest
 /// turns.
+/// An undone rewind gives the thread its turns back, and each of their
+/// entries answers to the anchor it had before the rewind: a model that
+/// read them then can cite them again.
+#[test]
+fn entries_an_undone_rewind_restores_keep_their_anchors() {
+    let store = TestStore::new("tcode-control-content-undo-anchors");
+    let mut caller = StoredThread::new("caller", "p");
+    let mut target = StoredThread::new("target", "p");
+    target.turn(
+        1,
+        "Why is the sync test flaky?",
+        "Worker 3 poisons the lock.",
+    );
+    let (prompt, reply) = target.turn(2, "Try a mutex", "Switched to a mutex.");
+    target.record(AgentEvent::RewindCompleted {
+        checkpoint_id: "cp-2".into(),
+        mode: RewindMode::Conversation,
+        prefill: None,
+        prefill_attachments: Vec::new(),
+        later_history: agent::LaterHistory::HiddenUntilNextSend,
+        files: None,
+        incomplete: None,
+        undo_token: Some("revert".into()),
+    });
+    target.record(AgentEvent::RewindUndone {
+        checkpoint_id: "cp-2".into(),
+    });
+
+    let (mut cx, state) = host(&store, vec![&mut caller, &mut target]);
+    for (anchor, text) in [(prompt, "Try a mutex"), (reply, "Switched to a mutex.")] {
+        let answer = call(
+            &state,
+            &mut cx,
+            "caller",
+            json!({ "tool": "read", "params": { "anchors": [format!("target#{anchor}")] } }),
+        )
+        .unwrap();
+        let entries = texts(&answer);
+        assert_eq!(entries.len(), 1, "target#{anchor}: {answer:#}");
+        assert!(entries[0].contains(text), "target#{anchor}: {answer:#}");
+    }
+}
+
 #[test]
 fn reading_a_very_long_thread_stays_within_budget_and_says_what_it_left_out() {
     let store = TestStore::new("tcode-control-content-budget");
@@ -495,7 +543,10 @@ fn reads_are_refused_outside_scope_and_leave_the_target_untouched() {
         assert_eq!(meta.updated_at, before.1.updated_at);
         assert!(state.resident("target").is_none(), "the read woke nothing");
         assert!(
-            state.control_activity(10).is_empty(),
+            state
+                .control_activity(&Default::default(), 10)
+                .entries
+                .is_empty(),
             "a read is not a write"
         );
     });

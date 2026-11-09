@@ -2,7 +2,11 @@
 //! the reads behind them. The desktop draws it inside the Pull requests tab; the phone draws it
 //! as a page.
 
+use crate::widgets::TooltipTrigger as _;
 use std::collections::{HashMap, HashSet};
+
+/// How long a conversation row takes to come in, or to fold away as it leaves.
+const ROWS_IN: std::time::Duration = std::time::Duration::from_millis(200);
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
@@ -39,6 +43,25 @@ use crate::{
     },
     window_state::WindowState,
 };
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The behind-base chip: how far the head is behind, and the updates the account may make.
+#[derive(Clone, PartialEq)]
+struct Behind {
+    label: String,
+    tooltip: String,
+    updates: Option<PullRequestKey>,
+    merges: bool,
+    busy: bool,
+}
 
 /// The phone ⋯ menu's title edit.
 #[derive(gpui::Action, Clone, PartialEq, serde::Deserialize)]
@@ -122,18 +145,41 @@ pub(super) struct Replies {
 
 pub(super) struct ConversationView {
     pub(super) list: ListState,
+    /// The rows `list` was last brought to.
+    pub(super) rows: Vec<super::conversation::Item>,
+    /// Their keys, and the rows that came in while the reader looked.
+    pub(super) keys: Vec<u64>,
+    pub(super) arrivals: crate::motion::list_rows::ListRows<(), super::conversation::LeftRow>,
+    /// The conversation and pending review count the rows were last brought to, from which
+    /// a row that goes is drawn while it folds away.
+    pub(super) drawn: Option<std::rc::Rc<tcode_protocol::PullRequestConversation>>,
+    pub(super) drawn_pending: usize,
+    /// The add-reaction chips, which travel between a comment's head and its reactions.
+    pub(super) shared: crate::motion::shared::SharedMoves,
     /// By comment id, with the account its conversation was read as.
     pub(super) markdown:
         std::cell::RefCell<HashMap<String, (String, Entity<crate::markdown::MarkdownState>)>>,
     pub(super) replies: HashMap<String, Replies>,
     /// Resolved threads and long comments the reader opened.
     pub(super) expanded: HashSet<String>,
+    /// The comment head the pointer is over, whose add-reaction chip shows.
+    pub(super) hover: crate::motion::ListHover,
+    /// A scroll to a thread, or to the composer, on its way.
+    pub(super) scroll: crate::motion::ListScroll,
 }
 
 impl Default for ConversationView {
     fn default() -> Self {
         Self {
+            hover: crate::motion::ListHover::new(crate::material::HOVER),
+            scroll: crate::motion::ListScroll::default(),
             list: ListState::new(0, ListAlignment::Top, px(200.)),
+            rows: Vec::new(),
+            keys: Vec::new(),
+            arrivals: crate::motion::list_rows::ListRows::over(ROWS_IN),
+            drawn: None,
+            drawn_pending: 0,
+            shared: Default::default(),
             markdown: Default::default(),
             replies: HashMap::new(),
             expanded: HashSet::new(),
@@ -167,6 +213,8 @@ pub(super) struct PullRequestPage {
 
 pub struct PullRequestView {
     pub(super) store: Entity<WorkspaceStore>,
+    /// The host the conversation's media is read through.
+    pub(super) image_host: crate::store::ImageHost,
     pub(super) window_state: Entity<WindowState>,
     /// The thread the pull request is read through, and the pull request.
     pub(super) current: Option<(String, PullRequestKey)>,
@@ -177,6 +225,10 @@ pub struct PullRequestView {
     pub(super) file_filter: Option<(Entity<crate::widgets::input::InputState>, Subscription)>,
     /// The phone header's chip row, which scrolls sideways.
     chips_scroll: ScrollHandle,
+    /// The view's motion that must carry on when the window draws the view
+    /// under another parent: the shell's page as it turns compact, the
+    /// panel's tab as it turns wide.
+    pub(super) motion: crate::motion::owned::Owned,
     wake: Option<(u64, Task<()>)>,
     _subscriptions: [Subscription; 2],
 }
@@ -209,6 +261,38 @@ pub(super) fn reason(error: &ProtocolError) -> String {
 }
 
 impl PullRequestView {
+    /// Keep the view's motion in `scene`, its host's: the pull request it
+    /// shows is the one its host's thread has open.
+    pub(crate) fn share_scene(&mut self, scene: &crate::motion::Epoch) {
+        self.motion = crate::motion::owned::Owned::in_scene(scene);
+    }
+
+    /// Let go of what was built to draw the pull requests read here — each
+    /// one's rendered files and its comments' laid-out text — and of the
+    /// timer for the next read, once the right panel has taken the view down.
+    /// What the host answered, and what the reader is writing or has marked,
+    /// stay; the next draw renders again and reads what has expired.
+    pub(crate) fn release(&mut self) {
+        self.wake = None;
+        for page in self.pages.values_mut() {
+            // A render under way lands its list as it would have.
+            if !page.files_view.rendering {
+                page.files_view.list = None;
+                page.files_view.rendered = None;
+            }
+            page.conversation_view.markdown.get_mut().clear();
+        }
+    }
+
+    /// What the open pull request's host calls a pull request.
+    pub(super) fn noun(&self, cx: &App) -> super::Noun {
+        let store = self.store.read(cx);
+        match &self.current {
+            Some((_, key)) => super::Noun::at(store, &key.host),
+            None => super::Noun::of(&tcode_core::pull_request::GITHUB),
+        }
+    }
+
     /// The open pull request's host as a person reads it.
     pub(super) fn host_name(&self, cx: &App) -> String {
         self.current
@@ -223,18 +307,11 @@ impl PullRequestView {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = [
-            observe_store_topics(
-                &store,
-                &[
-                    TopicKind::Index,
-                    TopicKind::SessionStatus,
-                    TopicKind::ActiveSession,
-                ],
-                cx,
-            ),
+            observe_store_topics(&store, &[TopicKind::Index, TopicKind::SessionStatus], cx),
             cx.observe(&window_state, |_, _, cx| cx.notify()),
         ];
         Self {
+            image_host: store.read(cx).image_host(),
             store,
             window_state,
             current: None,
@@ -244,6 +321,7 @@ impl PullRequestView {
             file_column: true,
             file_filter: None,
             chips_scroll: ScrollHandle::new(),
+            motion: Default::default(),
             wake: None,
             _subscriptions: subscriptions,
         }
@@ -255,6 +333,11 @@ impl PullRequestView {
             self.current = current;
             cx.notify();
         }
+    }
+
+    /// The thread of the pull request shown.
+    pub(super) fn session(&self) -> Option<String> {
+        self.current.as_ref().map(|(session, _)| session.clone())
     }
 
     pub(super) fn compact(&self, cx: &App) -> bool {
@@ -297,10 +380,6 @@ impl PullRequestView {
                 .thread_meta(session)
                 .map_or(&[][..], |meta| meta.pull_request_operations.as_slice()),
         )
-    }
-
-    pub(super) fn store(&self) -> &Entity<WorkspaceStore> {
-        &self.store
     }
 
     /// Opens another layer of the stack in the thread's page, as a row of its map does.
@@ -790,11 +869,11 @@ impl PullRequestView {
     }
 
     fn change_link(&mut self, action: &ChangeLink, window: &mut Window, cx: &mut Context<Self>) {
-        super::change_link(&self.store, action, window, cx);
+        super::change_link(&self.store, self.session(), action, window, cx);
     }
 
     fn change_watch(&mut self, action: &ChangeWatch, window: &mut Window, cx: &mut Context<Self>) {
-        super::change_watch(&self.store, action, window, cx);
+        super::change_watch(&self.store, self.session(), action, window, cx);
     }
 
     fn header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -817,6 +896,22 @@ impl PullRequestView {
             layer.map(|layer| layer.state),
         );
         let (glyph, color, state_label) = appearance(badge, cx);
+        // Keyed by the pull request, so another one's page does not glide from this one's.
+        let id = |part: &str| {
+            gpui::ElementId::from(SharedString::from(format!(
+                "pr-detail-{}-{}-{part}",
+                key.repository, key.number
+            )))
+        };
+        let glyph = crate::motion::status_icon(id("state"), glyph, color, CHANGE, window, cx);
+        let color = gpui_base::motion::transition(
+            id("state-chip"),
+            color,
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        let synced = crate::motion::shown(id("synced"), snapshot.clone(), SHOW, window, cx);
         let title = snapshot
             .as_ref()
             .map(|s| s.title.clone())
@@ -837,7 +932,7 @@ impl PullRequestView {
                     .id("pr-detail-number")
                     .font_family(cx.theme().mono_font_family.clone())
                     .child(format!("#{}", key.number))
-                    .tooltip({
+                    .with_tooltip({
                         let label = crate::tr!(
                             "pull_requests.number_tooltip",
                             source = crate::tr!(source(link.as_ref())).into_owned(),
@@ -847,7 +942,7 @@ impl PullRequestView {
                                 .unwrap_or_default())
                         )
                         .into_owned();
-                        move |window, cx| Tooltip::new(label.clone()).build(window, cx)
+                        move |_, _| Tooltip::new(label.clone())
                     }),
             )
             .child(material::semantic_chip(
@@ -856,68 +951,74 @@ impl PullRequestView {
                 color,
                 cx,
             ));
-        if let Some(snapshot) = &snapshot {
+        if let Some(synced) = &synced {
+            let snapshot = &synced.value;
             if let Some(author) = &snapshot.author {
                 line_two = line_two.child(
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        // The conversation names the avatar the host may read for this author.
-                        .child(self.avatar(
-                            &author.login,
-                            self.author_avatar(&author.login).as_deref(),
-                            16.,
-                            cx,
-                        ))
-                        .child(author.login.clone()),
+                    synced.fade(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            // The conversation names the avatar the host may read for this author.
+                            .child(self.avatar(
+                                &author.login,
+                                self.author_avatar(&author.login).as_deref(),
+                                16.,
+                                cx,
+                            ))
+                            .child(author.login.clone()),
+                    ),
                 );
             }
             let (base, head) = (snapshot.base_branch.clone(), snapshot.head_branch.clone());
             line_two = line_two
                 .child(
-                    div()
-                        .id("pr-detail-branches")
-                        .min_w_0()
-                        .max_w(px(320.))
-                        .overflow_hidden()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        // gpui-base has no middle truncation; the tooltip holds the full pair.
-                        .child(crate::widgets::fade_text(format!("{base} ← {head}")))
-                        .tooltip(move |window, cx| {
-                            Tooltip::new(
-                                crate::tr!(
-                                    "pull_requests.detail.merging_into",
-                                    head = head.clone(),
-                                    base = base.clone()
+                    synced.fade(
+                        div()
+                            .id("pr-detail-branches")
+                            .min_w_0()
+                            .max_w(px(320.))
+                            .overflow_hidden()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            // gpui-base has no middle truncation; the tooltip holds the full pair.
+                            .child(crate::widgets::fade_text(format!("{base} ← {head}")))
+                            .with_tooltip(move |_, _| {
+                                Tooltip::new(
+                                    crate::tr!(
+                                        "pull_requests.detail.merging_into",
+                                        head = head.clone(),
+                                        base = base.clone()
+                                    )
+                                    .into_owned(),
                                 )
-                                .into_owned(),
-                            )
-                            .build(window, cx)
-                        }),
+                            }),
+                    ),
                 )
                 .children(ago_rfc3339(&snapshot.updated_at).map(|ago| {
-                    crate::tr!(
-                        if self
-                            .store
-                            .read(cx)
-                            .settings()
-                            .source_control
-                            .kind(&key.host)
-                            == tcode_core::pull_request::HostKind::Azure
-                        {
-                            if snapshot.merged_at.is_some() {
-                                "pull_requests.conversation.merged"
-                            } else if snapshot.closed_at.is_some() {
-                                "pull_requests.conversation.closed"
+                    synced.fade(
+                        crate::tr!(
+                            if self
+                                .store
+                                .read(cx)
+                                .settings()
+                                .source_control
+                                .kind(&key.host)
+                                == tcode_core::pull_request::HostKind::Azure
+                            {
+                                if snapshot.merged_at.is_some() {
+                                    "pull_requests.conversation.merged"
+                                } else if snapshot.closed_at.is_some() {
+                                    "pull_requests.conversation.closed"
+                                } else {
+                                    "pull_requests.detail.created"
+                                }
                             } else {
-                                "pull_requests.detail.created"
-                            }
-                        } else {
-                            "pull_requests.detail.updated"
-                        },
-                        ago = ago
+                                "pull_requests.detail.updated"
+                            },
+                            ago = ago
+                        )
+                        .into_owned(),
                     )
-                    .into_owned()
                 }));
         }
         let mut chips = h_flex()
@@ -925,128 +1026,203 @@ impl PullRequestView {
             .items_center()
             .text_secondary(compact, cx)
             .text_color(cx.theme().foreground);
+        // Whether any chip is present, rather than leaving: the row folds as its last one fades.
         let mut has_chip = false;
-        if let Some(snapshot) = snapshot
+        let mut drawn = false;
+        let open = snapshot
             .as_ref()
-            .filter(|s| s.state == PullRequestState::Open)
-        {
-            let chip = |icon: IconName, color, label: String| {
-                h_flex()
-                    .flex_none()
-                    .gap_1()
-                    .items_center()
-                    .child(Icon::new(icon).text_color(color))
-                    .child(label)
-            };
-            if let Some(checks) = snapshot.checks_state {
-                has_chip = true;
-                let (icon, color, label) = match checks {
-                    ChecksState::Passing => (
-                        IconName::CircleCheck,
-                        cx.theme().success,
-                        "pull_requests.checks_passing",
-                    ),
-                    ChecksState::Failing => (
-                        IconName::CircleX,
-                        cx.theme().danger,
-                        "pull_requests.checks_failing",
-                    ),
-                    ChecksState::Pending => (
-                        IconName::CircleDashed,
-                        cx.theme().warning,
-                        "pull_requests.checks_pending",
-                    ),
-                };
-                chips = chips.child(chip(icon, color, crate::tr!(label).into_owned()));
-            }
-            if let Some(review) = snapshot.review_decision {
-                has_chip = true;
-                let (icon, color, label) = match review {
-                    ReviewDecision::Approved => (
-                        IconName::BadgeCheck,
-                        cx.theme().success,
-                        "pull_requests.review_approved",
-                    ),
-                    ReviewDecision::ChangesRequested => (
-                        IconName::MessageSquareWarning,
-                        cx.theme().danger,
-                        "pull_requests.review_changes_requested",
-                    ),
-                    ReviewDecision::Required => (
-                        IconName::MessageSquareMore,
-                        cx.theme().muted_foreground,
-                        "pull_requests.review_required",
-                    ),
-                };
-                chips = chips.child(chip(icon, color, crate::tr!(label).into_owned()));
-            }
-            if let Some(behind) = self.behind_chip(&key, snapshot, cx) {
-                has_chip = true;
-                chips = chips.child(behind);
-            }
-            if snapshot.mergeability == Mergeability::Conflicting {
-                has_chip = true;
-                chips = chips.child(chip(
-                    IconName::GitMergeConflict,
+            .filter(|s| s.state == PullRequestState::Open);
+        let chip = |part: &str,
+                    icon: IconName,
+                    color,
+                    label: String,
+                    window: &mut Window,
+                    cx: &mut App| {
+            h_flex()
+                .flex_none()
+                .gap_1()
+                .items_center()
+                .child(crate::motion::status_icon(
+                    id(&format!("{part}-icon")),
+                    icon,
+                    color,
+                    CHANGE,
+                    window,
+                    cx,
+                ))
+                .child(crate::motion::cross_fade(
+                    id(&format!("{part}-label")),
+                    label,
+                    CHANGE,
+                    window,
+                    cx,
+                    |label, _, _| {
+                        div()
+                            .whitespace_nowrap()
+                            .child(label.clone())
+                            .into_any_element()
+                    },
+                ))
+        };
+        if let Some(checks) = crate::motion::shown(
+            id("checks"),
+            open.and_then(|s| s.checks_state),
+            SHOW,
+            window,
+            cx,
+        ) {
+            has_chip |= !checks.leaving();
+            drawn = true;
+            let (icon, color, label) = match checks.value {
+                ChecksState::Passing => (
+                    IconName::CircleCheck,
+                    cx.theme().success,
+                    "pull_requests.checks_passing",
+                ),
+                ChecksState::Failing => (
+                    IconName::CircleX,
+                    cx.theme().danger,
+                    "pull_requests.checks_failing",
+                ),
+                ChecksState::Pending => (
+                    IconName::CircleDashed,
                     cx.theme().warning,
-                    crate::tr!(
-                        "pull_requests.conflict",
-                        base = snapshot.base_branch.clone()
-                    )
-                    .into_owned(),
-                ));
-            }
+                    "pull_requests.checks_pending",
+                ),
+            };
+            chips = chips.child(checks.fade(chip(
+                "checks",
+                icon,
+                color,
+                crate::tr!(label).into_owned(),
+                window,
+                cx,
+            )));
         }
-        if let Some(offer) = self.stack_offer(cx) {
-            has_chip = true;
+        if let Some(review) = crate::motion::shown(
+            id("review"),
+            open.and_then(|s| s.review_decision),
+            SHOW,
+            window,
+            cx,
+        ) {
+            has_chip |= !review.leaving();
+            drawn = true;
+            let (icon, color, label) = match review.value {
+                ReviewDecision::Approved => (
+                    IconName::BadgeCheck,
+                    cx.theme().success,
+                    "pull_requests.review_approved",
+                ),
+                ReviewDecision::ChangesRequested => (
+                    IconName::MessageSquareWarning,
+                    cx.theme().danger,
+                    "pull_requests.review_changes_requested",
+                ),
+                ReviewDecision::Required => (
+                    IconName::MessageSquareMore,
+                    cx.theme().muted_foreground,
+                    "pull_requests.review_required",
+                ),
+            };
+            chips = chips.child(review.fade(chip(
+                "review",
+                icon,
+                color,
+                crate::tr!(label).into_owned(),
+                window,
+                cx,
+            )));
+        }
+        let behind = open.and_then(|snapshot| self.behind(&key, snapshot, cx));
+        if let Some(behind) = crate::motion::shown(id("behind"), behind, SHOW, window, cx) {
+            has_chip |= !behind.leaving();
+            drawn = true;
+            chips =
+                chips.child(behind.fade(div().child(Self::behind_chip(&behind.value, compact))));
+        }
+        if let Some(conflict) = crate::motion::shown(
+            id("conflict"),
+            open.filter(|s| s.mergeability == Mergeability::Conflicting)
+                .map(|s| s.base_branch.clone()),
+            SHOW,
+            window,
+            cx,
+        ) {
+            has_chip |= !conflict.leaving();
+            drawn = true;
+            chips = chips.child(conflict.fade(chip(
+                "conflict",
+                IconName::GitMergeConflict,
+                cx.theme().warning,
+                crate::tr!("pull_requests.conflict", base = conflict.value.clone()).into_owned(),
+                window,
+                cx,
+            )));
+        }
+        let selector = self.stack_offer(cx).map(|offer| {
             let target = (!self.read_only(cx))
                 .then(|| self.shown_target(cx))
                 .flatten();
             let action = self.page().and_then(|page| page.action_state.data.clone());
-            chips = chips.child(super::stack::map_selector(
-                cx.entity(),
-                offer,
-                target,
-                action,
-                compact,
-                cx,
-            ));
+            (offer, target, action)
+        });
+        // The map's selector leaves with the stack it maps, so a leaving one is empty.
+        if let Some(shown) = crate::motion::shown(
+            id("stack-map"),
+            selector.is_some().then_some(()),
+            SHOW,
+            window,
+            cx,
+        ) {
+            has_chip |= !shown.leaving();
+            drawn = true;
+            chips = chips.child(shown.fade(div().children(selector.map(
+                |(offer, target, action)| {
+                    super::stack::map_selector(cx.entity(), offer, target, action, compact, cx)
+                },
+            ))));
         }
-        if visible
+        let watching = (visible
             && link.as_ref().is_some_and(|link| link.watch.is_some())
             && snapshot
                 .as_ref()
-                .is_none_or(|s| s.state == PullRequestState::Open)
-        {
-            has_chip = true;
-            let paused = self
-                .store
+                .is_none_or(|s| s.state == PullRequestState::Open))
+        .then(|| {
+            self.store
                 .read(cx)
                 .thread_meta(&session)
-                .is_some_and(|meta| meta.pull_request_watches_paused);
+                .is_some_and(|meta| meta.pull_request_watches_paused)
+        });
+        if let Some(watching) = crate::motion::shown(id("watching"), watching, SHOW, window, cx) {
+            has_chip |= !watching.leaving();
+            drawn = true;
+            let paused = watching.value;
             chips = chips.child(
-                div()
-                    .id("pr-detail-watch")
-                    .child(Icon::new(IconName::Eye).text_color(muted))
-                    .tooltip(move |window, cx| {
-                        Tooltip::new(
-                            crate::tr!(if paused {
-                                "pull_requests.watching_paused_tooltip"
-                            } else {
-                                "pull_requests.watching_tooltip"
-                            })
-                            .into_owned(),
-                        )
-                        .build(window, cx)
-                    }),
+                watching.fade(
+                    div()
+                        .id("pr-detail-watch")
+                        .child(Icon::new(IconName::Eye).text_color(muted))
+                        .with_tooltip(move |_, _| {
+                            Tooltip::new(
+                                crate::tr!(if paused {
+                                    "pull_requests.watching_paused_tooltip"
+                                } else {
+                                    "pull_requests.watching_tooltip"
+                                })
+                                .into_owned(),
+                            )
+                        }),
+                ),
             );
         }
+        let chip_row = crate::motion::shown(id("chips"), has_chip.then_some(()), SHOW, window, cx);
         let condition = match link.as_ref().map(|link| link.source) {
             Some(PullRequestSource::Dismissed) => Some("pull_requests.source_dismissed"),
             None => Some("pull_requests.source_not_linked"),
             _ => None,
         };
-        let _ = (&session, window);
+        let condition = crate::motion::shown(id("condition"), condition, SHOW, window, cx);
         v_flex()
             .flex_none()
             .px(if compact {
@@ -1065,13 +1241,14 @@ impl PullRequestView {
                         div()
                             .pt(cx.theme().tokens.spacing.xs)
                             .text_title(cx)
-                            .child(Icon::new(glyph).text_color(color)),
+                            .child(glyph),
                     )
-                    .child(self.title_line(title, snapshot.is_some(), cx)),
+                    .child(self.title_line(title, snapshot.is_some(), window, cx)),
             )
             .child(line_two)
-            .when(has_chip, |header| {
-                header.child(if compact {
+            .when_some(chip_row.filter(|_| drawn), |header, chip_row| {
+                // The row grows open with its first chip and folds with its last.
+                header.child(chip_row.fold(if compact {
                     let handle = self.chips_scroll.clone();
                     let surface = material::content_surface(cx);
                     div()
@@ -1124,27 +1301,29 @@ impl PullRequestView {
                         .into_any_element()
                 } else {
                     chips.flex_wrap().into_any_element()
-                })
+                }))
             })
             .children(condition.map(|condition| {
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .text_secondary(compact, cx)
-                    .child(Icon::new(IconName::Unlink))
-                    .child(crate::tr!(condition))
+                condition.fold(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .text_secondary(compact, cx)
+                        .child(Icon::new(IconName::Unlink))
+                        .child(crate::tr!(condition.value)),
+                )
             }))
             .into_any_element()
     }
 
     /// How far the head is behind its base, and the updates the account may make from it. Not on
     /// a stack layer, whose layers move together, nor while it conflicts.
-    fn behind_chip(
+    fn behind(
         &self,
         key: &PullRequestKey,
         snapshot: &tcode_core::pull_request::PullRequestSnapshot,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    ) -> Option<Behind> {
         let offer = self.shown_target(cx)?.offer;
         let state = offer.action.as_ref()?;
         let behind = state.behind_by.filter(|behind| *behind > 0)?;
@@ -1179,15 +1358,30 @@ impl PullRequestView {
         let updates =
             (state.can_update_branch && state.capabilities.update_branch && !self.read_only(cx))
                 .then(|| key.clone());
-        let busy = offer.busy;
-        let compact = self.compact(cx);
+        Some(Behind {
+            label,
+            tooltip,
+            updates,
+            merges,
+            busy: offer.busy,
+        })
+    }
+
+    fn behind_chip(behind: &Behind, compact: bool) -> AnyElement {
+        let Behind {
+            label,
+            tooltip,
+            updates,
+            merges,
+            busy,
+        } = behind.clone();
         let chip = Button::new("pr-behind")
             .ghost()
             .compact()
             .xsmall()
             .icon(IconName::ArrowUpDown)
             .label(label);
-        Some(match updates {
+        match updates {
             Some(key) => chip
                 .dropdown_menu(move |menu, _, _| {
                     let item = |kind| {
@@ -1218,12 +1412,26 @@ impl PullRequestView {
                 .into_any_element(),
             // News, not an offer, for an account that may not update the branch.
             None => chip.tooltip(tooltip).into_any_element(),
-        })
+        }
     }
 
     /// The title, its edit affordance (`pr-title-edit`) and the title editor.
-    fn title_line(&self, title: String, known: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn title_line(
+        &self,
+        title: String,
+        known: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let compact = self.compact(cx);
+        let id = |part: &str| {
+            let key = self
+                .current
+                .as_ref()
+                .map(|(_, key)| key.number)
+                .unwrap_or_default();
+            gpui::ElementId::from(SharedString::from(format!("pr-detail-{key}-{part}")))
+        };
         let editable = known
             && !self.read_only(cx)
             && self
@@ -1231,14 +1439,41 @@ impl PullRequestView {
                 .and_then(|page| page.conversation.data.as_ref())
                 .is_some_and(|conversation| conversation.permissions.update);
         let editing = self.writes().and_then(|writes| writes.title.as_ref());
+        // The editor and the title cross-fade where they stand.
+        let editor = self.motion.transition(
+            SharedString::from(id("title-editing").to_string()),
+            if editing.is_some() && !compact {
+                1.
+            } else {
+                0.
+            },
+            GLIDE,
+            window,
+            cx,
+        );
+        let plain = |cx: &App| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_title(cx)
+                .line_clamp(2)
+                .when(!known, |title| {
+                    title.font_family(cx.theme().mono_font_family.clone())
+                })
+                .child(title.clone())
+        };
         if let Some((input, _)) = editing.filter(|_| !compact) {
             let saving = self.busy("title");
             let blank = input.read(cx).value().trim().is_empty();
             return h_flex()
+                .relative()
                 .flex_1()
                 .min_w_0()
                 .gap_2()
                 .items_center()
+                .when(editor < 1., |row| {
+                    row.child(plain(cx).absolute().inset_0().opacity(1. - editor))
+                })
                 .on_action(
                     cx.listener(|this, _: &gpui_base::actions::Cancel, _, cx| {
                         this.cancel_title(cx)
@@ -1249,6 +1484,7 @@ impl PullRequestView {
                         .flex_1()
                         .min_w_0()
                         .text_title(cx)
+                        .opacity(editor)
                         .child(Input::new(input).disabled(saving)),
                 )
                 .child(
@@ -1270,26 +1506,47 @@ impl PullRequestView {
                 )
                 .into_any_element();
         }
+        // The first sync cross-fades the title over the branch that stood for it.
         let text = div()
             .flex_1()
             .min_w_0()
             .text_title(cx)
             .line_clamp(2)
-            .when(!known, |title| {
-                title.font_family(cx.theme().mono_font_family.clone())
-            })
-            .child(title.clone());
+            .opacity(1. - editor)
+            .child(crate::motion::cross_fade(
+                id("title"),
+                (title.clone(), known),
+                CHANGE,
+                window,
+                cx,
+                |(title, known), _, cx| {
+                    div()
+                        .when(!*known, |title| {
+                            title.font_family(cx.theme().mono_font_family.clone())
+                        })
+                        .child(title.clone())
+                        .into_any_element()
+                },
+            ));
         if !editable {
             return text.into_any_element();
         }
+        let hovered = window.use_keyed_state(id("title-hovered"), cx, |_, _| false);
         // A phone starts the edit from the ⋯ menu; the sheet needs no trigger.
         let affordance = if compact {
             self.title_sheet(cx)
         } else {
+            let shown = gpui_base::motion::transition(
+                id("title-edit-shown"),
+                if *hovered.read(cx) { 1. } else { 0. },
+                gpui_base::motion::Transition::new(GLIDE),
+                window,
+                cx,
+            );
             div()
                 .flex_none()
-                .invisible()
-                .group_hover("pr-header-title", |style| style.visible())
+                .opacity(shown)
+                .when(shown == 0., |affordance| affordance.invisible())
                 .child(
                     Button::new("pr-title-edit")
                         .ghost()
@@ -1303,12 +1560,21 @@ impl PullRequestView {
                 )
                 .into_any_element()
         };
+        // Hover is held as state, rather than a hover style, so the pencil can fade.
         h_flex()
-            .group("pr-header-title")
+            .id("pr-header-title")
             .flex_1()
             .min_w_0()
             .gap_1()
             .items_start()
+            .on_hover(crate::motion::pointer_hover(move |is_hovered, _, cx| {
+                hovered.update(cx, |hovered, cx| {
+                    if *hovered != *is_hovered {
+                        *hovered = *is_hovered;
+                        cx.notify();
+                    }
+                })
+            }))
             .child(text)
             .child(affordance)
             .into_any_element()
@@ -1461,7 +1727,7 @@ impl PullRequestView {
         ))
     }
 
-    fn sub_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn sub_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let key = self.current.as_ref().map(|(_, key)| key.clone());
         let refreshing = self.page().is_some_and(|page| page.refreshing);
         let url = self.url(cx);
@@ -1488,7 +1754,7 @@ impl PullRequestView {
                 }),
         )
         .child(div().flex_1())
-        .children(self.primary(false, cx))
+        .children(self.primary(false, window, cx))
         .child(self.refresh_button(refreshing, false, cx))
         .when_some(url, |bar, url| {
             bar.child(
@@ -1527,15 +1793,63 @@ impl PullRequestView {
 
     /// The header's primary action (`pr-primary-action`): one, by the rank, from the host's
     /// action state.
-    fn primary(&self, compact: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.read_only(cx) {
-            return None;
-        }
-        let target = self.shown_target(cx)?;
-        let primary = target.offer.primary()?;
-        Some(super::lifecycle::primary_element(
-            &target, primary, compact, cx,
-        ))
+    fn primary(
+        &self,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let current = (!self.read_only(cx))
+            .then(|| {
+                let target = self.shown_target(cx)?;
+                let primary = target.offer.primary()?;
+                Some((target, primary))
+            })
+            .flatten();
+        let number = self
+            .current
+            .as_ref()
+            .map(|(_, key)| key.number)
+            .unwrap_or_default();
+        let id = |part: &str| {
+            gpui::ElementId::from(SharedString::from(format!("pr-primary-{number}-{part}")))
+        };
+        // The target outlives the action it offered, so a leaving action is drawn from it.
+        let target = self.shown_target(cx);
+        let kept = crate::motion::shown(
+            id("shown"),
+            current.map(|(_, primary)| primary),
+            SHOW,
+            window,
+            cx,
+        )?;
+        let action = match target {
+            // A new action, or a status in its place, cross-fades over the one it follows.
+            Some(target) => crate::motion::cross_fade(
+                id("kind"),
+                kept.value,
+                CHANGE,
+                window,
+                cx,
+                move |primary, _, cx| {
+                    super::lifecycle::primary_element(&target, *primary, compact, cx)
+                },
+            ),
+            None => div().into_any_element(),
+        };
+        // On a phone the action is a row of its own under the header, which folds in and out
+        // so what is below moves with it.
+        Some(if compact {
+            kept.fold(
+                div()
+                    .flex_none()
+                    .px(px(material::COMPACT_PAGE_INSET))
+                    .pb_2()
+                    .child(action),
+            )
+        } else {
+            kept.fade(action)
+        })
     }
 
     pub(super) fn refresh_button(
@@ -1551,27 +1865,51 @@ impl PullRequestView {
                 .min()
         });
         let tooltip = match (refreshing, loaded) {
-            (true, _) => crate::tr!("pull_requests.detail.refreshing").into_owned(),
+            (true, _) => {
+                crate::tr!("pull_requests.detail.refreshing", pr = self.noun(cx).pr).into_owned()
+            }
             (false, Some(loaded)) => {
                 crate::tr!("pull_requests.detail.refresh", ago = ago(loaded)).into_owned()
             }
             (false, None) => crate::tr!("pull_requests.detail.refresh_unloaded").into_owned(),
         };
         // `toolbar_icon_button`'s touch form takes its glyph as a child, which `Button::loading`
-        // cannot swap for a spinner, so this square holds the button's place while it spins.
-        if refreshing {
-            return div()
+        // cannot swap for a spinner, so a spinner cross-fades over the button in its place.
+        let button = material::toolbar_icon_button(
+            "pr-detail-refresh",
+            IconName::RefreshCw,
+            tooltip,
+            compact,
+        )
+        .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx)));
+        crate::motion::Sampled::new(move |window, cx| {
+            let spin = gpui_base::motion::transition(
+                "pr-detail-refreshing",
+                if refreshing { 1. } else { 0. },
+                gpui_base::motion::Transition::new(GLIDE),
+                window,
+                cx,
+            );
+            div()
+                .relative()
                 .flex_none()
-                .size(px(if compact { material::TOUCH_TARGET } else { 24. }))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(crate::widgets::spinner::Spinner::new().small())
-                .into_any_element();
-        }
-        material::toolbar_icon_button("pr-detail-refresh", IconName::RefreshCw, tooltip, compact)
-            .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx)))
-            .into_any_element()
+                .child(div().opacity(1. - spin).child(button))
+                .when(spin > 0., |slot| {
+                    slot.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .opacity(spin)
+                            .when(refreshing, |spinner| spinner.occlude())
+                            .child(crate::widgets::spinner::Spinner::new().small()),
+                    )
+                })
+                .into_any_element()
+        })
+        .into_any_element()
     }
 
     /// The phone nav bar's trailing actions: refresh and the row menu.
@@ -1656,7 +1994,7 @@ impl PullRequestView {
         )
     }
 
-    fn switch(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn switch(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let compact = self.compact(cx);
         let tab = self.tab(cx);
         let page = self.page();
@@ -1698,8 +2036,22 @@ impl PullRequestView {
         let stats = (tab == Tab::Files)
             .then(|| link.as_ref().and_then(|link| link.snapshot.clone()))
             .flatten()
-            .and_then(|snapshot| snapshot.additions.zip(snapshot.deletions))
-            .map(|(additions, deletions)| {
+            .and_then(|snapshot| snapshot.additions.zip(snapshot.deletions));
+        let number = self
+            .current
+            .as_ref()
+            .map(|(_, key)| key.number)
+            .unwrap_or_default();
+        let stats = crate::motion::shown(
+            SharedString::from(format!("pr-detail-{number}-stats")),
+            stats,
+            SHOW,
+            window,
+            cx,
+        )
+        .map(|kept| {
+            let (additions, deletions) = kept.value;
+            kept.fade(
                 h_flex()
                     .flex_none()
                     .gap_1()
@@ -1713,8 +2065,9 @@ impl PullRequestView {
                         div()
                             .text_color(cx.theme().danger)
                             .child(format!("−{deletions}")),
-                    )
-            });
+                    ),
+            )
+        });
         let switch = div().flex_1().min_w_0().child(
             TabBar::new("pr-view")
                 .segmented()
@@ -1743,7 +2096,7 @@ impl PullRequestView {
     }
 
     /// Host conditions above the switch: a credential to connect, a rate limit, an unlink.
-    fn notices(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn notices(&self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut notices = Vec::new();
         let errors = self.page().map(|page| {
             [
@@ -1762,20 +2115,43 @@ impl PullRequestView {
         } else {
             cx.theme().tokens.spacing.sm
         };
-        let notice = |text: String, action: Option<AnyElement>, cx: &App| {
-            material::card(cx)
-                .flex_row()
-                .items_center()
-                .mx(inset)
-                .text_token(&cx.theme().tokens.typography.xs)
-                .child(div().flex_1().min_w_0().child(text))
-                .children(action)
+        let number = self
+            .current
+            .as_ref()
+            .map(|(_, key)| key.number)
+            .unwrap_or_default();
+        // Each notice comes and goes on its own, drawn from what it last said while it leaves.
+        let kept = |part: &str, text: Option<String>, window: &mut Window, cx: &mut App| {
+            crate::motion::shown(
+                SharedString::from(format!("pr-detail-{number}-notice-{part}")),
+                text,
+                SHOW,
+                window,
+                cx,
+            )
+        };
+        let notice = |kept: &crate::motion::Shown<String>, action: Option<AnyElement>, cx: &App| {
+            let text = kept.value.clone();
+            div()
+                .px(inset)
+                .child(
+                    kept.fold(
+                        material::card(cx)
+                            .flex_row()
+                            .items_center()
+                            .text_token(&cx.theme().tokens.typography.xs)
+                            .child(div().flex_1().min_w_0().child(text))
+                            .children(action),
+                    ),
+                )
                 .into_any_element()
         };
-        if errors.iter().any(|code| {
-            code == "pull_request_no_credential" || code == "pull_request_host_disabled"
-        }) {
-            notices.push(notice(
+        let credential = errors
+            .iter()
+            .any(|code| {
+                code == "pull_request_no_credential" || code == "pull_request_host_disabled"
+            })
+            .then(|| {
                 crate::tr!(
                     "pull_requests.notice_no_credential",
                     host = self
@@ -1784,7 +2160,11 @@ impl PullRequestView {
                         .map(|(_, key)| key.host.clone())
                         .unwrap_or_default()
                 )
-                .into_owned(),
+                .into_owned()
+            });
+        if let Some(credential) = kept("credential", credential, window, cx) {
+            notices.push(notice(
+                &credential,
                 Some(
                     Button::new("pr-detail-settings")
                         .ghost()
@@ -1798,11 +2178,10 @@ impl PullRequestView {
                 cx,
             ));
         }
-        if errors
+        let rate_limited = errors
             .iter()
             .any(|code| code == "pull_request_rate_limited")
-        {
-            notices.push(notice(
+            .then(|| {
                 crate::tr!(
                     "pull_requests.notice_rate_limited",
                     host_name = self.host_name(cx),
@@ -1816,23 +2195,31 @@ impl PullRequestView {
                         })
                         .unwrap_or_else(|| crate::tr!("pull_requests.notice_soon").into_owned())
                 )
-                .into_owned(),
-                None,
-                cx,
-            ));
+                .into_owned()
+            });
+        if let Some(rate_limited) = kept("rate-limited", rate_limited, window, cx) {
+            notices.push(notice(&rate_limited, None, cx));
         }
         let unlinked = self
             .link(cx)
             .is_some_and(|link| !link.visible() && link.source != PullRequestSource::Stack)
             || (self.link(cx).is_none() && self.stack(cx).is_none());
-        if unlinked
-            && let Some((url, key)) = self
-                .url(cx)
-                .zip(self.current.as_ref().map(|(_, key)| key.clone()))
-        {
+        let relink = self
+            .url(cx)
+            .zip(self.current.as_ref().map(|(_, key)| key.clone()))
+            .filter(|_| unlinked);
+        let unlinked = kept(
+            "unlinked",
+            relink
+                .is_some()
+                .then(|| crate::tr!("pull_requests.detail.no_longer_linked").into_owned()),
+            window,
+            cx,
+        );
+        if let Some(unlinked) = unlinked {
             notices.push(notice(
-                crate::tr!("pull_requests.detail.no_longer_linked").into_owned(),
-                Some(
+                &unlinked,
+                relink.map(|(url, key)| {
                     Button::new("pr-detail-relink")
                         .ghost()
                         .xsmall()
@@ -1847,8 +2234,8 @@ impl PullRequestView {
                                 cx,
                             )
                         })
-                        .into_any_element(),
-                ),
+                        .into_any_element()
+                }),
                 cx,
             ));
         }
@@ -1870,10 +2257,12 @@ impl PullRequestView {
                 .or(conversation)
                 .filter(|(code, _)| code != "pull_request_rate_limited")
         });
-        if let Some((_, loaded_at)) = stale {
+        let stale = stale.map(|(_, loaded_at)| {
+            crate::tr!("pull_requests.detail.refresh_failed", ago = ago(loaded_at)).into_owned()
+        });
+        if let Some(stale) = kept("stale", stale, window, cx) {
             notices.push(notice(
-                crate::tr!("pull_requests.detail.refresh_failed", ago = ago(loaded_at))
-                    .into_owned(),
+                &stale,
                 Some(
                     Button::new("pr-detail-retry")
                         .ghost()
@@ -1886,6 +2275,46 @@ impl PullRequestView {
             ));
         }
         notices
+    }
+
+    /// A body cross-fading over the skeleton drawn while it was read, keyed by `part` and the
+    /// pull request; `body` is the skeleton itself while `loading`.
+    pub(super) fn settle_body(
+        &self,
+        part: &str,
+        loading: bool,
+        body: AnyElement,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let number = self
+            .current
+            .as_ref()
+            .map(|(_, key)| key.number)
+            .unwrap_or_default();
+        let fade = crate::motion::CrossFade::new(
+            SharedString::from(format!("pr-detail-{number}-{part}-loading")),
+            usize::from(!loading),
+            2,
+            CHANGE,
+            window,
+            cx,
+        )
+        .fill();
+        let column = |body: AnyElement| {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .child(body)
+                .into_any_element()
+        };
+        let mut layers = vec![(usize::from(!loading), column(body))];
+        if !loading && fade.shows(0) {
+            layers.push((0, column(material::loading_skeleton(cx))));
+        }
+        fade.render(layers).flex_1().min_h_0().into_any_element()
     }
 
     /// The body when nothing could be read at all.
@@ -1903,7 +2332,8 @@ impl PullRequestView {
                 Icon::new(IconName::Lock),
                 crate::tr!(
                     "pull_requests.detail.no_credential_title",
-                    host_name = self.host_name(cx)
+                    host_name = self.host_name(cx),
+                    pr = self.noun(cx).pr
                 )
                 .into_owned(),
                 String::new(),
@@ -1916,7 +2346,8 @@ impl PullRequestView {
                     Icon::new(IconName::GitPullRequest),
                     crate::tr!(
                         "pull_requests.detail.unavailable_title",
-                        number = key.number.to_string()
+                        number = key.number.to_string(),
+                        pr = self.noun(cx).title
                     )
                     .into_owned(),
                     crate::tr!("pull_requests.detail.unavailable_desc").into_owned(),
@@ -1957,9 +2388,9 @@ impl PullRequestView {
                                 .id("pr-failure-reason")
                                 .text_secondary(self.compact(cx), cx)
                                 .child(reason(error))
-                                .tooltip({
+                                .with_tooltip({
                                     let full = error.message.clone();
-                                    move |window, cx| Tooltip::new(full.clone()).build(window, cx)
+                                    move |_, _| Tooltip::new(full.clone())
                                 }),
                         )
                         .child(
@@ -2001,12 +2432,39 @@ impl Render for PullRequestView {
         self.ensure_reads(cx);
         let compact = self.compact(cx);
         let tab = self.tab(cx);
-        let body = match tab {
-            Tab::Files => self.render_files(window, cx),
-            Tab::Conversation => self.render_conversation(window, cx),
-        };
+        let number = self
+            .current
+            .as_ref()
+            .map(|(_, key)| key.number)
+            .unwrap_or_default();
+        // Files and Conversation cross-fade, each in its own layer; the leaving one is inert.
+        let fade = crate::motion::CrossFade::new(
+            SharedString::from(format!("pr-detail-{number}-tab")),
+            usize::from(tab == Tab::Conversation),
+            2,
+            CHANGE,
+            window,
+            cx,
+        )
+        .fill();
+        let column = |body: AnyElement| div().size_full().flex().flex_col().child(body);
+        let mut layers = Vec::new();
+        if fade.shows(0) {
+            layers.push((0, column(self.render_files(window, cx)).into_any_element()));
+        }
+        if fade.shows(1) {
+            layers.push((
+                1,
+                column(self.render_conversation(window, cx)).into_any_element(),
+            ));
+        }
+        // Another pull request, a stack layer chosen from the map, fades in in this one's place.
+        let page = self
+            .motion
+            .entered("page", key_id(self.current.as_ref()), CHANGE, window, cx);
         v_flex()
             .size_full()
+            .opacity(page)
             .min_w_0()
             .on_action(cx.listener(Self::change_link))
             .on_action(cx.listener(Self::change_watch))
@@ -2014,22 +2472,22 @@ impl Render for PullRequestView {
             .on_action(cx.listener(Self::on_comment_menu))
             .on_action(cx.listener(Self::run_lifecycle))
             .on_action(cx.listener(Self::choose_merge_method))
-            .when(!compact, |view| view.child(self.sub_bar(cx)))
+            .when(!compact, |view| view.child(self.sub_bar(window, cx)))
             .child(self.header(window, cx))
             .when(compact, |view| {
-                view.children(self.primary(true, cx).map(|primary| {
-                    div()
-                        .flex_none()
-                        .px(px(material::COMPACT_PAGE_INSET))
-                        .pb_2()
-                        .child(primary)
-                }))
+                view.children(self.primary(true, window, cx))
             })
-            .children(self.notices(cx))
-            .child(self.switch(cx))
-            .child(div().flex_1().min_h_0().flex().flex_col().child(body))
+            .children(self.notices(window, cx))
+            .child(self.switch(window, cx))
+            .child(fade.render(layers).flex_1().min_h_0())
             .into_any_element()
     }
+}
+
+fn key_id(current: Option<&(String, PullRequestKey)>) -> String {
+    current.map_or_else(String::new, |(session, key)| {
+        format!("{session}-{}-{}-{}", key.host, key.repository, key.number)
+    })
 }
 
 fn count_label(plain: &str, counted: &str, count: Option<u64>) -> String {
@@ -2101,11 +2559,17 @@ mod tests {
             .unwrap();
     }
 
+    /// Lets reads land and what they started play out, as frames do in the app.
     fn settle(cx: &mut VisualTestContext) {
         for _ in 0..3 {
             cx.run_until_parked();
             cx.update(|window, cx| _ = window.draw(cx));
         }
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            _ = window.draw(cx);
+        });
     }
 
     struct Mounted<'a> {
@@ -2178,7 +2642,7 @@ mod tests {
             .unwrap();
         settle(cx);
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        store.update(cx, |store, _| store.select_session("session".into()));
+        store.update(cx, |store, cx| store.show_alone("session".into(), cx));
         view.update(cx, |view, cx| {
             view.window_state
                 .update(cx, |state, cx| state.set_compact(true, cx))
@@ -2225,8 +2689,7 @@ mod tests {
         let pump = link.clone();
         let executor = cx.background_executor.clone();
         let pump = cx.background_executor.spawn(async move {
-            pump.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
-                .await;
+            pump.pump_with_timer(|delay| executor.timer(delay)).await;
         });
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -2234,12 +2697,11 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (view, cx) = cx
             .add_window_view(|_, cx| PullRequestView::new(store.clone(), window_state.clone(), cx));
         cx.simulate_resize(gpui::size(px(1200.), px(800.)));
@@ -2348,9 +2810,18 @@ mod tests {
                     .list
                     .as_ref()
                     .unwrap()
-                    .scroll_to_file(file);
+                    .scroll_to_file(file, cx);
                 cx.notify();
             });
+            // The jump glides; the display draws every frame of it.
+            let frame = std::time::Duration::from_millis(16);
+            for _ in 0..=crate::edge_back::SETTLE.as_millis() / frame.as_millis() {
+                cx.executor().advance_clock(frame);
+                cx.update(|window, cx| {
+                    window.simulate_next_frame(cx);
+                    _ = window.draw(cx);
+                });
+            }
             settle(cx);
         };
         scroll_to(cx, 95);
@@ -2433,6 +2904,176 @@ mod tests {
             );
         });
         assert!(reads(&requests).is_empty());
+    }
+
+    #[gpui::test]
+    fn a_reread_with_a_new_comment_keeps_the_readers_place(cx: &mut TestAppContext) {
+        let Mounted {
+            view,
+            requests,
+            incoming,
+            _pump,
+            cx,
+        } = mount(cx);
+        let with_comments = |count: usize| {
+            let mut conversation = conversation();
+            conversation.comments = (0..count)
+                .map(|index| PullRequestComment {
+                    id: format!("C_{index}"),
+                    body: format!("Comment {index}"),
+                    created_at: format!("2026-10-02T00:00:{index:02}Z"),
+                    ..conversation.description.clone()
+                })
+                .collect();
+            PullRequestReadResponse::Conversation(Box::new(conversation))
+        };
+        let later = now() + 3600;
+        for (id, read) in reads(&requests) {
+            match read {
+                // Lands as its expiry passes, so the view reads it again at once.
+                PullRequestRead::Conversation => answer(&incoming, id, with_comments(40), now()),
+                PullRequestRead::Files { cursor: None } => answer(
+                    &incoming,
+                    id,
+                    PullRequestReadResponse::Files(files(0..1, None)),
+                    later,
+                ),
+                read => answer_other(&incoming, id, read, later),
+            }
+        }
+        view.update(cx, |view, cx| view.select_tab(Tab::Conversation, cx));
+        settle(cx);
+        view.update(cx, |view, cx| {
+            view.page()
+                .unwrap()
+                .conversation_view
+                .list
+                .scroll_by(px(1500.));
+            cx.notify();
+        });
+        settle(cx);
+        let top = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                view.page()
+                    .unwrap()
+                    .conversation_view
+                    .list
+                    .logical_scroll_top()
+            })
+        };
+        let before = top(cx);
+        assert!(before.item_ix > 0, "the reader scrolled into the comments");
+        let reread = reads(&requests)
+            .into_iter()
+            .find(|(_, read)| *read == PullRequestRead::Conversation)
+            .expect("an expired conversation is read again");
+        answer(&incoming, reread.0, with_comments(41), later);
+        settle(cx);
+        let after = top(cx);
+        assert_eq!(
+            (after.item_ix, after.offset_in_item),
+            (before.item_ix, before.offset_in_item),
+            "a new comment below keeps the row and offset the reader was at"
+        );
+    }
+
+    /// A comment that comes in where the reader looks opens its room, and one that goes folds
+    /// away from where it was, drawn as it was: what is below it moves over several frames
+    /// rather than in one, one way, and ends where the change puts it.
+    #[gpui::test]
+    fn a_comment_that_arrives_or_goes_in_view_moves_what_is_below_gradually(
+        cx: &mut TestAppContext,
+    ) {
+        let Mounted {
+            view,
+            requests,
+            incoming,
+            _pump,
+            cx,
+        } = mount(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        let with_comments = |count: usize| {
+            let mut conversation = conversation();
+            conversation.comments = (0..count)
+                .map(|index| PullRequestComment {
+                    id: format!("C_{index}"),
+                    body: format!("Comment {index}"),
+                    created_at: format!("2026-10-02T00:00:{index:02}Z"),
+                    ..conversation.description.clone()
+                })
+                .collect();
+            PullRequestReadResponse::Conversation(Box::new(conversation))
+        };
+        let later = now() + 3600;
+        for (id, read) in reads(&requests) {
+            match read {
+                PullRequestRead::Conversation => answer(&incoming, id, with_comments(2), now()),
+                PullRequestRead::Files { cursor: None } => answer(
+                    &incoming,
+                    id,
+                    PullRequestReadResponse::Files(files(0..1, None)),
+                    later,
+                ),
+                read => answer_other(&incoming, id, read, later),
+            }
+        }
+        view.update(cx, |view, cx| view.select_tab(Tab::Conversation, cx));
+        settle(cx);
+        let composer = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("pr-conversation-Composer")
+                .expect("the composer's row is drawn")
+                .top()
+        };
+        let reread = || {
+            reads(&requests)
+                .into_iter()
+                .find(|(_, read)| *read == PullRequestRead::Conversation)
+                .expect("an expired conversation is read again")
+                .0
+        };
+        let follow = |cx: &mut VisualTestContext| {
+            for _ in 0..3 {
+                cx.run_until_parked();
+                cx.update(|window, cx| _ = window.draw(cx));
+            }
+            let mut tops = vec![composer(cx)];
+            for _ in 0..20 {
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(16));
+                cx.update(|window, cx| {
+                    window.simulate_next_frame(cx);
+                    _ = window.draw(cx);
+                });
+                tops.push(composer(cx));
+            }
+            tops
+        };
+        let gradual = |tops: &[gpui::Pixels], from: gpui::Pixels| {
+            let to = *tops.last().unwrap();
+            assert_eq!(
+                tops[0], from,
+                "the frame of the change moves nothing: {tops:?}"
+            );
+            assert_ne!(to, from, "the change moved what is below: {tops:?}");
+            let steps = tops.windows(2).filter(|pair| pair[0] != pair[1]).count();
+            assert!(steps >= 5, "it moved in {steps} frames: {tops:?}");
+            assert!(
+                tops.windows(2)
+                    .all(|pair| f32::from(pair[1] - pair[0]) * f32::from(to - from) >= 0.),
+                "what is below went back: {tops:?}"
+            );
+            to
+        };
+
+        let before = composer(cx);
+        // Lands as its expiry passes, so the view reads it again at once.
+        answer(&incoming, reread(), with_comments(3), now());
+        let grown = gradual(&follow(cx), before);
+        assert!(grown > before, "the comment took its room");
+
+        answer(&incoming, reread(), with_comments(2), later);
+        let shrunk = gradual(&follow(cx), grown);
+        assert_eq!(shrunk, before, "and its room closes");
     }
 
     /// The meta block has a Labels row where the host has labels: on one without them
@@ -2622,5 +3263,235 @@ mod tests {
                 filter.read(cx).presentation().placeholder().to_string()
             })
         });
+    }
+
+    /// The thread's index, with `links` on the one session.
+    fn send_links(incoming: &async_channel::Sender<String>, links: &[u64]) {
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::Codex,
+            "/tmp/tcode-pr".into(),
+            None,
+        );
+        meta.id = "session".into();
+        meta.pull_requests = links
+            .iter()
+            .map(|number| ThreadPullRequestLink {
+                key: PullRequestKey::new("github.com", "octo/repo", *number),
+                url: format!("https://github.com/octo/repo/pull/{number}"),
+                source: PullRequestSource::Manual,
+                linked_at: None,
+                snapshot: None,
+                stack: Default::default(),
+                sync_error: None,
+                watch: None,
+            })
+            .collect();
+        incoming
+            .try_send(
+                encode_line(&HostMessage::Event(tcode_protocol::EventEnvelope {
+                    request_id: None,
+                    topic: tcode_protocol::Topic::Index,
+                    event: tcode_protocol::ServerEvent::IndexSnapshot(
+                        tcode_protocol::IndexSnapshot {
+                            summary: Default::default(),
+                            sessions: vec![meta],
+                            projects: Vec::new(),
+                        },
+                    ),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    /// A pull request that leaves the thread's list folds away and the row below it moves up
+    /// as it does; rows that trade places glide there.
+    #[gpui::test]
+    fn the_pull_request_list_folds_out_a_row_and_glides_a_reorder(cx: &mut TestAppContext) {
+        use crate::test_frames::{draw, draw_settled};
+        use gpui::VisualContext as _;
+        let Mounted {
+            view,
+            incoming,
+            _pump,
+            cx,
+            ..
+        } = mount(cx);
+        let (store, window_state) = view.read_with(cx, |view, _| {
+            (view.store.clone(), view.window_state.clone())
+        });
+        send_links(&incoming, &[7, 8, 9]);
+        settle(cx);
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        store.update(cx, |store, cx| store.show_alone("session".into(), cx));
+        cx.replace_root_view(|_, cx| {
+            super::super::PullRequestsPanel::new(
+                store.clone(),
+                window_state.clone(),
+                Some("session".into()),
+                cx,
+            )
+        });
+        draw_settled(cx);
+        let top = |number: u64, cx: &mut VisualTestContext| {
+            cx.debug_bounds(Box::leak(
+                format!("pr-entry-row-github.com/octo/repo#{number}").into_boxed_str(),
+            ))
+            .map(|bounds| bounds.top())
+        };
+        let (first, second, third) = (top(7, cx), top(8, cx), top(9, cx));
+        let (first, second, third) = (first.unwrap(), second.unwrap(), third.unwrap());
+
+        let change = |links: &[u64], cx: &mut VisualTestContext| {
+            send_links(&incoming, links);
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+            cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+            draw(cx);
+        };
+        change(&[7, 9], cx);
+        let moving = top(9, cx).expect("the row below is drawn");
+        assert!(
+            moving > second && moving < third,
+            "the row below moves up as the row above folds away: {moving:?}"
+        );
+        assert!(top(8, cx).is_some(), "the leaving row is drawn as it folds");
+        draw_settled(cx);
+        assert_eq!(top(9, cx), Some(second));
+
+        change(&[9, 7], cx);
+        let (seven, nine) = (top(7, cx).unwrap(), top(9, cx).unwrap());
+        assert!(
+            seven > first && seven < second && nine > first && nine < second,
+            "the rows glide past each other: {seven:?} {nine:?}"
+        );
+        draw_settled(cx);
+        assert_eq!((top(9, cx), top(7, cx)), (Some(first), Some(second)));
+    }
+
+    /// A label the host adds widens into its row on the next read, and the label after it
+    /// moves over as it does rather than jumping.
+    #[gpui::test]
+    fn a_label_the_host_adds_widens_in(cx: &mut TestAppContext) {
+        use crate::test_frames::draw;
+        let Mounted {
+            view,
+            requests,
+            incoming,
+            _pump,
+            cx,
+        } = mount(cx);
+        let labelled = |names: &[&str]| {
+            PullRequestReadResponse::Conversation(Box::new(PullRequestConversation {
+                labels: names
+                    .iter()
+                    .map(|name| tcode_protocol::PullRequestLabel {
+                        id: (*name).into(),
+                        name: (*name).into(),
+                        color: None,
+                        description: None,
+                    })
+                    .collect(),
+                ..conversation()
+            }))
+        };
+        let later = now() + 3600;
+        for (id, read) in reads(&requests) {
+            match read {
+                // Lands as its expiry passes, so the view reads it again at once.
+                PullRequestRead::Conversation => answer(&incoming, id, labelled(&["bug"]), now()),
+                PullRequestRead::Files { cursor: None } => answer(
+                    &incoming,
+                    id,
+                    PullRequestReadResponse::Files(files(0..1, None)),
+                    later,
+                ),
+                read => answer_other(&incoming, id, read, later),
+            }
+        }
+        view.update(cx, |view, cx| view.select_tab(Tab::Conversation, cx));
+        settle(cx);
+        let left = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("pr-label-bug")
+                .expect("the label is drawn")
+                .left()
+        };
+        let before = left(cx);
+        let reread = reads(&requests)
+            .into_iter()
+            .find(|(_, read)| *read == PullRequestRead::Conversation)
+            .expect("an expired conversation is read again");
+        answer(&incoming, reread.0, labelled(&["feature", "bug"]), later);
+        draw(cx);
+        assert_eq!(left(cx), before, "the label starts where it was");
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let moving = left(cx);
+        settle(cx);
+        let after = left(cx);
+        assert!(
+            moving > before && moving < after,
+            "the label moves over as the new one widens in: {before:?} {moving:?} {after:?}"
+        );
+    }
+
+    /// Jumping to a file glides the diff there, and ends with the file's header at the top.
+    #[gpui::test]
+    fn jumping_to_a_file_glides_there(cx: &mut TestAppContext) {
+        use crate::test_frames::draw;
+        let Mounted {
+            view,
+            requests,
+            incoming,
+            _pump,
+            cx,
+        } = mount(cx);
+        let later = now() + 3600;
+        for (id, read) in reads(&requests) {
+            match read {
+                PullRequestRead::Files { cursor: None } => answer(
+                    &incoming,
+                    id,
+                    PullRequestReadResponse::Files(files(0..60, None)),
+                    later,
+                ),
+                read => answer_other(&incoming, id, read, later),
+            }
+        }
+        settle(cx);
+        let top = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                let list = view.page().unwrap().files_view.list.as_ref().unwrap();
+                list.unified_list.logical_scroll_top().item_ix
+            })
+        };
+        let header = view.read_with(cx, |view, _| {
+            let list = view.page().unwrap().files_view.list.as_ref().unwrap();
+            crate::diff::list::file_header_index(
+                &list.files,
+                &list.unified_items,
+                "src/40.rs",
+                std::path::Path::new("/elsewhere"),
+            )
+            .expect("the file has a header")
+        });
+        assert_eq!(top(cx), 0);
+        view.update(cx, |view, cx| {
+            let list = view.page().unwrap().files_view.list.as_ref().unwrap();
+            list.scroll_to_file(40, cx);
+            cx.notify();
+        });
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        draw(cx);
+        let moving = top(cx);
+        assert!(
+            moving > 0 && moving < header,
+            "the diff is on its way to the file: {moving} of {header}"
+        );
+        settle(cx);
+        assert_eq!(top(cx), header);
     }
 }
