@@ -20,4 +20,8 @@ wayland-client = "0.31.11"
 wayland-sys = { version = "0.31", features = ["client", "dlopen"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+gdk = "0.18.2"
+gtk = "0.18.2"
+serde_json = "1"
 wayland-protocols = { version = "0.32", features = ["client"] }
+webkit2gtk = "=2.0.1"
