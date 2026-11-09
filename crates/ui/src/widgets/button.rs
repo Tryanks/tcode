@@ -83,6 +83,9 @@ pub struct Button {
     /// Owes a finger a [`TOUCH_TARGET`](crate::material::TOUCH_TARGET)
     /// square whatever the button's size draws.
     touch: bool,
+    /// Of that square, only the height: one of a row of actions
+    /// ([`Button::touch_in_row`]).
+    touch_in_row: bool,
     /// The composer's chip control: 28 tall at the chip radius.
     chip: bool,
     loading: bool,
@@ -121,6 +124,7 @@ impl Button {
             outline: false,
             compact: false,
             touch: false,
+            touch_in_row: false,
             chip: false,
             loading: false,
             size: Size::Medium,
@@ -141,6 +145,15 @@ impl Button {
     /// touch layout; the button's size still decides what it draws.
     pub fn touch(mut self, touch: bool) -> Self {
         self.touch = touch;
+        self
+    }
+    /// [`Button::touch`] for one of a row of icon actions: the full touch
+    /// height, but only [`TOUCH_ROW_ACTION_WIDTH`](crate::material::TOUCH_ROW_ACTION_WIDTH)
+    /// across, so the row's glyphs read as one group rather than a touch
+    /// square apart.
+    pub fn touch_in_row(mut self, touch: bool) -> Self {
+        self.touch = touch;
+        self.touch_in_row = true;
         self
     }
     /// The chip form used by the composer's inline controls: 28pt tall at the
@@ -513,8 +526,12 @@ impl RenderOnce for Button {
                 },
             )
             .when(self.touch, |this| {
-                this.min_w(px(crate::material::TOUCH_TARGET))
-                    .min_h(px(crate::material::TOUCH_TARGET))
+                this.min_w(px(if self.touch_in_row {
+                    crate::material::TOUCH_ROW_ACTION_WIDTH
+                } else {
+                    crate::material::TOUCH_TARGET
+                }))
+                .min_h(px(crate::material::TOUCH_TARGET))
             })
             .when(
                 matches!(self.variant, ButtonVariant::Default) || self.outline,

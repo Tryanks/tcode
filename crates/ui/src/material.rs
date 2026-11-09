@@ -55,6 +55,10 @@ pub(crate) const CARD_INSET: f32 = 12.;
 /// The smallest square a finger can reliably hit. gpui-base carries no
 /// control-height token (its `TouchHandle::HIT_SIZE` is text selection's own).
 pub(crate) const TOUCH_TARGET: f32 = 44.;
+/// The width of each of a row of icon actions on a touch layout, which keep
+/// the [`TOUCH_TARGET`] height: a touch square apiece holds their glyphs so
+/// far apart they read as unrelated controls.
+pub(crate) const TOUCH_ROW_ACTION_WIDTH: f32 = 30.;
 
 /// How long a list row's or a menu item's hover fill, or a list's hover
 /// reveal, takes to come in or go.

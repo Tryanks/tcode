@@ -3326,6 +3326,64 @@ This begins after the hard break."#;
         }
     }
 
+    /// On a phone a message's actions sit close enough to read as one group,
+    /// each still a full touch target tall: an answer's Copy and fork, in a
+    /// row under it or in its turn's footer, and a user message's Copy and
+    /// rewind.
+    #[gpui::test]
+    fn a_phone_keeps_a_messages_actions_together(cx: &mut TestAppContext) {
+        use agent::{ProviderKind, TurnStatus};
+        use gpui::{VisualTestContext, px, size};
+
+        let mut timeline = Timeline::default();
+        timeline.turns = (0..2)
+            .map(|index| TurnMeta {
+                provider_checkpoint_id: Some(format!("checkpoint-{index}")),
+                status: Some(TurnStatus::Completed),
+                ..TurnMeta::default()
+            })
+            .collect();
+        timeline.entries.extend([
+            at_turn(entry("user-0", user_item("first")), 0),
+            at_turn(entry("assistant-0", assistant("One.")), 0),
+            at_turn(entry("user-1", user_item("second")), 1),
+            at_turn(entry("assistant-1", assistant("Two.")), 1),
+            // The turn goes on after its answer, whose actions are a row
+            // under it.
+            at_turn(command("command-1"), 1),
+        ]);
+        let (store, window_state, session_id, _driver, _) =
+            seed_chat_scripted(cx, timeline, false, Some(ProviderKind::ClaudeCode), false);
+        window_state.update(cx, |state, _| state.compact = true);
+        let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+            ChatView::new(store, window_state, Some(session_id), window, cx)
+        });
+        let window: &mut VisualTestContext = window;
+        window.simulate_resize(size(px(393.), px(852.)));
+        draw_settled(window);
+        for (first, second) in [
+            ("copy-assistant:assistant-0", "fork-assistant-0"),
+            ("copy-assistant:assistant-1", "fork-assistant-1"),
+            ("copy-user:user-0", "rewind-user-0"),
+            ("copy-user:user-1", "rewind-user-1"),
+        ] {
+            let [first_bounds, second_bounds] =
+                [first, second].map(|selector| window.debug_bounds(selector).expect(selector));
+            let pitch = second_bounds.center().x - first_bounds.center().x;
+            assert!(
+                pitch > px(0.) && pitch <= px(32.),
+                "{first} and {second} are {pitch:?} apart"
+            );
+            for (selector, bounds) in [(first, first_bounds), (second, second_bounds)] {
+                assert!(
+                    bounds.size.height >= px(crate::material::TOUCH_TARGET),
+                    "{selector} is {:?} tall",
+                    bounds.size.height
+                );
+            }
+        }
+    }
+
     /// A finished turn's fork is beside its answer's Copy where the Harness
     /// has one, whatever it is called, and never on a user message or a turn
     /// still running. Used, it opens a thread that names where it came from,
