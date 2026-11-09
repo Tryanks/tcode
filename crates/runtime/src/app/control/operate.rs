@@ -1274,10 +1274,7 @@ impl AppState {
         if let Some(refusal) = self.move_target_refusal(caller, &params.thread_id, &project) {
             return Err(refusal);
         }
-        let cwd = params
-            .cwd
-            .map(|cwd| cwd_inside(&project.root, &cwd))
-            .transpose()?;
+        let cwd = cwd_inside(&project.root, params.cwd.as_deref().unwrap_or("."))?;
         let before = self
             .find_meta(&params.thread_id)
             .map(|meta| (meta.project_id, meta.cwd));

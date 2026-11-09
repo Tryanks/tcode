@@ -79,7 +79,7 @@ use tcode_services::version_check::{self as app_releases, ReleaseFeed};
 use tcode_services::workspace::list_workspace;
 use tcode_services::worktree::{
     MergeBackError, MergeBackOutcome, ProvisionError, cleanup_orphans, merge_back, provision,
-    remove as remove_git_worktree,
+    remove as remove_git_worktree, within_repository_worktree,
 };
 
 const TITLE_MAX_CHARS: usize = 40;
