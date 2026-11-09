@@ -336,15 +336,16 @@ impl TimelineView {
         }
     }
 
-    /// Where the chat lays the timeline out this frame.
-    pub(in crate::chat) fn set_layout(&mut self, layout: TimelineLayout, cx: &mut Context<Self>) {
+    /// Where the chat lays the timeline out this frame, handed as the chat
+    /// renders, before the timeline is built in the same frame: a notify
+    /// would build it again on the next frame as well.
+    pub(in crate::chat) fn set_layout(&mut self, layout: TimelineLayout) {
         if layout.strip != self.layout.strip
             && let Some(last) = self.rows.len().checked_sub(1)
         {
             self.list_state.remeasure_items(last..last + 1);
         }
         self.layout = layout;
-        cx.notify();
     }
 
     /// Whether the timeline is an agent's shown beside its lead.
