@@ -29,7 +29,7 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Start (or resume) a session with an ACP agent.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    if opts.fork {
+    if opts.fork.is_some() {
         return Err(AgentError::Protocol(
             "session fork is not supported for this provider".into(),
         ));
@@ -342,7 +342,7 @@ fn auth_hint(agent: &AcpAgent, init: &acp::InitializeResponse) -> String {
         format!(" It offers: {}.", methods.join("; "))
     };
     format!(
-        "`{}` requires authentication.{offered} Sign in with the agent's own CLI, or set its API-key environment variables in Settings → Providers → ACP Agents → {}.",
+        "`{}` requires authentication.{offered} Sign in with the agent's own CLI, or set its API-key environment variables in Settings → Harnesses → {}.",
         agent.name, agent.name
     )
 }

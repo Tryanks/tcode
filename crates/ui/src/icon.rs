@@ -87,6 +87,11 @@ impl Icon {
         Self::default().path(name.path())
     }
 
+    /// The SVG this icon draws.
+    pub(crate) fn glyph(&self) -> &SharedString {
+        &self.path
+    }
+
     pub fn path(mut self, path: impl Into<SharedString>) -> Self {
         self.path = path.into();
         self

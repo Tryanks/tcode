@@ -1,7 +1,9 @@
 use std::pin::Pin;
 
 use super::*;
-use crate::app::orchestrate::native_provider_named;
+use crate::app::orchestrate::{
+    native_provider_named, resolve_child_permission, resolve_child_worktree,
+};
 use crate::app::sessions::{directory_within, fork_refusal, read_attachments};
 use control_mcp::{
     ActionResponse, BatchResponse, BatchResult, ControlThreadParams, ControlThreadResponse,
@@ -10,6 +12,7 @@ use control_mcp::{
     SendMessageParams, SendMode, StartThreadParams, StartThreadResponse, Workspace,
 };
 use tcode_core::control::{ControlCategory, StartedBy, action};
+use tcode_core::project::ChildExpectation;
 use tcode_core::pull_request::{PullRequestKey, PullRequestSource};
 use tcode_protocol::{Command, CommandResponse, PullRequestAction, PullRequestActionResult};
 
@@ -18,6 +21,19 @@ use tcode_protocol::{Command, CommandResponse, PullRequestAction, PullRequestAct
 const ACTION_WAIT: Duration = Duration::from_secs(45);
 
 type ActionWork = Pin<Box<dyn Future<Output = Result<Option<serde_json::Value>, String>> + Send>>;
+
+/// What `start_thread` found before making a thread.
+enum StartPlan {
+    /// A retry of a call that already started this thread.
+    Started(StartThreadResponse),
+    Install {
+        meta: Box<SessionMeta>,
+        message: String,
+        attachments: Vec<Attachment>,
+        /// Provision a dedicated worktree at `meta.cwd` first.
+        isolate: bool,
+    },
+}
 
 fn batch(target: &str, outcome: Outcome, reason: impl Into<String>) -> BatchResult {
     BatchResult {
@@ -119,7 +135,10 @@ fn cwd_inside(root: &Path, cwd: &str) -> Result<PathBuf, String> {
     {
         return Err(outside());
     }
-    let joined = root.join(relative);
+    let joined = relative
+        .components()
+        .filter(|part| matches!(part, std::path::Component::Normal(_)))
+        .fold(root.to_path_buf(), |path, part| path.join(part));
     match directory_within(root, &joined) {
         None => Err(format!(
             "invalid cwd: {} is not a directory on this host",
@@ -201,32 +220,72 @@ impl AppState {
         caller: &Caller,
         params: StartThreadParams,
         cx: &mut HostCx,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Answer {
+        match self.prepare_start_thread(caller, params, cx) {
+            Err(error) => Answer::Now(Err(error)),
+            Ok(StartPlan::Started(response)) => Answer::Now(to_json(response)),
+            Ok(StartPlan::Install {
+                meta,
+                message,
+                attachments,
+                isolate: false,
+            }) => {
+                Answer::Now(self.finish_start_thread(caller, *meta, message, attachments, None, cx))
+            }
+            Ok(StartPlan::Install {
+                mut meta,
+                message,
+                attachments,
+                isolate: true,
+            }) => {
+                let caller = caller.clone();
+                let host_cx = cx.clone();
+                let data_dir = self.store.root().clone();
+                Answer::Later(cx.spawn_background(async move {
+                    let (path, child_id) = (meta.cwd.clone(), meta.id.clone());
+                    let (cwd, worktree, warning) = host_cx
+                        .unblock(move || resolve_child_worktree(path, &child_id, &data_dir))
+                        .await;
+                    meta.cwd = cwd;
+                    meta.worktree = worktree;
+                    finish_on_host(host_cx, move |state, cx| {
+                        state.finish_start_thread(&caller, *meta, message, attachments, warning, cx)
+                    })
+                    .await
+                }))
+            }
+        }
+    }
+
+    /// Everything `start_thread` decides before the thread exists: the earlier thread a retry
+    /// names, or the new thread's meta and first message.
+    fn prepare_start_thread(
+        &mut self,
+        caller: &Caller,
+        params: StartThreadParams,
+        cx: &mut HostCx,
+    ) -> Result<StartPlan, String> {
         if params.request_id.trim().is_empty() {
             return Err("request_id must not be empty".into());
         }
-        if let Some(meta) = self.sessions.iter().find(|meta| {
-            meta.started_by.as_ref().is_some_and(|by| {
-                by.thread_id == caller.thread_id && by.request_id == params.request_id
-            })
-        }) {
-            return to_json(StartThreadResponse {
-                thread_id: meta.id.clone(),
-                created: false,
-                title: meta.title.clone(),
-                cwd: meta.cwd.display().to_string(),
-            });
+        if let Some(started) = self.started_by_request(caller, &params.request_id) {
+            return Ok(StartPlan::Started(started));
         }
+        let subagent = params.subagent.unwrap_or(false);
         let attachment_paths = self.agent_attachments(caller, params.attachments, cx)?;
         if params.message.trim().is_empty() && attachment_paths.is_empty() {
             return Err("message is empty".into());
         }
+        let project_id = params
+            .project_id
+            .or_else(|| caller.project_id.clone())
+            .ok_or_else(|| "project_id is required: this thread has no project".to_string())?;
         let project = self
             .projects
             .iter()
-            .find(|project| project.id == params.project_id)
+            .find(|project| project.id == project_id)
             .cloned()
-            .ok_or_else(|| format!("unknown project: {}", params.project_id))?;
+            .ok_or_else(|| format!("unknown project: {project_id}"))?;
         if !caller
             .grant
             .scope
@@ -238,13 +297,18 @@ impl AppState {
                 caller.grant.scope.describe()
             ));
         }
-        if params.workspace == Some(Workspace::Worktree) {
-            return Err(
-                "refused: workspace worktree is not available to start_thread; Tcode \
-                        makes a thread's worktree only from a draft's first send. Use local."
-                    .into(),
-            );
-        }
+        let isolate = match params.workspace {
+            Some(Workspace::Worktree) if !subagent => {
+                return Err(
+                    "refused: workspace worktree is only for a subagent; Tcode makes \
+                            an ordinary thread's worktree only from a draft's first send. Use \
+                            local, or subagent: true."
+                        .into(),
+                );
+            }
+            Some(workspace) => workspace == Workspace::Worktree,
+            None => subagent && self.settings.subagents.child_worktrees,
+        };
         let provider = native_provider_named(&params.provider).ok_or_else(|| {
             format!(
                 "unknown provider: {}; start_thread starts the native providers list_providers lists",
@@ -264,8 +328,14 @@ impl AppState {
                 Some(_) => {}
             }
         }
+        let caller_cwd = self
+            .find_meta(&caller.thread_id)
+            .filter(|meta| meta.project_id.as_deref() == Some(project.id.as_str()))
+            .map(|meta| meta.cwd);
         let cwd = match params.cwd {
-            None => project.root.clone(),
+            None => caller_cwd
+                .filter(|_| subagent)
+                .unwrap_or_else(|| project.root.clone()),
             Some(cwd) => cwd_inside(&project.root, &cwd)?,
         };
         if !cwd.is_dir() {
@@ -299,24 +369,88 @@ impl AppState {
             .into_iter()
             .map(|(id, value)| OptionSelection { id, value })
             .collect();
-        meta.option_selections
-            .extend(self.initial_permission_selection(Some(&project.id), provider));
+        if subagent {
+            meta.parent_session_id = Some(caller.thread_id.clone());
+            meta.option_selections.extend(resolve_child_permission(
+                permission_control(provider),
+                self.settings.subagents.child_approval,
+            ));
+        } else {
+            meta.option_selections
+                .extend(self.initial_permission_selection(Some(&project.id), provider));
+        }
         meta.started_by = Some(StartedBy {
             thread_id: caller.thread_id.clone(),
             request_id: params.request_id,
         });
+        Ok(StartPlan::Install {
+            meta: Box::new(meta),
+            message: params.message,
+            attachments: read_attachments(attachment_paths),
+            isolate,
+        })
+    }
+
+    /// The thread an earlier `start_thread` call with this `request_id` started.
+    fn started_by_request(&self, caller: &Caller, request_id: &str) -> Option<StartThreadResponse> {
+        let meta = self.sessions.iter().find(|meta| {
+            meta.started_by
+                .as_ref()
+                .is_some_and(|by| by.thread_id == caller.thread_id && by.request_id == request_id)
+        })?;
+        Some(StartThreadResponse {
+            thread_id: meta.id.clone(),
+            created: false,
+            title: meta.title.clone(),
+            cwd: meta.cwd.display().to_string(),
+            subagent: meta.is_dispatched(),
+            worktree_branch: meta
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.branch.clone()),
+            warning: None,
+        })
+    }
+
+    fn finish_start_thread(
+        &mut self,
+        caller: &Caller,
+        meta: SessionMeta,
+        message: String,
+        attachments: Vec<Attachment>,
+        warning: Option<String>,
+        cx: &mut HostCx,
+    ) -> Result<serde_json::Value, String> {
+        // A worktree is made off the host thread: a retry or the caller's archive may have
+        // come in meanwhile. A worktree left unused is the orphan sweep's.
+        if let Some(by) = &meta.started_by
+            && let Some(started) = self.started_by_request(caller, &by.request_id)
+        {
+            return to_json(started);
+        }
+        if !self
+            .find_meta(&caller.thread_id)
+            .is_some_and(|meta| meta.archived_at.is_none())
+        {
+            return Err("this thread was archived before its subagent could start".into());
+        }
         let response = StartThreadResponse {
             thread_id: meta.id.clone(),
             created: true,
             title: meta.title.clone(),
             cwd: meta.cwd.display().to_string(),
+            subagent: meta.is_dispatched(),
+            worktree_branch: meta
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.branch.clone()),
+            warning,
         };
-        let id = self.install_background_thread(
-            meta,
-            params.message,
-            read_attachments(attachment_paths),
-            cx,
-        );
+        let id = if meta.is_dispatched() {
+            self.install_subagent(meta, message, attachments, cx)
+        } else {
+            self.install_background_thread(meta, message, attachments, cx)
+        };
         self.audit(caller, &id, action::START_THREAD, None, cx);
         to_json(response)
     }
@@ -394,6 +528,18 @@ impl AppState {
         if self.find_meta(target).is_some_and(|meta| meta.is_settled()) {
             side_effects.push("unsettled: a message reopens a settled thread".to_owned());
         }
+        if !matches!(mode, SendMode::Schedule { .. })
+            && let Some(superseded) = self.open_subagent_expectation(caller, target, cx)
+        {
+            side_effects.push(
+                if superseded {
+                    "the report it owed for your previous message is replaced by one for this"
+                } else {
+                    "it owes you a report for this message"
+                }
+                .to_owned(),
+            );
+        }
         let routing = self.resident(target).map(|session| session.route(true));
         let delivery = match mode {
             SendMode::Steer if routing == Some(SendRouting::Steer) => "steered",
@@ -430,6 +576,30 @@ impl AppState {
             reason: Some(delivery.to_owned()),
             side_effects: (!side_effects.is_empty()).then_some(side_effects),
         }
+    }
+
+    /// A message to the caller's own subagent is new work it owes a report for: a report not
+    /// yet delivered for the previous message is not the answer to this one. Whether one was
+    /// superseded; `None` for any other target.
+    fn open_subagent_expectation(
+        &mut self,
+        caller: &Caller,
+        target: &str,
+        cx: &mut HostCx,
+    ) -> Option<bool> {
+        let meta = self.find_meta(target)?;
+        if !self.own_subagent(caller, &meta) {
+            return None;
+        }
+        let superseded = meta.report().pending();
+        let mut expectation = ChildExpectation::opened(now_secs());
+        // A report made before this message answers the previous one.
+        expectation.delivered_item = self
+            .loaded_child_timeline(target)
+            .and_then(Timeline::last_report)
+            .map(|(item, _)| item.to_owned());
+        self.set_child_expectation(target, Some(expectation), cx);
+        Some(superseded)
     }
 
     fn queue_agent_message(
@@ -534,6 +704,18 @@ impl AppState {
             .find_meta(target)
             .ok_or_else(|| skipped("unknown thread".into()))?;
         let session_id = target.to_owned();
+        if let RunOp::Cancel = op {
+            if !self.own_subagent(caller, &meta) {
+                return Err(skipped(
+                    "not your subagent: cancel stops only your own".into(),
+                ));
+            }
+            self.validate_command_target(&Command::CancelAgent { session_id })
+                .map_err(|error| skipped(error.message))?;
+            self.cancel_child(target, cx);
+            self.audit(caller, target, action::CANCEL, None, cx);
+            return Ok(("cancelled; its result is not delivered", None));
+        }
         let (command, key, detail) = match &op {
             RunOp::Interrupt => (Command::Interrupt { session_id }, action::INTERRUPT, None),
             RunOp::Retry { turn } => (
@@ -588,7 +770,44 @@ impl AppState {
                 )) {
                     return Err(failed(refusal.into()));
                 }
-                (Command::ForkThread { id: session_id }, action::FORK, None)
+                (
+                    Command::ForkThread {
+                        id: session_id,
+                        at: None,
+                    },
+                    action::FORK,
+                    None,
+                )
+            }
+            RunOp::ForkAt { turn } => {
+                let turn = *turn;
+                let active = self.resident(target).ok_or_else(|| {
+                    failed("this thread's history is not loaded on the host".into())
+                })?;
+                let checkpoint_id = active
+                    .timeline
+                    .turns
+                    .get(turn)
+                    .ok_or_else(|| failed(format!("there is no turn {turn}")))?
+                    .provider_checkpoint_id
+                    .clone();
+                let at = tcode_protocol::ForkAt {
+                    turn,
+                    checkpoint_id,
+                };
+                if self.fork_plan(active, &at).is_none() {
+                    return Err(failed(format!(
+                        "this thread cannot fork through turn {turn}"
+                    )));
+                }
+                (
+                    Command::ForkThread {
+                        id: session_id,
+                        at: Some(at),
+                    },
+                    action::FORK,
+                    Some(turn.to_string()),
+                )
             }
             RunOp::SteerQueued { id } | RunOp::DropQueued { id } => {
                 let id = *id;
@@ -625,6 +844,7 @@ impl AppState {
                     )
                 }
             }
+            RunOp::Cancel => unreachable!("cancel is answered above"),
         };
         self.validate_command_target(&command)
             .map_err(|error| skipped(error.message))?;
@@ -665,11 +885,13 @@ impl AppState {
                 self.set_active_option(target, &id, value, cx);
                 "option set"
             }
-            Command::ForkThread { .. } => {
-                let fork = self
-                    .fork_thread(target, cx)
-                    .ok_or_else(|| failed("the fork could not be made".into()))?;
-                new_thread_id = Some(fork);
+            Command::ForkThread { at, .. } => {
+                let fork = match at {
+                    Some(at) => self.fork_thread_at(target, &at, cx),
+                    None => self.fork_thread(target, cx),
+                };
+                new_thread_id =
+                    Some(fork.ok_or_else(|| failed("the fork could not be made".into()))?);
                 "forked"
             }
             Command::SteerQueued { id, .. } => {
@@ -960,13 +1182,14 @@ impl AppState {
         cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
         let root = PathBuf::from(params.root);
-        let existed = self.projects.iter().any(|project| project.root == root);
         let command = Command::CreateProject { root: root.clone() };
         self.validate_command_target(&command)
             .map_err(|error| error.message)?;
+        let known = self.projects.len();
         let id = self
             .create_project(root, cx)
             .map_err(|error| error.message)?;
+        let existed = self.projects.len() == known;
         let project = self
             .projects
             .iter()

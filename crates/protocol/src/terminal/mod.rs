@@ -300,6 +300,10 @@ pub struct TerminalDelta {
     pub lines_evicted: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub styles: Vec<TerminalStyle>,
+    /// The screen scrolled up this many rows: its rows move up before
+    /// `rows_replaced` applies, and as many blank rows enter at the bottom.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub scrolled: u16,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rows_replaced: Vec<TerminalRowUpdate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -329,6 +333,8 @@ impl TerminalFrame {
         self.cursor = delta.cursor;
         self.lines_evicted = delta.lines_evicted;
         let styles = remap_styles(&mut self.styles, &delta.styles);
+        let scrolled = usize::from(delta.scrolled).min(self.visible.len());
+        self.visible.drain(..scrolled);
         self.visible
             .resize_with(usize::from(delta.rows), Default::default);
         for update in &delta.rows_replaced {

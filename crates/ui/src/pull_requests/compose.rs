@@ -28,6 +28,9 @@ use crate::{
     },
 };
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Where an editor is open. Its unsent text stays with the pull request until it is sent or
 /// cancelled, across tab switches and closing the panel.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -166,11 +169,7 @@ pub(super) fn rejection_reason(rejection: &PullRequestRejection, host_name: &str
         }
         PullRequestRejection::NoPushAccess { numbers } => crate::tr!(
             "pull_requests.stack.result_no_push",
-            list = numbers
-                .iter()
-                .map(|number| format!("#{number}"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            list = crate::i18n::join_list(numbers.iter().map(|number| format!("#{number}")))
         ),
         PullRequestRejection::OperationRunning => crate::tr!("pull_requests.stack.waiting_state"),
         PullRequestRejection::MergeRunning => {
@@ -254,8 +253,8 @@ fn toast(
                     Notification::error(
                         crate::tr!(
                             "pull_requests.result.review_partial_body",
-                            posted = applied.join(", "),
-                            not_posted = unapplied.join(", "),
+                            posted = crate::i18n::join_list(applied),
+                            not_posted = crate::i18n::join_list(unapplied),
                             reason = reason
                         )
                         .into_owned(),
@@ -269,7 +268,7 @@ fn toast(
             Notification::warning(
                 crate::tr!(
                     "pull_requests.result.partial_body",
-                    names = unapplied.join(", "),
+                    names = crate::i18n::join_list(unapplied),
                     reason = reason
                 )
                 .into_owned(),
@@ -350,7 +349,7 @@ impl PullRequestView {
     pub(super) fn read_only(&self, cx: &App) -> bool {
         self.store
             .read(cx)
-            .session_status()
+            .session_status_for(self.session().as_deref(), cx)
             .is_none_or(|status| status.conversation_read_only)
     }
 
@@ -875,23 +874,24 @@ impl PullRequestView {
                         .disabled(submitting)
                         .aria_label(spec.aria),
                 )
-                .when(conflict, |editor| {
-                    editor.child(
-                        div()
-                            .text_secondary(compact, cx)
-                            .text_color(cx.theme().warning)
-                            .child(crate::tr!(
-                                "pull_requests.compose.edit_conflict",
-                                host_name = this.host_name(cx)
-                            )),
-                    )
-                })
-                .children(notice.map(|notice| {
-                    div()
-                        .text_secondary(compact, cx)
-                        .text_color(cx.theme().warning)
-                        .child(notice)
-                }))
+                .child(warning(
+                    format!("pr-editor-conflict-{slot:?}"),
+                    conflict.then(|| {
+                        crate::tr!(
+                            "pull_requests.compose.edit_conflict",
+                            host_name = this.host_name(cx)
+                        )
+                        .into_owned()
+                    }),
+                    compact,
+                    cx,
+                ))
+                .child(warning(
+                    format!("pr-editor-notice-{slot:?}"),
+                    notice.map(|notice| notice.to_string()),
+                    compact,
+                    cx,
+                ))
                 .child(
                     h_flex()
                         .justify_end()
@@ -1019,4 +1019,19 @@ pub(super) struct EditorSpec {
     pub(super) submit: SharedString,
     pub(super) aria: SharedString,
     pub(super) cancel: bool,
+}
+
+/// A warning under an editor, fading in when it arises and out when it clears.
+fn warning(id: String, text: Option<String>, compact: bool, cx: &App) -> AnyElement {
+    let line = div()
+        .text_secondary(compact, cx)
+        .text_color(cx.theme().warning);
+    crate::motion::Sampled::new(move |window, cx| {
+        match crate::motion::shown(SharedString::from(id), text, SHOW, window, cx) {
+            Some(kept) => kept.fold(line.child(kept.value.clone())),
+            // Out of flow, so an absent warning takes no gap in the editor.
+            None => div().absolute().into_any_element(),
+        }
+    })
+    .into_any_element()
 }

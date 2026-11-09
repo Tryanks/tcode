@@ -22,12 +22,28 @@ use crate::acp_session::{
     prompt_status,
 };
 use crate::{
-    AgentError, AgentEvent, Attachment, LaunchEnv, ModelSpec, PlanStep, PlanStepStatus,
-    ProviderKind, ResumeCursor, SessionHandle, SessionOptions, TurnStatus, UserInputOption,
-    UserInputQuestion,
+    AgentError, AgentEvent, ApprovalDecision, ApprovalOptionKind, Attachment, LaunchEnv, ModelSpec,
+    PlanStep, PlanStepStatus, ProviderKind, ResumeCursor, SessionHandle, SessionOptions,
+    TurnStatus, UserInputOption, UserInputQuestion,
 };
 
 use updates::Updates;
+
+/// The directories the Cursor CLI launched with `launch_env` keeps its
+/// configuration and chats in: `CURSOR_CONFIG_DIR` and `CURSOR_DATA_DIR`,
+/// each else `~/.cursor`.
+pub fn state_dirs(launch_env: &LaunchEnv) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for key in ["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"] {
+        let dir = launch_env
+            .child_path(ProviderKind::Cursor, key)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".cursor")));
+        if let Some(dir) = dir.filter(|dir| !found.contains(dir)) {
+            found.push(dir);
+        }
+    }
+    found
+}
 
 const ASK_QUESTION: &str = "cursor/ask_question";
 const CREATE_PLAN: &str = "cursor/create_plan";
@@ -70,7 +86,7 @@ pub async fn list_models(
         cwd: std::env::temp_dir(),
         model: None,
         resume: None,
-        fork: false,
+        fork: None,
         binary_path,
         option_selections: Vec::new(),
         mcp_servers: Vec::new(),
@@ -133,7 +149,7 @@ fn catalog(listed: &Value) -> Vec<ModelSpec> {
 
 fn signed_out() -> AgentError {
     AgentError::Provider(
-        "Cursor is not signed in. Run `cursor-agent login`, or set CURSOR_API_KEY in Settings → Providers → Cursor, then try again."
+        "Cursor is not signed in. Run `cursor-agent login`, or set CURSOR_API_KEY in Settings → Harnesses → Cursor, then try again."
             .into(),
     )
 }
@@ -236,7 +252,7 @@ impl Dialect for Cursor {
 
     async fn establish(&self, setup: &Setup<'_>) -> Result<Established, AgentError> {
         let (connection, opts) = (setup.connection, setup.opts);
-        if opts.fork {
+        if opts.fork.is_some() {
             return Err(AgentError::Protocol(
                 "session fork is not supported for this provider".into(),
             ));
@@ -375,38 +391,29 @@ impl Dialect for Cursor {
                 if replaying {
                     return Ok(json!({"outcome": {"outcome": "cancelled"}}));
                 }
-                let content = params.get("plan").and_then(Value::as_str).unwrap_or("");
-                let answers = session
-                    .ask_user(vec![UserInputQuestion {
-                        id: "decision".into(),
-                        header: method,
-                        question: content.to_owned(),
-                        options: [
-                            ("Accept", "Let Cursor save the plan"),
-                            (
-                                "Reject",
-                                "Decline the plan; type a reason to provide feedback",
-                            ),
-                        ]
-                        .into_iter()
-                        .map(|(label, description)| UserInputOption {
-                            label: label.into(),
-                            description: description.into(),
-                        })
-                        .collect(),
-                        multi_select: false,
-                        prefill: None,
-                    }])
+                let decision = session
+                    .ask_plan(
+                        &params,
+                        "plan",
+                        [
+                            ("accept", "Accept", ApprovalOptionKind::AllowOnce),
+                            ("reject", "Reject", ApprovalOptionKind::RejectOnce),
+                        ],
+                    )
                     .await;
-                let answer = answers
-                    .as_ref()
-                    .and_then(|answers| answers.get("decision"))
-                    .and_then(Value::as_str);
-                Ok(match answer {
-                    Some("Accept") => json!({"outcome": {"outcome": "accepted"}}),
-                    Some("Reject") => json!({"outcome": {"outcome": "rejected"}}),
-                    Some(reason) => json!({"outcome": {"outcome": "rejected", "reason": reason}}),
-                    None => json!({"outcome": {"outcome": "cancelled"}}),
+                Ok(match decision {
+                    ApprovalDecision::Option(id) if id == "accept" => {
+                        json!({"outcome": {"outcome": "accepted"}})
+                    }
+                    ApprovalDecision::Option(id) if id == "reject" => {
+                        json!({"outcome": {"outcome": "rejected"}})
+                    }
+                    ApprovalDecision::Feedback(reason) => {
+                        json!({"outcome": {"outcome": "rejected", "reason": reason}})
+                    }
+                    ApprovalDecision::Option(_) | ApprovalDecision::Cancel => {
+                        json!({"outcome": {"outcome": "cancelled"}})
+                    }
                 })
             }
             UPDATE_TODOS => {

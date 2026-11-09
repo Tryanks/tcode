@@ -32,6 +32,7 @@ impl<K> TurnSnapshots<K> {
         key: K,
     ) -> (TurnBoundaryChange, Option<K>) {
         let change = boundaries.apply(event);
+        self.end_rewound(change.rewind.as_ref());
         let superseded = self.track(
             boundaries.len(),
             matches!(event, AgentEvent::TurnChangesUpdated { .. })
@@ -42,6 +43,15 @@ impl<K> TurnSnapshots<K> {
         (change, superseded)
     }
 
+    /// A rewind ends the lifetimes of the turns it cut, though the divider's
+    /// turn reuses an index; the cut turn of a steer lives on.
+    fn end_rewound(&mut self, cut: Option<&super::RewindCut>) {
+        if let Some(cut) = cut {
+            self.latest
+                .truncate(cut.turn + usize::from(cut.steer.is_some()));
+        }
+    }
+
     fn track(&mut self, turns: usize, target: Option<usize>, key: K) -> Option<K> {
         self.latest.truncate(turns);
         self.latest.resize_with(turns, || None);
@@ -49,22 +59,24 @@ impl<K> TurnSnapshots<K> {
     }
 
     /// Fold the event recorded at `ts`, which the caller knows as `key`, into
-    /// `fold`. When it is a snapshot that supersedes an earlier one, the
-    /// earlier one's key is returned.
+    /// `fold`. Returns what the event did to the turns and, when it is a
+    /// snapshot that supersedes an earlier one, the earlier one's key.
     pub fn apply_at(
         &mut self,
         fold: &mut Timeline,
         ts: Option<u64>,
         event: &AgentEvent,
         key: K,
-    ) -> Option<K> {
+    ) -> (TurnBoundaryChange, Option<K>) {
         let target = match event {
             AgentEvent::TurnChangesUpdated { turn_id, .. } => Some(fold.provider_turn(turn_id)),
             _ => None,
         };
-        fold.apply_at(ts, event);
+        let change = fold.apply_at(ts, event);
+        self.end_rewound(change.rewind.as_ref());
         let target = target.map(|target| target.unwrap_or(fold.turns.len() - 1));
-        self.track(fold.turns.len(), target, key)
+        let superseded = self.track(fold.turns.len(), target, key);
+        (change, superseded)
     }
 }
 
@@ -127,6 +139,11 @@ mod tests {
             checkpoint_id: checkpoint.into(),
             mode: RewindMode::Conversation,
             prefill: None,
+            prefill_attachments: Vec::new(),
+            later_history: agent::LaterHistory::Truncated,
+            files: None,
+            incomplete: None,
+            undo_token: None,
         }
     }
 
@@ -174,7 +191,9 @@ mod tests {
             .iter()
             .enumerate()
             .filter_map(|(index, record)| {
-                snapshots.apply_at(&mut fold, record.ts, &record.event, index)
+                snapshots
+                    .apply_at(&mut fold, record.ts, &record.event, index)
+                    .1
             })
             .collect();
         superseded.sort_unstable();
@@ -189,7 +208,8 @@ mod tests {
             at(3, message("m1", "one")),
             at(4, completed("x")),
             at(5, started("x")),
-            // Lands on the first turn named x, superseding record 1 there.
+            // A new process numbers its turns afresh: lands on the latest
+            // turn named x, leaving record 1 to the first; superseded by 6.
             at(6, changes("x", "b")),
             // Names no turn, so lands on the current one; superseded by record 8.
             at(7, changes("", "c")),
@@ -246,9 +266,9 @@ mod tests {
         ];
         let cases = [
             (
-                "a reused turn id lands on its first turn",
+                "a reused turn id lands on its latest turn",
                 reused_id,
-                vec![1, 6],
+                vec![5, 6],
             ),
             ("a snapshot that opened its turn", opens_turn, vec![0]),
             ("a snapshot that named its turn", names_turn, vec![1]),

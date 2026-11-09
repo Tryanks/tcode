@@ -3,7 +3,7 @@
 //! a public project need neither for the pull request and its threads; writes do.
 
 use crate::{
-    forge::{ForgeError, ForgeErrorKind},
+    forge::{ForgeError, ForgeErrorKind, account},
     settings::SettingsStore,
 };
 use serde_json::Value;
@@ -16,7 +16,7 @@ use std::{
 };
 use tcode_core::{
     pull_request::HostKind,
-    settings::{CredentialSource, HostSettings},
+    settings::{CredentialSource, HostProblem, HostSettings, TokenCheck},
 };
 
 /// The API version every request names unless it names its own.
@@ -245,10 +245,67 @@ impl Api {
         self.store.token(HostKind::Azure, authority).is_some()
     }
 
-    /// Whether the organization has answered a request sent with `credential`, a saved token.
-    pub(super) fn verified(&self, authority: &str, credential: &Credential) -> bool {
-        self.store
-            .credential_verified(HostKind::Azure, authority, &credential.verification)
+    /// What the organization's last answer to `credential` says: its account, and any problem.
+    pub(super) fn assessed(
+        &self,
+        authority: &str,
+        credential: &Credential,
+    ) -> (Option<HostProblem>, Option<String>) {
+        account::assessed(
+            &self.store,
+            HostKind::Azure,
+            authority,
+            &credential.source,
+            &credential.verification,
+        )
+    }
+
+    /// Whose the credential is in the organization: its connection data's signed-in user.
+    fn whose_credential(&self, authority: &str, credential: &Credential) -> account::Whose {
+        let answer = account::ask(
+            &self.agent,
+            &format!("https://{authority}/_apis/connectionData?api-version={VERSION}"),
+            &credential.authorization,
+            &[("X-TFS-FedAuthRedirect", "Suppress")],
+        )?;
+        // A 203 or a redirect is Azure's sign-in page served in place of the answer.
+        if answer.status == 203 || (300..400).contains(&answer.status) {
+            return Err(TokenCheck::Rejected { status: 401 });
+        }
+        let user = answer.accepted()?["authenticatedUser"].clone();
+        if user["id"].as_str().is_none() {
+            return Err(TokenCheck::Unreachable { status: None });
+        }
+        let login = user["properties"]["Account"]["$value"].clone();
+        Ok((
+            account::account(
+                &serde_json::json!({ "login": login, "name": user["providerDisplayName"] }),
+                "login",
+                "name",
+            ),
+            Vec::new(),
+        ))
+    }
+
+    /// Whose the personal access token `token` is in the organization.
+    pub(super) fn whose(&self, authority: &str, token: &str) -> account::Whose {
+        let credential = Credential::new(token, false, CredentialSource::Saved)
+            .ok_or(TokenCheck::Rejected { status: 401 })?;
+        self.whose_credential(authority, &credential)
+    }
+
+    /// Learns whose the token in use is, when that is not yet known.
+    pub(super) fn identify(&self, authority: &str) {
+        if let Ok(Some(credential)) = self.credential(authority) {
+            account::identify(
+                &self.store,
+                HostKind::Azure,
+                authority,
+                &credential.source,
+                &credential.verification,
+                || self.whose_credential(authority, &credential),
+            );
+        }
     }
 
     /// The organization `AZURE_DEVOPS_EXT_PAT` is for, when both variables are set: by name, as
@@ -461,17 +518,15 @@ impl Api {
                 .lock()
                 .unwrap()
                 .succeeded(authority, fingerprint, lease);
-            if let Some(credential) = credential
-                .as_ref()
-                .filter(|credential| credential.source == CredentialSource::Saved)
-                && let Err(error) = self.store.record_verification(
+            if let Some(credential) = &credential {
+                account::record(
+                    &self.store,
                     HostKind::Azure,
                     authority,
+                    &credential.source,
                     &credential.verification,
                     true,
-                )
-            {
-                log::warn!("failed to save credential verification: {error}");
+                );
             }
             return Ok(Response { body, truncated });
         }
@@ -482,15 +537,15 @@ impl Api {
                 "Azure DevOps request needs a sign-in",
             ),
             203 | 300..=399 | 401 => {
-                if let Some(credential) = credential.as_ref()
-                    && let Err(error) = self.store.record_verification(
+                if let Some(credential) = &credential {
+                    account::record(
+                        &self.store,
                         HostKind::Azure,
                         authority,
+                        &credential.source,
                         &credential.verification,
                         false,
-                    )
-                {
-                    log::warn!("failed to clear credential verification: {error}");
+                    );
                 }
                 self.forget(authority);
                 error(

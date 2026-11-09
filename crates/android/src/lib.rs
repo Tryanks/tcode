@@ -15,16 +15,7 @@ pub fn android_main(app: android_activity::AndroidApp) {
     use tcode_client::host::ClientHost;
     use tcode_ui::{ShellOptions, ShellSetup};
 
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Debug)
-            .with_filter(
-                android_logger::FilterBuilder::new()
-                    .parse("info,tcode_ui::store::history=debug")
-                    .build(),
-            )
-            .with_tag("Tcode-GPUI"),
-    );
+    logger::init();
     std::panic::set_hook(Box::new(|panic| {
         log::error!("GPUI Android panic: {panic}");
         log::error!("{}", std::backtrace::Backtrace::force_capture());
@@ -83,8 +74,9 @@ pub fn android_main(app: android_activity::AndroidApp) {
                         client_host: Some(host),
                         local: None,
                         local_failure: None,
-                        seed_blocking: false,
+                        local_settings: None,
                         restore_navigation: true,
+                        reopen: None,
                     },
                     ..Default::default()
                 }
@@ -123,6 +115,66 @@ pub fn android_main(app: android_activity::AndroidApp) {
 }
 
 #[cfg(target_os = "android")]
+mod logger {
+    use log::{Log, Metadata, Record};
+    use std::sync::OnceLock;
+
+    /// android-activity 0.6.1's `poll_events` logs this at error level each
+    /// time `ALooper_pollOnce` returns `ALOOPER_POLL_CALLBACK`, which it
+    /// takes for impossible; the looper returns it after running any
+    /// callback, so gpui-android's AChoreographer path gets it every vsync.
+    const POLL_CALLBACK_SOURCE: &str = "android_activity::native_activity";
+    const POLL_CALLBACK_MESSAGE: &str =
+        "Spurious ALOOPER_POLL_CALLBACK from ALooper_pollOnce() (ignored)";
+
+    struct Logger(OnceLock<android_logger::AndroidLogger>);
+
+    static LOGGER: Logger = Logger(OnceLock::new());
+
+    impl Logger {
+        fn inner(&self) -> &android_logger::AndroidLogger {
+            self.0.get_or_init(|| {
+                android_logger::AndroidLogger::new(
+                    android_logger::Config::default()
+                        .with_max_level(log::LevelFilter::Debug)
+                        .with_filter(
+                            android_logger::FilterBuilder::new()
+                                .parse("info,tcode_ui::store::history=debug")
+                                .build(),
+                        )
+                        .with_tag("Tcode-GPUI"),
+                )
+            })
+        }
+    }
+
+    impl Log for Logger {
+        fn enabled(&self, metadata: &Metadata) -> bool {
+            self.inner().enabled(metadata)
+        }
+
+        fn log(&self, record: &Record) {
+            if record.target() == POLL_CALLBACK_SOURCE
+                && record.args().as_str() == Some(POLL_CALLBACK_MESSAGE)
+            {
+                return;
+            }
+            self.inner().log(record);
+        }
+
+        fn flush(&self) {}
+    }
+
+    /// Each activity start runs `android_main` again in the same process;
+    /// only the first installs the logger.
+    pub(super) fn init() {
+        if log::set_logger(&LOGGER).is_ok() {
+            log::set_max_level(log::LevelFilter::Debug);
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
 mod jni_exports {
     use jni::{
         EnvUnowned,
@@ -147,8 +199,8 @@ mod jni_exports {
     pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeFrame(
         _env: EnvUnowned<'_>,
         _activity: JObject<'_>,
-    ) {
-        gpui_android::jni_frame();
+    ) -> jboolean {
+        gpui_android::jni_frame()
     }
 
     #[unsafe(no_mangle)]
@@ -158,6 +210,24 @@ mod jni_exports {
         rate: f32,
     ) {
         gpui_android::jni_refresh_rate(rate);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeThermalStatus(
+        _env: EnvUnowned<'_>,
+        _activity: JObject<'_>,
+        status: jint,
+    ) {
+        gpui_android::jni_thermal_status(status);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativePowerSaveMode(
+        _env: EnvUnowned<'_>,
+        _activity: JObject<'_>,
+        enabled: jboolean,
+    ) {
+        gpui_android::jni_power_save_mode(enabled);
     }
 
     #[unsafe(no_mangle)]
@@ -336,12 +406,13 @@ mod jni_exports {
         bytes: JByteArray<'local>,
     ) {
         env.with_env(|env| -> jni::errors::Result<()> {
-            let name = optional_string(env, name)?.unwrap_or_else(|| "image".into());
-            let mime = optional_string(env, mime)?.unwrap_or_else(|| "image/jpeg".into());
+            let name = optional_string(env, name)?.unwrap_or_else(|| "file".into());
+            let mime =
+                optional_string(env, mime)?.unwrap_or_else(|| "application/octet-stream".into());
             let bytes = env.convert_byte_array(&bytes)?;
             crate::host::deliver_image_picked(
                 request_id as u64,
-                tcode_client::host::PickedImage { name, mime, bytes },
+                tcode_client::host::PickedFile { name, mime, bytes },
             );
             Ok(())
         })

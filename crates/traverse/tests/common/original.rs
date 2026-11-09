@@ -5,6 +5,14 @@ use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
 use tcode_traverse::HostMux;
 
 pub fn recorded_host(root: &Path, bytes: &[u8]) -> (SpawnedHost, HostMux, String, String) {
+    recorded_host_with(root, bytes, HostServices::default())
+}
+
+pub fn recorded_host_with(
+    root: &Path,
+    bytes: &[u8],
+    services: HostServices,
+) -> (SpawnedHost, HostMux, String, String) {
     let store = tcode_services::store::SessionStore::open_at(root.join("store")).unwrap();
     let project = tcode_core::project::Project::from_root(root.to_owned());
     store.upsert_project(&project).unwrap();
@@ -30,7 +38,7 @@ pub fn recorded_host(root: &Path, bytes: &[u8]) -> (SpawnedHost, HostMux, String
             }),
         )
         .unwrap();
-    let runtime = spawn_host(store, HostServices::default()).unwrap();
+    let runtime = spawn_host(store, services).unwrap();
     let mux = HostMux::new(runtime.attachments.clone(), runtime.from_host.clone())
         .with_original_backend(Arc::new(runtime.clone()));
     (runtime, mux, meta.id, project.id)

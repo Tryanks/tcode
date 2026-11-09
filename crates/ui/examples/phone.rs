@@ -95,8 +95,9 @@ fn main() {
                         client_host: Some(host),
                         local: local_transport,
                         local_failure: None,
-                        seed_blocking: local,
+                        local_settings: None,
                         restore_navigation: true,
+                        reopen: None,
                     },
                     ..Default::default()
                 },

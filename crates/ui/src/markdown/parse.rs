@@ -13,6 +13,9 @@ use super::nodes::{
 pub(crate) struct ParsedDocument {
     pub(crate) root: BlockNode,
     pub(crate) root_starts: Option<Vec<usize>>,
+    /// The source defines a link reference, which a link in any of its
+    /// blocks, before or after the definition, resolves against.
+    pub(crate) defines_links: bool,
 }
 
 #[cfg(test)]
@@ -46,7 +49,22 @@ pub(crate) fn parse_document(source: &str) -> ParsedDocument {
     ParsedDocument {
         root: BlockNode::Root { children },
         root_starts: positions_available.then_some(root_starts),
+        defines_links: defines_links(&arena, doc_ref),
     }
+}
+
+/// Whether a link reference definition sits in `container`, at any depth:
+/// rushdown keeps one where it was written, in a quote or a list item too.
+fn defines_links(arena: &Arena, container: NodeRef) -> bool {
+    arena[container]
+        .children(arena)
+        .any(|child| match arena[child].kind_data() {
+            KindData::LinkReferenceDefinition(_) => true,
+            KindData::Blockquote(_) | KindData::List(_) | KindData::ListItem(_) => {
+                defines_links(arena, child)
+            }
+            _ => false,
+        })
 }
 
 fn block_node(
@@ -83,17 +101,23 @@ fn block_node(
         KindData::ThematicBreak(_) => BlockNode::HorizontalRule,
         KindData::CodeBlock(code) => {
             let value = code.value().iter(source).collect::<String>();
-            let lang = match code.code_block_kind() {
-                CodeBlockKind::Fenced => code
-                    .language_str(source)
-                    .filter(|lang| !lang.is_empty())
-                    .map(Into::into),
-                CodeBlockKind::Indented => None,
-                _ => None,
-            };
+            let fenced = matches!(code.code_block_kind(), CodeBlockKind::Fenced);
+            let lang = fenced
+                .then(|| code.language_str(source))
+                .flatten()
+                .filter(|lang| !lang.is_empty())
+                .map(Into::into);
+            let (closed, open_line) = node
+                .pos()
+                .filter(|_| fenced)
+                .map_or((false, false), |fence| {
+                    fence_end(source, fence, code.value().iter(source).count())
+                });
             BlockNode::CodeBlock(CodeBlock {
                 code: value.into(),
                 lang,
+                closed,
+                open_line,
                 ..Default::default()
             })
         }
@@ -125,6 +149,42 @@ fn block_node(
         _ => BlockNode::Unknown,
     };
     Some(block)
+}
+
+/// How the fence opening at byte `fence` of `source`, with `content_lines`
+/// lines of code, ends: whether its closing fence has arrived -- the line
+/// after its code, inside any quote markers and indentation, is a run of the
+/// fence's character at least as long as the opening one -- and whether its
+/// source stops inside its last line, which rushdown ends with a newline all
+/// the same. rushdown keeps the fence it matched to itself.
+fn fence_end(source: &str, fence: usize, content_lines: usize) -> (bool, bool) {
+    let line_after = |from: usize| source[from..].find('\n').map(|ix| from + ix + 1);
+    let Some(&fence_char) = source.as_bytes().get(fence) else {
+        return (false, false);
+    };
+    let fence_len = source[fence..]
+        .bytes()
+        .take_while(|byte| *byte == fence_char)
+        .count();
+    let Some(mut line) = line_after(fence) else {
+        return (false, false);
+    };
+    for _ in 0..content_lines {
+        let Some(next) = line_after(line) else {
+            return (false, true);
+        };
+        line = next;
+    }
+    let closing = source[line..]
+        .split('\n')
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches([' ', '\t', '>']);
+    let run = closing
+        .bytes()
+        .take_while(|byte| *byte == fence_char)
+        .count();
+    (run >= fence_len && closing[run..].trim().is_empty(), false)
 }
 
 fn split_math_blocks(paragraph: Paragraph) -> BlockNode {
@@ -712,6 +772,43 @@ x&-y\\
         };
         assert!(ordered);
         assert_eq!(*start, 2);
+    }
+
+    /// A streaming diagram is drawn whole once its fence closes, and from its
+    /// finished lines until then.
+    #[test]
+    fn a_fence_knows_whether_it_closed_and_whether_its_last_line_ended() {
+        fn fence(node: &BlockNode) -> Option<(bool, bool)> {
+            match node {
+                BlockNode::CodeBlock(code) => Some((code.closed, code.open_line)),
+                BlockNode::Root { children }
+                | BlockNode::Blockquote { children }
+                | BlockNode::List { children, .. }
+                | BlockNode::ListItem { children, .. } => children.iter().find_map(fence),
+                _ => None,
+            }
+        }
+        for (source, closed, open_line) in [
+            ("```mermaid\n", false, false),
+            ("```mermaid\nA --> B", false, true),
+            ("```mermaid\nA --> B\n", false, false),
+            // A closing fence half written is still a line of the code.
+            ("```mermaid\nA --> B\n``", false, true),
+            ("```mermaid\nA --> B\n```", true, false),
+            ("````mermaid\nA --> B\n```\n", false, false),
+            ("> ```mermaid\n> A --> B\n> ```\n", true, false),
+            ("- item\n\n  ```mermaid\n  A --> B\n  ```\n", true, false),
+            ("~~~\na\n~~~\nafter", true, false),
+        ] {
+            let BlockNode::Root { children } = parse(source) else {
+                panic!("root")
+            };
+            assert_eq!(
+                children.iter().find_map(fence),
+                Some((closed, open_line)),
+                "{source:?}"
+            );
+        }
     }
 
     #[test]

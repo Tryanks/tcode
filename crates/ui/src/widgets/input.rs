@@ -18,6 +18,9 @@ use gpui_base::StyledExt as _;
 use gpui_base::{InputBase, RoleOverride};
 use serde::Deserialize;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A right-click menu item of a field. The menu takes focus while it is open,
 /// so its choice is forwarded to the field's own focus handle, where the
 /// editor's Cut, Copy, Paste and Select All handlers live.
@@ -52,8 +55,9 @@ pub(crate) fn commit_marked_text<M: gpui_base::input::InputModeKind>(
         && let Some(text) = state.text_for_range(marked.clone(), &mut None, window, cx)
     {
         let selection = state.selected_range();
+        let reversed = state.is_selection_reversed();
         state.replace_text_in_range(Some(marked), &text, window, cx);
-        state.set_selected_range(selection, cx);
+        state.set_selected_range_with_direction(selection, reversed, cx);
     }
 }
 
@@ -274,10 +278,38 @@ impl RenderOnce for Input {
                 .update(cx, |state, cx| commit_marked_text(state, window, cx)));
         }
         let theme = cx.theme().clone();
+        let motion_id = dispatch_state!(&self.state, |base| gpui::ElementId::from((
+            "input-motion",
+            base.entity_id()
+        )));
+        let border = gpui_base::motion::transition(
+            (motion_id.clone(), "border"),
+            if focused { theme.ring } else { theme.input },
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        // gpui-base halves a disabled editor's text and placeholder inside its
+        // element, at once and with no state between; the field's own ink
+        // glides from one look to the other, and while gpui-base dims it is
+        // given twice the ink it shows, so the halving lands where the glide is.
+        let ink = gpui_base::motion::transition(
+            (motion_id, "ink"),
+            if self.disabled { 0.5 } else { 1. },
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        let ink = |color: gpui::Hsla| gpui::Hsla {
+            a: color.a * if self.disabled { ink / 0.5 } else { ink },
+            ..color
+        };
+        let foreground = ink(self.style.text.color.unwrap_or(theme.foreground));
+        let muted_foreground = ink(theme.muted_foreground);
         dispatch_state!(&self.state, |base| base.update(cx, |state, cx| {
             state.set_editor_style(gpui_base::input::InputEditorStyle {
-                foreground: theme.foreground,
-                muted_foreground: theme.muted_foreground,
+                foreground,
+                muted_foreground,
                 background: theme.background,
                 border: theme.border,
                 selection: theme.selection,
@@ -358,7 +390,6 @@ impl RenderOnce for Input {
                     this.capture_any_mouse_down(|_, window, _| window.prevent_default())
                 })
                 .role(self.role)
-                .styles(|styles| styles.focused(|style| style.border_color(theme.ring)))
                 .when_some(aria_label.clone(), |this, label| {
                     this.accessibility_label(label)
                 })
@@ -379,11 +410,11 @@ impl RenderOnce for Input {
                         .when_some(self.height, |this, height| this.h(height))
                 })
                 .when(self.appearance, |this| {
-                    this.bg(theme.background).when(self.bordered, |this| {
-                        this.border_1().border_color(theme.input)
-                    })
+                    this.bg(theme.background)
+                        .when(self.bordered, |this| this.border_1().border_color(border))
                 })
                 .refine_style(&self.style)
+                .text_color(foreground)
                 .child(editor)
                 // Register after the editor paints so GPUI uses its configured handler.
                 .child(
@@ -559,6 +590,17 @@ impl RenderOnce for NumberInput {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let compact = crate::window_seam::window_is_compact(window, cx);
         let focused = self.state.read(cx).focus_handle(cx).is_focused(window);
+        let border = gpui_base::motion::transition(
+            gpui::ElementId::from(("number-input-border", self.state.entity_id())),
+            if focused {
+                cx.theme().ring
+            } else {
+                cx.theme().input
+            },
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
         gpui_base::NumberInput::new(&self.state)
             .when_some(self.accessibility_label, |this, label| {
                 this.accessibility_label(label)
@@ -569,11 +611,7 @@ impl RenderOnce for NumberInput {
             .rounded(material::radius_input(cx))
             .bg(cx.theme().background)
             .border_1()
-            .border_color(if focused {
-                cx.theme().ring
-            } else {
-                cx.theme().input
-            })
+            .border_color(border)
             .input(Input::new(&self.state).appearance(false).h_full())
             .increment_button(|button| {
                 button
@@ -605,6 +643,60 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             Textarea::new(&self.0).disabled(self.1)
         }
+    }
+
+    /// The border of the field: the largest quad painted with a border (the
+    /// scrollbar inside it draws smaller ones).
+    fn border(cx: &mut gpui::VisualTestContext) -> gpui::Hsla {
+        cx.update(|window, _| {
+            window
+                .painted_quads()
+                .iter()
+                .filter(|quad| quad.border_widths.top.0 > 0.)
+                .max_by(|a, b| {
+                    let area = |q: &&gpui::Quad| q.bounds.size.width.0 * q.bounds.size.height.0;
+                    area(a).total_cmp(&area(b))
+                })
+                .map(|quad| quad.border_color)
+                .expect("the field has a border")
+        })
+    }
+
+    /// Focusing a field moves its border to the focus colour over several
+    /// frames, and blurring it moves it back.
+    #[gpui::test]
+    fn a_field_border_glides_to_the_focus_colour(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (field, cx) = cx.add_window_view(|window, cx| {
+            Field(cx.new(|cx| TextareaState::new(window, cx)), false)
+        });
+        let input = field.read_with(cx, |field, _| field.0.clone());
+        crate::test_frames::draw_settled(cx);
+        let (rest, ring) = cx.update(|_, cx| (cx.theme().input, cx.theme().ring));
+        assert!(close(border(cx), rest));
+        cx.update(|window, cx| input.update(cx, |state, cx| state.focus(window, cx)));
+        let mut between = 0;
+        for _ in 0..20 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+            let now = border(cx);
+            if !close(now, rest) && !close(now, ring) {
+                between += 1;
+            }
+        }
+        assert!(between >= 4, "the border jumped");
+        crate::test_frames::draw_settled(cx);
+        assert!(close(border(cx), ring));
+    }
+
+    fn close(a: gpui::Hsla, b: gpui::Hsla) -> bool {
+        [a.h - b.h, a.s - b.s, a.l - b.l, a.a - b.a]
+            .iter()
+            .all(|d| d.abs() < 1e-3)
     }
 
     // GPUI focuses any tracked handle under a press, and the platform raises
@@ -689,5 +781,37 @@ mod tests {
             cx.simulate_input("!");
             assert_eq!(input.read_with(cx, |state, _| state.value()), "!你好");
         }
+    }
+
+    /// A selection made backwards over a composition is still backwards once
+    /// leaving the field commits it, so Shift-Left keeps growing it.
+    #[gpui::test]
+    fn committing_preedit_on_blur_keeps_a_backward_selection_backward(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (field, cx) = cx.add_window_view(|window, cx| {
+            Field(
+                cx.new(|cx| TextareaState::new(window, cx).default_value("ab")),
+                false,
+            )
+        });
+        let input = field.read_with(cx, |field, _| field.0.clone());
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.focus(window, cx);
+                state.set_selected_range(2..2, cx);
+                state.replace_and_mark_text_in_range(None, "你好", None, window, cx);
+                state.set_selected_range_with_direction(2..8, true, cx);
+            });
+            window.draw(cx).clear(cx);
+            window.blur(cx);
+            window.draw(cx).clear(cx);
+            input.update(cx, |state, cx| {
+                assert_eq!(state.marked_text_range(window, cx), None);
+                state.focus(window, cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_keystrokes("shift-left");
+        assert_eq!(input.read_with(cx, |state, _| state.selected_range()), 1..8);
     }
 }

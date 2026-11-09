@@ -10,6 +10,14 @@
 
 use std::{ops::Range, panic::Location, rc::Rc};
 
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
+
+use crate::motion::{ListScroll, ScrollTarget};
+use crate::widgets::scrollbar::Scrollbar;
+
 use gpui::{
     AnyElement, App, Axis, Div, Element, ElementId, InteractiveElement, IntoElement, ListAlignment,
     ListOffset, ListSizingBehavior, ListState, ParentElement, Pixels, Refineable as _, RenderOnce,
@@ -18,8 +26,7 @@ use gpui::{
     uniform_list,
 };
 use gpui_base::{
-    InteractiveElementExt as _, ScrollBounce, ScrollableMask, Scrollbar, ScrollbarHandle,
-    StyledExt as _,
+    InteractiveElementExt as _, ScrollBounce, ScrollableMask, ScrollbarHandle, StyledExt as _,
 };
 
 pub(crate) trait ScrollableElement:
@@ -60,6 +67,82 @@ pub(crate) fn page_viewport<H: ScrollbarHandle + Clone>(
     element: impl IntoElement,
 ) -> ScrollBounce {
     ScrollBounce::new(id, handle, element)
+}
+
+/// How far a reader rising from the end of a list following its tail goes
+/// before the list stops following.
+///
+/// gpui-base's `ScrollBounce` hands each wheel and pan packet to
+/// `ListState::set_offset_from_scrollbar`, which takes an offset within 1px
+/// of the end for a drag to the end and goes on following, and gpui-fast's
+/// list layout resumes following within that pixel too. A following list is
+/// laid out at its end again every frame, so each packet starts from the
+/// end, and a slow trackpad scroll, whose packets are under a pixel, never
+/// leaves it. Twice that pixel clears it with room for rounding.
+const TAIL_ESCAPE: Pixels = px(2.);
+
+/// A list following its tail, as the handle its [`page_viewport`] scrolls:
+/// the packets that rise from the end add up until they reach
+/// [`TAIL_ESCAPE`], then move the list by all of them, so a scroll up leaves
+/// the tail however slowly it comes. Remove it once a wheel packet that
+/// rises from the end of a gpui-fast list pauses its following.
+#[derive(Clone)]
+pub(crate) struct FollowedList {
+    list: ListState,
+    /// What rose from the end while the list followed, not yet applied.
+    rise: Rc<std::cell::Cell<Pixels>>,
+}
+
+impl FollowedList {
+    pub(crate) fn new(list: &ListState) -> Self {
+        Self {
+            list: list.clone(),
+            rise: Rc::default(),
+        }
+    }
+}
+
+impl ScrollbarHandle for FollowedList {
+    fn viewport_bounds(&self) -> gpui::Bounds<Pixels> {
+        ScrollbarHandle::viewport_bounds(&self.list)
+    }
+
+    fn offset(&self) -> gpui::Point<Pixels> {
+        ScrollbarHandle::offset(&self.list)
+    }
+
+    fn set_offset(&self, mut offset: gpui::Point<Pixels>) {
+        if !self.list.is_following_tail() {
+            self.rise.set(px(0.));
+            self.list.set_offset_from_scrollbar(offset);
+            return;
+        }
+        // Anchored past its last row, the list reports more than it shows.
+        let end = -self.list.max_offset_for_scrollbar().y;
+        let rise = offset.y - self.list.scroll_px_offset_for_scrollbar().y.max(end);
+        if rise > px(0.) {
+            let rise = self.rise.get() + rise;
+            if rise < TAIL_ESCAPE {
+                self.rise.set(rise);
+                return;
+            }
+            offset.y = end + rise;
+        }
+        self.rise.set(px(0.));
+        self.list.set_offset_from_scrollbar(offset);
+    }
+
+    fn content_size(&self) -> gpui::Size<Pixels> {
+        ScrollbarHandle::content_size(&self.list)
+    }
+
+    fn start_drag(&self) {
+        ScrollbarHandle::start_drag(&self.list);
+    }
+
+    fn end_drag(&self) {
+        ScrollbarHandle::end_drag(&self.list);
+    }
 }
 
 #[derive(IntoElement)]
@@ -299,6 +382,78 @@ pub(crate) struct VirtualList {
     style: StyleRefinement,
     scrollbar: bool,
     reveal: Option<usize>,
+    keyed: Option<Keyed>,
+    measure_all: bool,
+    page: bool,
+}
+
+/// What a [`VirtualList::keyed`] list knows of its rows: each row's key, and
+/// how to draw a row that left from its key.
+struct Keyed {
+    keys: Rc<[u64]>,
+    duration: std::time::Duration,
+    leaving: LeavingRow,
+    /// Whether a change keeps the reader's place ([`VirtualList::keyed_live`]).
+    live: bool,
+}
+
+type LeavingRow = Box<dyn FnMut(u64, &mut Window, &mut App) -> Option<AnyElement>>;
+
+/// What the rows that left a [`VirtualList::keyed`] list were last drawn
+/// from, by key, for drawing them again as they fold away: kept by the
+/// list's owner, which hands it each frame's rows.
+pub(crate) struct LeftRows<T> {
+    drawn: std::collections::HashMap<u64, T>,
+    left: std::collections::HashMap<u64, (T, Instant)>,
+    duration: std::time::Duration,
+}
+
+impl<T: Clone> LeftRows<T> {
+    /// Rows that fold away over `duration`, as the list's do.
+    pub(crate) fn over(duration: std::time::Duration) -> Self {
+        Self {
+            drawn: Default::default(),
+            left: Default::default(),
+            duration,
+        }
+    }
+
+    /// The list's rows this frame, by key: what one drawn last frame and no
+    /// longer here showed is kept for as long as it can take to fold away.
+    pub(crate) fn update(&mut self, rows: impl IntoIterator<Item = (u64, T)>, cx: &App) {
+        let now = cx.background_executor().now();
+        let drawn: std::collections::HashMap<u64, T> = rows.into_iter().collect();
+        for (key, value) in self.drawn.drain() {
+            if !drawn.contains_key(&key) {
+                self.left.insert(key, (value, now));
+            }
+        }
+        let keep = self.duration * 2;
+        self.left.retain(|key, (_, at)| {
+            !drawn.contains_key(key) && now.saturating_duration_since(*at) <= keep
+        });
+        self.drawn = drawn;
+    }
+
+    /// What row `key`, which left, was last drawn from.
+    pub(crate) fn get(&self, key: u64) -> Option<&T> {
+        self.left.get(&key).map(|(value, _)| value)
+    }
+}
+
+/// A row key for a [`VirtualList::keyed`] list from what names the row.
+pub(crate) fn row_key(name: impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher as _;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A keyed list's rows as last drawn, and their motion.
+struct RowsMotion {
+    keys: Option<Rc<[u64]>>,
+    rows: crate::motion::list_rows::ListRows<(), u64>,
+    flip: crate::motion::ListFlip,
 }
 
 impl VirtualList {
@@ -344,7 +499,67 @@ impl VirtualList {
             style: StyleRefinement::default(),
             scrollbar: false,
             reveal: None,
+            keyed: None,
+            measure_all: false,
+            page: false,
         }
+    }
+
+    /// Rows known by `keys`, one per row, which stay the same for as long as
+    /// a row means the same thing: when they change (a filter, a re-sort),
+    /// the rows that stayed glide to their new places, new ones fold in and
+    /// the ones that went fold away, drawn by `leaving` from their keys, all
+    /// over `duration`. Measured rows only.
+    pub(crate) fn keyed(
+        mut self,
+        keys: impl Into<Rc<[u64]>>,
+        duration: std::time::Duration,
+        leaving: impl FnMut(u64, &mut Window, &mut App) -> Option<AnyElement> + 'static,
+    ) -> Self {
+        self.keyed = Some(Keyed {
+            keys: keys.into(),
+            duration,
+            leaving: Box::new(leaving),
+            live: false,
+        });
+        self
+    }
+
+    /// [`Self::keyed`] for rows that change under the reader rather than at
+    /// the reader's request (agents that start and finish, not a filter
+    /// typed): a change keeps the reader's place in the list, and the
+    /// heights of the rows it did not touch, rather than starting the list
+    /// again from its top.
+    pub(crate) fn keyed_live(
+        mut self,
+        keys: impl Into<Rc<[u64]>>,
+        duration: std::time::Duration,
+        leaving: impl FnMut(u64, &mut Window, &mut App) -> Option<AnyElement> + 'static,
+    ) -> Self {
+        self = self.keyed(keys, duration, leaving);
+        if let Some(keyed) = &mut self.keyed {
+            keyed.live = true;
+        }
+        self
+    }
+
+    /// Lay every measured row out, once and again only when it changes,
+    /// rather than only the rows in view: the list's height and scroll
+    /// range are its rows' from the first frame, for a list laid out in a
+    /// layout that shares its height out by what each part holds (the
+    /// rail's cards) or that is as tall as what it holds (a sheet).
+    /// Measured rows only.
+    pub(crate) fn measure_all(mut self) -> Self {
+        self.measure_all = true;
+        self
+    }
+
+    /// A page-level list, which bounces at its edges as [`page_viewport`]
+    /// does rather than handing what it cannot use to a scroller around it.
+    /// Measured rows only.
+    pub(crate) fn page(mut self) -> Self {
+        self.page = true;
+        self
     }
 
     /// Scroll row `index` into view whenever it changes, as a keyboard
@@ -376,7 +591,7 @@ impl Styled for VirtualList {
 }
 
 impl RenderOnce for VirtualList {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let root_style = root_style_from(&self.style);
         let revealed = window.use_keyed_state((self.id.clone(), "revealed"), cx, |_, _| None);
         let mut last_revealed = *revealed.read(cx);
@@ -402,30 +617,99 @@ impl RenderOnce for VirtualList {
                 }
                 let base = scroll.0.borrow().base_handle.clone();
                 let (mask, scrollbar) = overlays(&self.id, &base, self.scrollbar);
-                (viewport.into_any_element(), mask, scrollbar)
+                (viewport.into_any_element(), Some(mask), scrollbar)
             }
             Rows::Measured(mut render) => {
                 let count = self.count;
                 // A list that shrinks to its rows sizes itself from the rows
                 // it measured; measuring a viewport past its last height lets
                 // a longer list always reach its cap.
+                let measure_all = self.measure_all;
                 let state = window
                     .use_keyed_state((self.id.clone(), "list"), cx, |window, _| {
-                        ListState::new(count, ListAlignment::Top, window.viewport_size().height)
+                        let state = ListState::new(
+                            count,
+                            ListAlignment::Top,
+                            window.viewport_size().height,
+                        );
+                        if measure_all {
+                            state.measure_all()
+                        } else {
+                            state
+                        }
                     })
                     .read(cx)
                     .clone();
+                let glide = window
+                    .use_keyed_state((self.id.clone(), "glide"), cx, |_, _| ListScroll::default())
+                    .read(cx)
+                    .clone();
+                // A keyed list notes where its rows were before it takes the
+                // new ones, and lays every row out afresh, a live one every
+                // row a change moved: an index may hold another row now,
+                // whatever the count did.
+                let motion = self.keyed.take().map(|keyed| {
+                    let duration = keyed.duration;
+                    let live = keyed.live;
+                    let motion = window
+                        .use_keyed_state((self.id.clone(), "rows"), cx, move |_, _| {
+                            Rc::new(std::cell::RefCell::new(RowsMotion {
+                                keys: None,
+                                rows: crate::motion::list_rows::ListRows::over(duration),
+                                flip: crate::motion::ListFlip::default(),
+                            }))
+                        })
+                        .read(cx)
+                        .clone();
+                    let mut rows = motion.borrow_mut();
+                    let new = keyed.keys.clone();
+                    // A list that had no rows (still loading) is in place
+                    // at once: there is nothing for its rows to glide from.
+                    if let Some(old) = rows.keys.clone()
+                        && old != new
+                        && !old.is_empty()
+                    {
+                        rows.flip
+                            .replace(&state, |index| old.get(index).copied(), &new, window);
+                        rows.rows.replace(
+                            &old,
+                            &new,
+                            |_, _| Some(()),
+                            |index| Some(old[index]),
+                            cx,
+                        );
+                        if live {
+                            splice_rows(&state, &old, &new);
+                        } else if state.item_count() == count {
+                            state.reset(count);
+                        }
+                    }
+                    rows.keys = Some(new.clone());
+                    rows.rows.settle_list(&state, &new, window, cx);
+                    drop(rows);
+                    (motion, new, keyed.leaving)
+                });
                 if state.item_count() != count {
+                    glide.cancel();
                     state.reset(count);
                     last_revealed = None;
                 }
                 if let Some(index) = reveal_next(self.reveal, self.count, last_revealed) {
+                    let here = state.logical_scroll_top();
                     reveal_row(&state, index);
+                    let to = state.logical_scroll_top();
+                    if to != here {
+                        state.scroll_to(here);
+                        glide.scroll_to(&state, ScrollTarget::Row(to), cx);
+                    }
                 }
+                glide.step(&state, window, cx);
                 // GPUI sizes a list that shrinks to its rows by measuring them
                 // at their widest, so a wrapping row would be measured as one
                 // line. Rows keep the width the list last laid out at, and a
-                // new width lays the list out again.
+                // new width lays the list out again. GPUI's `list` places its
+                // rows at its left edge, applying only its vertical padding,
+                // so each row carries the left padding itself.
                 let bounds = state.viewport_bounds();
                 let mut style = gpui::Style::default();
                 style.refine(&self.style);
@@ -433,21 +717,72 @@ impl RenderOnce for VirtualList {
                     .padding
                     .to_pixels(bounds.size.into(), window.rem_size());
                 let width = bounds.size.width;
-                let row_width = (width > px(0.)).then(|| width - padding.left - padding.right);
-                width_probe = Some(width_probe_for(state.clone(), width));
+                let row_width = (width > px(0.)).then(|| width - padding.right);
+                let mut motion = motion;
                 let render = move |index, window: &mut Window, cx: &mut App| {
                     let row = render(index, window, cx);
-                    match row_width {
-                        Some(width) => div().w(width).child(row).into_any_element(),
+                    let row = match &mut motion {
+                        Some((motion, keys, leaving)) => match keys.get(index).copied() {
+                            Some(key) => {
+                                let around = motion.borrow().rows.around(key, cx);
+                                let mut left: std::collections::HashMap<u64, AnyElement> = around
+                                    .above
+                                    .iter()
+                                    .chain(&around.below)
+                                    .filter_map(|(key, _, _)| {
+                                        leaving(*key, window, cx).map(|row| (*key, row))
+                                    })
+                                    .collect();
+                                let row = around.draw(
+                                    "virtual-row",
+                                    key,
+                                    crate::motion::list_rows::Glide::Rest,
+                                    row,
+                                    |key, _| {
+                                        left.remove(key)
+                                            .unwrap_or_else(|| gpui::Empty.into_any_element())
+                                    },
+                                    window,
+                                );
+                                motion.borrow().flip.row(index, ("virtual-row", key), row)
+                            }
+                            None => row,
+                        },
                         None => row,
-                    }
+                    };
+                    div()
+                        .pl(padding.left)
+                        .when_some(row_width, |cell, width| cell.w(width))
+                        .child(row)
+                        .into_any_element()
                 };
+                // GPUI's `list` sizing itself to its rows lays out the rows
+                // in view on every layout, twice a frame, measured or not; a
+                // list that has measured them all takes their height
+                // instead, which `ListState` does not report but places its
+                // last row by.
+                let rows = self.measure_all.then(|| rows_height(&state));
+                width_probe = Some(width_probe_for(state.clone(), width, rows));
+                let rows = rows.flatten();
                 let viewport = list(state.clone(), render)
-                    .with_sizing_behavior(ListSizingBehavior::Infer)
+                    .with_sizing_behavior(if rows.is_some() {
+                        ListSizingBehavior::Auto
+                    } else {
+                        ListSizingBehavior::Infer
+                    })
                     .min_h_0()
-                    .refine_style(&self.style);
+                    .refine_style(&self.style)
+                    .when_some(rows, |list, rows| {
+                        list.h(rows + padding.top + padding.bottom)
+                    });
                 let (mask, scrollbar) = overlays(&self.id, &state, self.scrollbar);
-                (viewport.into_any_element(), mask, scrollbar)
+                if self.page {
+                    let viewport = page_viewport((self.id.clone(), "bounce"), &state, viewport)
+                        .into_any_element();
+                    (viewport, None, scrollbar)
+                } else {
+                    (viewport.into_any_element(), Some(mask), scrollbar)
+                }
             }
         };
         let reveal = self.reveal.or(last_revealed);
@@ -460,8 +795,47 @@ impl RenderOnce for VirtualList {
             .refine_style(&root_style)
             .child(viewport)
             .children(width_probe)
-            .child(mask)
+            .children(mask)
             .children(scrollbar)
+    }
+}
+
+/// How tall `list`'s rows are together, once it has measured the last of
+/// them where it last laid out.
+fn rows_height(list: &ListState) -> Option<Pixels> {
+    let last = list.bounds_for_item(list.item_count().checked_sub(1)?)?;
+    Some(last.bottom() - list.viewport_bounds().top() - list.scroll_px_offset_for_scrollbar().y)
+}
+
+/// Replaces the rows of `list` keyed `old` with the rows keyed `new`, keeping
+/// the reader's place and what was measured of every row that stayed: the
+/// rows that went are taken out and those that came put in where they stand,
+/// so the list keeps its scroll anchor and its height as gpui keeps them
+/// through a splice. Rows that stayed but changed places are measured again,
+/// each from the height its place had, which a reorder leaves summing to the
+/// list's height as it was.
+fn splice_rows(list: &ListState, old: &[u64], new: &[u64]) {
+    use std::collections::HashSet;
+    let stays: HashSet<u64> = new.iter().copied().collect();
+    let stood: HashSet<u64> = old.iter().copied().collect();
+    for index in (0..old.len()).rev() {
+        if !stays.contains(&old[index]) {
+            list.splice(index..index + 1, 0);
+        }
+    }
+    for (index, key) in new.iter().enumerate() {
+        if !stood.contains(key) {
+            list.splice(index..index, 1);
+        }
+    }
+    let kept = |keys: &[u64], of: &HashSet<u64>| -> Vec<u64> {
+        keys.iter()
+            .copied()
+            .filter(|key| of.contains(key))
+            .collect()
+    };
+    if kept(old, &stays) != kept(new, &stood) {
+        list.remeasure();
     }
 }
 
@@ -486,11 +860,16 @@ fn reveal_row(state: &ListState, index: usize) {
 }
 
 /// Renders the list's view again once the list lays out at a width other than
-/// `width`, the one its rows were given.
-fn width_probe_for(state: ListState, width: Pixels) -> AnyElement {
+/// `width`, the one its rows were given, or, for a list that measures all its
+/// rows, once it has measured them to a height other than `rows`, the one it
+/// was given: the list measures a row that came in or settled only as it is
+/// laid out, after a layout around it has read the list's height.
+fn width_probe_for(state: ListState, width: Pixels, rows: Option<Option<Pixels>>) -> AnyElement {
     canvas(
         move |_, window, _| {
-            if state.viewport_bounds().size.width != width {
+            if state.viewport_bounds().size.width != width
+                || rows.is_some_and(|rows| rows != rows_height(&state))
+            {
                 window.request_animation_frame();
             }
         },
@@ -704,6 +1083,75 @@ mod tests {
         }
     }
 
+    /// A measured list with a keyboard highlight, as a menu has.
+    struct Highlighted(Option<usize>);
+
+    impl Render for Highlighted {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(200.)).h(px(600.)).child(
+                div().debug_selector(|| "highlighted".into()).child(
+                    VirtualList::measured("highlighted-list", 40, |index, _, _| {
+                        div()
+                            .debug_selector(move || format!("highlighted-{index}"))
+                            .h(px(20.))
+                            .flex_none()
+                    })
+                    .reveal(self.0)
+                    .w_full()
+                    .max_h(px(100.)),
+                ),
+            )
+        }
+    }
+
+    /// How far the highlighted list is scrolled, from the rows it draws.
+    fn highlighted_scroll(cx: &mut VisualTestContext) -> f32 {
+        let top = cx.debug_bounds("highlighted").unwrap().top();
+        (0..40)
+            .find_map(|index| {
+                let row = cx.debug_bounds(format!("highlighted-{index}").leak())?;
+                (row.bottom() > top).then(|| index as f32 * 20. + f32::from(top - row.top()))
+            })
+            .unwrap()
+    }
+
+    /// A highlight moved past the end of the viewport scrolls the list
+    /// there over several frames rather than at once, and the list comes
+    /// to rest with the row's bottom at the viewport's.
+    #[gpui::test]
+    fn a_highlight_out_of_view_glides_the_list_to_it(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| Highlighted(None));
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(highlighted_scroll(cx), 0.);
+
+        view.update(cx, |view, cx| {
+            view.0 = Some(8);
+            cx.notify();
+        });
+        crate::test_frames::draw(cx);
+        let mut scrolls = vec![highlighted_scroll(cx)];
+        for _ in 0..30 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            crate::test_frames::draw(cx);
+            scrolls.push(highlighted_scroll(cx));
+        }
+        // Row 8 ends 180 down; the viewport is 100 tall.
+        assert!(
+            scrolls.windows(2).all(|pair| pair[1] >= pair[0]),
+            "{scrolls:?}"
+        );
+        assert!(
+            scrolls
+                .iter()
+                .filter(|scroll| **scroll > 0. && **scroll < 80.)
+                .count()
+                >= 4,
+            "jumped: {scrolls:?}"
+        );
+        assert_eq!(scrolls.last(), Some(&80.));
+    }
+
     struct NarrowRows;
 
     impl Render for NarrowRows {
@@ -832,6 +1280,206 @@ mod tests {
             top(&state),
             (0, px(0.)),
             "the next gesture reaches the list"
+        );
+    }
+
+    /// A filtered list: names shown, and the names a keystroke left.
+    struct Filtered(Vec<&'static str>);
+
+    fn name_key(name: &str) -> u64 {
+        name.bytes().fold(0, |key, byte| key * 31 + u64::from(byte))
+    }
+
+    impl Render for Filtered {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let names = self.0.clone();
+            let keys: Vec<u64> = names.iter().map(|name| name_key(name)).collect();
+            let row = |name: &'static str| {
+                div()
+                    .debug_selector(move || name.to_string())
+                    .h(px(20.))
+                    .flex_none()
+                    .into_any_element()
+            };
+            div().w(px(200.)).h(px(200.)).child(
+                VirtualList::measured(
+                    "filtered",
+                    names.len(),
+                    move |index, _, _| row(names[index]),
+                )
+                .keyed(keys, crate::motion::KEYSTROKE, move |key, _, _| {
+                    ["a", "b", "c"]
+                        .into_iter()
+                        .find(|name| name_key(name) == key)
+                        .map(row)
+                })
+                .w_full()
+                .max_h(px(200.)),
+            )
+        }
+    }
+
+    /// A keystroke that filters a row out folds it away while the row below
+    /// glides up into its place, and one that brings it back folds it in,
+    /// the row below making room as it does.
+    #[gpui::test]
+    fn a_filtered_list_folds_rows_out_and_in_and_glides_the_rest(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (view, cx) = cx.add_window_view(|_, _| Filtered(vec!["a", "b", "c"]));
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        crate::test_frames::draw_settled(cx);
+        let top = |name: &'static str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(name).map(|bounds| f32::from(bounds.top()))
+        };
+        let (b, c) = (top("b", cx).unwrap(), top("c", cx).unwrap());
+
+        view.update(cx, |view, cx| {
+            view.0 = vec!["a", "c"];
+            cx.notify();
+        });
+        crate::test_frames::draw(cx);
+        cx.executor().advance_clock(crate::motion::KEYSTROKE / 2);
+        crate::test_frames::draw(cx);
+        let gliding = top("c", cx).unwrap();
+        assert!(gliding > b && gliding < c, "c is on its way up: {gliding}");
+        assert!(top("b", cx).is_some(), "b is folding away");
+
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(top("c", cx), Some(b));
+        assert_eq!(top("b", cx), None);
+
+        view.update(cx, |view, cx| {
+            view.0 = vec!["a", "b", "c"];
+            cx.notify();
+        });
+        crate::test_frames::draw(cx);
+        cx.executor().advance_clock(crate::motion::KEYSTROKE / 2);
+        crate::test_frames::draw(cx);
+        let pushed = top("c", cx).unwrap();
+        assert!(pushed > b && pushed < c, "c makes room gradually: {pushed}");
+        crate::test_frames::draw_settled(cx);
+        assert_eq!((top("b", cx), top("c", cx)), (Some(b), Some(c)));
+    }
+
+    /// A keyed list of so many 20 px rows, in a 100 px viewport.
+    struct Arriving(usize);
+
+    impl Render for Arriving {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let row = |index: usize| {
+                div()
+                    .debug_selector(move || format!("arriving-{index}"))
+                    .h(px(20.))
+                    .flex_none()
+                    .into_any_element()
+            };
+            let keys: Vec<u64> = (0..self.0 as u64).collect();
+            div().w(px(200.)).h(px(600.)).child(
+                div().debug_selector(|| "arriving".into()).child(
+                    VirtualList::measured("arriving-list", self.0, move |index, _, _| row(index))
+                        .keyed(keys, crate::motion::KEYSTROKE, |_, _, _| None)
+                        .w_full()
+                        .max_h(px(100.)),
+                ),
+            )
+        }
+    }
+
+    /// Rows that arrive together fold in from nothing, the first ones
+    /// pushing the rest past the viewport's edge while they grow; once they
+    /// are in, scrolling to the end of the list shows its last row whole at
+    /// the viewport's bottom.
+    #[gpui::test]
+    fn a_virtual_list_scrolls_to_the_last_of_rows_that_arrived_together(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (view, cx) = cx.add_window_view(|_, _| Arriving(1));
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        crate::test_frames::draw_settled(cx);
+
+        view.update(cx, |view, cx| {
+            view.0 = 20;
+            cx.notify();
+        });
+        crate::test_frames::draw_settled(cx);
+        let viewport = cx.debug_bounds("arriving").unwrap();
+        cx.simulate_event(gpui::ScrollEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+            ..Default::default()
+        });
+        crate::test_frames::draw_settled(cx);
+
+        let last = cx
+            .debug_bounds("arriving-19")
+            .expect("the last row is drawn");
+        assert_eq!(last.size.height, px(20.));
+        assert_eq!(last.bottom(), viewport.bottom());
+    }
+
+    /// A live list of 20 px rows, keyed by what each shows, in a 100 px
+    /// viewport.
+    struct Live(Vec<u64>);
+
+    impl Render for Live {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let keys = self.0.clone();
+            let row = |key: u64| {
+                div()
+                    .debug_selector(move || format!("live-{key}"))
+                    .h(px(20.))
+                    .flex_none()
+                    .into_any_element()
+            };
+            div().w(px(200.)).h(px(600.)).child(
+                div().debug_selector(|| "live".into()).child(
+                    VirtualList::measured("live-list", keys.len(), move |index, _, _| {
+                        row(keys[index])
+                    })
+                    .keyed_live(self.0.clone(), crate::motion::KEYSTROKE, |_, _, _| None)
+                    .measure_all()
+                    .w_full()
+                    .max_h(px(100.)),
+                ),
+            )
+        }
+    }
+
+    /// Rows that come and go under a reader scrolled down a live list, above
+    /// and below the rows in view, leave those rows where they are: the
+    /// list does not start again from its top.
+    #[gpui::test]
+    fn a_live_list_keeps_the_readers_place_as_its_rows_change(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (view, cx) = cx.add_window_view(|_, _| Live((0..40).collect()));
+        crate::test_frames::draw_settled(cx);
+        let viewport = cx.debug_bounds("live").unwrap();
+        cx.simulate_event(gpui::ScrollEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-300.))),
+            ..Default::default()
+        });
+        crate::test_frames::draw_settled(cx);
+        let read = cx.debug_bounds("live-16").expect("the row read is in view");
+        assert!(
+            viewport.contains(&read.center()),
+            "{read:?} in {viewport:?}"
+        );
+
+        view.update(cx, |view, cx| {
+            // Two rows go and one comes above the rows in view, one comes
+            // below them.
+            view.0.retain(|key| ![3, 7].contains(key));
+            view.0.insert(0, 100);
+            view.0.insert(30, 101);
+            cx.notify();
+        });
+        crate::test_frames::draw_settled(cx);
+        let now = cx
+            .debug_bounds("live-16")
+            .expect("the row read is still drawn");
+        assert!(
+            viewport.contains(&now.center()),
+            "the row read stays in view: {now:?} in {viewport:?}"
         );
     }
 }

@@ -15,7 +15,7 @@ use agent::{
     SessionOptions, ThreadItem, TurnOptions, TurnStatus, list_models, permission_control,
 };
 use base64::Engine as _;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::host::{HostCx, HostEvent, HostTask};
 use crate::terminal::{
@@ -37,7 +37,7 @@ use tcode_core::session::{
     Author, EntryContent, MessageOrigin, ReviewComment, Timeline, append_review_comments_to_prompt,
 };
 use tcode_core::settings::{
-    ChildApprovalMode, EnvVar, OrchestrateSettings, ProfileSettingsPatch, ProviderProfile,
+    ChildApprovalMode, EnvVar, FavoriteModel, ProfileSettingsPatch, ProviderProfile,
     ProviderSettings, ResolvedProfile, Settings,
 };
 use tcode_core::ui::{
@@ -67,7 +67,7 @@ use tcode_services::git::{
 use tcode_services::import::{
     ExternalRoots, ImportOutcome, existing_external_ids, import_thread, scan_recent_dirs,
 };
-use tcode_services::provider_probe::{default_program, probe_provider, run_capture_env};
+use tcode_services::provider_probe::{probe_provider, run_capture_env};
 use tcode_services::session_search::SessionSearch;
 use tcode_services::settings::SettingsStore;
 use tcode_services::store::{CommandsCacheKey, SessionStore, now_millis, now_secs};
@@ -127,6 +127,8 @@ pub struct ScriptedProvider {
     pub launcher: ProviderLauncher,
     pub commands: smol::channel::Receiver<SessionCommand>,
     pub events: smol::channel::Sender<AgentEvent>,
+    /// Every launch's options, which carry the profile's environment and home.
+    pub launches: smol::channel::Receiver<SessionOptions>,
 }
 
 /// Build a provider launcher whose command and event channels are owned by the test.
@@ -134,7 +136,9 @@ pub struct ScriptedProvider {
 pub fn scripted_provider(provider: ProviderKind) -> ScriptedProvider {
     let (commands_tx, commands) = smol::channel::unbounded();
     let (events, events_rx) = smol::channel::unbounded();
-    let launcher = ProviderLauncher(Arc::new(move |requested, _options| {
+    let (launches_tx, launches) = smol::channel::unbounded();
+    let launcher = ProviderLauncher(Arc::new(move |requested, options| {
+        let _ = launches_tx.try_send(options);
         let commands = commands_tx.clone();
         let events = events_rx.clone();
         Box::pin(async move {
@@ -154,6 +158,7 @@ pub fn scripted_provider(provider: ProviderKind) -> ScriptedProvider {
         launcher,
         commands,
         events,
+        launches,
     }
 }
 
@@ -220,13 +225,6 @@ impl TimelineLoad {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct TerminalPreferences {
-    open: bool,
-    height: f32,
-    count: usize,
-}
-
 #[derive(Debug, Clone, Copy)]
 enum TerminalSpawnAction {
     Open,
@@ -244,24 +242,31 @@ mod acp;
 mod active_session;
 mod approvals;
 mod authorization;
+mod background;
 mod command_output;
 mod command_validation;
 mod control;
-mod diff_pass;
+mod dev_servers;
+mod disk_usage;
 mod events;
 mod git;
 mod history;
 mod original;
+mod storage_pass;
 use history::{Hydration, SessionLog};
+mod fork;
 mod lifecycle;
 mod options;
 mod orchestrate;
 mod plugins;
+mod preview;
 mod providers;
 mod pull_request_stacks;
 mod pull_request_watch;
 mod pull_requests;
 mod revisioned;
+mod rewind;
+pub use rewind::RewindAt;
 mod send;
 mod session_index;
 mod sessions;
@@ -275,20 +280,23 @@ mod terminals;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
+pub(crate) use test_support::{next_command, next_command_blocking};
+#[cfg(test)]
 mod tests;
 
 pub use active_session::{ActiveSession, QueuedMessage};
 use active_session::{
-    PendingRelay, PendingSteer, Runtime, SendRouting, attachment_paths, conversation_destination,
-    wire_text_with_placeholder,
+    PendingRelay, PendingSteer, ReportHandover, Runtime, SendRouting, attachment_paths,
+    conversation_destination, wire_text_with_placeholder,
 };
 use orchestrate::McpWiring;
+pub use providers::NewEndpointProfile;
 pub use providers::ProviderCatalog;
 use providers::{
-    McpServers, computer_use_attaches, effort_selection, normalized_selections,
+    McpServers, computer_use_attaches, effort_selection, named, normalized_selections,
     provider_secret_names, session_options,
 };
-pub use revisioned::Revisioned;
+pub use revisioned::{Revisioned, RevisionedMap};
 pub use session_index::SessionIndex;
 pub use sessions::ResidentSessions;
 pub(crate) use snapshots::DomainDiff;
@@ -354,6 +362,12 @@ pub struct AppState {
     store_writer: Option<std::thread::JoinHandle<()>>,
     /// Set once the store failed and every thread was stopped.
     store_failed: bool,
+    /// Why settings.json could not be read at start. While set, no settings
+    /// are written: the file may be a newer build's, and these settings are
+    /// defaults standing in for it.
+    settings_unreadable: Option<String>,
+    /// Whether the first settings write refused for that reason was reported.
+    settings_unreadable_reported: bool,
     pub sessions: SessionIndex,
     archived_revision: u64,
     activity_pending: VecDeque<String>,
@@ -387,23 +401,22 @@ pub struct AppState {
     /// per subscribed width.
     command_output_feeds: HashMap<Topic, command_output::CommandOutputFeed>,
     next_command_output_feed: u64,
-    preview_pending: HashMap<u64, async_channel::Sender<Result<preview_mcp::PreviewReply, String>>>,
-    next_preview_request: u64,
-    /// Provider-native rewind requested while a session is live or starting.
-    /// Kept here (rather than in persisted session metadata) because the
-    /// provider response is the only authority that can complete it.
-    pending_native_rewinds: HashMap<String, (String, RewindMode)>,
+    previews: preview::Previews,
+    dev_servers: dev_servers::DevServerReads,
+    /// The rewind or undo each thread's harness was asked for and has not
+    /// answered.
+    rewind_requests: HashMap<String, rewind::RewindRequest>,
+    /// Clients waiting for what a rewind would restore, by thread.
+    rewind_previews: HashMap<String, Vec<rewind::PreviewRequest>>,
     /// Provider-native subagent item ids mapped to their read-only mirror sessions.
     native_subagent_sessions: HashMap<(String, String), String>,
     /// Synthetic turn state survives eviction; false remembers a finished child.
     native_subagent_turns: HashMap<String, bool>,
-    /// Subagent items recorded inside mirrors, by (session, item id): the
-    /// spawns a nested mirror is created from once a grandchild item arrives.
-    nested_subagent_spawns: HashMap<(String, String), subagents::NestedSpawn>,
+    /// Child items rerouted into a mirror and not yet completed, by (session,
+    /// item id): their streamed deltas carry no parent and follow them there.
+    native_subagent_streams: HashMap<(String, String), String>,
     pub settings: Settings,
-    pub providers: ProviderCatalog,
-    terminal_preferences_path: PathBuf,
-    terminal_preferences: HashMap<String, TerminalPreferences>,
+    pub providers: Revisioned<ProviderCatalog>,
     next_terminal_spawn_id: u64,
     pending_terminal_spawns: HashMap<String, HashMap<u64, TerminalSpawnAction>>,
     next_start_generation: u64,
@@ -419,13 +432,13 @@ pub struct AppState {
     /// The ACP agent marketplace: the registry index (from the CDN, cached on
     /// disk with a one-hour TTL), whether a refresh is in flight, and the last
     /// failure to show when there is nothing cached to fall back on.
-    pub acp_registry: Option<Registry>,
+    pub acp_registry: Revisioned<Option<Registry>>,
     pub acp_registry_loading: bool,
     pub acp_registry_error: Option<String>,
     /// Registry ids currently downloading (their marketplace row shows a spinner).
     pub acp_installing: std::collections::HashSet<String>,
-    /// Native plugin catalogs by profile id, listed on demand.
-    plugin_catalogs: HashMap<String, plugins::PluginCatalog>,
+    /// Native plugin catalogs by profile and context, listed on demand.
+    plugin_catalogs: Revisioned<HashMap<plugins::CatalogKey, plugins::PluginCatalog>>,
     mcp: McpWiring,
     control: control::ControlState,
     callback_approval_requests: HashSet<(String, String)>,
@@ -454,7 +467,12 @@ pub struct AppState {
     /// Logs being read off the mailbox, by session; never one that is in
     /// `event_records`.
     log_hydrations: HashMap<String, Hydration>,
-    diff_pass: Option<diff_pass::DiffPassRun>,
+    storage_pass: Option<storage_pass::StoragePassRun>,
+    /// The move of an older build's threads, while one runs or waits for
+    /// disk space.
+    storage_migration: Option<tcode_protocol::StorageMigration>,
+    /// The last disk-usage measurement, and whether one runs.
+    disk_usage: tcode_protocol::DiskUsageState,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
     /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).
@@ -503,7 +521,13 @@ impl AppState {
             project.quick_chat = scratch_root.as_ref() == Some(&project.root);
         }
         let settings_store = SettingsStore::new(store.root().clone());
-        let settings = settings_store.load();
+        let (settings, settings_unreadable) = match settings_store.try_load() {
+            Ok(settings) => (settings, None),
+            Err(error) => {
+                log::error!("settings.json is unreadable; running on defaults: {error}");
+                (Settings::default(), Some(error.to_string()))
+            }
+        };
         let review_records = settings_store.load_review_records();
         let control_activity = settings_store.load_control_activity();
         let forge = tcode_services::forge::connect(settings_store.clone(), std::env::vars());
@@ -523,11 +547,10 @@ impl AppState {
             tcode_services::relaunch::take(store.root()),
             computer_use_mcp::permissions::check(),
         );
-        let terminal_preferences_path = store.root().join("terminal-ui.json");
-        let terminal_preferences = std::fs::read(&terminal_preferences_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        // Older builds kept each conversation's terminal drawer here and
+        // reopened it with fresh shells on load; a drawer now lives only with
+        // its running terminals.
+        let _ = std::fs::remove_file(store.root().join("terminal-ui.json"));
         // Seed the model picker from the persisted cache so it is instant and
         // works offline; a background refresh (see `refresh_model_catalogs`)
         // updates it once the providers respond.
@@ -577,6 +600,8 @@ impl AppState {
             store_write_failure_receiver: Some(store_write_failure_receiver),
             store_writer: None,
             store_failed: false,
+            settings_unreadable,
+            settings_unreadable_reported: false,
             sessions: sessions.into(),
             projects,
             archived_revision: 0,
@@ -602,16 +627,15 @@ impl AppState {
             terminal_projections: HashMap::new(),
             command_output_feeds: HashMap::new(),
             next_command_output_feed: 0,
-            preview_pending: HashMap::new(),
-            next_preview_request: 0,
-            pending_native_rewinds: HashMap::new(),
+            previews: Default::default(),
+            dev_servers: Default::default(),
+            rewind_requests: HashMap::new(),
+            rewind_previews: HashMap::new(),
             native_subagent_sessions: HashMap::new(),
             native_subagent_turns: HashMap::new(),
-            nested_subagent_spawns: HashMap::new(),
+            native_subagent_streams: HashMap::new(),
             settings,
-            providers: ProviderCatalog::new(model_catalogs, provider_secret_names),
-            terminal_preferences_path,
-            terminal_preferences,
+            providers: ProviderCatalog::new(model_catalogs, provider_secret_names).into(),
             next_terminal_spawn_id: 0,
             pending_terminal_spawns: HashMap::new(),
             next_start_generation: 0,
@@ -620,11 +644,11 @@ impl AppState {
             ai_title_generation_enabled,
             title_generating: Default::default(),
             provider_launcher: ProviderLauncher::default(),
-            acp_registry: None,
+            acp_registry: None.into(),
             acp_registry_loading: false,
             acp_registry_error: None,
             acp_installing: std::collections::HashSet::new(),
-            plugin_catalogs: HashMap::new(),
+            plugin_catalogs: HashMap::new().into(),
             mcp: McpWiring::default(),
             control: control::ControlState::new(review_records, control_activity),
             callback_approval_requests: HashSet::new(),
@@ -638,7 +662,9 @@ impl AppState {
             subscriptions: HashSet::new(),
             event_records: HashMap::new(),
             log_hydrations: HashMap::new(),
-            diff_pass: None,
+            storage_pass: None,
+            storage_migration: None,
+            disk_usage: Default::default(),
             review_comment_drafts: HashMap::new(),
             pending_relaunch,
             external_imports: HashMap::new(),
@@ -657,7 +683,6 @@ impl AppState {
             let writer = StoreWriter::new(
                 self.store.clone(),
                 self.settings_store.clone(),
-                self.terminal_preferences_path.clone(),
                 self.store_write_failures.clone(),
             );
             // Its own thread: every commit blocks on the database's fsync.
@@ -733,6 +758,13 @@ impl AppState {
     }
 
     fn enqueue_settings(&mut self, settings: &Settings, cx: &mut HostCx) {
+        if let Some(error) = &self.settings_unreadable {
+            if !std::mem::replace(&mut self.settings_unreadable_reported, true) {
+                let error = error.clone();
+                self.report_error(RuntimeError::SettingsUnreadable { error }, cx);
+            }
+            return;
+        }
         let mut settings = settings.clone();
         settings.source_control.status.clear();
         match serde_json::to_vec_pretty(&settings) {

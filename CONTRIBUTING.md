@@ -17,10 +17,11 @@ is derived from it. **Process** is how to build, check and submit work.
    tools, prompts, transcripts — is visible to the user. Capabilities a harness
    does not have (for example rewind outside Claude Code) are not synthesized.
 
-2. **Host and client.** One Tcode host owns all state: providers, threads,
+2. **Host and client.** A Tcode host owns all of its state: providers, threads,
    terminals, projects. Every client — the desktop window, a phone, a tablet, a
-   browser tab — is a screen for that host and speaks the same protocol whether
-   it runs on the same machine or across a network. Layers depend strictly
+   browser tab — is a screen for one or more hosts and speaks the same protocol
+   to each, whether it runs on the same machine or across a network; it shows
+   their state side by side and never merges it. Layers depend strictly
    downward: `app → ui/runtime/services`, `ui → runtime/core`,
    `runtime → services/core` and lower adapters, `services → core`.
 
@@ -54,14 +55,21 @@ is derived from it. **Process** is how to build, check and submit work.
 
 6. **gpui-base is the infrastructure; no house UI principles.** Tcode follows
    the recommendations and defaults of gpui-base and gpui-kit, and keeps no
-   separate design contract in sync with the code. Everything gpui-base
+   separate design contract in sync with the code: no house-wide UI rules of
+   its own, such as a single duration for every transition or classes of
+   change that must stay instant. Everything gpui-base
    provides on top of GPUI — selection, scrolling, positioning, dismissal,
    focus, theme tokens, motion, virtual lists, form controls — is used as it
    is, defaults included, before anything of the kind is written in Tcode.
    Tcode's own components are styled compositions of those primitives; they
-   never re-derive a primitive's rules locally. A primitive is reimplemented,
-   or a default overridden, only where gpui-base demonstrably cannot meet the
-   need; the site names that gap, and it is removed once gpui-base closes it.
+   never re-derive a primitive's rules locally. Where gpui-base demonstrably
+   cannot meet the need, Tcode builds what is missing — a primitive
+   reimplemented, a default overridden, or an element gpui-base does not have
+   — and the site names that gap; it is removed once gpui-base closes it.
+   This principle decides how something is built, never whether it is built:
+   what the interface does is the maintainer's call, and a primitive
+   gpui-base lacks is never a reason to leave an effect out, make it instant,
+   or settle for less.
 
 7. **Code and tests are the only source of truth.** This section is the only
    maintainer-authored text; comments, issues and other documents are derived
@@ -69,7 +77,11 @@ is derived from it. **Process** is how to build, check and submit work.
    comment is kept only when it states a constraint the code cannot express or
    the reason an obvious alternative was rejected; narrated steps, history and
    "mirrors X" notes are deleted when touched. A constraint drafted by an AI is
-   not a requirement until it appears here. A test, whatever its form, is
+   not a requirement until it appears here. Rules and conventions written into
+   audits, hand-offs, briefs or agent instructions bind no one: they are
+   notes, never cited as requirements or used to send work back, and where
+   one would narrow what the maintainer asked for, the maintainer's request
+   wins. A test, whatever its form, is
    truth only for a contract real use needs, and only while it is the test
    that proves it by driving the code the way the running app does. The suite
    is larger than its contracts: a test met while working on its area is
@@ -141,14 +153,27 @@ Platform prerequisites:
 
 - **macOS** — Xcode command-line tools.
 - **Windows** — MSVC toolchain.
-- **Linux** — a Vulkan driver plus the usual GPUI build deps (`libxkbcommon-dev`,
-  `libwayland-dev`, `libxcb*`, `libssl-dev`, `libasound2-dev`, `libfontconfig-dev`)
-  and WebKitGTK for the embedded preview (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`).
-  The preview embeds only into an X11 window: on a Wayland session run
-  `WAYLAND_DISPLAY= cargo run` to get it through XWayland.
+- **Linux** — a Vulkan driver plus the usual GPUI build deps and WebKitGTK 4.1
+  with GTK 3 for the embedded preview. The Debian list is the one CI installs:
+
+  ```sh
+  # Debian / Ubuntu
+  sudo apt install build-essential clang cmake pkg-config libssl-dev libzstd-dev \
+    libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-dev \
+    libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev libvulkan-dev \
+    libwebkit2gtk-4.1-dev libgtk-3-dev
+  # Arch Linux (headers ship with the libraries)
+  sudo pacman -S --needed base-devel clang cmake pkgconf openssl zstd alsa-lib \
+    fontconfig wayland libxkbcommon libxkbcommon-x11 libx11 libxcb mesa \
+    vulkan-icd-loader vulkan-headers webkit2gtk-4.1 gtk3
+  ```
+
+  On a Wayland session the preview runs GTK on a nested compositor of its
+  own (experimental); `WAYLAND_DISPLAY= cargo run` embeds it into an X11
+  window through XWayland instead.
 
 Provider CLIs are resolved from `PATH` (`claude`, `codex`, `pi`, `opencode`,
-`cursor-agent`, `grok`) and can be overridden in **Settings → Providers**.
+`cursor-agent`, `grok`) and can be overridden in **Settings → Harnesses**.
 
 ### Before you open a pull request
 
@@ -179,8 +204,8 @@ Cargo's `package` alias or machete's `renamed` metadata so unused imports remain
 detectable. An `ignored` entry requires an explanation of the generated or
 implicit use it cannot detect.
 
-New user-facing strings must be added to **both** `locales/en.yml` and
-`locales/zh-CN.yml` — a parity test enforces it.
+New user-facing strings must be added to **every** locale file — `locales/en.yml`,
+`locales/zh-CN.yml` and `locales/ja.yml` — a parity test enforces it.
 
 If you changed something visual, launch the surface and look at it in both
 themes and at a wide and a narrow width; compile and unit checks alone do not
@@ -321,7 +346,8 @@ crates/agent             provider clients (no GPUI) — claude.rs, codex.rs, pi.
 crates/term              terminal implementation (PTY, host-side emulator)
 crates/mcp-host          shared authenticated loopback host for in-process MCP servers
 crates/preview-mcp       MCP server exposing the preview browser to the agent
-crates/orchestrate-mcp   MCP server for orchestration tools
+crates/control-mcp       MCP server through which a thread observes and operates Tcode,
+                         subagents included
 crates/computer-use-mcp  MCP server for desktop automation (macOS, Windows)
 ```
 

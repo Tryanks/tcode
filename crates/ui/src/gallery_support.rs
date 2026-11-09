@@ -8,8 +8,7 @@ use tcode_core::notice::OrchestrateCallback;
 use tcode_core::session::{SteeringStatus, TimelineEntry};
 
 use crate::chat::components::{
-    activity, assistant, bubble, changed_files, disclosure, dividers, error_card, indicator,
-    subagent, work_log,
+    assistant, bubble, changed_files, disclosure, dividers, error_card, indicator, plan, work_log,
 };
 use crate::markdown::MarkdownState;
 
@@ -17,12 +16,20 @@ fn click() -> changed_files::ClickHandler {
     Box::new(|_, _, _| {})
 }
 
+/// The gallery's one list hover, which its rows' hover fills follow.
+fn hover() -> crate::motion::ListHover {
+    thread_local! {
+        static HOVER: crate::motion::ListHover = crate::motion::ListHover::new(crate::material::HOVER);
+    }
+    HOVER.with(Clone::clone)
+}
+
 pub fn section_label(label: &str) -> Div {
     crate::material::tracked_uppercase(label)
 }
 
-pub fn working_indicator(id: &str, started_at: u64, cx: &App) -> AnyElement {
-    indicator::working_indicator(id.to_string().into(), Some(started_at), cx)
+pub fn working_indicator(id: &str, started_at: u64, window: &mut Window, cx: &App) -> AnyElement {
+    indicator::working_indicator(id.to_string().into(), Some(started_at), window, cx)
 }
 
 pub fn user_bubble(
@@ -35,7 +42,9 @@ pub fn user_bubble(
 ) -> AnyElement {
     bubble::user_bubble(
         bubble::BubbleData {
+            image_host: crate::store::ImageHost::NONE,
             entry_id: id,
+            taken: None,
             visible: text,
             cwd,
             attachments: &[],
@@ -46,6 +55,8 @@ pub fn user_bubble(
             markdown: None,
             rewind: None,
             rewind_menu: None,
+            hover: crate::motion::ListHover::new(crate::material::HOVER),
+            motion: Default::default(),
         },
         bubble::BubbleHandlers {
             copy: click(),
@@ -57,7 +68,7 @@ pub fn user_bubble(
 }
 
 pub fn activity(entry: &TimelineEntry, expanded: bool, cx: &App) -> AnyElement {
-    activity::activity_row(entry, false, false, expanded, None, None, |_, _, _| {}, cx)
+    crate::chat::tools::preview_window(entry, expanded, hover(), cx)
 }
 
 pub fn work_log(
@@ -79,14 +90,12 @@ pub fn work_log(
             expanded: false,
             running: false,
             rows: Vec::new(),
+            hover: hover(),
+            motion: Default::default(),
         },
         |_, _, _| {},
         cx,
     )
-}
-
-pub fn subagent(entry: &TimelineEntry, cx: &App) -> AnyElement {
-    subagent::subagent_row(entry, None, cx)
 }
 
 pub fn changed_files(index: usize, cwd: &Path, changes: &[FileChange], cx: &App) -> AnyElement {
@@ -101,6 +110,7 @@ pub fn changed_files(index: usize, cwd: &Path, changes: &[FileChange], cx: &App)
             toggle_more: click(),
             open_files: changes.iter().map(|_| click()).collect(),
         },
+        &Default::default(),
         cx,
     )
 }
@@ -114,15 +124,63 @@ pub fn assistant(
 ) -> AnyElement {
     assistant::assistant(
         assistant::AssistantData {
+            image_host: crate::store::ImageHost::NONE,
             id,
             text: "",
+            copy_text: std::sync::Arc::from(""),
             summarized,
             cwd,
             markdown: Some(markdown),
             compact: false,
             pinned: true,
-            show_actions: true,
+            actions: assistant::MessageActions::Below,
+            fork: None,
             copied: false,
+            hover: crate::motion::ListHover::new(crate::material::HOVER),
+            motion: Default::default(),
+        },
+        |_, _, _| {},
+        cx,
+    )
+}
+
+/// A proposed plan, with Claude Code's choices when `deciding`.
+pub fn plan(
+    id: &str,
+    markdown: Entity<MarkdownState>,
+    deciding: bool,
+    cwd: &Path,
+    cx: &App,
+) -> AnyElement {
+    let options = [
+        ("allow", "Approve", agent::ApprovalOptionKind::AllowOnce),
+        (
+            "deny",
+            "Keep planning",
+            agent::ApprovalOptionKind::RejectOnce,
+        ),
+    ]
+    .map(|(id, label, kind)| agent::ApprovalOption {
+        id: id.into(),
+        label: label.into(),
+        kind,
+    });
+    plan::plan_block(
+        plan::PlanData {
+            image_host: crate::store::ImageHost::NONE,
+            id,
+            text: "",
+            copy_text: std::sync::Arc::from(""),
+            cwd,
+            markdown: Some(markdown),
+            compact: false,
+            copied: false,
+            decision: deciding.then(|| plan::PlanDecision {
+                options: &options,
+                enabled: true,
+                on_choose: std::rc::Rc::new(|_, _, _| {}),
+            }),
+            motion: Default::default(),
         },
         |_, _, _| {},
         cx,
@@ -130,7 +188,15 @@ pub fn assistant(
 }
 
 pub fn error_card(id: &str, message: &str, cx: &App) -> AnyElement {
-    error_card::error_card(id, message, false, None, |_, _, _| {}, cx)
+    error_card::error_card(
+        id,
+        message,
+        false,
+        None,
+        |_, _, _| {},
+        &Default::default(),
+        cx,
+    )
 }
 
 pub fn relay_divider(id: &str, cx: &App) -> AnyElement {
@@ -151,5 +217,15 @@ pub fn callback(id: &str, callback: &OrchestrateCallback, expanded: bool, cx: &A
     let event = disclosure::callback_event_label(callback)
         .into_owned()
         .into();
-    disclosure::callback_row(id, event, callback, expanded, |_, _, _| {}, None, cx)
+    disclosure::callback_row(
+        id,
+        event,
+        callback,
+        expanded,
+        |_, _, _| {},
+        None,
+        hover(),
+        &Default::default(),
+        cx,
+    )
 }

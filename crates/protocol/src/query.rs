@@ -3,6 +3,46 @@ use std::path::PathBuf;
 use agent::FileChange;
 use serde::{Deserialize, Serialize};
 
+/// Which `tcode_control` writes a [`Query::ControlActivity`] asks for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlActivityFilter {
+    /// A thread that made the write or was its target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// The write's `ControlAction::action`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+}
+
+impl ControlActivityFilter {
+    pub fn matches(&self, entry: &crate::ControlActivityEntry) -> bool {
+        self.thread_id.as_ref().is_none_or(|thread| {
+            entry.target_thread_id == *thread || entry.action.actor_thread_id == *thread
+        }) && self
+            .action
+            .as_ref()
+            .is_none_or(|action| entry.action.action == *action)
+    }
+}
+
+/// A thread the activity log names, under the title it last had there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlActivityThread {
+    pub id: String,
+    pub title: String,
+}
+
+/// The newest writes a filter matches, and what the whole log offers to
+/// filter by.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlActivityPage {
+    pub entries: Vec<crate::ControlActivityEntry>,
+    /// How many writes the filter matches, of which `entries` is the newest.
+    pub total: u32,
+    pub threads: Vec<ControlActivityThread>,
+    pub actions: Vec<String>,
+}
+
 /// Read-only or result-bearing host operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
@@ -37,6 +77,12 @@ pub enum Query {
     BrowseIconImages {
         directory: PathBuf,
     },
+    /// The folders directly inside a host directory, for picking a project
+    /// root. `path` is in the host's own path rules; a leading `~` stands for
+    /// the host's home, and an empty path is the home itself.
+    BrowseDirectories {
+        path: String,
+    },
     ReadIconImage {
         path: PathBuf,
     },
@@ -69,6 +115,28 @@ pub enum Query {
         ext: String,
     },
     RemoveUserFile {
+        path: PathBuf,
+    },
+    /// Reserve a host file for a file only the client can read, in the
+    /// scratch directory quick threads work in. The answer is the path the
+    /// message carries.
+    BeginUpload {
+        session_id: String,
+        name: String,
+        size: u64,
+    },
+    /// The next bytes of a reserved upload; `offset` must equal what has
+    /// arrived so far.
+    WriteUpload {
+        session_id: String,
+        path: PathBuf,
+        offset: u64,
+        #[serde(with = "crate::wire::base64_bytes")]
+        bytes: Vec<u8>,
+    },
+    /// Drop a reserved upload, finished or not.
+    DiscardUpload {
+        session_id: String,
         path: PathBuf,
     },
     /// Render a stored thread into a transferable artifact. Rendering belongs to
@@ -119,6 +187,12 @@ pub enum Query {
     /// The latest `tcode_control` writes across every thread, newest first.
     ControlActivity {
         limit: u32,
+        #[serde(default)]
+        filter: ControlActivityFilter,
+    },
+    /// The MCP servers a profile's harness is configured with in its own files.
+    NativeMcpServers {
+        profile_id: String,
     },
     /// Review records stored by `record_review`, newest first.
     ReviewRecords {
@@ -139,6 +213,16 @@ pub const STORED_OUTPUT_COLS: std::ops::RangeInclusive<u16> = 20..=400;
 /// Screen rows the host emulates command output into. Trailing blank rows are
 /// trimmed, so a shorter output returns a shorter frame.
 pub const STORED_OUTPUT_ROWS: u16 = 16;
+
+/// How much of a finished command's output its frame holds: all of it, up to
+/// its last `STORED_OUTPUT_BYTES` and the `STORED_OUTPUT_HISTORY` rows of
+/// scrollback they make; what comes before, the frame counts in
+/// `lines_evicted`. A frame goes as one transport line, whose peers read
+/// 16 MiB at most, and each character is a JSON cell of about 13 bytes: this
+/// much dense output makes a frame of about 10 MiB (measured by the host's
+/// `a_frame_at_the_ceiling_fits_one_transport_line`).
+pub const STORED_OUTPUT_BYTES: usize = 768 * 1024;
+pub const STORED_OUTPUT_HISTORY: usize = 20_000;
 
 /// Largest export the host will put on one response frame. The transport writes
 /// a single WebSocket text frame per NDJSON line and peers read with
@@ -167,12 +251,16 @@ pub enum QueryResponse {
         parent: Option<PathBuf>,
         entries: Vec<IconImageEntry>,
     },
+    Directories(DirectoryListing),
     ExternalHistory(Vec<RecentDir>),
     CommitMessage(String),
     GitDiff(GitDiffResult),
     FileBytes(#[serde(with = "crate::wire::base64_bytes")] Vec<u8>),
     SavedAttachment(PathBuf),
     UserFileRemoved,
+    UploadBegun(PathBuf),
+    UploadWritten,
+    UploadDiscarded,
     /// A rendered thread export. `suggested_name` is already safe for a file
     /// name on any client OS; the client picks the destination.
     ThreadExport {
@@ -186,7 +274,8 @@ pub enum QueryResponse {
     /// `None` when no entry was recorded at or before the position.
     ThreadAnchorTurn(Option<usize>),
     ArchivedSessions(crate::ArchivedSessions),
-    ControlActivity(Vec<crate::ControlActivityEntry>),
+    ControlActivity(ControlActivityPage),
+    NativeMcpServers(Vec<agent::NativeMcpServer>),
     ReviewRecords(Vec<tcode_core::control::ReviewRecord>),
     PullRequest {
         response: Box<crate::PullRequestReadResponse>,
@@ -233,6 +322,20 @@ pub struct GitDiffResult {
     pub error: Option<String>,
     pub branches: Vec<String>,
     pub default_base: Option<String>,
+}
+
+/// The folders inside one host directory. Clients return paths unchanged:
+/// their path separator and drive semantics may differ from the host's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryListing {
+    /// The directory listed, absolute, with `~` expanded.
+    pub directory: PathBuf,
+    /// `None` at a filesystem root.
+    pub parent: Option<PathBuf>,
+    /// The host's home, which `~` stands for.
+    pub home: Option<PathBuf>,
+    /// Each folder's name, hidden ones included, sorted case-insensitively.
+    pub entries: Vec<String>,
 }
 
 /// A picker entry on the host. Clients return `path` unchanged: their path

@@ -75,16 +75,24 @@ impl BlockNode {
                 let Some(prepared) = old.prepared.get() else {
                     return;
                 };
+                // Several appends can arrive before a frame paints the block:
+                // carry the latest highlighting there is.
                 let cached = prepared
                     .highlights
                     .lock()
                     .ok()
-                    .and_then(|cache| cache.as_ref().map(|(_, runs)| runs.clone()))
-                    .or_else(|| prepared.previous_highlights.get().cloned());
-                if let Some(cached) = cached {
-                    // Multiple chunks can arrive before painting. Carry the last
-                    // available checkpoint without retaining evicted cache entries.
-                    let _ = new.prepared().previous_highlights.set(cached);
+                    .and_then(|cache| cache.as_ref().and_then(|(_, held)| held.get()))
+                    .or_else(|| {
+                        prepared
+                            .previous_highlights
+                            .lock()
+                            .ok()
+                            .and_then(|previous| previous.clone())
+                    });
+                if let Some(cached) = cached
+                    && let Ok(mut previous) = new.prepared().previous_highlights.lock()
+                {
+                    *previous = Some(cached);
                 }
             }
             (Self::Root { children: new }, Self::Root { children: old })
@@ -137,6 +145,34 @@ impl BlockNode {
     /// (a laid-out display formula is one line).
     pub(crate) fn for_each_segment(&self, f: &mut SegmentVisitor<'_>) {
         self.walk_segments(&mut Vec::new(), f);
+    }
+
+    /// Every code block of this block where it is root block `ix`, with its
+    /// render path (`root-3-1`).
+    pub(super) fn for_each_code_block_at(&self, ix: usize, f: &mut dyn FnMut(String, &CodeBlock)) {
+        fn walk(node: &BlockNode, path: &mut String, f: &mut dyn FnMut(String, &CodeBlock)) {
+            match node {
+                BlockNode::Root { children }
+                | BlockNode::Blockquote { children }
+                | BlockNode::List { children, .. }
+                | BlockNode::ListItem { children, .. } => {
+                    for (ix, child) in children.iter().enumerate() {
+                        let len = path.len();
+                        path.push_str(&format!("-{ix}"));
+                        walk(child, path, f);
+                        path.truncate(len);
+                    }
+                }
+                BlockNode::CodeBlock(code) => f(path.clone(), code),
+                _ => {}
+            }
+        }
+        walk(self, &mut format!("root-{ix}"), f);
+    }
+
+    /// [`Self::for_each_segment`] of this block where it is root block `ix`.
+    pub(super) fn for_each_segment_at(&self, ix: usize, f: &mut SegmentVisitor<'_>) {
+        self.walk_segments(&mut vec![ix as u32], f);
     }
 
     fn walk_segments(&self, path: &mut Vec<u32>, f: &mut SegmentVisitor<'_>) {
@@ -432,7 +468,13 @@ pub(crate) struct CodeBlock {
     pub(super) formula: super::math_layout::FormulaSelection,
     pub(crate) code: SharedString,
     pub(crate) lang: Option<SharedString>,
-    pub(super) line_states: Arc<Mutex<Vec<Arc<Mutex<InlineState>>>>>,
+    /// A fenced block's closing fence has arrived. A fence still streaming in
+    /// is open; so is one its source never closed, which runs to the end of
+    /// its container.
+    pub(crate) closed: bool,
+    /// The source stops inside the code's last line, which is still being
+    /// written; the code ends with a newline all the same.
+    pub(crate) open_line: bool,
     pub(super) prepared: Arc<OnceLock<PreparedCode>>,
 }
 
@@ -442,9 +484,30 @@ pub(super) type CodeHighlightRuns = crate::highlight::HighlightedSource;
 pub(super) struct PreparedCode {
     pub(super) text: SharedString,
     pub(super) lines: Vec<Range<usize>>,
-    pub(super) previous_highlights: OnceLock<Weak<CodeHighlightRuns>>,
-    pub(super) highlights:
-        Mutex<Option<(crate::highlight::HighlightTheme, Weak<CodeHighlightRuns>)>>,
+    /// The highlighting of the code this block was parsed again from as it
+    /// streamed in, which its own resumes from instead of starting over.
+    pub(super) previous_highlights: Mutex<Option<Arc<CodeHighlightRuns>>>,
+    pub(super) highlights: Mutex<Option<(crate::highlight::HighlightTheme, HeldHighlights)>>,
+}
+
+/// A code block's highlighting, as the block keeps it.
+#[derive(Debug)]
+pub(super) enum HeldHighlights {
+    /// In the shared cache, which bounds how long it lives.
+    Shared(Weak<CodeHighlightRuns>),
+    /// The block's own: resumed from the code it extends. Every version of a
+    /// block streaming in is one, and no other text shares any of them;
+    /// cached, they would push finished blocks' highlighting out.
+    Own(Arc<CodeHighlightRuns>),
+}
+
+impl HeldHighlights {
+    pub(super) fn get(&self) -> Option<Arc<CodeHighlightRuns>> {
+        match self {
+            Self::Shared(runs) => runs.upgrade(),
+            Self::Own(runs) => Some(runs.clone()),
+        }
+    }
 }
 
 impl PreparedCode {
@@ -455,7 +518,10 @@ impl PreparedCode {
 
 impl PartialEq for CodeBlock {
     fn eq(&self, other: &Self) -> bool {
-        self.code == other.code && self.lang == other.lang
+        self.code == other.code
+            && self.lang == other.lang
+            && self.closed == other.closed
+            && self.open_line == other.open_line
     }
 }
 
@@ -482,33 +548,9 @@ impl CodeBlock {
                 text,
                 lines,
                 highlights: Mutex::new(None),
-                previous_highlights: OnceLock::new(),
+                previous_highlights: Mutex::new(None),
             }
         })
-    }
-
-    pub(super) fn states_for_lines(
-        &self,
-        code: &PreparedCode,
-        span: Range<usize>,
-    ) -> Vec<Arc<Mutex<InlineState>>> {
-        let Ok(mut states) = self.line_states.lock() else {
-            return span
-                .map(|ix| InlineState::shared(code.line(ix).to_string().into()))
-                .collect();
-        };
-        if states.len() != code.lines.len() {
-            *states = (0..code.lines.len())
-                .map(|ix| InlineState::shared(code.line(ix).to_string().into()))
-                .collect();
-        } else {
-            for (state, ix) in states[span.clone()].iter().zip(span.clone()) {
-                if let Ok(mut state) = state.lock() {
-                    state.set_text(code.line(ix).to_string().into());
-                }
-            }
-        }
-        states[span].to_vec()
     }
 }
 

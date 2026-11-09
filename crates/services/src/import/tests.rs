@@ -336,3 +336,143 @@ fn import_is_idempotent_and_replays_into_timeline() {
         assert_eq!(store.load_index().unwrap().len(), index + 2);
     }
 }
+
+/// Rollout items recorded by Codex (metadata trimmed; the image swapped for a
+/// 1x1 JPEG, the image prompt and bytes replaced, tool descriptions dropped)
+/// import in the live adapter's shapes: an MCP call keeps its server, its
+/// output is text with the image moved out, a dropped or unanswered call is
+/// interrupted, web searches are searches, and tool search and image
+/// generation calls are kept.
+#[test]
+fn codex_converter_keeps_recorded_tool_shapes() {
+    let temp = TestDir::new();
+    let file = temp.path().join("rollout.jsonl");
+    let image = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==";
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    let item = |ts: &str, payload: serde_json::Value| json!({"timestamp": ts, "type": "response_item", "payload": payload});
+    write_lines(
+        &file,
+        &[
+            json!({"timestamp":"2026-06-10T03:28:00.000Z","type":"session_meta","payload":{"id":"codex-2","cwd":"/synthetic","originator":"codex_exec"}}),
+            item(
+                "2026-06-10T03:28:01.000Z",
+                json!({"type":"function_call","namespace":"mcp__cua_repl","name":"js","arguments":"{\"code\":\"await interlock.getAXStateAndScreenshot();\",\"title\":\"核对引脚表当前内容\"}","call_id":"call_eCkCDGIgrTwMGt9JIPQK7WVO"}),
+            ),
+            item(
+                "2026-06-10T03:28:02.000Z",
+                json!({"type":"function_call_output","call_id":"call_eCkCDGIgrTwMGt9JIPQK7WVO","output":[
+                    {"type":"input_text","text":"Wall time: 0.4182 seconds\nOutput:"},
+                    {"type":"input_text","text":"+41 window Secondary Actions: Raise"},
+                    {"type":"input_image","image_url":format!("data:image/jpeg;base64,{image}"),"detail":"original"}
+                ]}),
+            ),
+            item(
+                "2026-06-10T03:28:03.000Z",
+                json!({"type":"function_call","status":"completed","id":"fc_0ce6920dbcb19676016ae7294a7c348191a0f6cd1539d4a95f","name":"sleep","namespace":"clock","arguments":"{\"duration_ms\":60000}","call_id":"call_2c5abe77211840b5ba8c66b96cde08f1"}),
+            ),
+            item(
+                "2026-06-10T03:28:04.000Z",
+                json!({"type":"function_call_output","id":"fco_01a196f9-4be5-76c3-9b5f-a5370acdb872","call_id":"call_2c5abe77211840b5ba8c66b96cde08f1","output":"aborted before dispatch"}),
+            ),
+            item(
+                "2026-06-10T03:28:52.891Z",
+                json!({"type":"web_search_call","status":"completed","action":{"type":"search","query":"robotgo UI Automation Windows accessibility github robotn robotgo","queries":["robotgo UI Automation Windows accessibility github robotn robotgo","github robotn robotgo window handle title control automation"]}}),
+            ),
+            item(
+                "2026-06-10T03:28:55.407Z",
+                json!({"type":"web_search_call","status":"completed","action":{"type":"open_page","url":"https://pkg.go.dev/github.com/go-vgo/robotgo"}}),
+            ),
+            item(
+                "2026-06-10T03:28:58.976Z",
+                json!({"type":"web_search_call","status":"completed","action":{"type":"find_in_page","url":"https://pkg.go.dev/github.com/go-vgo/robotgo","pattern":"func GetTitle"}}),
+            ),
+            item(
+                "2026-06-10T03:29:00.000Z",
+                json!({"type":"tool_search_call","call_id":"call_sjUtXwgCr2UDioxgS7pEu6IL","status":"completed","execution":"client","arguments":{"query":"node_repl js","limit":10}}),
+            ),
+            item(
+                "2026-06-10T03:29:01.000Z",
+                json!({"type":"tool_search_output","call_id":"call_sjUtXwgCr2UDioxgS7pEu6IL","status":"completed","execution":"client","tools":[{"type":"namespace","name":"mcp__node_repl","tools":[
+                    {"type":"function","name":"js_reset","strict":false,"defer_loading":true},
+                    {"type":"function","name":"js_add_node_module_dir","strict":false,"defer_loading":true},
+                    {"type":"function","name":"js","strict":false,"defer_loading":true}
+                ]}]}),
+            ),
+            item(
+                "2026-06-10T03:29:02.000Z",
+                json!({"type":"image_generation_call","id":"ig_093e33d59b19e538016a1fd0b660948191a503acc522dcc8fc","status":"generating","revised_prompt":"A blue square.","result":png}),
+            ),
+            item(
+                "2026-06-10T03:29:03.000Z",
+                json!({"type":"function_call","status":"completed","id":"fc_026708af2176e729016ae71fd523988191ada5740941c05bfe","name":"wait_agent","namespace":"collaboration","arguments":"{\"timeout_ms\":10000}","call_id":"call_34e6e8a81d544b80adafc13d186fb0f6"}),
+            ),
+        ],
+    );
+
+    let converted = codex::convert(&file, "codex:codex-2").unwrap().unwrap();
+    let contents = item_contents(&converted);
+    assert_eq!(
+        contents[0],
+        &ItemContent::ToolCall {
+            image_reads: vec![agent::Attachment {
+                media_type: "image/jpeg".into(),
+                data_base64: image.into(),
+                source_path: None,
+            }],
+            name: "cua_repl/js".into(),
+            input: json!({"code":"await interlock.getAXStateAndScreenshot();","title":"核对引脚表当前内容"}),
+            output: Some(
+                "Wall time: 0.4182 seconds\nOutput:\n+41 window Secondary Actions: Raise".into()
+            ),
+            status: ItemStatus::Completed,
+        }
+    );
+    assert!(matches!(contents[1], ItemContent::ToolCall {
+        name, output: Some(output), status: ItemStatus::Interrupted, ..
+    } if name == "sleep" && output == "aborted before dispatch"));
+    let queries: Vec<_> = contents[2..5]
+        .iter()
+        .map(|content| match content {
+            ItemContent::WebSearch { query } => query.as_str(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        queries,
+        [
+            "robotgo UI Automation Windows accessibility github robotn robotgo",
+            "https://pkg.go.dev/github.com/go-vgo/robotgo",
+            "'func GetTitle' in https://pkg.go.dev/github.com/go-vgo/robotgo",
+        ]
+    );
+    assert_eq!(
+        contents[5],
+        &ItemContent::ToolCall {
+            image_reads: Vec::new(),
+            name: "tool_search".into(),
+            input: json!({"query":"node_repl js","limit":10}),
+            output: Some(
+                "node_repl/js_reset\nnode_repl/js_add_node_module_dir\nnode_repl/js".into()
+            ),
+            status: ItemStatus::Completed,
+        }
+    );
+    assert_eq!(
+        contents[6],
+        &ItemContent::ToolCall {
+            image_reads: vec![agent::Attachment {
+                media_type: "image/png".into(),
+                data_base64: png.into(),
+                source_path: None,
+            }],
+            name: "image_generation".into(),
+            input: json!({"revised_prompt":"A blue square."}),
+            output: None,
+            status: ItemStatus::Completed,
+        }
+    );
+    assert!(matches!(contents[7], ItemContent::ToolCall {
+        name, output: None, status: ItemStatus::Interrupted, ..
+    } if name == "wait_agent"));
+    assert_eq!(contents.len(), 8);
+}

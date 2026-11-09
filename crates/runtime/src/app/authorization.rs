@@ -120,7 +120,12 @@ impl AppState {
                 | Topic::Settings
                 | Topic::Providers
                 | Topic::RuntimeEvents
-                | Topic::Preview
+                | Topic::Preview { .. }
+                | Topic::PreviewSession { .. }
+                | Topic::DevServers { .. }
+                | Topic::Hosting
+                | Topic::StorageMigration
+                | Topic::DiskUsage
                 | Topic::ExternalImport { .. } => Err(refusal("subscription")),
             },
             ClientPayload::Command(command) => match command {
@@ -244,11 +249,6 @@ impl AppState {
                     attachment_paths,
                     ..
                 }
-                | Command::OrchestrateTurn {
-                    session_id,
-                    attachment_paths,
-                    ..
-                }
                 | Command::Steer {
                     session_id,
                     attachment_paths,
@@ -269,6 +269,9 @@ impl AppState {
                 | Command::SetPullRequestWatchesPaused { session_id, .. }
                 | Command::RetryTurn { session_id, .. }
                 | Command::Interrupt { session_id }
+                | Command::StopBackgroundTask { session_id, .. }
+                | Command::MoveToBackground { session_id, .. }
+                | Command::ForceTerminate { session_id }
                 | Command::CompactContext { session_id }
                 | Command::SetGoal { session_id, .. }
                 | Command::ClearGoal { session_id }
@@ -294,6 +297,9 @@ impl AppState {
                 | Command::ReorderPinned { session_id, .. }
                 | Command::ReorderActive { session_id, .. }
                 | Command::RewindTurn { session_id, .. }
+                | Command::PreviewRewind { session_id, .. }
+                | Command::UndoRewind { session_id, .. }
+                | Command::OpenRewoundBranch { session_id, .. }
                 | Command::AddReviewComment { session_id, .. }
                 | Command::RemoveReviewComment { session_id, .. }
                 | Command::SetTerminalHeight { session_id, .. }
@@ -310,7 +316,7 @@ impl AppState {
                 | Command::MarkSessionRead { session_id, .. }
                 | Command::MarkSessionUnread { session_id }
                 | Command::WriteRelaunchMarker { session_id, .. } => session(session_id),
-                Command::ForkThread { id } => session(id),
+                Command::ForkThread { id, .. } => session(id),
                 // A space may move its threads only between its own projects.
                 Command::MoveSession {
                     session_id,
@@ -352,8 +358,12 @@ impl AppState {
                 | Command::ToggleFavoriteModel { .. }
                 | Command::ToggleProjectCollapsed { .. }
                 | Command::PreviewReply { .. }
+                | Command::ShowPreviewHere { .. }
+                | Command::ReportPreviewTabs { .. }
+                | Command::ReportPreviewInput { .. }
                 | Command::ReloadProvider
                 | Command::SetHostToken { .. }
+                | Command::VerifyHostToken { .. }
                 | Command::RefreshHostCredentials
                 | Command::SetProfileSecret { .. }
                 | Command::UpdateProfileSettings { .. }
@@ -367,6 +377,7 @@ impl AppState {
                 | Command::RefreshProviderStatus
                 | Command::RefreshProviderUsage
                 | Command::CheckProviderVersions
+                | Command::MeasureDiskUsage
                 | Command::UpdateProviders { .. }
                 | Command::RefreshAcpRegistry
                 | Command::InstallAcpAgent { .. }
@@ -394,6 +405,9 @@ impl AppState {
                 | Query::ThreadAnchorTurn { session_id, .. }
                 | Query::ReadItemImage { session_id, .. }
                 | Query::ReadItemImagePreview { session_id, .. }
+                | Query::BeginUpload { session_id, .. }
+                | Query::WriteUpload { session_id, .. }
+                | Query::DiscardUpload { session_id, .. }
                 | Query::PullRequest { session_id, .. } => session(session_id),
                 Query::ReadProjectIcon { project_id, .. } => self
                     .projects
@@ -422,8 +436,10 @@ impl AppState {
                 Query::Hosting { .. }
                 | Query::ComputerUsePermissions
                 | Query::ControlActivity { .. }
+                | Query::NativeMcpServers { .. }
                 | Query::ReviewRecords { .. }
-                | Query::ScanExternalHistory => Err(refusal("query")),
+                | Query::ScanExternalHistory
+                | Query::BrowseDirectories { .. } => Err(refusal("query")),
             },
         }
     }

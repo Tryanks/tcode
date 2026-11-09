@@ -1,0 +1,324 @@
+//! This device's own preferences. One owner above every host's store reads
+//! them from the client's [`ClientHost`] and writes each change through it;
+//! no store keeps a copy.
+
+use std::rc::Rc;
+
+use gpui::{App, AppContext as _, Entity, Global, Window};
+use tcode_client::host::{ClientHost, ClientPreferences, WorkspacePreference};
+use tcode_core::settings::{Settings, SidebarLayout, ThemeMode};
+
+use crate::store::HostKey;
+
+pub(crate) struct DevicePreferences {
+    client: Option<Rc<dyn ClientHost>>,
+    saved: ClientPreferences,
+}
+
+struct Installed(Entity<DevicePreferences>);
+
+impl Global for Installed {}
+
+impl DevicePreferences {
+    /// Make what `client` saved the preferences every view reads.
+    pub(crate) fn install(client: Rc<dyn ClientHost>, cx: &mut App) {
+        let saved = client.load_preferences();
+        Self::entity(cx).update(cx, |this, cx| {
+            this.client = Some(client);
+            this.saved = saved;
+            cx.notify();
+        });
+    }
+
+    /// The owner, holding nothing saved until a shell installs its client.
+    pub(crate) fn entity(cx: &mut App) -> Entity<Self> {
+        if let Some(installed) = cx.try_global::<Installed>() {
+            return installed.0.clone();
+        }
+        let entity = cx.new(|_| Self {
+            client: None,
+            saved: ClientPreferences::default(),
+        });
+        cx.set_global(Installed(entity.clone()));
+        entity
+    }
+
+    fn saved(cx: &App) -> Option<&ClientPreferences> {
+        Some(&cx.try_global::<Installed>()?.0.read(cx).saved)
+    }
+
+    fn update(cx: &mut App, change: impl FnOnce(&mut ClientPreferences)) {
+        Self::entity(cx).update(cx, |this, cx| {
+            // Read again rather than from `saved`: a space's store writes its
+            // member settings into the same preferences.
+            let mut preferences = match &this.client {
+                Some(client) => client.load_preferences(),
+                None => this.saved.clone(),
+            };
+            let loaded = preferences.clone();
+            change(&mut preferences);
+            if preferences != loaded
+                && let Some(client) = &this.client
+            {
+                client.save_preferences(&preferences);
+            }
+            if preferences != this.saved {
+                this.saved = preferences;
+                cx.notify();
+            }
+        });
+    }
+
+    /// A preference this device has never set takes `host`'s, once: the
+    /// host kept these four before they were the device's. Returns whether
+    /// any did.
+    pub(crate) fn adopt(host: &Settings, cx: &mut App) -> bool {
+        let unset = Self::saved(cx).is_none_or(|saved| {
+            saved.appearance.is_none()
+                || saved.language.is_none()
+                || saved.sidebar_collapsed.is_none()
+                || saved.sidebar_layout.is_none()
+        });
+        if unset {
+            Self::update(cx, |saved| {
+                saved
+                    .appearance
+                    .get_or_insert_with(|| theme_key(host.theme_mode).to_owned());
+                saved
+                    .language
+                    .get_or_insert_with(|| host.language.clone().unwrap_or("system".into()));
+                saved
+                    .sidebar_collapsed
+                    .get_or_insert(host.sidebar_collapsed);
+                saved
+                    .sidebar_layout
+                    .get_or_insert_with(|| layout_key(host.sidebar_layout).to_owned());
+            });
+        }
+        unset
+    }
+
+    /// The theme this device chose, `None` before it chose one.
+    pub(crate) fn appearance(cx: &App) -> Option<ThemeMode> {
+        match Self::saved(cx)?.appearance.as_deref()? {
+            "system" => Some(ThemeMode::System),
+            "light" => Some(ThemeMode::Light),
+            "dark" => Some(ThemeMode::Dark),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn theme(cx: &App) -> ThemeMode {
+        Self::appearance(cx).unwrap_or_default()
+    }
+
+    pub(crate) fn set_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
+        Self::update(cx, |saved| {
+            saved.appearance = Some(theme_key(mode).to_owned())
+        });
+        crate::settings_page::apply_theme(mode, window, cx);
+    }
+
+    /// The language this device asks for; `None` is the system's.
+    pub(crate) fn language(cx: &App) -> Option<String> {
+        Self::saved(cx).and_then(language).map(str::to_owned)
+    }
+
+    pub(crate) fn set_language(language: Option<&str>, window: &mut Window, cx: &mut App) {
+        Self::update(cx, |saved| {
+            saved.language = Some(language.unwrap_or("system").to_owned())
+        });
+        crate::settings::apply_locale(language);
+        window.refresh();
+    }
+
+    pub(crate) fn sidebar_collapsed(cx: &App) -> bool {
+        Self::saved(cx)
+            .and_then(|saved| saved.sidebar_collapsed)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn toggle_sidebar_collapsed(cx: &mut App) {
+        let collapsed = !Self::sidebar_collapsed(cx);
+        Self::update(cx, |saved| saved.sidebar_collapsed = Some(collapsed));
+    }
+
+    pub(crate) fn sidebar_layout(cx: &App) -> SidebarLayout {
+        match Self::saved(cx).and_then(|saved| saved.sidebar_layout.as_deref()) {
+            Some("grouped") => SidebarLayout::Grouped,
+            _ => SidebarLayout::Flat,
+        }
+    }
+
+    pub(crate) fn set_sidebar_layout(layout: SidebarLayout, cx: &mut App) {
+        Self::update(cx, |saved| {
+            saved.sidebar_layout = Some(layout_key(layout).to_owned())
+        });
+    }
+
+    /// The workspace as this device arranged it, `None` before it did.
+    pub(crate) fn workspace(cx: &App) -> Option<WorkspacePreference> {
+        Self::saved(cx)?.workspace.clone()
+    }
+
+    pub(crate) fn arrange_workspace(
+        cx: &mut App,
+        change: impl FnOnce(&mut Option<WorkspacePreference>),
+    ) {
+        Self::update(cx, |saved| change(&mut saved.workspace));
+    }
+
+    /// Whether this device folded `host`'s section away.
+    pub(crate) fn host_collapsed(host: &HostKey, cx: &App) -> bool {
+        Self::saved(cx)
+            .and_then(|saved| saved.workspace.as_ref())
+            .is_some_and(|workspace| {
+                workspace
+                    .hosts
+                    .iter()
+                    .any(|listed| listed.host_id == host.name() && listed.collapsed)
+            })
+    }
+
+    pub(crate) fn set_host_collapsed(host: &HostKey, collapsed: bool, cx: &mut App) {
+        Self::arrange_workspace(cx, |workspace| {
+            crate::workspace::set_collapsed(
+                workspace.get_or_insert_with(Default::default),
+                host,
+                collapsed,
+            )
+        });
+    }
+
+    /// The name this device shows the machines it connects to.
+    pub(crate) fn device_name(cx: &App) -> String {
+        let this = cx
+            .try_global::<Installed>()
+            .map(|installed| installed.0.read(cx));
+        this.and_then(|this| this.saved.device_name.clone())
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| Some(this?.client.as_ref()?.device_name()))
+            .unwrap_or_else(|| crate::tr!("app.name").into_owned())
+    }
+
+    pub(crate) fn device_name_overridden(cx: &App) -> bool {
+        Self::saved(cx).is_some_and(|saved| saved.device_name.is_some())
+    }
+
+    pub(crate) fn set_device_name(name: Option<String>, cx: &mut App) {
+        Self::update(cx, |saved| {
+            saved.device_name = name.filter(|name| !name.trim().is_empty())
+        });
+    }
+
+    /// The per-image ceiling, in bytes, for attachments this device sends
+    /// across the internet.
+    pub(crate) fn remote_attachment_limit_bytes(cx: &App) -> u64 {
+        Self::remote_attachment_limit_mib(cx)
+            .map_or(tcode_core::attachments::DEFAULT_REMOTE_BYTES, |mib| {
+                u64::from(mib) * 1024 * 1024
+            })
+    }
+
+    pub(crate) fn remote_attachment_limit_mib(cx: &App) -> Option<u32> {
+        Self::saved(cx)?.remote_attachment_limit_mib
+    }
+
+    pub(crate) fn set_remote_attachment_limit_mib(limit: Option<u32>, cx: &mut App) {
+        Self::update(cx, |saved| {
+            saved.remote_attachment_limit_mib = limit.filter(|limit| *limit > 0)
+        });
+    }
+
+    /// The width the user dragged a right panel to, in points.
+    pub(crate) fn right_panel_width(cx: &App) -> Option<u32> {
+        Self::saved(cx)?.right_panel_width
+    }
+
+    pub(crate) fn set_right_panel_width(width: u32, cx: &mut App) {
+        if Self::right_panel_width(cx) != Some(width) {
+            Self::update(cx, |saved| saved.right_panel_width = Some(width));
+        }
+    }
+
+    /// Whether this device folded the stack map's note about GitHub stacks away.
+    pub(crate) fn stack_note_collapsed(cx: &App) -> bool {
+        Self::saved(cx)
+            .and_then(|saved| saved.navigation.as_ref())
+            .and_then(|navigation| navigation["stack_note_collapsed"].as_bool())
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn set_stack_note_collapsed(collapsed: bool, cx: &mut App) {
+        Self::update(cx, |saved| {
+            saved
+                .navigation
+                .get_or_insert_with(|| serde_json::json!({}))["stack_note_collapsed"] =
+                serde_json::json!(collapsed);
+        });
+    }
+
+    /// The window's navigation as last saved; the shell owns its schema.
+    pub(crate) fn navigation(cx: &App) -> Option<serde_json::Value> {
+        Self::saved(cx)?.navigation.clone()
+    }
+
+    /// Save the window's navigation, keeping what others keep beside it.
+    pub(crate) fn save_navigation(snapshot: serde_json::Value, cx: &mut App) {
+        Self::update(cx, |saved| {
+            let mut navigation = snapshot;
+            for kept in ["member_settings", "stack_note_collapsed"] {
+                if let Some(value) = saved
+                    .navigation
+                    .as_ref()
+                    .and_then(|navigation| navigation.get(kept))
+                {
+                    navigation[kept] = value.clone();
+                }
+            }
+            saved.navigation = Some(navigation);
+        });
+    }
+
+    /// Restore this device's theme, language, name, attachment limit and
+    /// panel width to their defaults; its sidebar and workspace are kept.
+    pub(crate) fn restore_defaults(window: &mut Window, cx: &mut App) {
+        Self::update(cx, |saved| {
+            *saved = ClientPreferences {
+                appearance: Some(theme_key(ThemeMode::System).to_owned()),
+                language: Some("system".into()),
+                navigation: saved.navigation.take(),
+                sidebar_collapsed: saved.sidebar_collapsed,
+                sidebar_layout: saved.sidebar_layout.take(),
+                workspace: saved.workspace.take(),
+                ..ClientPreferences::default()
+            };
+        });
+        crate::settings::apply_locale(None);
+        crate::settings_page::apply_theme(ThemeMode::System, window, cx);
+        window.refresh();
+    }
+}
+
+/// The language `preferences` ask for; `None` is the system's.
+pub(crate) fn language(preferences: &ClientPreferences) -> Option<&str> {
+    preferences
+        .language
+        .as_deref()
+        .filter(|language| *language != "system")
+}
+
+fn theme_key(mode: ThemeMode) -> &'static str {
+    match mode {
+        ThemeMode::System => "system",
+        ThemeMode::Light => "light",
+        ThemeMode::Dark => "dark",
+    }
+}
+
+fn layout_key(layout: SidebarLayout) -> &'static str {
+    match layout {
+        SidebarLayout::Flat => "flat",
+        SidebarLayout::Grouped => "grouped",
+    }
+}

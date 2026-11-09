@@ -10,7 +10,6 @@ static CONFIG: RwLock<ComputerUseSettings> = RwLock::new(ComputerUseSettings {
     enabled: false,
     allow_input: true,
     image_mode: ImageMode::Auto,
-    allow_foreground_fallback: false,
     show_agent_cursor: true,
 });
 

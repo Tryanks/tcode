@@ -2,10 +2,15 @@
 //! and the record every write leaves.
 
 use super::*;
-use control_mcp::{ControlOp, ToolRequirement};
-use tcode_core::control::{ControlAction, ControlGrant, ControlGrantSource, ControlScope, action};
+use control_mcp::{ControlOp, ThreadAccess, ToolRequirement};
+use tcode_core::control::{
+    ControlAction, ControlCategory, ControlGrant, ControlGrantSource, ControlScope, action,
+};
 use tcode_core::settings::SettingsPatch;
-use tcode_protocol::{ControlActivityEntry, ControlStatus, ThreadReferenceStatus};
+use tcode_protocol::{
+    ControlActivityEntry, ControlActivityFilter, ControlActivityPage, ControlActivityThread,
+    ControlStatus, ThreadReferenceStatus,
+};
 
 mod content;
 mod grants;
@@ -78,8 +83,10 @@ pub(super) struct Caller {
     pub(super) thread_id: String,
     pub(super) project_id: Option<String>,
     pub(super) grant: ControlGrant,
-    /// Its Orchestrate parent and that thread's ancestors, which it may neither read nor
-    /// act on.
+    /// Another thread started it as its subagent.
+    pub(super) subagent: bool,
+    /// The thread that started it as its subagent and that thread's ancestors, which it may
+    /// neither read nor act on.
     pub(super) ancestors: Vec<String>,
 }
 
@@ -119,6 +126,23 @@ impl AppState {
             .resolve(meta.control_grant.as_ref(), meta.project_id.as_deref())
     }
 
+    /// What the control server offers `meta`'s thread: nothing but `request_grant` with the
+    /// feature off, otherwise its grant and, for a subagent, `report_result`.
+    pub(super) fn control_access(&self, meta: &SessionMeta) -> ThreadAccess {
+        if !self.settings.control.enabled {
+            return ThreadAccess::none();
+        }
+        ThreadAccess {
+            grant: self.caller_grant(meta).0,
+            subagent: meta.is_dispatched(),
+        }
+    }
+
+    /// Whether `target` is a subagent `caller` started.
+    pub(super) fn own_subagent(&self, caller: &Caller, target: &SessionMeta) -> bool {
+        target.is_dispatched() && target.parent_session_id.as_deref() == Some(&caller.thread_id)
+    }
+
     /// Whether the thread's provider is given the `tcode_control` server when it starts;
     /// with an empty grant it lists `request_grant` alone, so the model can still ask.
     pub(super) fn control_offered(&self, meta: &SessionMeta) -> bool {
@@ -150,7 +174,7 @@ impl AppState {
             .control_grants
             .lock()
             .unwrap()
-            .insert(meta.id.clone(), self.caller_grant(meta).0);
+            .insert(meta.id.clone(), self.control_access(meta));
         Some(registration)
     }
 
@@ -171,21 +195,16 @@ impl AppState {
     /// keeps only `request_grant`.
     pub(super) fn refresh_control_grants(&mut self) {
         let registered: Vec<String> = self.mcp.control_registrations.keys().cloned().collect();
-        let grants: Vec<(String, ControlGrant)> = registered
+        let access: Vec<(String, ThreadAccess)> = registered
             .into_iter()
             .filter_map(|id| {
                 let meta = self.find_meta(&id)?;
-                let grant = if self.settings.control.enabled {
-                    self.caller_grant(&meta).0
-                } else {
-                    ControlGrant::none()
-                };
-                Some((id, grant))
+                Some((id, self.control_access(&meta)))
             })
             .collect();
         let mut table = self.mcp.control_grants.lock().unwrap();
-        for (id, grant) in grants {
-            table.insert(id, grant);
+        for (id, access) in access {
+            table.insert(id, access);
         }
     }
 
@@ -232,6 +251,7 @@ impl AppState {
             thread_id: meta.id.clone(),
             project_id: meta.project_id.clone(),
             grant: self.caller_grant(meta).0,
+            subagent: meta.is_dispatched(),
             ancestors,
         }
     }
@@ -358,7 +378,21 @@ impl AppState {
             ToolRequirement::Category(category) if !grant.allows_category(category) => {
                 return refused(format!("category {}", category.name()));
             }
+            ToolRequirement::Subagent if !caller.subagent => {
+                return Err(format!(
+                    "refused: `{name}` is only for a thread another thread started as its \
+                     subagent"
+                ));
+            }
             _ => {}
+        }
+        if let ControlOp::RespondInput(params) = op
+            && !grant.allows_category(ControlCategory::AnswerInput)
+            && !self
+                .find_meta(&params.thread_id)
+                .is_some_and(|target| self.own_subagent(caller, &target))
+        {
+            return refused(format!("category {}", ControlCategory::AnswerInput.name()));
         }
         for category in op.extra_categories() {
             if !grant.allows_category(category) {
@@ -460,7 +494,7 @@ impl AppState {
             ControlOp::ReadTerminal(p) => self.op_read_terminal(caller, p, cx),
             ControlOp::RecordReview(p) => self.op_record_review(caller, p, cx),
             ControlOp::SettleSelf(p) => self.op_settle_self(caller, p, cx),
-            ControlOp::StartThread(p) => self.op_start_thread(caller, p, cx),
+            ControlOp::StartThread(p) => return self.op_start_thread(caller, p, cx),
             ControlOp::SendMessage(p) => self.op_send_message(caller, p, cx),
             ControlOp::ControlThread(p) => self.op_control_thread(caller, p, cx),
             ControlOp::PullRequest(p) => return self.op_pull_request(caller, p, cx),
@@ -471,9 +505,11 @@ impl AppState {
             ControlOp::CancelNotify(p) => self.op_cancel_notify(caller, p, cx),
             ControlOp::Reference(p) => self.op_reference(caller, p, cx),
             ControlOp::RespondInput(p) => self.op_respond_input(caller, p, cx),
+            ControlOp::RespondApproval(p) => self.op_respond_approval(caller, p, cx),
+            ControlOp::ReportResult(p) => self.op_report_result(caller, p),
             ControlOp::Terminal(p) => self.op_terminal(caller, p, cx),
             ControlOp::DeleteThreads(p) => self.op_delete_threads(caller, p, cx),
-            ControlOp::Rewind(p) => self.op_rewind(caller, p, cx),
+            ControlOp::Rewind(p) => return self.op_rewind(caller, p, cx),
             ControlOp::PatchSettings(p) => self.op_patch_settings(caller, p, cx),
             ControlOp::RequestGrant(p) => self.op_request_grant(caller, p, cx),
         };
@@ -526,8 +562,37 @@ impl AppState {
         self.enqueue_store_write(StoreWrite::WriteControlActivity(entries), cx);
     }
 
-    pub(crate) fn control_activity(&self, limit: usize) -> Vec<ControlActivityEntry> {
-        self.control.activity.iter().take(limit).cloned().collect()
+    pub(crate) fn control_activity(
+        &self,
+        filter: &ControlActivityFilter,
+        limit: usize,
+    ) -> ControlActivityPage {
+        let log = &self.control.activity;
+        let matching = || log.iter().filter(|entry| filter.matches(entry));
+        let mut threads = Vec::<ControlActivityThread>::new();
+        let mut actions = Vec::<String>::new();
+        for entry in log {
+            for (id, title) in [
+                (&entry.target_thread_id, &entry.target_title),
+                (&entry.action.actor_thread_id, &entry.action.actor_title),
+            ] {
+                if !threads.iter().any(|thread| thread.id == *id) {
+                    threads.push(ControlActivityThread {
+                        id: id.clone(),
+                        title: title.clone(),
+                    });
+                }
+            }
+            if !actions.contains(&entry.action.action) {
+                actions.push(entry.action.action.clone());
+            }
+        }
+        ControlActivityPage {
+            entries: matching().take(limit).cloned().collect(),
+            total: matching().count() as u32,
+            threads,
+            actions,
+        }
     }
 
     pub(crate) fn review_records(&self, limit: usize) -> Vec<tcode_core::control::ReviewRecord> {

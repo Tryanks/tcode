@@ -1,11 +1,15 @@
 use super::super::*;
 
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl Composer {
     pub(in super::super) fn render_checkout_row(
         &self,
+        checkout: &crate::store::ComposerCheckoutState,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let checkout = self.workspace_store.read(cx).composer_state().checkout?;
+    ) -> AnyElement {
+        let checkout = checkout.clone();
         let branch = checkout.branch;
         let branches: Rc<[String]> = checkout.branches.into();
         let checkout_blocked = checkout.checkout_blocked;
@@ -37,6 +41,8 @@ impl Composer {
         } else {
             let store_open = self.workspace_store.clone();
             let store_content = self.workspace_store.clone();
+            let open_session = self.session_id.clone();
+            let session_id = self.session_id.clone();
             let current: Rc<str> = picker_current.as_str().into();
             let compact = self.compact;
             let trigger = Button::new("branch-picker")
@@ -57,10 +63,12 @@ impl Composer {
                 .trigger(trigger)
                 .on_open_change(move |open, _window, cx| {
                     if *open {
-                        store_open.update(cx, |store, _cx| store.load_branches());
+                        store_open.update(cx, |store, _cx| {
+                            store.load_branches_for(open_session.clone().unwrap_or_default())
+                        });
                     }
                 })
-                .content(move |_state, _window, cx| {
+                .content(move |_state, window, cx| {
                     let spacing = &cx.theme().tokens.spacing;
                     let mut col = v_flex()
                         .w(px(220.))
@@ -84,54 +92,78 @@ impl Composer {
                                 .child(crate::tr!("composer.worktree_base")),
                         );
                     }
+                    // "Loading…" gives way to the branches, fading out under
+                    // them.
+                    let fade = crate::motion::CrossFade::new(
+                        "branch-states",
+                        usize::from(!branches.is_empty()),
+                        2,
+                        CHANGE,
+                        window,
+                        cx,
+                    );
+                    let loading = fade.shows(0).then(|| {
+                        (
+                            0,
+                            crate::material::empty_row(crate::tr!("composer.loading"), cx)
+                                .flex_none()
+                                .into_any_element(),
+                        )
+                    });
                     if branches.is_empty() {
                         return col
-                            .child(
-                                crate::material::empty_row(crate::tr!("composer.loading"), cx)
-                                    .flex_none(),
-                            )
+                            .child(fade.column().span().render(loading))
                             .into_any_element();
                     }
                     let branches = branches.clone();
                     let current = current.clone();
                     let store = store_content.clone();
                     let popover = cx.entity();
+                    let list = crate::scroll::VirtualList::uniform(
+                        "branch-list",
+                        branches.len(),
+                        move |range, _, cx| {
+                            range
+                                .map(|index| {
+                                    let store = store.clone();
+                                    let session_id = session_id.clone();
+                                    let popover = popover.clone();
+                                    branch_row(
+                                        index,
+                                        &branches[index],
+                                        branches[index] == *current,
+                                        compact,
+                                        move |branch_name, window, cx| {
+                                            store.update(cx, |store, _cx| {
+                                                if worktree_mode {
+                                                    store.set_draft_workspace_for(
+                                                        session_id.clone().unwrap_or_default(),
+                                                        WorkspaceMode::NewWorktree {
+                                                            base: branch_name,
+                                                        },
+                                                    );
+                                                } else {
+                                                    store.checkout_branch_for(
+                                                        session_id.clone().unwrap_or_default(),
+                                                        branch_name,
+                                                    );
+                                                }
+                                            });
+                                            popover.update(cx, |st, cx| st.dismiss(window, cx));
+                                        },
+                                        cx,
+                                    )
+                                })
+                                .collect()
+                        },
+                    )
+                    .w_full()
+                    .min_h_0()
+                    .into_any_element();
                     col.child(
-                        crate::scroll::VirtualList::uniform(
-                            "branch-list",
-                            branches.len(),
-                            move |range, _, cx| {
-                                range
-                                    .map(|index| {
-                                        let store = store.clone();
-                                        let popover = popover.clone();
-                                        branch_row(
-                                            index,
-                                            &branches[index],
-                                            branches[index] == *current,
-                                            compact,
-                                            move |branch_name, window, cx| {
-                                                store.update(cx, |store, _cx| {
-                                                    if worktree_mode {
-                                                        store.set_draft_workspace(
-                                                            WorkspaceMode::NewWorktree {
-                                                                base: branch_name,
-                                                            },
-                                                        );
-                                                    } else {
-                                                        store.checkout_branch(branch_name);
-                                                    }
-                                                });
-                                                popover.update(cx, |st, cx| st.dismiss(window, cx));
-                                            },
-                                            cx,
-                                        )
-                                    })
-                                    .collect()
-                            },
-                        )
-                        .w_full()
-                        .min_h_0(),
+                        fade.column()
+                            .span()
+                            .render(loading.into_iter().chain([(1, list)])),
                     )
                     .into_any_element()
                 })
@@ -141,17 +173,15 @@ impl Composer {
         let left =
             self.render_workspace_chip(is_draft, worktree_mode, worktree.is_some(), &branch, cx);
 
-        Some(
-            h_flex()
-                .w_full()
-                .px_2()
-                .items_center()
-                .justify_between()
-                .text_secondary(self.compact, cx)
-                .child(left)
-                .child(right)
-                .into_any_element(),
-        )
+        h_flex()
+            .w_full()
+            .px_2()
+            .items_center()
+            .justify_between()
+            .text_secondary(self.compact, cx)
+            .child(left)
+            .child(right)
+            .into_any_element()
     }
 
     /// The left-hand workspace chip: a draft can pick current checkout vs a new
@@ -165,7 +195,8 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let label = if worktree_mode || has_worktree {
+        let worktree_selected = worktree_mode || has_worktree;
+        let label = if worktree_selected {
             crate::tr!("composer.new_worktree")
         } else {
             crate::tr!("composer.local_checkout")
@@ -182,6 +213,7 @@ impl Composer {
         }
 
         let store_content = self.workspace_store.clone();
+        let session_id = self.session_id.clone();
         let base_default = base_default.to_string();
         let compact = self.compact;
         let trigger = Button::new("workspace-picker")
@@ -204,6 +236,8 @@ impl Composer {
                 let popover = cx.entity();
                 let store_local = store_content.clone();
                 let store_worktree = store_content.clone();
+                let local_session = session_id.clone();
+                let worktree_session = session_id.clone();
                 let pop_local = popover.clone();
                 let pop_worktree = popover.clone();
                 let base = base_default.clone();
@@ -211,12 +245,11 @@ impl Composer {
                                      selected: bool,
                                      cx: &mut Context<PopoverState>|
                  -> gpui::Div {
-                    crate::material::menu_item_frame(compact, cx)
+                    crate::material::menu_item_frame(compact, crate::material::ItemFill::Hover, cx)
                         .w_full()
                         .items_center()
                         .cursor_pointer()
                         .text_body(compact, cx)
-                        .hover(|s| s.bg(cx.theme().muted))
                         .child(div().flex_1().min_w_0().child(label))
                         .when(selected, |this| {
                             this.child(Icon::new(IconName::Check).text_color(cx.theme().primary))
@@ -236,13 +269,16 @@ impl Composer {
                     .child(
                         workspace_row(
                             crate::tr!("composer.local_checkout").into_owned().into(),
-                            false,
+                            !worktree_selected,
                             cx,
                         )
                         .id("workspace-local")
                         .on_click(move |_, window, cx| {
                             store_local.update(cx, |store, _cx| {
-                                store.set_draft_workspace(WorkspaceMode::LocalCheckout);
+                                store.set_draft_workspace_for(
+                                    local_session.clone().unwrap_or_default(),
+                                    WorkspaceMode::LocalCheckout,
+                                );
                             });
                             pop_local.update(cx, |st, cx| st.dismiss(window, cx));
                         }),
@@ -250,14 +286,17 @@ impl Composer {
                     .child(
                         workspace_row(
                             crate::tr!("composer.new_worktree").into_owned().into(),
-                            false,
+                            worktree_selected,
                             cx,
                         )
                         .id("workspace-worktree")
                         .on_click(move |_, window, cx| {
                             let base = base.clone();
                             store_worktree.update(cx, |store, _cx| {
-                                store.set_draft_workspace(WorkspaceMode::NewWorktree { base });
+                                store.set_draft_workspace_for(
+                                    worktree_session.clone().unwrap_or_default(),
+                                    WorkspaceMode::NewWorktree { base },
+                                );
                             });
                             pop_worktree.update(cx, |st, cx| st.dismiss(window, cx));
                         }),
@@ -280,14 +319,13 @@ fn branch_row(
     div()
         .pb_0p5()
         .child(
-            crate::material::menu_item_frame(compact, cx)
+            crate::material::menu_item_frame(compact, crate::material::ItemFill::Hover, cx)
                 .id(("branch-row", index))
                 .flex_none()
                 .w_full()
                 .items_center()
                 .cursor_pointer()
                 .text_body(compact, cx)
-                .hover(|s| s.bg(cx.theme().muted))
                 .child(
                     div()
                         .flex_1()

@@ -289,7 +289,7 @@ fn space_index_and_scope_project_only_the_members_projects() {
         .iter()
         .find(|choice| choice.profile_id.as_deref() == Some("shared-profile"))
         .unwrap();
-    assert_eq!(profile.name, "Team model");
+    assert_eq!(profile.name, "Codex (Team model)");
     assert!(profile.models.iter().any(|model| model.id == "team-model"));
     let wire = serde_json::to_string(&scope).unwrap();
     assert!(!wire.contains("private-endpoint"));
@@ -435,6 +435,7 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
     for command in [
         Command::CreateNewProject {
             name: "outside-space".into(),
+            parent: None,
         },
         Command::StartScratchDraft,
         // Authority over tcode_control is the host owner's: a space member may neither give
@@ -447,6 +448,12 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
             session_id: "a".into(),
             request_id: "request".into(),
             approve: true,
+        },
+        // Preview is a full device's: a member may not render even its own thread's.
+        Command::ShowPreviewHere {
+            session_id: "a".into(),
+            client_id: "member-device".into(),
+            take_over: true,
         },
         // A reference would let thread a's model read thread b, which the space cannot read.
         Command::AddThreadReference {
@@ -472,10 +479,25 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
         Topic::Settings,
         Topic::Providers,
         Topic::RuntimeEvents,
-        Topic::Preview,
+        Topic::Preview {
+            client: tcode_protocol::PreviewClient {
+                id: "member-device".into(),
+                name: "Member device".into(),
+            },
+        },
+        Topic::PreviewSession {
+            session_id: "a".into(),
+        },
+        // The host machine's processes are a full device's to see.
+        Topic::DevServers {
+            session_id: "a".into(),
+        },
         Topic::ExternalImport {
             project_id: host.a.id.clone(),
         },
+        // The machine's storage is a full device's to watch.
+        Topic::StorageMigration,
+        Topic::DiskUsage,
         Topic::SpaceIndex {
             space_id: "other".into(),
         },
@@ -565,6 +587,14 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
         member.clone(),
         ClientPayload::Query(Query::RemoveUserFile {
             path: host.a.root.join("visible.txt"),
+        }),
+    ));
+    denied(host.request(
+        member.clone(),
+        ClientPayload::Query(Query::BeginUpload {
+            session_id: "b".into(),
+            name: "notes.txt".into(),
+            size: 1,
         }),
     ));
     let ServerEvent::SessionStatusReplaced(status) = host
@@ -738,9 +768,13 @@ fn space_drafts_are_bound_to_workspace_and_device_and_search_filters_before_limi
         panic!("settings snapshot")
     };
     assert!(!settings.last_visited.contains_key("a"));
-    let CommandResponse::SessionId(Some(fork)) =
-        host.command(one.clone(), Command::ForkThread { id: "a".into() })
-    else {
+    let CommandResponse::SessionId(Some(fork)) = host.command(
+        one.clone(),
+        Command::ForkThread {
+            id: "a".into(),
+            at: None,
+        },
+    ) else {
         panic!("fork response")
     };
     host.subscribe(
@@ -795,7 +829,7 @@ fn space_turns_keep_the_sending_author_through_provider_delivery_and_queueing() 
         );
         if text == "first" {
             let SessionCommand::SendTurn { delivery_id, .. } =
-                host.provider.commands.recv_blocking().unwrap()
+                crate::app::next_command_blocking(&host.provider.commands).unwrap()
             else {
                 panic!("send command")
             };
@@ -822,7 +856,7 @@ fn space_turns_keep_the_sending_author_through_provider_delivery_and_queueing() 
         })
         .unwrap();
     let SessionCommand::SendTurn { delivery_id, .. } =
-        host.provider.commands.recv_blocking().unwrap()
+        crate::app::next_command_blocking(&host.provider.commands).unwrap()
     else {
         panic!("queued send command")
     };

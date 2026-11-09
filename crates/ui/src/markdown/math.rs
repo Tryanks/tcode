@@ -3,12 +3,12 @@ use std::{cell::RefCell, sync::Arc};
 use super::{
     inline::{Inline, InlineState},
     math_layout::{self, FormulaSelection},
-    render::RecentCache,
     selection::RunOrigin,
     state::{MarkdownState, PendingContextTarget},
 };
 use crate::{
     icon::IconName,
+    recent_cache::RecentCache,
     scroll::ScrollableElement as _,
     theme::ActiveTheme as _,
     typography::TextRole as _,
@@ -16,10 +16,14 @@ use crate::{
 };
 use gpui::{
     AnyElement, App, Entity, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
-    SharedString, Styled as _, Window, div, prelude::FluentBuilder as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _,
 };
 use gpui_base::h_flex;
 use latex_rust::{MathBox, MathFont, MathStyle, layout, parse};
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 
 type FormulaCache = RecentCache<(String, bool), Option<Arc<MathBox>>>;
 
@@ -81,7 +85,7 @@ pub(super) fn block(
     code: AnyElement,
     path: &str,
     view: &Entity<MarkdownState>,
-    window: &Window,
+    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let tree = formula(source, true);
@@ -89,7 +93,10 @@ pub(super) fn block(
     let show_source = view.read(cx).math_sources.contains(path);
     let compact = crate::window_seam::window_is_compact(window, cx);
     let latex = source.strip_suffix('\n').unwrap_or(source).to_string();
-    let group = SharedString::from(format!("math-block-{path}"));
+    let hover = view.read(cx).hover.clone();
+    let buttons = view.read(cx).motion();
+    let hover_key = SharedString::from(format!("math-block-{path}"));
+    let reveal = hover.reveal(&hover_key, window, cx);
 
     let toggle = tree.is_some().then(|| {
         let (view, path) = (view.clone(), path.to_string());
@@ -102,6 +109,7 @@ pub(super) fn block(
         let selector = format!("markdown-math-toggle-{path}");
         let button = action_button(format!("math-toggle-{path}"), icon, label.into_owned(), cx)
             .touch(compact)
+            .motion(&buttons)
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();
                 view.update(cx, |state, cx| {
@@ -126,14 +134,24 @@ pub(super) fn block(
             },
             cx,
         )
+        .motion(&buttons)
     };
     // Revealed on hover like the message actions, and pinned where there is
     // no hover or while the source shows. Faded rather than hidden: over its
-    // own mouse-blocking hitbox the block no longer counts as hovered, so its
-    // own hover must keep it shown. Pinned beside a rendered formula on a
-    // narrow screen, so it never covers the formula's end.
+    // own mouse-blocking hitbox the block no longer counts as hovered, so the
+    // actions are a part of the block's hover. Pinned beside a rendered
+    // formula on a narrow screen, so it never covers the formula's end; the
+    // pin fades and the actions glide there as the window turns compact.
     let beside = compact && tree.is_some() && !show_source;
+    let pinned = actions_pinned(view, path, compact, window, cx);
+    let reflow = view
+        .read(cx)
+        .motion()
+        .reflow(format!("{path}/actions"), u64::from(compact))
+        .at_end();
     let actions = h_flex()
+        .id(SharedString::from(format!("math-actions-{path}")))
+        .on_hover(hover.on_hover(hover_key.clone()))
         .when(!beside, |actions| actions.absolute().top_1().right_1())
         .when(beside, |actions| actions.flex_none().mt_1())
         .items_center()
@@ -149,12 +167,14 @@ pub(super) fn block(
         })
         .children(toggle)
         .child(copy)
-        .when(tree.is_some() && !show_source && !compact, |actions| {
-            actions
-                .opacity(0.)
-                .group_hover(group.clone(), |style| style.opacity(1.))
-                .hover(|style| style.opacity(1.))
+        .when(tree.is_some() && !show_source, |actions| {
+            actions.opacity(reveal + (1. - reveal) * pinned)
         });
+    #[cfg(test)]
+    let actions = {
+        let path = path.to_string();
+        actions.debug_selector(move || format!("markdown-math-actions-{path}"))
+    };
 
     // The actions sit on the box that shows: the formula, or its source.
     let shown = match &tree {
@@ -181,9 +201,14 @@ pub(super) fn block(
         .w_full()
         .items_start()
         .child(shown)
-        .child(actions);
+        .child(reflow.part("actions", actions));
+    // Shown as its source or as the formula, the block's height glides
+    // between the two, and the blocks after it follow.
+    let body = crate::motion::SizeGlide::new(&view.read(cx).glide(path), reflow.render(body))
+        .on_change(show_source as u64);
     let block = div()
-        .group(group)
+        .id(hover_key.clone())
+        .on_hover(hover.on_hover(hover_key))
         .w_full()
         .on_mouse_down(
             MouseButton::Right,
@@ -203,6 +228,26 @@ pub(super) fn block(
         block.debug_selector(move || format!("markdown-math-{path}"))
     };
     block.into_any_element()
+}
+
+/// How far a block's hover actions are pinned by the window being compact,
+/// from 0 (wide: revealed on hover) to 1 (compact: always shown), on the
+/// document's clock under the block's `path`: a window turning compact or
+/// wide draws the block under a new parent.
+pub(super) fn actions_pinned(
+    view: &Entity<MarkdownState>,
+    path: &str,
+    compact: bool,
+    window: &mut Window,
+    cx: &App,
+) -> f32 {
+    view.read(cx).motion().transition(
+        format!("{path}/actions/compact"),
+        if compact { 1f32 } else { 0. },
+        GLIDE,
+        window,
+        cx,
+    )
 }
 
 pub(super) fn inline(

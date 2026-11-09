@@ -224,9 +224,19 @@ fn render_incomplete_timeline(output: &mut String, timeline: &Timeline) {
                     output.push_str(visible);
                     output.push_str("\n\n");
                 }
+                EntryContent::Feedback { text } => {
+                    output.push_str("#### User\n\n");
+                    output.push_str(text);
+                    output.push_str("\n\n");
+                }
                 EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => {
                     output.push_str("#### Assistant\n\n");
                     output.push_str(text);
+                    output.push_str("\n\n");
+                }
+                EntryContent::Item(ItemContent::Plan { markdown }) => {
+                    output.push_str("#### Plan\n\n");
+                    output.push_str(markdown);
                     output.push_str("\n\n");
                 }
                 EntryContent::Item(ItemContent::Reasoning { .. }) => {}
@@ -428,9 +438,7 @@ mod tests {
             .entries
             .iter()
             .filter_map(|entry| match &entry.content {
-                EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => {
-                    Some(text.as_str())
-                }
+                EntryContent::Item(ItemContent::Plan { markdown }) => Some(markdown.as_str()),
                 _ => None,
             })
             .collect();

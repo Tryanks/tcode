@@ -58,6 +58,19 @@
         read: () => refused('Reading the clipboard needs a secure context'),
       } });
     }
+    // gpui-fast-wgpu stores WebGL instance data in an Rgba32Uint texture as
+    // wide as MAX_TEXTURE_SIZE allows, and wgpu zero-fills it a row at a time
+    // from a 512 KiB buffer: past 32768 texels a row no longer fits and the
+    // first frame panics, so GPUs reporting 65536 open to a blank page.
+    // Reporting at most 16384 keeps a row at 256 KiB.
+    if (globalThis.WebGL2RenderingContext) {
+      const { prototype } = WebGL2RenderingContext;
+      const getParameter = prototype.getParameter;
+      prototype.getParameter = function (name) {
+        const value = getParameter.call(this, name);
+        return name === this.MAX_TEXTURE_SIZE ? Math.min(value, 16384) : value;
+      };
+    }
     try {
       await authorizeBrowser();
       await init();

@@ -31,6 +31,9 @@ use tcode_core::ui::RightTab;
 
 use crate::window_state::Route;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Height of a caption strip. Matches the shell's 52px top rows so the cluster
 /// sits flush with the window top on every host surface.
 pub(crate) const CAPTION_STRIP_HEIGHT: f32 = 52.;
@@ -42,9 +45,8 @@ pub(crate) const CAPTION_CLUSTER_WIDTH: f32 = CAPTION_BUTTON_WIDTH * 3.;
 /// Whether this build owns its window chrome and must draw caption buttons.
 const CLIENT_DECORATED: bool = cfg!(target_os = "windows");
 /// What the caption cluster takes from an open right panel's top strip. With
-/// the panel open the workspace's top-right corner is the panel's, docked or
-/// floating, so on a build that draws its own caption buttons they always sit
-/// in its strip.
+/// the panel open the workspace's top-right corner is the panel's, so on a
+/// build that draws its own caption buttons they sit in its strip.
 pub(crate) const RIGHT_PANEL_CAPTION_WIDTH: f32 = if CLIENT_DECORATED {
     CAPTION_CLUSTER_WIDTH
 } else {
@@ -168,6 +170,22 @@ pub(crate) fn drag_region<E: InteractiveElement>(el: E) -> E {
     }
 }
 
+/// Where a page's own close goes on a strip that hosts the caption cluster:
+/// on a row of its own under the strip, a gap below the cluster, its right
+/// end as far from the window edge as on a strip without the cluster — over
+/// the cluster's Close. Beside the cluster it would read as a fourth window
+/// control.
+pub(crate) fn below_caption(close: impl IntoElement, cx: &App) -> gpui::Div {
+    let spacing = &cx.theme().tokens.spacing;
+    div()
+        .flex()
+        .justify_end()
+        .w_full()
+        .pt(spacing.md)
+        .pr(spacing.sm)
+        .child(close)
+}
+
 /// The caption cluster, in Windows order: minimize, maximize/restore, close.
 /// Call only when [`hosts_caption`] is true for the surface being rendered.
 pub(crate) fn caption_controls(window: &Window, cx: &App) -> impl IntoElement {
@@ -207,23 +225,49 @@ fn caption_button(button: CaptionButton, maximized: bool, cx: &App) -> impl Into
         )
     };
 
-    div()
-        .id(button.id())
-        .flex()
-        .flex_none()
-        .h_full()
-        .w(px(CAPTION_BUTTON_WIDTH))
-        .items_center()
-        .justify_center()
-        .text_color(cx.theme().muted_foreground)
-        .window_control_area(button.area())
-        // Blocking the mouse ends gpui's hit test at this button, so neither the
-        // header's drag listeners nor any enclosing `Drag` control area is in
-        // the hit set — the platform sees a caption button, never a drag area.
-        .occlude()
-        .hover(move |style| style.bg(hover_bg).text_color(active_fg))
-        .active(move |style| style.bg(pressed_bg).text_color(active_fg))
-        .child(Icon::new(button.icon(maximized)).small())
+    let rest_fg = cx.theme().muted_foreground;
+    crate::motion::Sampled::new(move |window, cx| {
+        let (hovered, on_hover) = crate::motion::hovered(button.id(), window, cx);
+        let settle = || gpui_base::motion::Transition::new(GLIDE);
+        let fill = gpui_base::motion::transition(
+            (button.id(), "fill"),
+            if hovered {
+                hover_bg
+            } else {
+                hover_bg.opacity(0.)
+            },
+            settle(),
+            window,
+            cx,
+        );
+        let fg = gpui_base::motion::transition(
+            (button.id(), "fg"),
+            if hovered { active_fg } else { rest_fg },
+            settle(),
+            window,
+            cx,
+        );
+        div()
+            .id(button.id())
+            .debug_selector(move || button.id().into())
+            .flex()
+            .flex_none()
+            .h_full()
+            .w(px(CAPTION_BUTTON_WIDTH))
+            .items_center()
+            .justify_center()
+            .bg(fill)
+            .text_color(fg)
+            .window_control_area(button.area())
+            // Blocking the mouse ends gpui's hit test at this button, so neither the
+            // header's drag listeners nor any enclosing `Drag` control area is in
+            // the hit set — the platform sees a caption button, never a drag area.
+            .occlude()
+            .on_hover(on_hover)
+            .active(move |style| style.bg(pressed_bg).text_color(active_fg))
+            .child(Icon::new(button.icon(maximized)).small())
+            .into_any_element()
+    })
 }
 
 #[cfg(test)]

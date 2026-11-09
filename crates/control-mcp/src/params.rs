@@ -377,18 +377,24 @@ pub enum Workspace {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StartThreadParams {
-    #[schemars(description = "The project the thread belongs to.")]
-    pub project_id: String,
+    #[serde(default)]
+    #[schemars(description = "The project the thread belongs to; omit for this thread's project.")]
+    pub project_id: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Working directory relative to the project root, inside it; default the project root."
+        description = "Working directory relative to the project root, inside it; default the project root, or this thread's own directory for a subagent in this thread's project."
     )]
     pub cwd: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "local (the checkout, the default). worktree is refused: Tcode makes a thread's dedicated worktree only from a draft's first send."
+        description = "local (the checkout) or worktree. worktree is only for a subagent: when its directory is a Git repository root it runs on branch tcode/<thread-id> in a dedicated worktree, and the response names the path and branch or why it fell back to the plain directory. Omitted, a subagent follows Settings → Control subagent worktree isolation and any other thread is local."
     )]
     pub workspace: Option<Workspace>,
+    #[serde(default)]
+    #[schemars(
+        description = "Start the thread as this thread's subagent (default false): a child shown in this thread's Subagents view, whose report_result reaches you as a message when its turn ends, as do its approval requests and questions. Each message you send it opens a new report it owes you; settle it with update_threads once you accept the result."
+    )]
+    pub subagent: Option<bool>,
     #[schemars(
         description = "Provider name as list_providers lists it, for example claude or codex."
     )]
@@ -403,7 +409,7 @@ pub struct StartThreadParams {
     pub profile: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Provider option id → value, as list_providers describes them. The permission mode is not settable: the project's default applies."
+        description = "Provider option id → value, as list_providers describes them. The permission mode is not settable: the project's default applies, or for a subagent the one Settings → Control subagent approvals chooses."
     )]
     pub options: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
@@ -468,12 +474,16 @@ pub enum RunOp {
         value: serde_json::Value,
     },
     Fork,
+    ForkAt {
+        turn: usize,
+    },
     SteerQueued {
         id: u64,
     },
     DropQueued {
         id: u64,
     },
+    Cancel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -481,7 +491,7 @@ pub struct RunChange {
     #[schemars(description = "The thread id.")]
     pub thread_id: String,
     #[schemars(
-        description = "One of interrupt, {\"retry\": {\"turn\"}}, compact, {\"set_model\": {\"model\"}} (a model of the thread's own provider and profile), {\"set_option\": {\"id\", \"value\"}}, fork, {\"steer_queued\": {\"id\"}}, {\"drop_queued\": {\"id\"}}. Dropping a queued human message needs history_edit."
+        description = "One of interrupt, {\"retry\": {\"turn\"}}, compact, {\"set_model\": {\"model\"}} (a model of the thread's own provider and profile), {\"set_option\": {\"id\", \"value\"}}, fork, {\"fork_at\": {\"turn\"}} (a new thread holding everything through that finished turn, answer included, as outline numbers them, where the provider of the thread forks at a turn), {\"steer_queued\": {\"id\"}}, {\"drop_queued\": {\"id\"}}, or cancel (your own subagent only: stop it and drop its queue without delivering its result). Dropping a queued human message needs history_edit."
     )]
     pub op: RunOp,
 }
@@ -661,6 +671,35 @@ pub struct RespondInputParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RespondApprovalParams {
+    #[schemars(description = "Your subagent with the pending approval.")]
+    pub thread_id: String,
+    #[serde(default)]
+    #[schemars(
+        description = "The approval id from the approval message or get_thread; omit when the subagent has exactly one pending approval."
+    )]
+    pub approval_id: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Exact native option id from the approval message. Supply option or cancel: true, never both."
+    )]
+    pub option: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Cancel the request the provider's native way. Supply cancel: true or option, never both."
+    )]
+    pub cancel: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ReportResultParams {
+    #[schemars(
+        description = "The complete final report, verbatim. Do not summarize or truncate; this exact text is what the thread that started you receives."
+    )]
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalOp {
     Open,
@@ -792,6 +831,14 @@ pub struct StartThreadResponse {
     pub created: bool,
     pub title: String,
     pub cwd: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subagent: bool,
+    /// The branch of a subagent's dedicated worktree, whose path is `cwd`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
+    /// Why a requested worktree fell back to the plain directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

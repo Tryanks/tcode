@@ -7,7 +7,6 @@
       "name": "tcode Light",
       "mode": "light",
       "font.family": "DM Sans",
-      "mono_font.family": "SF Mono",
       "radius": 10,
       "radius.lg": 14,
       "colors": {
@@ -57,7 +56,6 @@
       "name": "tcode Dark",
       "mode": "dark",
       "font.family": "DM Sans",
-      "mono_font.family": "SF Mono",
       "radius": 10,
       "radius.lg": 14,
       "colors": {

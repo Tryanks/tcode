@@ -88,6 +88,8 @@ struct Lineage {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     fork_pending_start: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    forked_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     started_by: Option<String>,
 }
 
@@ -441,7 +443,11 @@ impl AppState {
                 .filter(|child| child.parent_session_id.as_deref() == Some(meta.id.as_str()))
                 .map(|child| child.id.clone())
                 .collect(),
-            fork_pending_start: meta.pending_fork,
+            fork_pending_start: meta.pending_fork.is_some(),
+            forked_from: meta
+                .fork_origin
+                .as_ref()
+                .map(|origin| origin.thread_id.clone()),
             started_by: meta
                 .started_by
                 .as_ref()

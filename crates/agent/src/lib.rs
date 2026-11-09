@@ -20,13 +20,19 @@ mod claude_goal;
 mod claude_manifest;
 #[cfg(feature = "process")]
 mod claude_plugins;
+mod plugin_command;
+#[cfg(feature = "process")]
+mod source_plugins;
+pub use plugin_command::plugin_op_command;
 pub mod context_window;
-mod image_reads;
-pub use image_reads::tool_result_images;
 #[cfg(not(feature = "process"))]
 pub mod claude {
     pub use crate::claude_context::*;
 }
+#[cfg(feature = "process")]
+mod cmd_shim;
+pub mod harness;
+pub use harness::{Endpoint, EndpointPreset, HarnessFacts, NativeMcpServer};
 #[cfg(feature = "process")]
 pub mod codex;
 #[cfg(feature = "process")]
@@ -34,15 +40,23 @@ pub mod cursor;
 #[cfg(feature = "process")]
 pub mod grok;
 #[cfg(feature = "process")]
+pub mod native_mcp;
+#[cfg(feature = "process")]
 pub mod opencode;
 #[cfg(feature = "process")]
 pub mod pi;
 #[cfg(feature = "process")]
+pub use cmd_shim::CmdShim;
+#[cfg(feature = "process")]
 mod process;
 #[cfg(feature = "process")]
-pub use process::keep_own_stdio_from_children;
+pub use process::{command, stop_every_tree};
 #[cfg(feature = "process")]
 mod subagent_tail;
+mod tool_name;
+pub use tool_name::ToolName;
+mod tool_output;
+pub use tool_output::ToolOutput;
 
 use std::path::PathBuf;
 
@@ -66,11 +80,71 @@ pub enum ProviderKind {
     Acp,
 }
 
+/// Work a harness runs in the background of a thread, as it names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundTask {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub kind: BackgroundKind,
+    /// The call that started it, when the harness says which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    /// When it started (unix ms): as the harness reports it when
+    /// `started_reported`, else when the adapter first saw it running.
+    pub started_at: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub started_reported: bool,
+}
+
+/// What a piece of background work is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundKind {
+    Command,
+    Agent,
+    #[default]
+    Other,
+}
+
+/// What a harness lets a client do with the background work it lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackgroundControl {
+    pub stop: BackgroundStop,
+    /// The harness moves a running command or agent call into the
+    /// background on request ([`SessionCommand::MoveToBackground`]).
+    pub move_running: bool,
+}
+
+/// Which of its background work a harness stops on request
+/// ([`SessionCommand::StopBackgroundTask`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundStop {
+    None,
+    /// One piece at a time; a stop for all of it is one stop for each.
+    Each,
+    /// One piece at a time, or all of it in one request of its own.
+    EachAndAll,
+}
+
+impl BackgroundStop {
+    pub fn stops(self) -> bool {
+        self != Self::None
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Caps {
     pub supports_steering: bool,
     pub supports_fork: bool,
-    pub native_rewind: bool,
+    /// Whether the harness forks through a finished turn itself
+    /// ([`ForkPoint::Before`] the next prompt, [`ForkPoint::Tail`] from the
+    /// last turn).
+    pub fork_at: bool,
+    /// What the harness's own rewind does ([`SessionCommand::Rewind`]), when
+    /// it has one. A thread can withdraw it ([`AgentEvent::RewindAvailability`])
+    /// and a preview narrows it for one message ([`AgentEvent::RewindPreviewed`]).
+    pub rewind: Option<RewindControl>,
     /// The harness compacts its context on request ([`SessionCommand::Compact`]).
     pub manual_compaction: bool,
     /// How the harness's standing goal is driven ([`SessionCommand::SetGoal`]),
@@ -79,6 +153,12 @@ pub struct Caps {
     pub per_turn_effort: bool,
     pub options_apply_live: bool,
     pub live_option_push: LiveOptionPush,
+    /// The harness lists its background work ([`AgentEvent::BackgroundTaskList`]),
+    /// and what it lets a client do with it.
+    pub background: Option<BackgroundControl>,
+    /// The running process can be asked to take a new model and options
+    /// ([`SessionCommand::ApplySettings`]) rather than restart for them.
+    pub live_settings: bool,
     /// Whether this adapter can attach tcode's HTTP MCP servers to a session.
     /// Preview attachment rides the same capability as every other MCP server.
     pub mcp_servers: bool,
@@ -94,6 +174,92 @@ pub struct Caps {
     pub instruction_channel: InstructionChannel,
     /// The CLI signs a profile in and out of its native account itself.
     pub account_login: bool,
+    /// A session resumes under another account profile of this provider once
+    /// [`transfer_session`] has copied its native files into that profile's home.
+    pub session_transfer: bool,
+}
+
+/// Where a session started from [`SessionOptions::resume`] goes on instead of
+/// where that session stands. A value the provider's [`Caps`] do not declare
+/// fails the start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkPoint {
+    /// A new session holding all of the resumed one ([`Caps::supports_fork`],
+    /// and [`Caps::fork_at`] from its last turn).
+    Tail,
+    /// A new session holding what came before the message of the restore
+    /// point `checkpoint_id` ([`Caps::fork_at`]).
+    Before { checkpoint_id: String },
+    /// Not a fork: the branch a rewind left, by the `undo_token` of its
+    /// [`AgentEvent::RewindCompleted`] ([`LaterHistory::Branch`]).
+    Branch { token: String },
+}
+
+/// What a harness's own rewind does. Tcode offers exactly this and never
+/// emulates a missing part with Git or transcript edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RewindControl {
+    /// The scopes it restores, in the order the panel offers them.
+    pub modes: &'static [RewindMode],
+    /// The conversation can be restored to before the thread's first turn.
+    pub first_turn_conversation: bool,
+    /// A steer (a message added to a running turn) is a target for the
+    /// conversation alone; it has no restore point for files.
+    pub steer_targets: bool,
+    pub later_history: LaterHistory,
+    pub preview: RewindPreviewKind,
+    pub running_turn: RunningTurnPolicy,
+    /// Files the agent changed by running commands are restored too, not only
+    /// those its own edit tools wrote.
+    pub restores_command_edits: bool,
+}
+
+impl RewindControl {
+    /// Whether `mode` can restore turn `turn`, counted from the thread's first,
+    /// or a steer inside it.
+    pub fn offers(self, mode: RewindMode, turn: usize, steer: bool) -> bool {
+        self.modes.contains(&mode)
+            && (!steer || (self.steer_targets && mode == RewindMode::Conversation))
+            && (turn > 0 || steer || self.first_turn_conversation || !mode.includes_conversation())
+    }
+}
+
+/// What becomes of the conversation after a rewind's target.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaterHistory {
+    /// The later turns leave the harness's conversation for good.
+    #[default]
+    Truncated,
+    /// The later turns are hidden, and the rewind can be undone until the
+    /// next message is sent, which makes it final.
+    HiddenUntilNextSend,
+    /// The conversation goes on in a new branch; the original is kept and can
+    /// be returned to.
+    Branch,
+}
+
+/// What a harness can show of a rewind before it is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindPreviewKind {
+    None,
+    /// The files a restore would change, with line counts where it has them.
+    Files,
+    /// The files a restore would change, and those changed outside the agent
+    /// since, which the restore would overwrite.
+    Conflicts,
+}
+
+/// What a rewind does to a turn that is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunningTurnPolicy {
+    /// The harness stops the turn first, as its own rewind does.
+    Interrupt,
+    /// A rewind waits until no turn runs.
+    Refuse,
 }
 
 /// What a harness lets a client do with its standing goal.
@@ -110,12 +276,11 @@ pub struct GoalControl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionChannel {
-    /// Appended to the system prompt once per process, on creation and resume alike.
+    /// Part of the session's system instructions, set at every start, on creation and resume
+    /// alike (Claude Code's appended system prompt, an OpenCode session instruction entry).
     SessionAppend,
     /// Developer context Codex re-sends when it changes; restored after a compaction.
     DeveloperContext,
-    /// The system field of every prompt.
-    PerPromptSystem,
     /// A content block of its own after the user's text on every prompt that is not a native
     /// `/command`, while the session attached Tcode's MCP servers.
     PerPromptUserBlock,
@@ -166,7 +331,29 @@ impl ProviderKind {
             ProviderKind::ClaudeCode => Caps {
                 supports_steering: true,
                 supports_fork: true,
-                native_rewind: true,
+                // `--resume-session-at` keeps the entries up to the message the
+                // prompt was answering; the first prompt has none.
+                fork_at: true,
+                rewind: Some(RewindControl {
+                    modes: &[
+                        RewindMode::FilesAndConversation,
+                        RewindMode::Conversation,
+                        RewindMode::Files,
+                    ],
+                    // A cut before the first prompt persists as a leaf-less
+                    // `last-prompt` entry, which a resume reads as an empty
+                    // conversation (2.1.318).
+                    first_turn_conversation: true,
+                    // A steer has no file checkpoint ("No code restore").
+                    steer_targets: true,
+                    later_history: LaterHistory::Truncated,
+                    // `rewind_files` with `dry_run`.
+                    preview: RewindPreviewKind::Files,
+                    // `rewind_conversation`'s `interrupt_if_running`.
+                    running_turn: RunningTurnPolicy::Interrupt,
+                    // File history tracks the edit tools' writes only.
+                    restores_command_edits: false,
+                }),
                 manual_compaction: true,
                 goals: Some(GoalControl {
                     pause: false,
@@ -175,6 +362,16 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::None,
+                // `background_tasks_changed` and `stop_task`, shells and
+                // subagents alike (2.1.318); `stop_task` takes one id. The
+                // `background_tasks` control request with a `tool_use_id` is
+                // Ctrl+B for that call (2.1.319).
+                background: Some(BackgroundControl {
+                    stop: BackgroundStop::Each,
+                    move_running: true,
+                }),
+                // `set_model` and `apply_flag_settings` (2.1.318).
+                live_settings: true,
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
@@ -190,14 +387,31 @@ impl ProviderKind {
                         PluginActionKind::Update,
                     ],
                     marketplaces: true,
+                    scopes: &[PluginScope::User, PluginScope::Project, PluginScope::Local],
+                    source_install: false,
+                    unmanaged: None,
                 },
                 instruction_channel: InstructionChannel::SessionAppend,
                 account_login: true,
+                session_transfer: true,
             },
             ProviderKind::Codex => Caps {
                 supports_steering: true,
                 supports_fork: true,
-                native_rewind: false,
+                // `thread/fork {lastTurnId}`, the turn before the prompt's: the
+                // first prompt has none.
+                fork_at: true,
+                // `thread/revert`: conversation only, never files (its undo
+                // was removed); a turn it reverts while running is stopped.
+                rewind: Some(RewindControl {
+                    modes: &[RewindMode::Conversation],
+                    first_turn_conversation: true,
+                    steer_targets: false,
+                    later_history: LaterHistory::Truncated,
+                    preview: RewindPreviewKind::None,
+                    running_turn: RunningTurnPolicy::Interrupt,
+                    restores_command_edits: false,
+                }),
                 manual_compaction: true,
                 goals: Some(GoalControl {
                     pause: true,
@@ -206,6 +420,13 @@ impl ProviderKind {
                 per_turn_effort: true,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::None,
+                // `thread/backgroundTerminals/*`: `terminate` and `clean`,
+                // experimental (0.167.0).
+                background: Some(BackgroundControl {
+                    stop: BackgroundStop::EachAndAll,
+                    move_running: false,
+                }),
+                live_settings: true,
                 mcp_servers: true,
                 // `codex features list` reports `computer_use stable` (0.159.3).
                 native_computer_use: true,
@@ -221,19 +442,26 @@ impl ProviderKind {
                         PluginActionKind::Disable,
                     ],
                     marketplaces: true,
+                    scopes: &[PluginScope::User],
+                    source_install: false,
+                    unmanaged: None,
                 },
                 instruction_channel: InstructionChannel::DeveloperContext,
-                account_login: false,
+                account_login: true,
+                session_transfer: false,
             },
             ProviderKind::Acp => Caps {
                 supports_steering: false,
                 supports_fork: false,
-                native_rewind: false,
+                fork_at: false,
+                rewind: None,
                 manual_compaction: false,
                 goals: None,
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
+                background: None,
+                live_settings: false,
                 // ACP support is negotiated per agent; capable agents receive
                 // every tcode HTTP MCP registration in session/new or load.
                 mcp_servers: true,
@@ -245,73 +473,159 @@ impl ProviderKind {
                 plugin_management: PluginManagement::NONE,
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
                 account_login: false,
+                session_transfer: false,
             },
             ProviderKind::Pi => Caps {
                 supports_steering: true,
                 supports_fork: false,
-                native_rewind: false,
+                // RPC `fork`, in a process of the fork's own so the source's
+                // running turn, which that request aborts, is left alone.
+                fork_at: true,
+                // RPC `fork` goes on in a new session file from before a user
+                // message and keeps the old one, which `switch_session` returns
+                // to; files are not pi's to restore.
+                rewind: Some(RewindControl {
+                    modes: &[RewindMode::Conversation],
+                    first_turn_conversation: true,
+                    steer_targets: false,
+                    later_history: LaterHistory::Branch,
+                    preview: RewindPreviewKind::None,
+                    running_turn: RunningTurnPolicy::Interrupt,
+                    restores_command_edits: false,
+                }),
                 manual_compaction: true,
                 goals: None,
                 per_turn_effort: false,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
+                background: None,
+                live_settings: true,
                 mcp_servers: false,
                 native_computer_use: false,
                 launch_args: true,
                 option_descriptors: OptionDescriptors::Catalog,
                 home_path: true,
                 trust_project_extensions: true,
-                plugin_management: PluginManagement::NONE,
+                plugin_management: PluginManagement {
+                    actions: &[
+                        PluginActionKind::Install,
+                        PluginActionKind::Uninstall,
+                        PluginActionKind::Update,
+                    ],
+                    scopes: &[PluginScope::User, PluginScope::Project],
+                    source_install: true,
+                    ..PluginManagement::NONE
+                },
                 instruction_channel: InstructionChannel::None,
                 account_login: false,
+                session_transfer: false,
             },
             ProviderKind::OpenCode => Caps {
-                supports_steering: false,
-                supports_fork: false,
-                native_rewind: false,
-                manual_compaction: false,
+                supports_steering: true,
+                supports_fork: true,
+                // `POST /api/session/{id}/fork {before}`.
+                fork_at: true,
+                // A revert restores the conversation, with or without the
+                // files its steps changed; there is no files-only revert. It
+                // stays staged until the next prompt or compaction commits it,
+                // and the files come back from snapshots of the whole
+                // worktree, whatever changed them.
+                rewind: Some(RewindControl {
+                    modes: &[RewindMode::FilesAndConversation, RewindMode::Conversation],
+                    first_turn_conversation: true,
+                    steer_targets: false,
+                    later_history: LaterHistory::HiddenUntilNextSend,
+                    preview: RewindPreviewKind::None,
+                    running_turn: RunningTurnPolicy::Interrupt,
+                    restores_command_edits: true,
+                }),
+                manual_compaction: true,
                 goals: None,
                 per_turn_effort: true,
                 options_apply_live: false,
-                live_option_push: LiveOptionPush::None,
+                live_option_push: LiveOptionPush::Only(&["agent"]),
+                background: None,
+                live_settings: true,
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
                 option_descriptors: OptionDescriptors::Catalog,
                 home_path: false,
                 trust_project_extensions: false,
-                plugin_management: PluginManagement::NONE,
-                instruction_channel: InstructionChannel::PerPromptSystem,
+                plugin_management: PluginManagement {
+                    actions: &[
+                        PluginActionKind::Install,
+                        PluginActionKind::Uninstall,
+                        PluginActionKind::Update,
+                    ],
+                    scopes: &[PluginScope::User],
+                    source_install: true,
+                    ..PluginManagement::NONE
+                },
+                instruction_channel: InstructionChannel::SessionAppend,
                 account_login: false,
+                session_transfer: false,
             },
             ProviderKind::Cursor => Caps {
                 supports_steering: false,
                 supports_fork: false,
-                native_rewind: false,
+                fork_at: false,
+                rewind: None,
                 manual_compaction: false,
                 goals: None,
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
+                background: None,
+                live_settings: false,
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
                 option_descriptors: OptionDescriptors::Wire,
                 home_path: true,
                 trust_project_extensions: false,
-                plugin_management: PluginManagement::NONE,
+                plugin_management: PluginManagement {
+                    unmanaged: Some(UnmanagedPlugins {
+                        kind: UnmanagedPluginsKind::EditorOnly,
+                    }),
+                    ..PluginManagement::NONE
+                },
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
                 account_login: false,
+                session_transfer: false,
             },
             ProviderKind::Grok => Caps {
                 supports_steering: true,
                 supports_fork: true,
-                native_rewind: false,
+                // `_x.ai/session/fork` with the prompt's number.
+                fork_at: true,
+                // `_x.ai/rewind/execute`: a prompt's number, in every mode its
+                // /rewind offers. The files are the snapshots its own tools
+                // took; a dry run lists them and those changed since.
+                rewind: Some(RewindControl {
+                    modes: &[
+                        RewindMode::FilesAndConversation,
+                        RewindMode::Conversation,
+                        RewindMode::Files,
+                    ],
+                    first_turn_conversation: true,
+                    steer_targets: false,
+                    later_history: LaterHistory::Truncated,
+                    preview: RewindPreviewKind::Conflicts,
+                    running_turn: RunningTurnPolicy::Interrupt,
+                    restores_command_edits: false,
+                }),
                 manual_compaction: false,
                 goals: None,
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
+                // `background_tasks` lists them; nothing stops one.
+                background: Some(BackgroundControl {
+                    stop: BackgroundStop::None,
+                    move_running: false,
+                }),
+                live_settings: false,
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
@@ -325,9 +639,13 @@ impl ProviderKind {
                         PluginActionKind::Update,
                     ],
                     marketplaces: true,
+                    scopes: &[PluginScope::User],
+                    source_install: false,
+                    unmanaged: None,
                 },
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
                 account_login: false,
+                session_transfer: false,
             },
         }
     }
@@ -351,17 +669,47 @@ impl ProviderKind {
 pub struct PluginManagement {
     pub actions: &'static [PluginActionKind],
     pub marketplaces: bool,
+    /// The native scopes plugins are installed or enabled in. User scope is
+    /// each account's own configuration directory; project and local scopes
+    /// are files in the project, shared by every account.
+    pub scopes: &'static [PluginScope],
+    /// There is no catalog: an install takes a package source a person
+    /// types.
+    pub source_install: bool,
+    /// Set for a harness that extends itself natively in a way Tcode does
+    /// not manage.
+    pub unmanaged: Option<UnmanagedPlugins>,
 }
 
 impl PluginManagement {
     pub const NONE: Self = Self {
         actions: &[],
         marketplaces: false,
+        scopes: &[],
+        source_install: false,
+        unmanaged: None,
     };
+
+    /// Whether Tcode lists and changes this harness's plugins.
+    pub fn manages(&self) -> bool {
+        !self.actions.is_empty() || self.marketplaces
+    }
 
     pub fn supports(&self, action: PluginActionKind) -> bool {
         self.actions.contains(&action)
     }
+}
+
+/// How a harness Tcode does not manage plugins for extends itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnmanagedPlugins {
+    pub kind: UnmanagedPluginsKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnmanagedPluginsKind {
+    /// Plugins installed only from the harness's own editor.
+    EditorOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -479,6 +827,11 @@ pub struct PluginInstallation {
     /// effective value is [`ProviderPluginEntry::enabled`].
     #[serde(default)]
     pub scope_enabled: Option<bool>,
+    /// A project or local installation of another project than the one the
+    /// catalog was listed from: the CLI lists those home-wide, but this
+    /// project's scope does not hold it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub other_project: bool,
 }
 
 /// Components a plugin declares, by name. A `None` field was not enumerated,
@@ -514,6 +867,10 @@ pub struct ProviderPluginEntry {
     pub name: String,
     #[serde(default)]
     pub version: Option<String>,
+    /// A newer version the native catalog reports for an installed plugin.
+    /// `None` when it reports none, including a CLI that never tells.
+    #[serde(default)]
+    pub latest_version: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     pub source: PluginSource,
@@ -524,6 +881,10 @@ pub struct ProviderPluginEntry {
     pub enabled: Tri,
     #[serde(default)]
     pub declared: Option<DeclaredComponents>,
+    /// The native estimate of what the plugin adds to every session's
+    /// context, as the CLI prints it (`~32 tok`).
+    #[serde(default)]
+    pub always_on: Option<String>,
     #[serde(default)]
     pub errors: Vec<String>,
     #[serde(default)]
@@ -630,9 +991,9 @@ pub async fn list_plugins(
         ProviderKind::ClaudeCode => claude_plugins::list(context).await,
         ProviderKind::Codex => codex::plugins::list(context).await,
         ProviderKind::Grok => grok::plugins::list(context).await,
-        ProviderKind::Pi | ProviderKind::OpenCode | ProviderKind::Cursor | ProviderKind::Acp => {
-            Err(no_plugin_management(provider))
-        }
+        ProviderKind::Pi => source_plugins::list_pi(context).await,
+        ProviderKind::OpenCode => source_plugins::list_opencode(context).await,
+        ProviderKind::Cursor | ProviderKind::Acp => Err(no_plugin_management(provider)),
     }
 }
 
@@ -647,9 +1008,37 @@ pub async fn run_plugin_op(
         ProviderKind::ClaudeCode => claude_plugins::run(context, op).await,
         ProviderKind::Codex => codex::plugins::run(context, op).await,
         ProviderKind::Grok => grok::plugins::run(context, op).await,
-        ProviderKind::Pi | ProviderKind::OpenCode | ProviderKind::Cursor | ProviderKind::Acp => {
-            Err(no_plugin_management(provider))
-        }
+        ProviderKind::Pi => source_plugins::run_pi(context, op).await,
+        ProviderKind::OpenCode => source_plugins::run_opencode(context, op).await,
+        ProviderKind::Cursor | ProviderKind::Acp => Err(no_plugin_management(provider)),
+    }
+}
+
+/// Copy the native session `resume` names out of the home a profile launched
+/// with `from` keeps it in, into the one `to` launches with, so that profile
+/// resumes the same session. Only a provider with [`Caps::session_transfer`]
+/// can. Blocking.
+#[cfg(feature = "process")]
+pub fn transfer_session(
+    provider: ProviderKind,
+    from: &LaunchEnv,
+    to: &LaunchEnv,
+    resume: &ResumeCursor,
+) -> std::io::Result<()> {
+    match provider {
+        ProviderKind::ClaudeCode => claude::transfer_session(from, to, resume),
+        ProviderKind::Codex
+        | ProviderKind::Pi
+        | ProviderKind::OpenCode
+        | ProviderKind::Cursor
+        | ProviderKind::Grok
+        | ProviderKind::Acp => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "{} cannot carry a session to another profile",
+                provider.display_name()
+            ),
+        )),
     }
 }
 
@@ -794,9 +1183,9 @@ pub struct SessionOptions {
     /// Provider-native model id; `None` = provider default.
     pub model: Option<String>,
     pub resume: Option<ResumeCursor>,
-    /// Fork the resumed provider session instead of continuing it in place.
-    /// This is meaningful only when `resume` is present.
-    pub fork: bool,
+    /// Go on somewhere other than where the resumed session stands. This is
+    /// meaningful only when `resume` is present.
+    pub fork: Option<ForkPoint>,
     /// Override for the CLI binary; `None` = resolve from PATH.
     pub binary_path: Option<PathBuf>,
     /// Chosen values for the provider's [`OptionDescriptor`]s (permission,
@@ -806,7 +1195,7 @@ pub struct SessionOptions {
     pub option_selections: Vec<OptionSelection>,
     /// Enabled tcode HTTP MCP servers to register with this session.
     pub mcp_servers: Vec<McpRegistration>,
-    /// Per-provider environment (Settings → Providers): extra variables merged
+    /// Per-provider environment (Settings → Harnesses): extra variables merged
     /// into the child's environment, plus the config-directory override. See
     /// [`LaunchEnv`].
     pub launch_env: LaunchEnv,
@@ -821,7 +1210,7 @@ pub struct SessionOptions {
     pub instructions: Option<String>,
 }
 
-/// The per-provider environment configured in Settings → Providers, applied to
+/// The per-provider environment configured in Settings → Harnesses, applied to
 /// every child process we spawn for that provider (sessions, `list_models`, and
 /// version/auth probes alike).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -865,6 +1254,17 @@ impl LaunchEnv {
         }
         pairs
     }
+
+    /// The path `key` names in a child of `provider` launched with this
+    /// environment: the last pair that sets it, else this process's own.
+    pub fn child_path(&self, provider: ProviderKind, key: &str) -> Option<PathBuf> {
+        self.pairs(provider)
+            .into_iter()
+            .rev()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| PathBuf::from(value))
+            .or_else(|| std::env::var_os(key).map(PathBuf::from))
+    }
 }
 
 /// Connection details for the tcode preview MCP server (a streamable-HTTP
@@ -882,9 +1282,6 @@ pub struct McpRegistration {
 
 impl McpRegistration {
     pub const SERVER_NAME_PREVIEW: &'static str = "tcode_preview";
-    pub const SERVER_NAME_ORCHESTRATE: &'static str = "tcode_orchestrate";
-    /// The child-thread half of orchestration: a single `report_result` tool.
-    pub const SERVER_NAME_ORCHESTRATE_REPORT: &'static str = "tcode_report";
     pub const SERVER_NAME_COMPUTER_USE: &'static str = "tcode_computer_use";
     pub const SERVER_NAME_PULL_REQUESTS: &'static str = "tcode_pull_requests";
     pub const SERVER_NAME_CONTROL: &'static str = "tcode_control";
@@ -984,7 +1381,7 @@ pub enum ApplyTiming {
     Restart,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectOption {
     pub value: String,
     pub label: String,
@@ -1300,7 +1697,7 @@ pub(crate) fn resolve_binary(
     }
     find_on_path(default_name).ok_or_else(|| {
         AgentError::Spawn(format!(
-            "`{default_name}` not found on PATH (set its path in Settings → Providers)"
+            "`{default_name}` not found on PATH (set its path in Settings → Harnesses)"
         ))
     })
 }
@@ -1548,6 +1945,11 @@ pub async fn list_models(
 #[derive(Debug)]
 pub enum AgentError {
     Spawn(String),
+    /// The CLI is a Windows batch file that is not a recognised package
+    /// manager shim, and an argument spans lines, which `cmd.exe` cannot pass.
+    BatchLineBreak {
+        program: PathBuf,
+    },
     Protocol(String),
     Provider(String),
     Io(std::io::Error),
@@ -1559,6 +1961,11 @@ impl std::fmt::Display for AgentError {
             Self::Spawn(message) => {
                 write!(formatter, "failed to spawn provider process: {message}")
             }
+            Self::BatchLineBreak { program } => write!(
+                formatter,
+                "failed to spawn provider process: `{}` is a batch file, which cannot be given an argument that spans lines; install the CLI's native build or set its executable in Settings → Harnesses",
+                program.display()
+            ),
             Self::Protocol(message) => write!(formatter, "protocol error: {message}"),
             Self::Provider(message) => write!(formatter, "provider reported error: {message}"),
             Self::Io(error) => error.fmt(formatter),
@@ -1634,12 +2041,48 @@ pub enum SessionCommand {
         id: String,
         value: serde_json::Value,
     },
+    /// Stop one piece of background work, or all of it with `None`, on a
+    /// harness whose [`Caps::background`] stops it. Its next
+    /// [`AgentEvent::BackgroundTaskList`] shows the result.
+    StopBackgroundTask {
+        task_id: Option<String>,
+    },
+    /// Move the running call `item_id` into the background, on a harness
+    /// whose [`Caps::background`] can: the call returns to the model and its
+    /// work goes on ([`AgentEvent::ItemBackgrounded`]).
+    MoveToBackground {
+        item_id: String,
+    },
+    /// Bring the running process to these settings where it stands, on a
+    /// harness whose [`Caps::live_settings`] says it can be asked. Answered by
+    /// [`AgentEvent::SettingsApplied`].
+    ApplySettings {
+        model: Option<String>,
+        option_selections: Vec<OptionSelection>,
+    },
     /// Ask the provider to restore one of its own message checkpoints. The
     /// provider remains the sole owner of both the checkpoint and the restore
-    /// semantics; adapters without a native implementation reject this.
+    /// semantics; adapters without a native implementation reject this. Where
+    /// [`RewindControl::running_turn`] interrupts, the adapter stops a running
+    /// turn first the way its harness does. Answered by
+    /// [`AgentEvent::RewindCompleted`] or [`AgentEvent::RewindFailed`].
     Rewind {
         checkpoint_id: String,
         mode: RewindMode,
+    },
+    /// Ask what [`Self::Rewind`] would restore, without restoring anything,
+    /// where [`RewindControl::preview`] says the harness can tell. Answered by
+    /// [`AgentEvent::RewindPreviewed`].
+    PreviewRewind {
+        checkpoint_id: String,
+        mode: RewindMode,
+    },
+    /// Undo a rewind the harness keeps undoable: the `undo_token` of its
+    /// [`AgentEvent::RewindCompleted`]. Answered by
+    /// [`AgentEvent::RewindUndone`] or [`AgentEvent::RewindUndoFailed`].
+    UndoRewind {
+        checkpoint_id: String,
+        undo_token: String,
     },
     /// Ask the provider to compact its context now, the way its own `/compact`
     /// does (Codex `thread/compact/start`, pi `compact`, Claude Code's
@@ -1659,6 +2102,16 @@ pub enum SessionCommand {
     },
     /// Clear the standing goal (Codex `thread/goal/clear`, `/goal clear`).
     ClearGoal,
+    /// Read the signed-in account's usage windows from the running harness
+    /// (Claude Code's `get_usage` control request, Codex
+    /// `account/rateLimits/read`), answered on `reply` with the payload a
+    /// short-lived process would give ([`claude::read_usage`],
+    /// [`codex::read_rate_limits`]). A harness without such a read drops
+    /// `reply`.
+    #[cfg(feature = "process")]
+    ReadAccountUsage {
+        reply: smol::channel::Sender<Result<serde_json::Value, String>>,
+    },
     Shutdown,
 }
 
@@ -1669,6 +2122,13 @@ pub struct SessionHandle {
     pub provider: ProviderKind,
     pub commands: Sender<SessionCommand>,
     pub events: Receiver<AgentEvent>,
+}
+
+#[cfg(feature = "process")]
+fn now_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
 #[cfg(feature = "process")]
@@ -1747,16 +2207,6 @@ pub enum ClassifierCategory {
     Other(String),
 }
 
-impl ClassifierCategory {
-    pub fn parse(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "cyber" => Self::Cyber,
-            "bio" => Self::Bio,
-            other => Self::Other(other.to_string()),
-        }
-    }
-}
-
 /// A failed native turn can be continued without adding user input.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnRetry {
@@ -1814,19 +2264,18 @@ pub enum AgentEvent {
         model: String,
         reason: Option<String>,
     },
+    /// History-only: retained to decode stored rows; never emitted.
     ModelFallbackDetected {
         expected: String,
         actual: String,
         category: Option<ClassifierCategory>,
-        /// Claude's `refused_user_message_uuid` — the native rewind checkpoint for the refused turn.
         checkpoint_id: Option<String>,
         parent_tool_use_id: Option<String>,
     },
+    /// History-only: retained to decode stored rows; never emitted.
     TurnBlocked {
         category: Option<ClassifierCategory>,
-        /// The selected model that refused (NOT "<synthetic>").
         model: Option<String>,
-        /// Human-readable detail from Claude's error text.
         detail: String,
     },
     TurnStarted {
@@ -1848,6 +2297,18 @@ pub enum AgentEvent {
     BackgroundTasksChanged {
         count: usize,
     },
+    /// The background work a harness with [`Caps::background`] is running
+    /// now, replacing the last list. Transient, like
+    /// [`Self::BackgroundTasksChanged`], which goes on carrying the liveness a
+    /// list that just emptied may not yet mean.
+    BackgroundTaskList {
+        tasks: Vec<BackgroundTask>,
+    },
+    /// The answer to [`SessionCommand::ApplySettings`]; `false` when the change
+    /// takes a restart. Transient, like [`Self::TurnAccepted`].
+    SettingsApplied {
+        applied: bool,
+    },
     /// The provider's current net file changes for one turn. Unlike the
     /// per-tool [`ItemContent::FileChange`] stream, this is a replacement
     /// snapshot: later events with the same `turn_id` supersede earlier ones.
@@ -1865,20 +2326,72 @@ pub enum AgentEvent {
         turn_id: String,
         checkpoint_id: String,
     },
-    /// The provider successfully applied a native restore operation. A
-    /// conversation restore also returns the selected prompt for composer
-    /// prefill, matching the provider's own edit-after-rewind behavior.
+    /// A provider-owned restore point for a steer: the conversation alone
+    /// can be rewound to before it ([`RewindControl::steer_targets`]).
+    SteerCheckpoint {
+        request_id: String,
+        checkpoint_id: String,
+    },
+    /// The restore points recorded so far no longer address the harness's
+    /// session (the thread was forked into a new one); none of them is a
+    /// rewind target any more.
+    CheckpointsCleared,
+    /// The latest rewind can no longer be undone here, though nothing was
+    /// sent after it: its log was carried into a thread that goes on in
+    /// another of the Harness's sessions, so the branch it left is reached
+    /// only as a thread of its own, which one thread at a time can go on in.
+    RewindUndoClosed,
+    /// Whether this thread's harness session can be rewound at all, where
+    /// that differs between sessions of one harness (Codex's legacy history).
+    RewindAvailability {
+        /// Why it cannot; `None` once it can.
+        unavailable: Option<RewindFailureReason>,
+    },
+    /// What a [`SessionCommand::PreviewRewind`] found. Transient, like
+    /// [`Self::TurnAccepted`]: the runtime answers the client that asked.
+    RewindPreviewed {
+        checkpoint_id: String,
+        mode: RewindMode,
+        result: RewindPreviewResult,
+    },
+    /// The provider applied a native restore operation. `mode` is what it
+    /// restored; when that is less than was asked, `incomplete` says what
+    /// failed. A conversation restore also returns the selected prompt for
+    /// composer prefill, matching the provider's own edit-after-rewind
+    /// behavior.
     RewindCompleted {
         checkpoint_id: String,
         mode: RewindMode,
         prefill: Option<String>,
+        /// Local paths of the images the restored prompt carried.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        prefill_attachments: Vec<String>,
+        #[serde(default)]
+        later_history: LaterHistory,
+        /// The files the restore changed, when the harness said.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        files: Option<RewindFiles>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        incomplete: Option<RewindIncomplete>,
+        /// Present while the harness keeps this rewind undoable; returned in
+        /// [`SessionCommand::UndoRewind`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        undo_token: Option<String>,
     },
-    /// A native restore request was rejected without changing tcode's local
-    /// conversation state.
+    /// A native restore request was rejected without changing anything.
     RewindFailed {
         checkpoint_id: String,
         mode: RewindMode,
-        error: String,
+        failure: RewindFailure,
+    },
+    /// The harness undid the rewind to `checkpoint_id`: the later turns are
+    /// its conversation again.
+    RewindUndone {
+        checkpoint_id: String,
+    },
+    RewindUndoFailed {
+        checkpoint_id: String,
+        failure: RewindFailure,
     },
     TurnCompleted {
         turn_id: String,
@@ -1888,6 +2401,16 @@ pub enum AgentEvent {
     ItemStarted(ThreadItem),
     ItemUpdated(ThreadItem),
     ItemCompleted(ThreadItem),
+    /// The call `item_id` returned to the model while the work it started
+    /// goes on — a command or an agent launched in the background — so the
+    /// turn no longer waits on it. The item stays in progress until a later
+    /// snapshot settles it, which is when that work ends. `parent_item_id`
+    /// is the item's own, as on [`ThreadItem`].
+    ItemBackgrounded {
+        item_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_item_id: Option<String>,
+    },
     /// A runtime-synthesized steering request, persisted before provider delivery.
     SteerRequested {
         request_id: String,
@@ -1958,6 +2481,11 @@ pub enum AgentEvent {
     ContextWindowChanged {
         window: u64,
     },
+    /// The message before this ran on the settings the live process started
+    /// with: the restart that takes the thread's new ones waits for its
+    /// background work. Never emitted by an adapter; the runtime persists it
+    /// after the user message it describes.
+    SettingsKept,
     /// Another thread's model acted on this thread through `tcode_control`. This is
     /// never emitted by an adapter; the runtime records it in the target thread.
     ControlAction(ControlAction),
@@ -2061,12 +2589,165 @@ pub enum TurnStatus {
 
 /// Provider-native restore scopes. These describe what the upstream agent
 /// changes; tcode never emulates a missing scope with Git or transcript edits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RewindMode {
     Files,
     Conversation,
     FilesAndConversation,
+}
+
+impl SessionCommand {
+    /// The answer to a rewind command the adapter cannot carry out: the
+    /// failure event that command expects, or `None` for any other command.
+    pub fn rewind_refusal(&self, failure: RewindFailure) -> Option<AgentEvent> {
+        Some(match self {
+            Self::Rewind {
+                checkpoint_id,
+                mode,
+            } => AgentEvent::RewindFailed {
+                checkpoint_id: checkpoint_id.clone(),
+                mode: *mode,
+                failure,
+            },
+            Self::PreviewRewind {
+                checkpoint_id,
+                mode,
+            } => AgentEvent::RewindPreviewed {
+                checkpoint_id: checkpoint_id.clone(),
+                mode: *mode,
+                result: RewindPreviewResult::Refused(failure),
+            },
+            Self::UndoRewind { checkpoint_id, .. } => AgentEvent::RewindUndoFailed {
+                checkpoint_id: checkpoint_id.clone(),
+                failure,
+            },
+            _ => return None,
+        })
+    }
+}
+
+/// Why a harness did not rewind, in the terms the UI explains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindFailureReason {
+    /// A turn is running and the harness does not stop it for a rewind.
+    TurnRunning,
+    /// Input the harness has not taken yet is waiting.
+    Busy,
+    /// The target is no longer in the harness's conversation (compacted,
+    /// forked away, already rewound).
+    TargetNotFound,
+    /// The conversation changed since the target was chosen.
+    ConversationChanged,
+    /// The harness cannot cut the conversation at that point.
+    CannotCutHere,
+    /// There was nothing to restore.
+    NothingToRestore,
+    /// Files changed outside the agent since; restoring would overwrite them.
+    Conflicts,
+    UsageLimited,
+    Expired,
+    /// The harness could not save the result.
+    SaveFailed,
+    /// This thread's session cannot be rewound.
+    Unsupported,
+    /// The harness process stopped before it answered.
+    ProcessGone,
+    #[serde(other)]
+    Other,
+}
+
+/// A refusal or failure, with the harness's own words for the log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindFailure {
+    pub reason: RewindFailureReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl RewindFailure {
+    pub fn new(reason: RewindFailureReason, detail: impl Into<Option<String>>) -> Self {
+        Self {
+            reason,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// The part of a rewind that failed after another part was made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindIncomplete {
+    pub requested: RewindMode,
+    pub failure: RewindFailure,
+}
+
+/// Files a rewind restores or would restore.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindFiles {
+    pub files: Vec<RewindFile>,
+    /// Totals, when the harness counts lines only across all files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insertions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u64>,
+    /// Paths the harness leaves alone for link safety.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skipped_links: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindFile {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insertions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u64>,
+}
+
+impl RewindFile {
+    pub fn path(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            insertions: None,
+            deletions: None,
+        }
+    }
+}
+
+/// What a rewind would do, before it is made.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindPreview {
+    pub files: RewindFiles,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<RewindConflict>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindConflict {
+    pub path: String,
+    pub kind: RewindConflictKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindConflictKind {
+    ModifiedExternally,
+    CreatedExternally,
+    DeletedExternally,
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum RewindPreviewResult {
+    Ready(RewindPreview),
+    Refused(RewindFailure),
 }
 
 impl RewindMode {
@@ -2125,13 +2806,11 @@ pub struct ThreadItem {
 pub enum ItemContent {
     UserMessage {
         text: String,
-        /// Byte length of an injected context prefix folded into `text` — the
-        /// orchestrate guidance + configuration that `/orchestrate` composes
-        /// ahead of the user's own words. The provider still receives the whole
-        /// `text`; the UI uses this offset to render the prefix as a collapsed
-        /// disclosure row and keep the bubble to `text[context_len..]`. Absent on
-        /// ordinary messages and on every log written before this field existed,
-        /// which therefore render as a plain bubble exactly as before.
+        /// Byte length of a context prefix Tcode folded into `text` ahead of the
+        /// user's own words. Only stored messages carry it; nothing sends one
+        /// now. The provider received the whole `text`; the UI renders the
+        /// prefix as a collapsed disclosure row and keeps the bubble to
+        /// `text[context_len..]`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_len: Option<usize>,
         /// Local paths of the image attachments sent with this message, so the
@@ -2149,6 +2828,13 @@ pub enum ItemContent {
     },
     Reasoning {
         text: String,
+    },
+    /// A plan the harness proposed on its way out of its own plan mode
+    /// (Claude Code's `ExitPlanMode`, Grok's `exit_plan_mode`, Cursor's
+    /// `create_plan`, Codex's plan item). When the harness waits on a decision
+    /// it also asks an [`ApprovalKind::Plan`] naming this item.
+    Plan {
+        markdown: String,
     },
     CommandExecution {
         command: String,
@@ -2355,6 +3041,10 @@ pub enum ApprovalKind {
         input: serde_json::Value,
         detail: String,
     },
+    /// Leave the harness's plan mode on the plan in [`ItemContent::Plan`]
+    /// item `item_id`. A reply in the user's own words is
+    /// [`ApprovalDecision::Feedback`]: the harness keeps planning from it.
+    Plan { item_id: String, markdown: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2365,6 +3055,10 @@ pub enum ApprovalDecision {
     Cancel,
     /// Pick one of the provider's own [`ApprovalOption`]s.
     Option(String),
+    /// Decline in the user's own words, which the agent continues from:
+    /// Claude denies with them as the message, Grok and Cursor return them as
+    /// plan feedback. A provider with no channel for words declines once.
+    Feedback(String),
 }
 
 impl<'de> Deserialize<'de> for ApprovalDecision {
@@ -2374,6 +3068,7 @@ impl<'de> Deserialize<'de> for ApprovalDecision {
         enum StoredDecision {
             Cancel,
             Option(String),
+            Feedback(String),
             Approve,
             ApproveForSession,
             Deny,
@@ -2381,6 +3076,7 @@ impl<'de> Deserialize<'de> for ApprovalDecision {
         Ok(match StoredDecision::deserialize(deserializer)? {
             StoredDecision::Cancel => Self::Cancel,
             StoredDecision::Option(id) => Self::Option(id),
+            StoredDecision::Feedback(text) => Self::Feedback(text),
             // These ids are history-only and never occur in live request options.
             StoredDecision::Approve => Self::Option("legacy:approve".into()),
             StoredDecision::ApproveForSession => Self::Option("legacy:approve_for_session".into()),

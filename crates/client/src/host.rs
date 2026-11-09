@@ -134,11 +134,45 @@ pub struct ClientPreferences {
     /// [`tcode_core::attachments::DEFAULT_REMOTE_BYTES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_attachment_limit_mib: Option<u32>,
+    /// The width, in points, the user dragged a right panel to. One value:
+    /// every conversation's panel in every pane rests at it, as far as its
+    /// pane allows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_panel_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_collapsed: Option<bool>,
+    /// `"flat"` or `"grouped"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_layout: Option<String>,
+    /// `None` until this device first arranges its workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspacePreference>,
 }
 
-/// One image the platform's own picker handed back, already read into memory.
+/// The hosts this device's window lists side by side.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspacePreference {
+    /// In the order the window lists them.
+    #[serde(default)]
+    pub hosts: Vec<WorkspaceHost>,
+    /// Group members this device took out of its workspace. Every other
+    /// member of a group joins it by default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceHost {
+    /// A saved host's id, or `"local"` for the host in this process.
+    pub host_id: String,
+    /// Whether the window folds this host's section away.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collapsed: bool,
+}
+
+/// One file a platform picker handed back, already read into memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PickedImage {
+pub struct PickedFile {
     pub name: String,
     pub mime: String,
     pub bytes: Vec<u8>,
@@ -187,6 +221,14 @@ pub trait ClientHost: 'static {
     fn load_hosts(&self) -> Vec<PairedHost>;
     fn save_hosts(&self, hosts: &[PairedHost]);
 
+    /// Wakes after the saved machines change, for as long as it is held:
+    /// a group's roster arrives with a pairing, a connection or the machine
+    /// in this process joining the group, none of which the window asked
+    /// for. `None` where nothing else changes them.
+    fn saved_hosts_changes(&self) -> Option<async_channel::Receiver<()>> {
+        None
+    }
+
     /// Replace one pairing while preserving unrelated saved machines. Native
     /// adapters make these mutations atomic with transport address updates.
     fn remember_host(&self, host: PairedHost) {
@@ -207,6 +249,12 @@ pub trait ClientHost: 'static {
             host.last_connected_unix = Some(timestamp);
             self.save_hosts(&hosts);
         }
+    }
+
+    /// The id of the machine hosted from this client's own data, which is
+    /// never also one of its remote machines.
+    fn local_machine_id(&self) -> Option<String> {
+        None
     }
 
     /// `Some(id)` of the host to reconnect to on launch.
@@ -253,8 +301,20 @@ pub trait ClientHost: 'static {
     /// Let the user choose up to `limit` images in the platform's media
     /// picker. Dismissing the picker resolves to an empty list; `Err` is a
     /// real failure to show.
-    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedImage>, String>> {
+    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedFile>, String>> {
         let _ = limit;
+        Box::pin(async { Err("unsupported".into()) })
+    }
+
+    /// Whether [`pick_files`](Self::pick_files) opens a platform file picker.
+    /// Desktops attach by drop and paste instead.
+    fn supports_file_picker(&self) -> bool {
+        false
+    }
+
+    /// Let the user choose files of any type. Dismissing the picker resolves
+    /// to an empty list; `Err` is a real failure to show.
+    fn pick_files(&self) -> HostFuture<'_, Result<Vec<PickedFile>, String>> {
         Box::pin(async { Err("unsupported".into()) })
     }
 

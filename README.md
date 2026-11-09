@@ -83,11 +83,11 @@ and a live plan/task panel.
 
 **Everything else, over [ACP](https://agentclientprotocol.com).** Tcode ships a
 marketplace backed by the official ACP registry.
-Install one from **Settings → Providers**, or point Tcode at any command that
+Install one from **Settings → Harnesses**, or point Tcode at any command that
 speaks ACP.
 
 <div align="center">
-<img src="docs/images/acp-marketplace.png" width="720" alt="ACP agent marketplace in Settings → Providers">
+<img src="docs/images/acp-marketplace.png" width="720" alt="ACP agent marketplace in Settings → Harnesses">
 </div>
 
 > ACP entries that duplicate a native integration are deliberately hidden from
@@ -111,7 +111,7 @@ uses n0's public iroh relays and lookup service, which n0 describes as
 rate-limited with no uptime guarantee.
 
 Every device shows the *same* app. There is no reduced phone build: a phone, or
-a tablet narrower than 900px, shows a machines → threads → thread stack; a
+a tablet narrower than 900px, shows a threads → thread stack; a
 wider tablet and every desktop window use the split layout. Some actions depend
 on the device in your hands, such as opening a native file dialog or driving the
 embedded preview browser.
@@ -141,10 +141,11 @@ Traverse mode. Headless release builds also serve the browser app, on
 address. Set a password on first open, or preset it with `TCODE_PASSWORD`.
 
 **Connect another device.** Open the sidebar's **Machines** row on a desktop,
-or the opening screen on a phone. Scan the machine's QR code or paste its
-invitation link; pairing connects at once. In a browser, open the printed HTTP
-link and log in with the password; the browser is for direct access on the
-machine or its LAN and does not use Traverse. Its **Settings → Remote** shows
+or **Machines** from a phone's threads list. Scan the machine's QR code or
+paste its invitation link; pairing connects at once and adds the machine to
+the window beside the others. In a browser, open the printed HTTP link and log
+in with the password; the browser is for direct access on the machine or its
+LAN and does not use Traverse. Its **Settings → Remote** shows
 the machine's invitation for native clients and controls pairing and
 revocation.
 See [Use Tcode from other devices](docs/remote.md) for the full guide.
@@ -167,14 +168,28 @@ guide.
 **1. Install Tcode.** Download a build for your platform from
 [Releases](https://github.com/Tryanks/tcode/releases) — macOS 27+ (Apple
 silicon), Windows 11+ (x64 / ARM64), Linux (x64 / ARM64) — and run it. Check the
-release notes for runtime requirements and signing status. Linux needs the listed
-system libraries and a Vulkan driver.
+release notes for runtime requirements and signing status. Linux needs ALSA,
+Fontconfig, the Wayland/X11 client libraries, libgbm, a Vulkan loader with a
+working Vulkan driver, and GTK 3 with WebKitGTK 4.1 for the embedded preview:
+
+```sh
+# Debian / Ubuntu
+sudo apt install libwebkit2gtk-4.1-0 libgtk-3-0 libasound2 libfontconfig1 \
+  libgbm1 libwayland-client0 libxkbcommon0 libxkbcommon-x11-0 libvulkan1 \
+  mesa-vulkan-drivers
+# Arch Linux (also install your GPU's Vulkan driver: vulkan-radeon,
+# vulkan-intel or nvidia-utils)
+sudo pacman -S --needed webkit2gtk-4.1 gtk3 alsa-lib fontconfig mesa wayland \
+  libxkbcommon libxkbcommon-x11 vulkan-icd-loader
+```
 
 For an unsigned macOS build, remove quarantine after installing the app with
 `xattr -dr com.apple.quarantine /Applications/Tcode.app`. The embedded preview
-browser is available on macOS, Windows, Android, iOS and Linux under X11 (on a
-Wayland session, start Tcode with `WAYLAND_DISPLAY` unset to run it on
-XWayland); the browser client opens dev servers in a new tab instead.
+browser is available on macOS, Windows, Android, iOS and Linux. On a Linux
+Wayland session it runs WebKitGTK on a nested compositor of its own
+(experimental; it needs `XDG_RUNTIME_DIR`), and starting Tcode with
+`WAYLAND_DISPLAY` unset embeds it through XWayland instead. The browser client
+opens dev servers in a new tab instead.
 
 Each release uses the native application icon format for its platform: `.icns`
 inside the macOS app bundle, an `.ico` resource embedded directly in the Windows

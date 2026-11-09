@@ -1,6 +1,7 @@
 //! Feedback ownership follows authenticated MCP sessions, not registration metadata.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
+use std::time::Instant;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -38,6 +39,7 @@ impl FeedbackSession {
                 generation: self.state.generation.load(Ordering::Acquire),
                 session: Arc::downgrade(&self.state),
                 cancellation,
+                finished: Arc::new(OnceLock::new()),
             },
             completed: false,
         }
@@ -66,7 +68,7 @@ pub(crate) struct FeedbackRun {
 }
 
 impl FeedbackRun {
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub(crate) fn ticket(&self) -> FeedbackTicket {
         self.ticket.clone()
     }
@@ -74,10 +76,11 @@ impl FeedbackRun {
         self.ticket.is_current()
     }
     /// A finished run, whether or not its actions worked, keeps the cursor for
-    /// its bounded idle tail. Cancellation and a dropped request clear their
-    /// own current marker immediately.
+    /// its bounded idle tail, timed from now. Cancellation and a dropped
+    /// request clear their own current marker immediately.
     pub(crate) fn complete(&mut self) {
         self.completed = true;
+        let _ = self.ticket.finished.set(Instant::now());
     }
 }
 
@@ -96,17 +99,27 @@ pub(crate) struct FeedbackTicket {
     generation: u64,
     session: Weak<FeedbackState>,
     cancellation: Option<tokio_util::sync::CancellationToken>,
+    finished: Arc<OnceLock<Instant>>,
 }
 
 impl FeedbackTicket {
+    /// rmcp cancels a request's token when it sends the response, so the
+    /// token only speaks for the run until the run has finished.
     pub(crate) fn is_current(&self) -> bool {
-        !self
-            .cancellation
-            .as_ref()
-            .is_some_and(|token| token.is_cancelled())
+        (self.finished().is_some()
+            || !self
+                .cancellation
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled()))
             && self.session.upgrade().is_some_and(|session| {
                 !session.closed.load(Ordering::Acquire)
                     && session.generation.load(Ordering::Acquire) == self.generation
             })
+    }
+
+    /// When the run that published this action finished; `None` while its
+    /// call is still acting or verifying.
+    pub(crate) fn finished(&self) -> Option<Instant> {
+        self.finished.get().copied()
     }
 }

@@ -14,12 +14,36 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, Toolbar, h_flex, v_flex};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Height reserved beneath chat messages for hover-revealed actions.
 pub(crate) const CHAT_ACTION_ROW_HEIGHT: f32 = 24.;
 /// Maximum width of the shared chat/composer content column.
 pub(crate) const CHAT_CONTENT_MAX_WIDTH: f32 = 720.;
 /// Minimum horizontal padding around the shared chat/composer content column.
 pub(crate) const CHAT_CONTENT_MIN_PADDING: f32 = 24.;
+/// The narrowest a side panel's content reads at: the right panel's (its
+/// icon tabs and own controls fit in it).
+pub(crate) const PANEL_CONTENT_MIN_WIDTH: f32 = 320.;
+/// The chat's side rail at its narrowest: a card header still holds its
+/// title, a few words of summary and its chevron. Kept below a panel's
+/// narrowest so the rail sits beside the centred column of a maximized
+/// 1512pt window with the sidebar open, whose chat is about 1256 wide.
+pub(crate) const CHAT_RAIL_NARROWEST: f32 = 220.;
+/// The chat's side rail at its widest: a wider gutter only widens the room
+/// between the column and the rail, since card rows gain nothing past it.
+pub(crate) const CHAT_RAIL_WIDEST: f32 = 300.;
+/// Between the chat's content column and its side rail: the timeline
+/// scrollbar's track, which stands just right of the column, is this wide,
+/// so beside a column moved clear of the rail it fills this gap.
+pub(crate) const CHAT_RAIL_GAP: f32 = 16.;
+/// Between the side rail and the chat's right edge.
+pub(crate) const CHAT_RAIL_EDGE: f32 = 16.;
+/// What an agent's card in the rail's place keeps left of it beyond
+/// [`CHAT_RAIL_GAP`]: its edge's resize band, 9 wide, which the timeline
+/// scrollbar's track stays clear of.
+pub(crate) const CHAT_SIDE_GRIP: f32 = 12.;
 /// The compact layout's page inset: content is held this far clear of both
 /// window edges. Cards inside that content inset a further [`CARD_INSET`].
 pub(crate) const COMPACT_PAGE_INSET: f32 = 16.;
@@ -31,6 +55,14 @@ pub(crate) const CARD_INSET: f32 = 12.;
 /// The smallest square a finger can reliably hit. gpui-base carries no
 /// control-height token (its `TouchHandle::HIT_SIZE` is text selection's own).
 pub(crate) const TOUCH_TARGET: f32 = 44.;
+/// The width of each of a row of icon actions on a touch layout, which keep
+/// the [`TOUCH_TARGET`] height: a touch square apiece holds their glyphs so
+/// far apart they read as unrelated controls.
+pub(crate) const TOUCH_ROW_ACTION_WIDTH: f32 = 30.;
+
+/// How long a list row's or a menu item's hover fill, or a list's hover
+/// reveal, takes to come in or go.
+pub(crate) const HOVER: std::time::Duration = std::time::Duration::from_millis(200);
 /// Width of numeric form fields, including their step controls.
 pub(crate) const NUMBER_INPUT_WIDTH: f32 = 96.;
 
@@ -63,18 +95,21 @@ pub fn canvas(cx: &App) -> Hsla {
 /// Flatten the canvas over fullscreen vibrancy, where its translucent color
 /// would otherwise composite against black.
 pub fn opaque_canvas(cx: &App) -> Hsla {
-    cx.theme().background.opacity(1.)
+    Hsla {
+        a: 1.,
+        ..cx.theme().background
+    }
 }
 
 /// T1 paper: the near-opaque reading plane the chat workspace, right panel and
 /// full-page routes paint over the vibrancy canvas. Warm paper in light mode,
 /// blue-carbon in dark.
 pub fn content_surface(cx: &App) -> Hsla {
-    if cx.theme().mode.is_dark() {
-        rgba(0x1B, 0x1E, 0x24, 0xF0)
-    } else {
-        rgba(0xFD, 0xFD, 0xFB, 0xF2)
-    }
+    paper(cx.theme())
+}
+
+fn paper(theme: &crate::theme::Theme) -> Hsla {
+    theme.by_mode(rgba(0xFD, 0xFD, 0xFB, 0xF2), rgba(0x1B, 0x1E, 0x24, 0xF0))
 }
 
 /// Popovers, menus, dialogs, toasts: the theme's large-element radius.
@@ -135,11 +170,13 @@ pub fn faded_hairline(cx: &App) -> impl IntoElement {
 
 /// Applies the T3 overlay contour: fully opaque fill, hairline border and a
 /// large soft shadow. Radius stays the caller's choice (`radius_overlay`).
-pub fn overlay_contour(el: Div, cx: &App) -> Div {
-    el.bg(cx.theme().popover)
-        .border_1()
-        .border_color(cx.theme().border)
-        .shadow_xl()
+pub fn overlay_contour<E: Styled>(el: E, cx: &App) -> Raised<E> {
+    raised(
+        el.bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .shadow_xl(),
+    )
 }
 
 /// Height of the drag handle strip above a compact sheet's title row.
@@ -149,7 +186,12 @@ pub const SHEET_TITLE_HEIGHT: f32 = 48.;
 
 /// The compact bottom sheet's surface: top corners at the sheet radius, opaque
 /// fill, a hairline along its top edge and the large soft shadow.
-pub fn sheet_contour<E: Styled>(el: E, cx: &App) -> E {
+pub fn sheet_contour<E: Styled>(el: E, cx: &App) -> Raised<E> {
+    raised(sheet_chrome(el, cx))
+}
+
+/// What [`sheet_contour`] draws, for a surface raised by its own host.
+pub(crate) fn sheet_chrome<E: Styled>(el: E, cx: &App) -> E {
     el.rounded_t(radius_overlay_sheet(cx))
         .bg(cx.theme().popover)
         .border_t_1()
@@ -166,13 +208,36 @@ pub enum Side {
 
 /// A side panel floating over the content: opaque fill, a medium shadow and a
 /// hairline on the edge that faces the content.
-pub fn floating_panel<E: Styled>(el: E, side: Side, cx: &App) -> E {
-    let el = el.bg(cx.theme().popover).shadow_lg();
+pub fn floating_panel<E: Styled>(el: E, side: Side, cx: &App) -> Raised<E> {
+    let el = raised(el).bg(cx.theme().popover).shadow_lg();
     match side {
         Side::Left => el.border_r_1(),
         Side::Right => el.border_l_1(),
     }
     .border_color(cx.theme().border)
+}
+
+/// A side panel `lift` of the way from docked to [floating](floating_panel). A
+/// docked one is a peer of the content beside it: the same paper, opaque for
+/// what runs on beneath it, the same hairline, and no shadow.
+pub fn lifting_panel<E: Styled>(el: E, side: Side, lift: f32, cx: &App) -> Raised<E> {
+    let mut el = floating_panel(el, side, cx);
+    let style = el.style();
+    style.box_shadow = style
+        .box_shadow
+        .take()
+        .filter(|_| lift > 0.)
+        .map(|shadows| {
+            shadows
+                .into_iter()
+                .map(|mut shadow| {
+                    shadow.color.a *= lift;
+                    shadow
+                })
+                .collect()
+        });
+    let docked = opaque_canvas(cx).blend(content_surface(cx));
+    el.bg(docked.blend(cx.theme().popover.opacity(lift)))
 }
 
 /// A card inside a page or a chat column: its radius, inset, gap and the muted
@@ -193,12 +258,279 @@ pub fn card_secondary(cx: &App) -> Div {
 }
 
 /// A [`card`] lifted off the page: opaque fill, hairline border, small shadow.
-pub fn card_raised(cx: &App) -> Div {
-    card(cx)
-        .bg(cx.theme().popover)
-        .border_1()
-        .border_color(cx.theme().border)
-        .shadow_sm()
+pub fn card_raised(cx: &App) -> Raised<Div> {
+    raised(
+        card(cx)
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .shadow_sm(),
+    )
+}
+
+/// `surface`, raised off what it lies on by its drop shadows: while it is
+/// drawn faint, by its own opacity or a fade it is painted under
+/// ([`crate::motion::faded`]), its shadows are drawn only around it, as a
+/// box shadow is drawn outside its border box; at rest, as GPUI draws them.
+///
+/// Gap: GPUI draws an element's drop shadow under it as well as around it,
+/// and fades an element by fading each thing it paints rather than the
+/// element as one. A raised surface fading in or out would show its own
+/// shadow through its fill, darker than both what it lies on and the
+/// surface. A rounded corner leaves part of its square uncovered, where the
+/// shadow shows around the surface too, so the shadow is still drawn under
+/// those squares. Remove this once GPUI draws a drop shadow only outside its
+/// element, or fades an element as one.
+pub fn raised<E: Styled>(surface: E) -> Raised<E> {
+    Raised {
+        inner: Some(surface),
+    }
+}
+
+/// See [`raised`].
+pub struct Raised<E> {
+    inner: Option<E>,
+}
+
+impl<E> Raised<E> {
+    fn inner(&mut self) -> &mut E {
+        self.inner
+            .as_mut()
+            .expect("a raised surface is laid out once")
+    }
+}
+
+/// What a [`Raised`] keeps from its layout to its paint.
+pub struct RaisedLayout {
+    surface: gpui::AnyElement,
+    shadows: Vec<BoxShadow>,
+    corners: gpui::CornersRefinement<gpui::AbsoluteLength>,
+    /// The surface's own opacity.
+    opacity: f32,
+}
+
+/// The regions `shadow` of a surface at `bounds` with `radii` corners is
+/// drawn in while the surface is faint: all round it, and the parts of its
+/// corners' squares the rounding leaves open. Their edges lie on device
+/// pixels the surface covers whole, so neighbours meet without a gap or an
+/// overlap.
+///
+/// GPUI culls a shadow whose content mask misses the rectangle it blurs,
+/// although it draws the blur well past it (`Scene::insert_primitive`
+/// against the shadow shader's margin). A shadow whose rectangle lies inside
+/// the surface on a side, which a small or negative spread makes it, would
+/// be culled from that side's region entirely: each region reaches into the
+/// surface just past the rectangle's edge on its side, and the shadow is
+/// drawn under that edge of the surface too.
+fn around(
+    bounds: gpui::Bounds<Pixels>,
+    radii: gpui::Corners<Pixels>,
+    shadow: &BoxShadow,
+    scale: f32,
+) -> Option<Vec<gpui::Bounds<Pixels>>> {
+    let snap = |value: Pixels, up: bool| {
+        let device = f32::from(value) * scale;
+        px(if up { device.ceil() } else { device.floor() } / scale)
+    };
+    let (left, top) = (snap(bounds.left(), true), snap(bounds.top(), true));
+    let (right, bottom) = (snap(bounds.right(), false), snap(bounds.bottom(), false));
+    if right <= left || bottom <= top {
+        return None;
+    }
+    // How far inside the surface the blurred rectangle's edge lies on each
+    // side, and so how far that side's region reaches in: past the edge by a
+    // device pixel, or not at all where the rectangle reaches out.
+    let pixel = px(1. / scale);
+    let inward = |inset: Pixels| {
+        if inset < px(0.) {
+            px(0.)
+        } else {
+            snap(inset, true) + pixel
+        }
+    };
+    let (offset, spread) = (shadow.offset, shadow.spread_radius);
+    let most = ((right - left) / 2.).min((bottom - top) / 2.);
+    let band_top = inward(offset.y - spread).min(most);
+    let band_bottom = inward(-offset.y - spread).min(most);
+    let band_left = inward(offset.x - spread).min(most);
+    let band_right = inward(-offset.x - spread).min(most);
+    let reach =
+        shadow.blur_radius * 3. + spread.max(px(0.)) + offset.x.abs() + offset.y.abs() + px(1.);
+    let (outer_left, outer_top) = (left - reach, top - reach);
+    let (outer_right, outer_bottom) = (right + reach, bottom + reach);
+    let (inner_top, inner_bottom) = (top + band_top, bottom - band_bottom);
+    let (inner_left, inner_right) = (left + band_left, right - band_right);
+    let corner = |radius: Pixels| snap(radius.min(most), true);
+    let rect = |left: Pixels, top: Pixels, right: Pixels, bottom: Pixels| {
+        (right > left && bottom > top)
+            .then(|| gpui::Bounds::from_corners(gpui::point(left, top), gpui::point(right, bottom)))
+    };
+    let (top_left, top_right) = (corner(radii.top_left), corner(radii.top_right));
+    let (bottom_left, bottom_right) = (corner(radii.bottom_left), corner(radii.bottom_right));
+    Some(
+        [
+            rect(outer_left, outer_top, outer_right, inner_top),
+            rect(outer_left, inner_bottom, outer_right, outer_bottom),
+            rect(outer_left, inner_top, inner_left, inner_bottom),
+            rect(inner_right, inner_top, outer_right, inner_bottom),
+            rect(inner_left, inner_top, left + top_left, top + top_left),
+            rect(right - top_right, inner_top, inner_right, top + top_right),
+            rect(
+                inner_left,
+                bottom - bottom_left,
+                left + bottom_left,
+                inner_bottom,
+            ),
+            rect(
+                right - bottom_right,
+                bottom - bottom_right,
+                inner_right,
+                inner_bottom,
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+    )
+}
+
+impl<E: IntoElement + Styled + 'static> IntoElement for Raised<E> {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl<E: IntoElement + Styled + 'static> gpui::Element for Raised<E> {
+    type RequestLayoutState = RaisedLayout;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, RaisedLayout) {
+        let mut inner = self
+            .inner
+            .take()
+            .expect("a raised surface is laid out once");
+        let style = inner.style();
+        let shadows = style.box_shadow.take().unwrap_or_default();
+        let corners = style.corner_radii.clone();
+        let opacity = style.opacity.unwrap_or(1.);
+        let mut surface = inner.into_any_element();
+        let layout = surface.request_layout(window, cx);
+        (
+            layout,
+            RaisedLayout {
+                surface,
+                shadows,
+                corners,
+                opacity,
+            },
+        )
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: gpui::Bounds<Pixels>,
+        layout: &mut RaisedLayout,
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) {
+        layout.surface.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<Pixels>,
+        layout: &mut RaisedLayout,
+        _: &mut (),
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) {
+        if !layout.shadows.is_empty() {
+            let rem = window.rem_size();
+            let most = bounds.size.width.min(bounds.size.height) / 2.;
+            let radius = |corner: Option<gpui::AbsoluteLength>| {
+                corner
+                    .map_or(px(0.), |corner| corner.to_pixels(rem))
+                    .min(most)
+            };
+            let corners = &layout.corners;
+            let radii = gpui::Corners {
+                top_left: radius(corners.top_left),
+                top_right: radius(corners.top_right),
+                bottom_right: radius(corners.bottom_right),
+                bottom_left: radius(corners.bottom_left),
+            };
+            // The surface's own opacity is applied as it paints itself,
+            // after these.
+            let opacity = layout.opacity;
+            let shadows: Vec<BoxShadow> = layout
+                .shadows
+                .iter()
+                .cloned()
+                .map(|mut shadow| {
+                    shadow.color.a *= opacity;
+                    shadow
+                })
+                .collect();
+            let faint = opacity * crate::motion::faded::opacity() < 1.;
+            let scale = window.scale_factor();
+            for shadow in &shadows {
+                let shadow = std::slice::from_ref(shadow);
+                match around(bounds, radii, &shadow[0], scale).filter(|_| faint) {
+                    Some(regions) => {
+                        for region in regions {
+                            window.with_content_mask(
+                                Some(gpui::ContentMask { bounds: region }),
+                                |window| window.paint_drop_shadows(bounds, radii, shadow),
+                            );
+                        }
+                    }
+                    None => window.paint_drop_shadows(bounds, radii, shadow),
+                }
+            }
+        }
+        // What the surface holds is drawn as faint as it is.
+        crate::motion::faded::within(layout.opacity, || layout.surface.paint(window, cx));
+    }
+}
+
+impl<E: Styled> Styled for Raised<E> {
+    fn style(&mut self) -> &mut gpui::StyleRefinement {
+        self.inner().style()
+    }
+}
+
+impl<E: InteractiveElement> InteractiveElement for Raised<E> {
+    fn interactivity(&mut self) -> &mut gpui::Interactivity {
+        self.inner().interactivity()
+    }
+}
+
+impl<E: gpui::StatefulInteractiveElement> gpui::StatefulInteractiveElement for Raised<E> {}
+
+impl<E: gpui::ParentElement> gpui::ParentElement for Raised<E> {
+    fn extend(&mut self, elements: impl IntoIterator<Item = gpui::AnyElement>) {
+        self.inner().extend(elements);
+    }
 }
 
 /// A dense header strip across the top of a [`card`]: a desktop section bar's
@@ -262,8 +594,8 @@ pub fn row_hairline(indent: Pixels, cx: &App) -> Div {
 }
 
 /// One grouped-list container shared by settings surfaces.
-pub fn group(cx: &App) -> Div {
-    v_flex()
+pub fn group(cx: &App) -> Raised<Div> {
+    raised(v_flex())
         .w_full()
         .rounded(radius_card(cx))
         .border_1()
@@ -275,7 +607,7 @@ pub fn group(cx: &App) -> Div {
 
 /// Assemble rows into a floating group with inset hairlines between them.
 /// Rows carry their own inset ([`group_row`] for the common one).
-pub fn grouped(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
+pub fn grouped(rows: Vec<gpui::AnyElement>, cx: &App) -> Raised<Div> {
     let mut group = group(cx);
     let last = rows.len().saturating_sub(1);
     for (index, row) in rows.into_iter().enumerate() {
@@ -327,7 +659,7 @@ pub fn group_caption(label: impl Into<SharedString>, cx: &App) -> Div {
 ///
 /// Settings-like forms use [`grouped`] instead: plain rows for navigable
 /// content, grouped cards for settings-like forms.
-pub fn list_row(id: impl Into<ElementId>, label: SharedString, cx: &App) -> Stateful<Div> {
+pub fn list_row(id: impl Into<ElementId>, label: SharedString, cx: &App) -> Clickable<Div> {
     accessible_clickable(gpui_base::h_flex(), id, Role::Button, label, cx)
         .w_full()
         .min_h(px(LIST_ROW_MIN_HEIGHT))
@@ -336,7 +668,8 @@ pub fn list_row(id: impl Into<ElementId>, label: SharedString, cx: &App) -> Stat
         .gap_3()
         .items_center()
         .cursor_pointer()
-        .hover(|style| style.bg(cx.theme().list_hover))
+        .relative()
+        .child(row_hover(px(0.), cx))
         .active(|style| style.bg(cx.theme().list_active))
 }
 
@@ -348,7 +681,7 @@ pub fn panel_row(
     label: SharedString,
     compact: bool,
     cx: &App,
-) -> Stateful<Div> {
+) -> Clickable<Div> {
     if compact {
         return list_row(id, label, cx);
     }
@@ -361,20 +694,73 @@ pub fn panel_row(
         .gap(spacing.sm)
         .items_center()
         .rounded(radius_card(cx))
-        .hover(|style| style.bg(cx.theme().list_hover))
+        .relative()
+        .child(row_hover(radius_card(cx), cx))
+}
+
+/// What fills a [`menu_item_frame`] beneath its content.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ItemFill {
+    /// Nothing: an item that cannot be chosen.
+    Inert,
+    /// `muted` under the pointer.
+    Hover,
+    /// The fill of the item the keyboard is on, and `muted` under the
+    /// pointer.
+    Highlight(Hsla),
+}
+
+impl ItemFill {
+    /// [`ItemFill::Highlight`] with `fill` while `on`, [`ItemFill::Hover`]
+    /// otherwise.
+    pub fn highlight(on: bool, fill: Hsla) -> Self {
+        if on {
+            Self::Highlight(fill)
+        } else {
+            Self::Hover
+        }
+    }
+}
+
+/// A row's list hover fill, gliding as the pointer comes and goes, for the
+/// row's first child; the row must be positioned and have an id.
+pub(crate) fn row_hover(radius: Pixels, cx: &App) -> crate::motion::Sampled {
+    let hover = cx.theme().list_hover;
+    crate::motion::hover_layer(None, hover.opacity(0.), hover, radius, HOVER.into())
 }
 
 /// One item of a menu or a menu-like picker: its inset, gap, radius and, on a
-/// touch layout, a [`TOUCH_TARGET`] height. The highlight is `muted`; callers
-/// add it with the content, since a disabled item takes none.
-pub fn menu_item_frame(touch: bool, cx: &App) -> Div {
+/// touch layout, a [`TOUCH_TARGET`] height, and the `fill` beneath its
+/// content, which glides as the pointer and the highlight come and go. The
+/// item must be given an id.
+pub fn menu_item_frame(touch: bool, fill: ItemFill, cx: &App) -> Div {
     let spacing = &cx.theme().tokens.spacing;
+    let radius = radius_button(cx);
+    let hover = cx.theme().muted;
     h_flex()
+        .relative()
         .gap(spacing.sm)
         .px(spacing.sm)
         .py(spacing.xs)
         .when(touch, |item| item.min_h(px(TOUCH_TARGET)))
-        .rounded(radius_button(cx))
+        .rounded(radius)
+        .map(|item| match fill {
+            ItemFill::Inert => item,
+            ItemFill::Hover => item.child(crate::motion::hover_layer(
+                None,
+                hover.opacity(0.),
+                hover,
+                radius,
+                HOVER.into(),
+            )),
+            ItemFill::Highlight(rest) => item.child(crate::motion::hover_layer(
+                None,
+                rest,
+                hover,
+                radius,
+                HOVER.into(),
+            )),
+        })
 }
 
 /// The three heights a horizontal bar of controls takes. gpui-base's `Toolbar`
@@ -449,9 +835,90 @@ pub(crate) fn selectable_row_height(compact: bool) -> f32 {
 /// accessibility.
 pub(crate) fn selectable_row<E>(el: E, selected: bool, compact: bool, cx: &App) -> E
 where
-    E: Styled + InteractiveElement + gpui::prelude::FluentBuilder,
+    E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
 {
     selectable_surface(el, selectable_row_height(compact), selected, compact, cx)
+        .when(selected, |row| row.bg(cx.theme().list_active))
+}
+
+/// A [`selectable_row`] whose hover fill's clock is kept by `motion` under
+/// `key`, so a fade under way carries on when the view is drawn under
+/// another parent.
+pub(crate) fn selectable_row_owned<E>(
+    el: E,
+    motion: &crate::motion::owned::Owned,
+    key: impl Into<SharedString>,
+    selected: bool,
+    compact: bool,
+    cx: &App,
+) -> E
+where
+    E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
+{
+    selectable_surface_with(
+        el,
+        selectable_row_height(compact),
+        selected,
+        compact,
+        Some((motion, key.into())),
+        cx,
+    )
+    .when(selected, |row| row.bg(cx.theme().list_active))
+}
+
+/// A [`selectable_row`] whose selected fill is a mark its list draws under
+/// it and glides between rows (a [`TabBar`](crate::widgets::tabs::TabBar)
+/// rail).
+pub(crate) fn selectable_row_under_mark<E>(el: E, selected: bool, compact: bool, cx: &App) -> E
+where
+    E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
+{
+    selectable_surface(el, selectable_row_height(compact), selected, compact, cx)
+}
+
+/// A [`selectable_row`] whose selected fill glides in and out as the
+/// selection moves (a selection that follows the scroll), the row holding
+/// it as a layer under its content. Its fills' clocks are kept by `motion`
+/// under `key`, so they carry on when the view is drawn under another
+/// parent.
+pub(crate) fn selectable_row_gliding<E>(
+    el: E,
+    motion: &crate::motion::owned::Owned,
+    key: impl Into<SharedString>,
+    selected: bool,
+    compact: bool,
+    cx: &App,
+) -> E
+where
+    E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
+{
+    let key = key.into();
+    let (active, radius) = (cx.theme().list_active, cx.theme().tokens.radius.md);
+    let fill_motion = motion.clone();
+    let fill_key = format!("{key}/selected-fill");
+    selectable_surface_with(
+        el,
+        selectable_row_height(compact),
+        selected,
+        compact,
+        Some((motion, key)),
+        cx,
+    )
+    .child(crate::motion::Sampled::new(move |window, cx| {
+        let fill = fill_motion.transition(
+            fill_key,
+            if selected { active } else { active.opacity(0.) },
+            GLIDE,
+            window,
+            cx,
+        );
+        div()
+            .absolute()
+            .inset_0()
+            .rounded(radius)
+            .bg(fill)
+            .into_any_element()
+    }))
 }
 
 /// The height of a [`selectable_row_two_line`].
@@ -467,7 +934,7 @@ pub fn selectable_row_inset(compact: bool) -> Pixels {
 /// A [`selectable_row`] holding two lines of text.
 pub fn selectable_row_two_line<E>(el: E, selected: bool, compact: bool, cx: &App) -> E
 where
-    E: Styled + InteractiveElement + gpui::prelude::FluentBuilder,
+    E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
 {
     selectable_surface(
         el,
@@ -476,30 +943,55 @@ where
         compact,
         cx,
     )
+    .when(selected, |row| row.bg(cx.theme().list_active))
 }
 
 /// The desktop rail's 10pt inset and 6pt gap sit between gpui-base's spacing
 /// tokens; the denser rail is Tcode's.
 fn selectable_surface<E>(el: E, height: f32, selected: bool, compact: bool, cx: &App) -> E
 where
-    E: Styled + InteractiveElement + gpui::prelude::FluentBuilder,
+    E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
+{
+    selectable_surface_with(el, height, selected, compact, None, cx)
+}
+
+/// [`selectable_surface`] whose hover fill's clock is kept by the owner and
+/// key `owned` names, when one does.
+fn selectable_surface_with<E>(
+    el: E,
+    height: f32,
+    selected: bool,
+    compact: bool,
+    owned: Option<(&crate::motion::owned::Owned, SharedString)>,
+    cx: &App,
+) -> E
+where
+    E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
 {
     let theme = cx.theme();
-    let (active, hover) = (theme.list_active, theme.list_hover);
+    let hover = theme.list_hover;
     let gap = if compact {
         theme.tokens.spacing.sm
     } else {
         px(6.)
     };
     let inset = selectable_row_inset(compact);
+    let radius = theme.tokens.radius.md;
     el.h(px(height))
+        .relative()
         .flex()
         .items_center()
         .gap(gap)
         .px(inset)
-        .rounded(theme.tokens.radius.md)
-        .when(selected, |row| row.bg(active))
-        .when(!selected, |row| row.hover(move |style| style.bg(hover)))
+        .rounded(radius)
+        // A row the pointer selects lets its hover fill go as it is selected.
+        .child({
+            let (rest, hover) = (
+                hover.opacity(0.),
+                if selected { hover.opacity(0.) } else { hover },
+            );
+            crate::motion::hover_layer(owned, rest, hover, radius, HOVER.into())
+        })
 }
 
 /// The caption above one section of a navigable content list: at the page
@@ -538,11 +1030,10 @@ pub fn brand_wordmark(cx: &App) -> impl IntoElement {
 /// `foreground` through in dark mode would *lighten* the page behind the overlay
 /// instead of pushing it back, so the dark scrim is black.
 pub fn scrim(progress: f32, cx: &App) -> Hsla {
-    if cx.theme().mode.is_dark() {
-        gpui::black().opacity(0.5 * progress)
-    } else {
-        cx.theme().foreground.opacity(0.32 * progress)
-    }
+    cx.theme().by_mode(
+        cx.theme().foreground.opacity(0.32 * progress),
+        gpui::black().opacity(0.5 * progress),
+    )
 }
 
 /// Drag handle above a compact sheet's title row.
@@ -666,7 +1157,8 @@ pub fn semantic_chip_with_icon(
     chip_surface(bg, fg, cx).child(icon).child(label.into())
 }
 
-fn chip_surface(bg: Hsla, fg: Hsla, cx: &App) -> Div {
+/// A [`semantic_chip`]'s surface, for a label that is not plain text.
+pub fn chip_surface(bg: Hsla, fg: Hsla, cx: &App) -> Div {
     let theme = cx.theme();
     gpui_base::h_flex()
         .flex_none()
@@ -700,20 +1192,168 @@ pub(crate) fn tracked_uppercase(text: &str) -> Div {
 /// as the component-library controls. GPUI automatically maps Enter/Space to
 /// `on_click` for a focused clickable element; this helper supplies the tab stop,
 /// semantic role/name, and a keyboard-only outline that remains legible in
-/// both themes without changing layout.
-pub fn accessible_clickable<E: gpui::Element + gpui::InteractiveElement>(
+/// both themes without changing layout, fading in and out with the keyboard's
+/// focus.
+pub fn accessible_clickable<E: gpui::Element + gpui::InteractiveElement + Styled>(
     el: E,
     id: impl Into<ElementId>,
     role: Role,
     label: impl Into<SharedString>,
     cx: &App,
-) -> Stateful<E> {
-    let ring = focus_ring(cx);
-    el.tab_index(0)
-        .focus_visible(move |style| style.shadow(vec![ring]))
-        .id(id)
-        .role(role)
-        .aria_label(label)
+) -> Clickable<E> {
+    let id = id.into();
+    Clickable {
+        inner: Some(el.id(id.clone()).role(role).aria_label(label)),
+        id,
+        focus: None,
+        ring: focus_ring(cx),
+    }
+}
+
+/// A surface [`accessible_clickable`] made clickable. It holds its own focus
+/// handle, kept under its id, and paints its focus ring over itself fading in
+/// and out ([`crate::motion::focus_ring`]): with GPUI's `tab_index` alone the
+/// handle is GPUI's, and only its `focus_visible` style, which switches at
+/// once, knows the keyboard focused it.
+pub struct Clickable<E: gpui::Element + gpui::InteractiveElement> {
+    inner: Option<Stateful<E>>,
+    id: ElementId,
+    /// The handle the caller tracks, when it keeps its own.
+    focus: Option<gpui::FocusHandle>,
+    ring: BoxShadow,
+}
+
+impl<E: gpui::Element + gpui::InteractiveElement> Clickable<E> {
+    fn inner(&mut self) -> &mut Stateful<E> {
+        self.inner.as_mut().expect("a clickable is laid out once")
+    }
+}
+
+/// What a [`Clickable`] keeps from its layout to its paint: the surface, its
+/// focus handle and its corners.
+pub struct ClickableLayout {
+    surface: gpui::AnyElement,
+    focus: gpui::FocusHandle,
+    corners: gpui::CornersRefinement<gpui::AbsoluteLength>,
+}
+
+impl<E: gpui::Element + gpui::InteractiveElement + Styled + 'static> IntoElement for Clickable<E> {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl<E: gpui::Element + gpui::InteractiveElement + Styled + 'static> gpui::Element
+    for Clickable<E>
+{
+    type RequestLayoutState = ClickableLayout;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, ClickableLayout) {
+        let mut inner = self.inner.take().expect("a clickable is laid out once");
+        let corners = inner.style().corner_radii.clone();
+        let focus = match self.focus.clone() {
+            Some(focus) => focus,
+            None => crate::motion::focus_ring::handle(&self.id, window, cx),
+        };
+        let mut surface = inner.track_focus(&focus).into_any_element();
+        let layout = surface.request_layout(window, cx);
+        (
+            layout,
+            ClickableLayout {
+                surface,
+                focus,
+                corners,
+            },
+        )
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: gpui::Bounds<Pixels>,
+        layout: &mut ClickableLayout,
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) {
+        layout.surface.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<Pixels>,
+        layout: &mut ClickableLayout,
+        _: &mut (),
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) {
+        layout.surface.paint(window, cx);
+        crate::motion::focus_ring::paint(
+            &layout.focus,
+            self.ring.clone(),
+            bounds,
+            &layout.corners,
+            window,
+            cx,
+        );
+    }
+}
+
+impl<E: gpui::Element + gpui::InteractiveElement + Styled> Styled for Clickable<E> {
+    fn style(&mut self) -> &mut gpui::StyleRefinement {
+        self.inner().style()
+    }
+}
+
+impl<E: gpui::Element + gpui::InteractiveElement> InteractiveElement for Clickable<E> {
+    fn interactivity(&mut self) -> &mut gpui::Interactivity {
+        self.inner().interactivity()
+    }
+
+    /// A caller that keeps its own focus handle keeps it, and the ring
+    /// follows that handle.
+    fn track_focus(mut self, focus_handle: &gpui::FocusHandle) -> Self {
+        self.focus = Some(focus_handle.clone());
+        self
+    }
+}
+
+impl<E: gpui::Element + gpui::InteractiveElement> gpui::StatefulInteractiveElement
+    for Clickable<E>
+{
+}
+
+impl<E: gpui::Element + gpui::InteractiveElement + gpui::ParentElement> gpui::ParentElement
+    for Clickable<E>
+{
+    fn extend(&mut self, elements: impl IntoIterator<Item = gpui::AnyElement>) {
+        self.inner().extend(elements);
+    }
+}
+
+impl gpui::StyledImage for Clickable<gpui::Img> {
+    fn image_style(&mut self) -> &mut gpui::ImageStyle {
+        self.inner().image_style()
+    }
 }
 
 /// The keyboard focus ring of a clickable that is not a `Button`.
@@ -721,11 +1361,8 @@ pub fn accessible_clickable<E: gpui::Element + gpui::InteractiveElement>(
 /// Inset: GPUI paints a drop shadow's whole rectangle beneath its element
 /// rather than only outside it, so an outset ring fills a transparent control.
 pub(crate) fn focus_ring(cx: &App) -> BoxShadow {
-    let ring = cx.theme().ring.opacity(if cx.theme().mode.is_dark() {
-        0.72
-    } else {
-        0.58
-    });
+    let theme = cx.theme();
+    let ring = theme.by_mode(theme.ring.opacity(0.58), theme.ring.opacity(0.72));
     BoxShadow::new(px(0.), px(0.), ring)
         .spread_radius(px(2.))
         .inset()
@@ -762,4 +1399,113 @@ pub fn loading_skeleton(cx: &gpui::App) -> gpui::AnyElement {
                 )
         }))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{IntoElement, Render, TestAppContext, Window};
+
+    /// A menu item and the rows of a virtual list, each built with `&App`
+    /// only, as a popover's content and a list's rows are.
+    struct Rows;
+
+    fn menu_item(cx: &App) -> impl IntoElement {
+        menu_item_frame(false, ItemFill::Hover, cx)
+            .id("menu-item")
+            .debug_selector(|| "menu-item".into())
+            .w(px(200.))
+            .h(px(32.))
+            .child("Item")
+    }
+
+    impl Render for Rows {
+        fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            div().w(px(200.)).child(menu_item(cx)).child(
+                crate::scroll::VirtualList::uniform("rows", 20, |range, _, cx| {
+                    range
+                        .map(|index| {
+                            selectable_row(div().id(("row", index)), false, false, cx)
+                                .debug_selector(move || format!("row-{index}"))
+                                .w_full()
+                                .child("Row")
+                        })
+                        .collect()
+                })
+                .w_full()
+                .h(px(200.)),
+            )
+        }
+    }
+
+    /// The alpha of the fill of `hue` painted over the whole of `selector`.
+    fn fill(selector: &'static str, hue: Hsla, cx: &mut gpui::VisualTestContext) -> f32 {
+        let bounds = cx.debug_bounds(selector).expect(selector);
+        cx.update(|window, _| {
+            let bounds = bounds.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .iter()
+                .filter(|quad| quad.bounds == bounds)
+                .filter_map(|quad| quad.background.as_solid())
+                .filter(|fill| (fill.h, fill.s, fill.l) == (hue.h, hue.s, hue.l))
+                .map(|fill| fill.a)
+                .fold(0., f32::max)
+        })
+    }
+
+    /// Under the pointer, a menu item and a list row each fill in over
+    /// several frames, delivered as a display delivers them, and fade out
+    /// when the pointer leaves; at rest each holds its full hover fill, or
+    /// none.
+    #[gpui::test]
+    fn menu_items_and_list_rows_fade_their_hover_fill(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (_, cx) = cx.add_window_view(|_, _| Rows);
+        let away = gpui::point(px(400.), px(400.));
+        cx.simulate_mouse_move(away, None, gpui::Modifiers::none());
+        crate::test_frames::draw_settled(cx);
+        let (muted, list_hover) = cx.update(|_, cx| (cx.theme().muted, cx.theme().list_hover));
+        let frames = |selector: &'static str, hue: Hsla, cx: &mut gpui::VisualTestContext| {
+            (0..20)
+                .map(|_| {
+                    cx.executor()
+                        .advance_clock(std::time::Duration::from_millis(16));
+                    cx.update(|window, cx| {
+                        window.simulate_next_frame(cx);
+                        let _ = window.draw(cx);
+                    });
+                    fill(selector, hue, cx)
+                })
+                .collect::<Vec<_>>()
+        };
+        let fades = |alphas: &[f32], full: f32, rising: bool| {
+            alphas.iter().filter(|a| **a > 0. && **a < full).count() >= 4
+                && alphas.windows(2).all(|pair| {
+                    if rising {
+                        pair[1] >= pair[0]
+                    } else {
+                        pair[1] <= pair[0]
+                    }
+                })
+        };
+        for (selector, hue) in [("menu-item", muted), ("row-2", list_hover)] {
+            let at = cx.debug_bounds(selector).unwrap().center();
+            assert_eq!(fill(selector, hue, cx), 0.);
+            cx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+            let alphas = frames(selector, hue, cx);
+            assert!(
+                fades(&alphas, hue.a, true),
+                "{selector} popped in: {alphas:?}"
+            );
+            assert_eq!(alphas.last(), Some(&hue.a));
+            cx.simulate_mouse_move(away, None, gpui::Modifiers::none());
+            let alphas = frames(selector, hue, cx);
+            assert!(
+                fades(&alphas, hue.a, false),
+                "{selector} popped out: {alphas:?}"
+            );
+            assert_eq!(alphas.last(), Some(&0.));
+        }
+    }
 }

@@ -6,37 +6,25 @@ use tcode_core::{
 };
 use turso::Connection;
 
+use super::codec::Mode;
 use super::db::{Db, blob, integer, text};
+use super::rows::{self, Storage, Thread};
 use super::{SessionStore, decode_row, invalid_data};
 
 pub(super) fn create_table(db: &Db, connection: &Connection) -> io::Result<()> {
-    for version in 1..=2 {
-        for suffix in ["insert", "update", "delete", "remove"] {
-            db.execute(
-                connection,
-                &format!("DROP TRIGGER IF EXISTS activity_cache_v{version}_{suffix}"),
-                (),
-            )?;
-        }
-        db.execute(
-            connection,
-            &format!("DROP TABLE IF EXISTS activity_cache_v{version}"),
-            (),
-        )?;
-    }
     db.execute(
         connection,
         "CREATE TABLE IF NOT EXISTS thread_activity (\
-         session_id TEXT PRIMARY KEY, fold_version INTEGER NOT NULL, \
+         thread INTEGER PRIMARY KEY, fold_version INTEGER NOT NULL, \
          has_parent INTEGER NOT NULL, body BLOB NOT NULL)",
         (),
     )?;
     Ok(())
 }
 
-fn session_parent(db: &Db, connection: &Connection, id: &str) -> io::Result<Option<bool>> {
+fn session_parent(st: &Storage, connection: &Connection, id: &str) -> io::Result<Option<bool>> {
     let mut parent = None;
-    db.query(
+    st.query(
         connection,
         "SELECT json_extract(body, '$.parent_session_id') IS NOT NULL FROM sessions WHERE id = ?1",
         [id],
@@ -48,35 +36,21 @@ fn session_parent(db: &Db, connection: &Connection, id: &str) -> io::Result<Opti
     Ok(parent)
 }
 
-pub(super) fn log_end(db: &Db, connection: &Connection, id: &str) -> io::Result<i64> {
-    let mut end = 0;
-    db.query(
-        connection,
-        "SELECT COALESCE(MAX(position) + 1, 0) FROM events WHERE session_id = ?1",
-        [id],
-        |row| {
-            end = integer(row, 0)?;
-            Ok(())
-        },
-    )?;
-    Ok(end)
-}
-
 fn read(
-    db: &Db,
+    st: &Storage,
     connection: &Connection,
-    id: &str,
+    thread: &Thread,
     parent: bool,
 ) -> io::Result<Option<ThreadActivity>> {
     let mut activity = None;
-    db.query(
+    st.query(
         connection,
-        "SELECT body FROM thread_activity WHERE session_id = ?1 AND fold_version = ?2 AND has_parent = ?3",
-        (id, i64::from(THREAD_ACTIVITY_FOLD_VERSION), i64::from(parent)),
+        "SELECT body FROM thread_activity WHERE thread = ?1 AND fold_version = ?2 AND has_parent = ?3",
+        (thread.key, i64::from(THREAD_ACTIVITY_FOLD_VERSION), i64::from(parent)),
         |row| {
             match serde_json::from_slice(&blob(row, 0)?) {
                 Ok(value) => activity = Some(value),
-                Err(error) => log::warn!("thread activity for {id} will be rebuilt: {error}"),
+                Err(error) => log::warn!("thread activity for {} will be rebuilt: {error}", thread.id),
             }
             Ok(())
         },
@@ -85,58 +59,66 @@ fn read(
 }
 
 fn save(
-    db: &Db,
+    st: &Storage,
     connection: &Connection,
-    id: &str,
+    thread: &Thread,
     parent: bool,
     activity: &ThreadActivity,
 ) -> io::Result<()> {
-    db.execute(
+    st.execute(
         connection,
-        "INSERT INTO thread_activity (session_id, fold_version, has_parent, body) VALUES (?1, ?2, ?3, ?4) \
-         ON CONFLICT (session_id) DO UPDATE SET fold_version = excluded.fold_version, \
+        "INSERT INTO thread_activity (thread, fold_version, has_parent, body) VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT (thread) DO UPDATE SET fold_version = excluded.fold_version, \
          has_parent = excluded.has_parent, body = excluded.body",
-        (id, i64::from(THREAD_ACTIVITY_FOLD_VERSION), i64::from(parent), serde_json::to_vec(activity).map_err(invalid_data)?),
+        (thread.key, i64::from(THREAD_ACTIVITY_FOLD_VERSION), i64::from(parent), serde_json::to_vec(activity).map_err(invalid_data)?),
     )?;
     Ok(())
 }
 
-fn fold(db: &Db, connection: &Connection, id: &str, parent: bool) -> io::Result<ThreadActivity> {
+fn fold(
+    st: &Storage,
+    connection: &Connection,
+    thread: Option<&Thread>,
+    parent: bool,
+) -> io::Result<ThreadActivity> {
     let mut records = Vec::new();
-    db.query(
-        connection,
-        "SELECT line FROM events WHERE session_id = ?1 ORDER BY position",
-        [id],
-        |row| {
-            if let Ok(Some(record)) = decode_row(&blob(row, 0)?)
+    if let Some(thread) = thread {
+        let codec = st.codec();
+        let mut decoder = codec.decoder();
+        rows::visit(st, connection, thread, 0..u64::MAX, false, |_, row| {
+            if let Ok(Some(record)) = decode_row(&st.decode(&mut decoder, &row, Mode::Bare)?.bytes)
                 && ThreadActivity::moves_clock(&record.stored.event)
             {
                 records.push(record.stored);
             }
-            Ok(())
-        },
-    )?;
+            Ok(true)
+        })?;
+    }
     Ok(ThreadActivity::fold_stored(&records, parent))
 }
 
-pub(super) fn recompute(db: &Db, connection: &Connection, id: &str) -> io::Result<ThreadActivity> {
-    let parent = session_parent(db, connection, id)?.unwrap_or(false);
-    let activity = fold(db, connection, id, parent)?;
-    save(db, connection, id, parent, &activity)?;
+pub(super) fn recompute(
+    st: &Storage,
+    connection: &Connection,
+    thread: &Thread,
+) -> io::Result<ThreadActivity> {
+    let parent = session_parent(st, connection, &thread.id)?.unwrap_or(false);
+    let activity = fold(st, connection, Some(thread), parent)?;
+    save(st, connection, thread, parent, &activity)?;
     Ok(activity)
 }
 
 pub(super) fn append(
-    db: &Db,
+    st: &Storage,
     connection: &Connection,
-    id: &str,
+    thread: &Thread,
     record: &StoredEvent,
 ) -> io::Result<()> {
     let mut stored = None;
-    db.query(
+    st.query(
         connection,
-        "SELECT has_parent, body FROM thread_activity WHERE session_id = ?1 AND fold_version = ?2",
-        (id, i64::from(THREAD_ACTIVITY_FOLD_VERSION)),
+        "SELECT has_parent, body FROM thread_activity WHERE thread = ?1 AND fold_version = ?2",
+        (thread.key, i64::from(THREAD_ACTIVITY_FOLD_VERSION)),
         |row| {
             if let Ok(activity) = serde_json::from_slice::<ThreadActivity>(&blob(row, 1)?) {
                 stored = Some((integer(row, 0)? != 0, activity));
@@ -146,28 +128,29 @@ pub(super) fn append(
     )?;
     if let Some((parent, mut activity)) = stored {
         activity.apply(record, parent);
-        save(db, connection, id, parent, &activity)?;
+        save(st, connection, thread, parent, &activity)?;
     }
     Ok(())
 }
 
-pub(super) fn remove(db: &Db, connection: &Connection, id: &str) -> io::Result<()> {
-    db.execute(
+pub(super) fn remove(st: &Storage, connection: &Connection, thread: &Thread) -> io::Result<()> {
+    st.execute(
         connection,
-        "DELETE FROM thread_activity WHERE session_id = ?1",
-        [id],
+        "DELETE FROM thread_activity WHERE thread = ?1",
+        [thread.key],
     )?;
     Ok(())
 }
 
 impl SessionStore {
     pub fn load_thread_activity(&self) -> io::Result<HashMap<String, ThreadActivity>> {
-        self.run("load thread activity", |db| {
-            db.read(|db, connection| {
+        self.run("load thread activity", |st| {
+            st.read(|st, connection| {
                 let mut activities = HashMap::new();
-                db.query(
+                st.query(
                     connection,
-                    "SELECT session_id, body FROM thread_activity WHERE fold_version = ?1",
+                    "SELECT t.id, a.body FROM thread_activity a JOIN threads t ON t.key = a.thread \
+                     WHERE a.fold_version = ?1",
                     [i64::from(THREAD_ACTIVITY_FOLD_VERSION)],
                     |row| {
                         let id = text(row, 0)?;
@@ -193,48 +176,61 @@ impl SessionStore {
         &self,
         ids: &[String],
     ) -> io::Result<HashMap<String, Option<ThreadActivity>>> {
-        self.run("backfill thread activity", |db| {
+        self.run("backfill thread activity", |st| {
             let mut activities = HashMap::new();
             for id in ids {
-                let candidate = db.read(|db, connection| {
-                    db.execute(connection, "BEGIN", ())?;
+                let candidate = st.read(|st, connection| {
+                    st.execute(connection, "BEGIN", ())?;
                     let result = (|| {
-                        let Some(parent) = session_parent(db, connection, id)? else {
+                        let Some(parent) = session_parent(st, connection, id)? else {
                             return Ok(None);
                         };
-                        let end = log_end(db, connection, id)?;
-                        let revision = super::turn_index::revision(db, connection, id)?;
-                        let activity = match read(db, connection, id, parent)? {
-                            Some(activity) => activity,
-                            None => fold(db, connection, id, parent)?,
+                        let thread = rows::thread(st, connection, id)?;
+                        let (end, revision) = match &thread {
+                            Some(thread) => (
+                                rows::end(st, connection, thread)?,
+                                rows::revision(st, connection, id)?,
+                            ),
+                            None => (0, Vec::new()),
                         };
-                        let index = super::turn_index::candidate(db, connection, id)?;
+                        let activity = match &thread {
+                            Some(thread) => match read(st, connection, thread, parent)? {
+                                Some(activity) => activity,
+                                None => fold(st, connection, Some(thread), parent)?,
+                            },
+                            None => fold(st, connection, None, parent)?,
+                        };
+                        let index = match &thread {
+                            Some(thread) => super::turn_index::candidate(st, connection, thread)?,
+                            None => Some(super::turn_index::Pending::default()),
+                        };
                         Ok(Some((parent, end, revision, activity, index)))
                     })();
-                    db.execute(connection, "ROLLBACK", ())?;
+                    st.execute(connection, "ROLLBACK", ())?;
                     result
                 })?;
                 let Some((parent, end, revision, activity, index)) = candidate else {
                     continue;
                 };
-                let published = db.write(|db, connection| {
-                    if session_parent(db, connection, id)? != Some(parent) {
+                let published = st.write(|st, connection| {
+                    if session_parent(st, connection, id)? != Some(parent) {
                         return Ok(None);
                     }
-                    if log_end(db, connection, id)? != end
-                        || super::turn_index::revision(db, connection, id)? != revision
+                    let thread = rows::ensure_thread(st, connection, id)?;
+                    if rows::end(st, connection, &thread)? != end
+                        || (end > 0 && rows::revision(st, connection, id)? != revision)
                     {
                         return Ok(None);
                     }
                     if let Some(index) = index
-                        && super::turn_index::read(db, connection, id)?.is_none()
+                        && super::turn_index::read(st, connection, &thread)?.is_none()
                     {
-                        super::turn_index::save(db, connection, id, &index)?;
+                        super::turn_index::save(st, connection, thread.key, &index)?;
                     }
-                    if let Some(current) = read(db, connection, id, parent)? {
+                    if let Some(current) = read(st, connection, &thread, parent)? {
                         return Ok(Some(current));
                     }
-                    save(db, connection, id, parent, &activity)?;
+                    save(st, connection, &thread, parent, &activity)?;
                     Ok(Some(activity))
                 })?;
                 activities.insert(id.clone(), published);
@@ -358,14 +354,23 @@ mod tests {
             ids.push(meta.id);
         }
         store
-            .run("seed old activity version", |db| {
-                db.write(|db, connection| {
-                    db.execute(
+            .run("seed old activity version", |st| {
+                st.write(|st, connection| {
+                    st.execute(
                         connection,
                         "UPDATE thread_activity SET fold_version = 0",
                         (),
                     )?;
-                    db.execute(connection, "UPDATE thread_activity SET fold_version = ?2, body = ?3 WHERE session_id = ?1", (ids[2].as_str(), i64::from(THREAD_ACTIVITY_FOLD_VERSION), b"not-json".as_slice()))?;
+                    st.execute(
+                        connection,
+                        "UPDATE thread_activity SET fold_version = ?2, body = ?3 \
+                        WHERE thread = (SELECT key FROM threads WHERE id = ?1)",
+                        (
+                            ids[2].as_str(),
+                            i64::from(THREAD_ACTIVITY_FOLD_VERSION),
+                            b"not-json".as_slice(),
+                        ),
+                    )?;
                     Ok(())
                 })
             })

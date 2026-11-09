@@ -26,7 +26,9 @@ pub fn has_meaningful_history(timeline: &Timeline) -> bool {
 
 fn is_provider_work(content: &EntryContent) -> bool {
     match content {
-        EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => !text.trim().is_empty(),
+        EntryContent::Item(
+            ItemContent::AssistantMessage { text, .. } | ItemContent::Plan { markdown: text },
+        ) => !text.trim().is_empty(),
         EntryContent::Item(
             ItemContent::CommandExecution { .. }
             | ItemContent::FileChange { .. }
@@ -38,12 +40,16 @@ fn is_provider_work(content: &EntryContent) -> bool {
         ) => true,
         EntryContent::Item(ItemContent::UserMessage { .. } | ItemContent::Reasoning { .. })
         | EntryContent::Steer { .. }
+        | EntryContent::Feedback { .. }
         | EntryContent::Error { .. }
         | EntryContent::ProviderStartError { .. }
         | EntryContent::ProviderRelay { .. }
         | EntryContent::ContextCompacted(_)
         | EntryContent::ContextWindowChanged { .. }
+        | EntryContent::SettingsKept
         | EntryContent::ControlAction(_)
+        | EntryContent::Rewound(_)
+        | EntryContent::RewindFailed { .. }
         | EntryContent::ModelChanged { .. } => false,
     }
 }
@@ -216,6 +222,17 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
                 body.push_str("\n\n");
             }
             EntryContent::Item(ItemContent::AssistantMessage { .. }) => {}
+            EntryContent::Feedback { text } if !text.trim().is_empty() => {
+                body.push_str("### User\n\n");
+                body.push_str(text);
+                body.push_str("\n\n");
+            }
+            EntryContent::Item(ItemContent::Plan { markdown }) if !markdown.trim().is_empty() => {
+                body.push_str("### Plan\n\n");
+                body.push_str(markdown);
+                body.push_str("\n\n");
+            }
+            EntryContent::Feedback { .. } | EntryContent::Item(ItemContent::Plan { .. }) => {}
             EntryContent::Item(ItemContent::CommandExecution {
                 command,
                 output,
@@ -300,7 +317,11 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
                 "provider",
                 &format!("window set to {}", agent::context_window::format(*window)),
             ),
-            EntryContent::ModelChanged { .. } => {}
+            // The removed turns are no longer the harness's conversation.
+            EntryContent::ModelChanged { .. }
+            | EntryContent::SettingsKept
+            | EntryContent::Rewound(_)
+            | EntryContent::RewindFailed { .. } => {}
             EntryContent::ControlAction(action) => activity(
                 &mut body,
                 "control",
@@ -383,11 +404,11 @@ fn status_outcome(status: ItemStatus, output: &str) -> String {
     }
 }
 
-fn one_line(value: &str) -> String {
+pub(crate) fn one_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn truncate_chars(value: &str, limit: usize) -> String {
+pub(crate) fn truncate_chars(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 

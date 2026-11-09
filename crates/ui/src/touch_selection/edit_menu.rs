@@ -7,7 +7,8 @@ use std::rc::Rc;
 use gpui::canvas;
 use gpui::{
     App, Bounds, ClickEvent, Corners, ElementId, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, RenderOnce, SharedString, Styled as _, Window, deferred, div, px,
+    ParentElement as _, Pixels, RenderOnce, SharedString, Styled as _, Window, deferred, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{Placement, Positioner, h_flex};
 
@@ -18,10 +19,17 @@ use crate::{
     widgets::button::{Button, ButtonVariants as _},
 };
 
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// What a command does when its row is pressed.
 type ItemHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// One command in the edit menu.
+#[derive(Clone)]
 pub(crate) struct EditMenuItem {
     label: SharedString,
     /// Names the row for a test, independent of the locale.
@@ -73,6 +81,7 @@ pub(crate) struct EditMenu {
     /// The selection, including the room its handles take.
     anchor: Bounds<Pixels>,
     items: Vec<EditMenuItem>,
+    open: bool,
 }
 
 impl EditMenu {
@@ -81,7 +90,15 @@ impl EditMenu {
             id: id.into(),
             anchor,
             items: Vec::new(),
+            open: true,
         }
+    }
+
+    /// Whether the menu shows: it fades and rises in as it opens, and fades
+    /// out, taking no presses, as it closes.
+    pub(crate) fn open(mut self, open: bool) -> Self {
+        self.open = open;
+        self
     }
 
     pub(crate) fn items(mut self, items: impl IntoIterator<Item = EditMenuItem>) -> Self {
@@ -122,6 +139,12 @@ fn side(anchor: Bounds<Pixels>, visible: Bounds<Pixels>) -> Placement {
 impl RenderOnce for EditMenu {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let id = self.id;
+        let presence =
+            crate::motion::appear((id.clone(), "presence"), self.open, APPEAR, window, cx);
+        if !presence.should_render() {
+            return gpui::Empty.into_any_element();
+        }
+        let progress = presence.progress;
         // A T3 pill, as iOS draws its edit menu: the overlay contour at the
         // overlay radius, its items filling it edge to edge.
         let radius = material::radius_overlay(cx);
@@ -132,111 +155,133 @@ impl RenderOnce for EditMenu {
         #[cfg(target_os = "ios")]
         let (foreground, background) = (cx.theme().foreground, cx.theme().popover);
         let last = self.items.len().saturating_sub(1);
-        let items = self.items.into_iter().enumerate().flat_map(|(ix, item)| {
-            let on_click = item.on_click;
-            #[cfg(target_os = "ios")]
-            let native_paste = item.native_paste;
-            #[cfg(not(target_os = "ios"))]
-            let native_paste = false;
-            // Each item's press surface takes the bar's own corners: the
-            // first the left pair, the last the right pair, the ones between
-            // none.
-            let corner = |on: bool| if on { inner_radius } else { px(0.) };
-            let corners = Corners {
-                top_left: corner(ix == 0),
-                bottom_left: corner(ix == 0),
-                top_right: corner(ix == last),
-                bottom_right: corner(ix == last),
-            };
-            let selector = item.selector;
-            // This is a finger's menu wherever it shows: a touch-target row.
-            // Its text is 17pt because UIKit draws its own Paste item at that
-            // size and takes no font; no typography token is 17. Pressing an
-            // item leaves focus on the text it acts on: an input keeps its
-            // keyboard, and a message keeps answering the menu's actions.
-            let button = Button::new(ix)
-                .ghost()
-                .with_size(px(material::TOUCH_TARGET))
-                .touch(true)
-                .text_size(px(17.))
-                .rounded_corners(corners)
-                .tab_stop(false)
-                .focusable(false)
-                .debug_selector(move || format!("edit-menu-{selector}"))
-                .on_click(move |_: &ClickEvent, window, cx| on_click(window, cx));
-            let button = if native_paste {
-                // UIKit's control draws this item's label; the cell keeps its
-                // own unseen, for its width.
-                button.aria_label(item.label.clone()).child(
-                    div()
-                        .text_color(gpui::transparent_black())
-                        .child(item.label),
-                )
-            } else {
-                button.label(item.label)
-            };
-            let button = button.into_any_element();
-            #[cfg(target_os = "ios")]
-            let button = if native_paste {
-                // UIKit only trusts a paste its own UIPasteControl starts, and
-                // the control draws its own label. It is laid over this cell
-                // in the cell's colours, with the bar's inner corners — the
-                // cell shows the same fill under a middle item's rounding —
-                // so it reads as one more item. Its bounds are read from a
-                // wrapper the size of the cell: Button's content area
-                // excludes its padding.
-                div()
-                    .relative()
-                    .flex()
-                    .child(button)
-                    .child(
-                        canvas(
-                            |_, _, _| (),
-                            move |bounds, _, _, _| {
-                                gpui_ios::set_paste_control(Some(gpui_ios::PasteControl {
-                                    bounds,
-                                    foreground,
-                                    background,
-                                    corner_radius: inner_radius,
-                                }))
-                            },
-                        )
-                        .absolute()
-                        .inset_0(),
+        // An item that comes or goes (Select All, once used) narrows away and
+        // its neighbours close up, the pill with them.
+        let items = self
+            .items
+            .into_iter()
+            .enumerate()
+            .map(|(ix, item)| (SharedString::from(item.selector), (ix, item)))
+            .collect::<Vec<_>>();
+        let items = crate::motion::keyed_across(
+            (id.clone(), "items"),
+            items,
+            ROWS,
+            window,
+            cx,
+            move |_, (ix, item), _, _| {
+                let (ix, item) = (*ix, item.clone());
+                let on_click = item.on_click;
+                #[cfg(target_os = "ios")]
+                let native_paste = item.native_paste;
+                #[cfg(not(target_os = "ios"))]
+                let native_paste = false;
+                // Each item's press surface takes the bar's own corners: the
+                // first the left pair, the last the right pair, the ones between
+                // none.
+                let corner = |on: bool| if on { inner_radius } else { px(0.) };
+                let corners = Corners {
+                    top_left: corner(ix == 0),
+                    bottom_left: corner(ix == 0),
+                    top_right: corner(ix == last),
+                    bottom_right: corner(ix == last),
+                };
+                let selector = item.selector;
+                // This is a finger's menu wherever it shows: a touch-target row.
+                // Its text is 17pt because UIKit draws its own Paste item at that
+                // size and takes no font; no typography token is 17. Pressing an
+                // item leaves focus on the text it acts on: an input keeps its
+                // keyboard, and a message keeps answering the menu's actions.
+                let button = Button::new(selector)
+                    .ghost()
+                    .with_size(px(material::TOUCH_TARGET))
+                    .touch(true)
+                    .text_size(px(17.))
+                    .rounded_corners(corners)
+                    .tab_stop(false)
+                    .focusable(false)
+                    .debug_selector(move || format!("edit-menu-{selector}"))
+                    .on_click(move |_: &ClickEvent, window, cx| on_click(window, cx));
+                let button = if native_paste {
+                    // UIKit's control draws this item's label; the cell keeps its
+                    // own unseen, for its width.
+                    button.aria_label(item.label.clone()).child(
+                        div()
+                            .text_color(gpui::transparent_black())
+                            .child(item.label),
                     )
-                    .into_any_element()
-            } else {
-                button
-            };
-            // A rule between neighbours, none before the first, the full
-            // height of the bar.
-            (ix > 0)
-                .then(|| {
+                } else {
+                    button.label(item.label)
+                };
+                let button = button.into_any_element();
+                #[cfg(target_os = "ios")]
+                let button = if native_paste {
+                    // UIKit only trusts a paste its own UIPasteControl starts, and
+                    // the control draws its own label. It is laid over this cell
+                    // in the cell's colours, with the bar's inner corners — the
+                    // cell shows the same fill under a middle item's rounding —
+                    // so it reads as one more item. Its bounds are read from a
+                    // wrapper the size of the cell: Button's content area
+                    // excludes its padding.
                     div()
-                        .flex_shrink_0()
-                        .w(px(1.))
-                        .bg(hairline)
+                        .relative()
+                        .flex()
+                        .child(button)
+                        .child(
+                            canvas(
+                                |_, _, _| (),
+                                move |bounds, _, _, _| {
+                                    gpui_ios::set_paste_control(Some(gpui_ios::PasteControl {
+                                        bounds,
+                                        foreground,
+                                        background,
+                                        corner_radius: inner_radius,
+                                    }))
+                                },
+                            )
+                            .absolute()
+                            .inset_0(),
+                        )
                         .into_any_element()
-                })
-                .into_iter()
-                .chain([button])
-        });
+                } else {
+                    button
+                };
+                // A rule between neighbours, none before the first, the full
+                // height of the bar; each item carries the one before it.
+                h_flex()
+                    .h_full()
+                    .items_stretch()
+                    .when(ix > 0, |item| {
+                        item.child(div().flex_shrink_0().w(px(1.)).bg(hairline))
+                    })
+                    .child(button)
+                    .into_any_element()
+            },
+        );
         deferred(
             Positioner::side(self.anchor)
                 .placement(side(self.anchor, window.fully_visible_bounds()))
                 .offset(GAP)
                 .occlude()
                 .child(
-                    material::overlay_contour(
-                        h_flex().relative().items_stretch().overflow_hidden(),
-                        cx,
-                    )
-                    .rounded(radius)
-                    .id(id)
-                    .debug_selector(|| "edit-menu".into())
-                    .children(items),
+                    div()
+                        .relative()
+                        .opacity(progress)
+                        .top(crate::motion::lift(progress))
+                        .child(
+                            items.render(
+                                material::overlay_contour(
+                                    h_flex().relative().items_stretch().overflow_hidden(),
+                                    cx,
+                                )
+                                .rounded(radius)
+                                .debug_selector(|| "edit-menu".into()),
+                            ),
+                        )
+                        .when(!self.open, |menu| menu.child(crate::motion::shield())),
                 ),
         )
         .with_priority(gpui_base::POPUP_PRIORITY)
+        .into_any_element()
     }
 }

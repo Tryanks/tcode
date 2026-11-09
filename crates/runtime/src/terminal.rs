@@ -11,7 +11,7 @@ pub use tcode_protocol::{
 
 mod command_output;
 mod projection;
-pub(crate) use command_output::render as render_command_output;
+pub(crate) use command_output::{delta as command_output_delta, render as render_command_output};
 pub(crate) use projection::{FRAME_INTERVAL, TerminalProjection, TerminalUpdate};
 
 /// `TerminalDrawer` is a shared UI entity that swaps between conversations.
@@ -25,13 +25,20 @@ pub struct TerminalEntry {
     pub terminal: Arc<term::Terminal>,
 }
 
+/// A conversation's terminals and the drawer that shows them. The drawer's
+/// state lives only as long as its terminals: nothing about it is persisted,
+/// because no PTY outlives the host.
 pub struct TerminalWorkspace {
     pub terminals: Vec<TerminalEntry>,
     pub active_id: Option<u64>,
     pub splits: Vec<TerminalSplit>,
     pub contexts: Vec<TerminalContext>,
+    pub open: bool,
+    pub height: f32,
     next_context_id: u64,
 }
+
+pub const DEFAULT_TERMINAL_HEIGHT: f32 = 240.;
 
 /// Host-private index from terminal id to its live PTY, so command dispatch and
 /// the grid projection can reach a terminal without walking every workspace.
@@ -67,6 +74,8 @@ impl Default for TerminalWorkspace {
             active_id: None,
             splits: Vec::new(),
             contexts: Vec::new(),
+            open: false,
+            height: DEFAULT_TERMINAL_HEIGHT,
             next_context_id: 1,
         }
     }
@@ -80,6 +89,12 @@ impl TerminalWorkspace {
 
     pub fn terminal(&self, id: u64) -> Option<&TerminalEntry> {
         self.terminals.iter().find(|entry| entry.id == id)
+    }
+
+    /// Whether a shell is still running here: only then is there anything for
+    /// the conversation to come back to.
+    pub fn in_use(&self) -> bool {
+        self.terminals.iter().any(|entry| !entry.terminal.exited())
     }
 
     /// Add and activate a terminal with a process-wide unique tab id.

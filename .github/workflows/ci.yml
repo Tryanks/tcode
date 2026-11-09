@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   # Pull requests opened with GITHUB_TOKEN start no pull_request run; the
   # agent-version workflow dispatches one instead.
   workflow_dispatch:
@@ -28,6 +29,7 @@ jobs:
   # required check must wait for that platform's Clippy and tests alone.
   linux-clippy:
     name: Linux x64 / clippy
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps: &clippy-steps
@@ -123,6 +125,7 @@ jobs:
 
   linux-tests:
     name: Linux x64 / tests
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps: &test-steps
@@ -172,30 +175,62 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo test -p gpui-ios --lib --locked
 
+      # WebKitGTK sandboxes its web process with bubblewrap, which needs the
+      # unprivileged user namespaces Ubuntu 24.04 restricts through AppArmor;
+      # wayland-nest's WebKitGTK test runs it unsandboxed.
       - name: Run tests under Xvfb
         if: runner.os == 'Linux'
+        env:
+          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: 1
         run: xvfb-run -a cargo nextest run --workspace --locked --no-fail-fast
+
+      # The preview on a Wayland session runs GTK on wayland-nest; a headless
+      # sway is that session. The smoke exits 0 when it skips, so it must
+      # print PASS.
+      - name: Run the preview smoke on Wayland
+        if: runner.os == 'Linux'
+        env:
+          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: 1
+        run: |
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 install -y --no-install-recommends sway mesa-vulkan-drivers
+          cargo build -p tcode --locked
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/wayland" TCODE_DATA_DIR="$RUNNER_TEMP/tcode-data"
+          mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+          printf 'output HEADLESS-1 resolution 1600x1000\n' > "$RUNNER_TEMP/sway.conf"
+          WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 \
+            sway -c "$RUNNER_TEMP/sway.conf" &
+          for _ in $(seq 100); do
+            socket=$(cd "$XDG_RUNTIME_DIR" && ls wayland-? 2>/dev/null | head -n 1)
+            [ -n "$socket" ] && break
+            sleep 0.1
+          done
+          env -u DISPLAY WAYLAND_DISPLAY="$socket" timeout 300 target/debug/tcode --preview-smoke 2>&1 | tee "$RUNNER_TEMP/smoke.log"
+          grep -q '^preview-smoke: PASS$' "$RUNNER_TEMP/smoke.log"
 
   macos-clippy:
     name: macOS arm64 / clippy
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: macos-26
     timeout-minutes: 60
     steps: *clippy-steps
 
   macos-tests:
     name: macOS arm64 / tests
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: macos-26
     timeout-minutes: 60
     steps: *test-steps
 
   windows-clippy:
     name: Windows x64 / clippy
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-2022
     timeout-minutes: 60
     steps: *clippy-steps
 
   windows-tests:
     name: Windows x64 / tests
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-2022
     timeout-minutes: 60
     steps: *test-steps
@@ -205,7 +240,7 @@ jobs:
   linux:
     name: Linux x64
     needs: [linux-clippy, linux-tests]
-    if: always()
+    if: ${{ always() && !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps: &require-platform
@@ -217,7 +252,7 @@ jobs:
   macos:
     name: macOS arm64
     needs: [macos-clippy, macos-tests]
-    if: always()
+    if: ${{ always() && !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps: *require-platform
@@ -225,13 +260,14 @@ jobs:
   windows:
     name: Windows x64
     needs: [windows-clippy, windows-tests]
-    if: always()
+    if: ${{ always() && !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps: *require-platform
 
   dependencies:
     name: Dependency hygiene
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -247,6 +283,7 @@ jobs:
 
   ios:
     name: iOS
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: macos-26
     timeout-minutes: 30
     env:
@@ -270,6 +307,7 @@ jobs:
 
   android:
     name: Android
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -316,6 +354,7 @@ jobs:
 
   web:
     name: Web
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:

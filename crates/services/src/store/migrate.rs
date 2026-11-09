@@ -1,5 +1,7 @@
 //! Creating `tcode.db`, once: from the JSON index (`sessions.json`) and the
 //! per-thread JSONL logs older builds wrote, or empty on a fresh install.
+//! The file is built in the layout of `user_version` 1, which the store then
+//! turns over to its own like any older build's ([`super::source`]).
 //!
 //! The database is built and verified under a staging name and published by
 //! a rename, so a file at the final name is always complete:
@@ -36,8 +38,8 @@ use std::time::Instant;
 
 use tcode_core::project::{IndexFile, SessionMeta, migrate_index};
 
-use super::db::{Db, SCHEMA_VERSION, blob, integer, wal_path};
-use super::{DB_FILE, insert_segments, read_index};
+use super::db::{Db, V1_SCHEMA, V1_VERSION, blob, integer, wal_path};
+use super::{DB_FILE, read_index};
 
 const STAGING_FILE: &str = "tcode.db.migrating";
 const ARCHIVE_LIST: &str = "tcode.db.archive";
@@ -340,7 +342,7 @@ fn build_staging(root: &Path, progress: &mut Progress) -> io::Result<Summary> {
     }
     reject_duplicates(&index)?;
     let staging = root.join(STAGING_FILE);
-    let db = Db::open(&staging, true)?;
+    let db = Db::open(&staging, Some(V1_SCHEMA))?;
     db.write(|db, connection| {
         for project in &index.projects {
             let body = serde_json::to_vec(project).map_err(io::Error::other)?;
@@ -398,7 +400,7 @@ fn build_staging(root: &Path, progress: &mut Progress) -> io::Result<Summary> {
     db.write(|db, connection| {
         db.execute(
             connection,
-            &format!("PRAGMA user_version = {SCHEMA_VERSION}"),
+            &format!("PRAGMA user_version = {V1_VERSION}"),
             (),
         )
         .map(drop)
@@ -409,8 +411,8 @@ fn build_staging(root: &Path, progress: &mut Progress) -> io::Result<Summary> {
     progress.check()?;
 
     // A fresh open sees only what reached the main file.
-    let reopened = Db::open(&staging, false)?;
-    if reopened.user_version()? != SCHEMA_VERSION {
+    let reopened = Db::open(&staging, None)?;
+    if reopened.user_version()? != V1_VERSION {
         return Err(io::Error::other(format!(
             "{} lost its completion marker after the checkpoint",
             staging.display()
@@ -769,3 +771,22 @@ pub(super) fn sync_file(path: &Path) -> io::Result<()> {
 
 /// Make a directory's entries (a rename, a new file) durable.
 pub(super) use crate::fs_tree::sync_dir;
+
+fn insert_segments(
+    db: &Db,
+    connection: &turso::Connection,
+    session_id: &str,
+    first: i64,
+    lines: impl IntoIterator<Item = impl AsRef<[u8]>>,
+) -> io::Result<i64> {
+    let mut position = first;
+    for line in lines {
+        db.execute(
+            connection,
+            "INSERT INTO events (session_id, position, line) VALUES (?1, ?2, ?3)",
+            (session_id, position, line.as_ref()),
+        )?;
+        position += 1;
+    }
+    Ok(position)
+}

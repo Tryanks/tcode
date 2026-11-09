@@ -33,6 +33,8 @@ pub struct Credential {
     pub(super) host: String,
     pub(super) token: String,
     pub(super) fingerprint: String,
+    /// The fingerprint the host's checks are recorded under.
+    verification: String,
     pub(super) source: CredentialSource,
 }
 impl std::fmt::Debug for Credential {
@@ -47,6 +49,7 @@ impl Credential {
     fn new(host: String, token: String, source: CredentialSource) -> Self {
         let fingerprint = format!("{host}:{}", super::digest(&token));
         Self {
+            verification: crate::settings::credential_fingerprint(&token, None),
             host,
             token,
             fingerprint,
@@ -167,6 +170,51 @@ impl Credentials {
             );
         }
         value
+    }
+
+    /// Records that the host answered (`true`) or refused a request sent with `credential`.
+    pub(super) fn record(&self, credential: &Credential, accepted: bool) {
+        crate::forge::account::record(
+            &self.store,
+            HostKind::Github,
+            &credential.host,
+            &credential.source,
+            &credential.verification,
+            accepted,
+        );
+    }
+
+    /// Records the account the host said `credential` signs in as.
+    pub(super) fn recognized(&self, credential: &Credential, login: &str) {
+        if matches!(credential.source, CredentialSource::Cli { .. }) {
+            return;
+        }
+        let verdict = crate::settings::Verdict::Accepted {
+            login: Some(login.to_owned()),
+        };
+        if let Err(error) = self.store.record_check(
+            HostKind::Github,
+            &credential.host,
+            &credential.verification,
+            verdict,
+        ) {
+            log::warn!("failed to save credential check: {error}");
+        }
+    }
+
+    pub(super) fn identify(
+        &self,
+        credential: &Credential,
+        whose: impl FnOnce() -> crate::forge::account::Whose,
+    ) {
+        crate::forge::account::identify(
+            &self.store,
+            HostKind::Github,
+            &credential.host,
+            &credential.source,
+            &credential.verification,
+            whose,
+        );
     }
 
     pub fn invalidate(&self, host: &str) {
@@ -330,7 +378,36 @@ impl Credentials {
                             .map(str::to_owned)
                     })
                     .collect();
-                let source = self.get(&host).ok().map(|credential| credential.source);
+                let credential = self.get(&host).ok();
+                let (assessed, login) = credential
+                    .as_ref()
+                    .map(|credential| {
+                        crate::forge::account::assessed(
+                            &self.store,
+                            HostKind::Github,
+                            &host,
+                            &credential.source,
+                            &credential.verification,
+                        )
+                    })
+                    .unwrap_or_default();
+                let source = credential.map(|credential| credential.source);
+                // gh's login is the account chosen, else the one gh has active.
+                let login = match &source {
+                    Some(CredentialSource::Cli { .. }) => choice
+                        .account
+                        .clone()
+                        .filter(|account| accounts.contains(account))
+                        .or_else(|| {
+                            logins.into_iter().flatten().find_map(|login| {
+                                (login.get("active").and_then(|active| active.as_bool())
+                                    == Some(true))
+                                .then(|| login.get("login")?.as_str().map(str::to_owned))
+                                .flatten()
+                            })
+                        }),
+                    _ => login,
+                };
                 let env_overrides_account = matches!(source, Some(CredentialSource::Env { .. }))
                     && choice.account.is_some();
                 let mut order = vec![CredentialSource::Saved];
@@ -341,18 +418,17 @@ impl Credentials {
                         .map(|name| CredentialSource::Env { name: name.into() }),
                 );
                 order.push(CredentialSource::Cli { tool: "gh".into() });
-                let problem = (source.is_none() && choice.enabled).then(|| {
-                    if tools_missing.is_empty() {
-                        HostProblem::NotSignedIn {
-                            tool: "gh".into(),
-                            command: Some(format!("gh auth login --hostname {host}")),
-                        }
-                    } else {
-                        HostProblem::NoCredential {
-                            tools_missing: tools_missing.clone(),
-                        }
-                    }
-                });
+                let problem = match &source {
+                    _ if !choice.enabled => None,
+                    None if tools_missing.is_empty() => Some(HostProblem::NotSignedIn {
+                        tool: "gh".into(),
+                        command: Some(format!("gh auth login --hostname {host}")),
+                    }),
+                    None => Some(HostProblem::NoCredential {
+                        tools_missing: tools_missing.clone(),
+                    }),
+                    Some(_) => assessed,
+                };
                 (
                     host.clone(),
                     HostStatus {
@@ -369,6 +445,7 @@ impl Credentials {
                         )),
                         access_token_url: None,
                         token_scopes: vec!["repo".into(), "read:org".into()],
+                        login,
                     },
                 )
             })

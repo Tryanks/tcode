@@ -6,10 +6,14 @@ use gpui::{
     ElementId, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
     KeyBinding, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, RenderOnce,
     Role, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    Window, deferred, div, prelude::FluentBuilder, px,
+    Window, deferred, div, point, prelude::FluentBuilder, px,
 };
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
 use serde::Deserialize;
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::typography::TextRole as _;
@@ -18,6 +22,12 @@ use crate::{
     scroll::ScrollableElement as _,
     theme::ActiveTheme as _,
 };
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
 
 const CONTEXT: &str = "TcodePopupMenu";
 
@@ -79,6 +89,11 @@ pub struct PopupMenu {
     items: Vec<MenuItem>,
     selected: Option<usize>,
     scroll: ScrollHandle,
+    /// The keyboard's item scrolling into view: from and to which offset,
+    /// since when. gpui's `scroll_to_item` jumps, and `ListScroll` glides a
+    /// list, not a scrolled div, so the menu eases its own offset.
+    reveal: Option<(Point<Pixels>, Point<Pixels>, Instant)>,
+    after_choose: Option<AfterChoose>,
 }
 impl FluentBuilder for PopupMenu {}
 
@@ -90,6 +105,8 @@ impl PopupMenu {
             items: Vec::new(),
             selected: None,
             scroll: ScrollHandle::new(),
+            reveal: None,
+            after_choose: None,
         }
     }
     fn build(
@@ -173,6 +190,12 @@ impl PopupMenu {
             disabled: false,
             checked: false,
         });
+        self
+    }
+    /// Run `then` once a chosen row's action has run and the menu has
+    /// handed the focus back to where it opened from.
+    pub fn after_choose(mut self, then: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.after_choose = Some(Rc::new(then));
         self
     }
     pub fn label(mut self, text: impl Into<SharedString>) -> Self {
@@ -263,6 +286,9 @@ impl PopupMenu {
         };
         window.dispatch_action(action.boxed_clone(), cx);
         cx.emit(DismissEvent);
+        if let Some(then) = self.after_choose.clone() {
+            window.defer(cx, move |window, cx| then(window, cx));
+        }
     }
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(DismissEvent);
@@ -295,7 +321,26 @@ impl PopupMenu {
     }
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         self.selected = Some(index);
-        self.scroll.scroll_to_item(index);
+        // The item glides into view: as far as brings it in, from wherever
+        // the menu is now, mid-glide too.
+        let viewport = self.scroll.bounds();
+        match self.scroll.bounds_for_item(index) {
+            Some(item) if !cx.reduce_motion() => {
+                let from = self.scroll.offset();
+                let shift = if item.top() < viewport.top() {
+                    viewport.top() - item.top()
+                } else if item.bottom() > viewport.bottom() {
+                    viewport.bottom() - item.bottom()
+                } else {
+                    px(0.)
+                };
+                if shift != px(0.) {
+                    let to = point(from.x, from.y + shift);
+                    self.reveal = Some((from, to, cx.background_executor().now()));
+                }
+            }
+            _ => self.scroll.scroll_to_item(index),
+        }
         cx.notify();
     }
 }
@@ -309,10 +354,24 @@ impl Focusable for PopupMenu {
 
 impl Render for PopupMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((from, to, since)) = self.reveal {
+            let elapsed = cx
+                .background_executor()
+                .now()
+                .saturating_duration_since(since);
+            let progress = crate::motion::Curve::new(GLIDE).progress(elapsed);
+            self.scroll
+                .set_offset(point(from.x, from.y + (to.y - from.y) * progress));
+            if progress < 1. {
+                window.request_animation_frame();
+            } else {
+                self.reveal = None;
+            }
+        }
         if self.is_empty() {
             // An empty menu is being dismissed by menu_popover; render nothing
             // rather than a bare strip for its final frame.
-            return div().id("tcode-popup-menu");
+            return crate::material::raised(div()).id("tcode-popup-menu");
         }
         let root = crate::material::overlay_contour(div(), cx)
             .rounded(crate::material::radius_overlay(cx))
@@ -363,37 +422,59 @@ impl Render for PopupMenu {
                     label,
                     icon,
                     render,
-                    action: _,
+                    action,
                     disabled,
                     checked,
                 } => {
                     let selected = self.selected == Some(index);
                     let disabled = *disabled;
                     let content = render.as_ref().map(|render| render(window, cx));
+                    // A touch menu has no keyboard to hint at.
+                    let key = (!self.touch)
+                        .then(|| super::Kbd::binding_for_action(action.as_ref(), None, window))
+                        .flatten();
                     items = items.child(
-                        crate::material::menu_item_frame(self.touch, cx)
-                            .text_body(self.touch, cx)
-                            .id(("menu-item", index))
-                            .debug_selector(move || format!("menu-item-{index}"))
-                            .role(Role::MenuItem)
-                            .when_some(label.clone(), |el, label| el.aria_label(label))
-                            .when(selected, |el| el.bg(cx.theme().muted))
-                            .when(disabled, |el| el.text_color(cx.theme().muted_foreground))
-                            .when(!disabled, |el| {
-                                el.hover(|style| style.bg(cx.theme().muted))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.choose(index, window, cx)
-                                    }))
-                            })
-                            .child(div().flex_none().w_4().flex().justify_center().children(
-                                match (*checked, icon.clone()) {
-                                    (true, _) => Some(Icon::new(IconName::Check)),
-                                    (false, Some(icon)) => Some(Icon::new(icon)),
-                                    (false, None) => None,
-                                },
-                            ))
-                            .when_some(label.clone(), |el, label| el.child(label))
-                            .when_some(content, |el, content| el.child(content)),
+                        crate::material::menu_item_frame(
+                            self.touch,
+                            if disabled {
+                                crate::material::ItemFill::Inert
+                            } else {
+                                crate::material::ItemFill::highlight(selected, cx.theme().muted)
+                            },
+                            cx,
+                        )
+                        .text_body(self.touch, cx)
+                        .id(("menu-item", index))
+                        .debug_selector(move || format!("menu-item-{index}"))
+                        .role(Role::MenuItem)
+                        .when_some(label.clone(), |el, label| el.aria_label(label))
+                        .when(selected && disabled, |el| el.bg(cx.theme().muted))
+                        .when(disabled, |el| el.text_color(cx.theme().muted_foreground))
+                        .when(!disabled, |el| {
+                            el.on_click(cx.listener(move |this, _, window, cx| {
+                                this.choose(index, window, cx)
+                            }))
+                        })
+                        .child(div().flex_none().w_4().flex().justify_center().children(
+                            match (*checked, icon.clone()) {
+                                (true, _) => Some(Icon::new(IconName::Check)),
+                                (false, Some(icon)) => Some(Icon::new(icon)),
+                                (false, None) => None,
+                            },
+                        ))
+                        .when_some(label.clone(), |el, label| el.child(label))
+                        .when_some(content, |el, content| el.child(content))
+                        .when_some(key, |el, key| {
+                            el.child(
+                                div()
+                                    .debug_selector(move || format!("menu-item-{index}-key"))
+                                    .flex_none()
+                                    .ml_auto()
+                                    .pl(cx.theme().tokens.spacing.md)
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(key.appearance(false)),
+                            )
+                        }),
                     );
                 }
             }
@@ -404,6 +485,7 @@ impl Render for PopupMenu {
 
 type MenuBuilder = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
 type ItemRenderer = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
+type AfterChoose = Rc<dyn Fn(&mut Window, &mut App)>;
 
 #[derive(Default)]
 struct MenuState {
@@ -428,10 +510,12 @@ where
         .appearance(false)
         .mouse_button(button)
         .overlay_closable(true)
+        // Each opening builds a fresh menu; a closing one keeps its menu, so
+        // the leaving popover draws it again without building or focusing.
         .on_open_change({
             let menu_state = menu_state.clone();
             move |open, _, cx| {
-                if !open {
+                if *open {
                     menu_state.update(cx, |state, _| state.menu = None);
                 }
             }
@@ -463,16 +547,12 @@ where
             menu_state.update(cx, |state, _| state.menu = Some(menu.clone()));
             menu.focus_handle(cx).focus(window, cx);
             // Weak: `menu_state` owns the menu this subscription lives as long
-            // as, so strong captures would keep both alive after the trigger
-            // unmounts, with the popover's deferred registration.
+            // as, so a strong capture would keep the popover state, and its
+            // deferred registration, alive after the trigger unmounts.
             let popover = cx.entity().downgrade();
             window
-                .subscribe(&menu, cx, {
-                    let menu_state = menu_state.downgrade();
-                    move |_, _: &DismissEvent, window, cx| {
-                        let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
-                        let _ = menu_state.update(cx, |state, _| state.menu = None);
-                    }
+                .subscribe(&menu, cx, move |_, _: &DismissEvent, window, cx| {
+                    let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
                 })
                 .detach();
             menu
@@ -500,6 +580,7 @@ pub trait ContextMenuExt:
             trigger: self,
             builder: Rc::new(builder),
             touch: false,
+            reveal: None,
         }
     }
 }
@@ -511,6 +592,7 @@ pub struct ContextMenu<T: InteractiveElement + ParentElement + Styled + IntoElem
     trigger: T,
     builder: MenuBuilder,
     touch: bool,
+    reveal: Option<(crate::motion::ListHover, SharedString)>,
 }
 
 impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> ContextMenu<T> {
@@ -518,11 +600,25 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Con
         self.touch = touch;
         self
     }
+
+    /// A trigger that is `item` of the list `hover`: what it reveals stays
+    /// for as long as the menu holds its hover fill.
+    pub(crate) fn reveals(
+        mut self,
+        hover: &crate::motion::ListHover,
+        item: impl Into<SharedString>,
+    ) -> Self {
+        self.reveal = Some((hover.clone(), item.into()));
+        self
+    }
 }
 
 #[derive(Default)]
 struct ContextMenuState {
     menu: Option<Entity<PopupMenu>>,
+    /// Dismissed, and kept only to be drawn while it leaves.
+    closing: bool,
+    reveal: Option<crate::motion::HoverHold>,
     position: Point<Pixels>,
     _subscription: Option<Subscription>,
     _deferred: Option<gpui_base::DeferredPopover>,
@@ -533,11 +629,12 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
 {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let dismissal = crate::overlay::OutsideDismissal::new(self.id.clone(), window, cx);
-        let state = window.use_keyed_state((self.id, "context-menu"), cx, |_, _| {
+        let state = window.use_keyed_state((self.id.clone(), "context-menu"), cx, |_, _| {
             ContextMenuState::default()
         });
         let builder = self.builder;
         let touch = self.touch;
+        let reveal = self.reveal;
         let open = Rc::new(
             move |position: Point<Pixels>,
                   long_press: bool,
@@ -571,8 +668,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                         let state = state.downgrade();
                         move |_, _: &DismissEvent, window, cx| {
                             let _ = state.update(cx, |state, _| {
-                                state.menu = None;
-                                state._subscription = None;
+                                state.closing = true;
                                 state._deferred = None;
                             });
                             if menu_focus.contains_focused(window, cx)
@@ -586,6 +682,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                     menu.focus_handle(cx).focus(window, cx);
                     state.update(cx, |state, _| {
                         state.menu = Some(menu);
+                        state.closing = false;
                         state.position = position;
                         state._subscription = Some(subscription);
                         state._deferred = Some(deferred);
@@ -628,11 +725,56 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
             );
         }
         trigger = trigger.child(dismissal.release_listener());
-        let (menu, position) = {
+        let (menu, closing, position) = {
             let state = state.read(cx);
-            (state.menu.clone(), state.position)
+            (state.menu.clone(), state.closing, state.position)
         };
-        if let Some(menu) = menu {
+        // Sampled only while there is a menu, so a mounted trigger with
+        // none asks for no frames.
+        let presence = menu.is_some().then(|| {
+            let presence = crate::motion::appear(
+                (self.id.clone(), "context-menu"),
+                !closing,
+                APPEAR,
+                window,
+                cx,
+            );
+            // A finger lifts and a pointer moves on to the menu, and nothing
+            // else marks which row the menu acts on.
+            let held = !closing;
+            crate::motion::hold_hover_layer(self.id, held, window, cx);
+            if let Some((hover, item)) = reveal {
+                state.update(cx, |state, cx| {
+                    state.reveal =
+                        held.then(|| state.reveal.take().unwrap_or_else(|| hover.hold(item, cx)));
+                });
+            }
+            presence
+        });
+        if presence.is_some_and(|presence| !presence.should_render()) {
+            state.update(cx, |state, _| {
+                state.menu = None;
+                state.closing = false;
+                state._subscription = None;
+            });
+        }
+        if let (Some(menu), Some(presence)) = (menu, presence)
+            && presence.should_render()
+        {
+            let progress = presence.progress;
+            let surface = div()
+                .opacity(progress)
+                .top(crate::motion::lift(progress))
+                .child(crate::motion::faded::faded(progress, menu.clone()));
+            let surface = if closing {
+                // Above the menu: a leaving menu takes no hover or press.
+                surface.child(div().absolute().inset_0().occlude())
+            } else {
+                surface.on_mouse_down_out(move |_, window, cx| {
+                    dismissal.consume(window, cx);
+                    menu.update(cx, |_, cx| cx.emit(DismissEvent));
+                })
+            };
             // The menu stays a child of the trigger so its actions dispatch
             // through the trigger's ancestor chain, where on_action handlers
             // (on the trigger itself or above it) live.
@@ -643,12 +785,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                         // does not export.
                         .margin(px(8.))
                         .occlude()
-                        .child(div().child(menu.clone()).on_mouse_down_out(
-                            move |_, window, cx| {
-                                dismissal.consume(window, cx);
-                                menu.update(cx, |_, cx| cx.emit(DismissEvent));
-                            },
-                        )),
+                        .child(surface),
                 )
                 .with_priority(gpui_base::POPUP_PRIORITY),
             );
@@ -744,7 +881,11 @@ mod tests {
                 ..Default::default()
             });
             cx.update(|window, cx| window.draw(cx).clear(cx));
-            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx)
+            });
             cx.debug_bounds("tcode-popup-menu").expect("menu opens")
         };
 
@@ -753,6 +894,11 @@ mod tests {
 
         cx.simulate_keystrokes("escape");
         cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx)
+        });
         assert!(cx.debug_bounds("tcode-popup-menu").is_none());
 
         let menu = right_click(cx, point(px(380.), px(50.)));
@@ -950,8 +1096,7 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let trigger = cx.debug_bounds("filter-trigger").unwrap().center();
         cx.simulate_click(trigger, Default::default());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
+        crate::test_frames::draw_settled(cx);
         let menu = cx.debug_bounds("tcode-popup-menu").unwrap();
         assert!(
             menu.top() >= px(0.) && menu.bottom() <= px(852.),
@@ -959,9 +1104,17 @@ mod tests {
         );
         assert!(cx.debug_bounds("menu-item-59").unwrap().top() > menu.bottom());
 
-        // Up from no selection wraps to the last item.
+        // Up from no selection wraps to the last item, which glides into view.
         cx.simulate_keystrokes("up");
         cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        crate::test_frames::draw(cx);
+        let gliding = cx.debug_bounds("menu-item-59").unwrap();
+        assert!(
+            gliding.bottom() > menu.bottom(),
+            "the menu jumped to {gliding:?}"
+        );
+        crate::test_frames::draw_settled(cx);
         let last = cx.debug_bounds("menu-item-59").unwrap();
         assert!(
             last.top() >= menu.top() && last.bottom() <= menu.bottom(),

@@ -7,6 +7,12 @@ use image::GenericImageView as _;
 use std::cell::RefCell;
 use tcode_core::attachments::{AttachError, MAX_EDGE_PX, MAX_IMAGES, MAX_SOURCE_BYTES};
 
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a picture drawn here takes to fade in once it has decoded.
+const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(Clone)]
 /// A pending image attachment: validated, persisted to the session attachments
 /// dir, and shown in the composer thumbnail strip. Kept per active session.
@@ -14,6 +20,14 @@ pub(in super::super) struct PendingImage {
     /// On-disk path of the persisted copy (also the thumbnail image source).
     pub(in super::super) path: PathBuf,
     pub(in super::super) name: String,
+}
+
+/// One slot of the strip under the field.
+#[derive(Clone)]
+enum StripItem {
+    Image(usize, PendingImage),
+    File(usize),
+    Loading,
 }
 
 pub(in super::super) enum PendingImageSource {
@@ -95,14 +109,68 @@ pub(crate) fn fit_for_upload(mime: &str, bytes: Vec<u8>) -> image::ImageResult<(
     }
 }
 
+/// Ask before sending `size` bytes across the internet. `proceed` runs on
+/// confirmation; `release` on any other way out, Escape and the backdrop
+/// included.
+pub(super) fn confirm_large_transfer(
+    composer: Entity<Composer>,
+    name: String,
+    size: u64,
+    window: &mut Window,
+    cx: &mut Context<Composer>,
+    proceed: impl FnOnce(&mut Composer, &mut Window, &mut Context<Composer>) + 'static,
+    release: impl FnOnce(&mut Composer, &mut Context<Composer>) + 'static,
+) {
+    // Taken by whichever button fires.
+    let outcome = Rc::new(RefCell::new(Some((proceed, release))));
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let confirmed = composer.clone();
+        let outcome_ok = outcome.clone();
+        let release = {
+            let composer = composer.clone();
+            let outcome = outcome.clone();
+            move |cx: &mut App| {
+                if let Some((_, release)) = outcome.borrow_mut().take() {
+                    composer.update(cx, |composer, cx| release(composer, cx));
+                }
+            }
+        };
+        let on_cancel = release.clone();
+        alert
+            .title(crate::tr!("attach.tunnel_title"))
+            .description(crate::tr!(
+                "attach.tunnel_body",
+                name = name,
+                size = format_size(size)
+            ))
+            .button_props(
+                DialogButtons::default()
+                    .ok_text(crate::tr!("attach.tunnel_confirm"))
+                    .cancel_text(crate::tr!("mobile.cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_, window, cx| {
+                if let Some((proceed, _)) = outcome_ok.borrow_mut().take() {
+                    confirmed.update(cx, |composer, cx| proceed(composer, window, cx));
+                }
+                true
+            })
+            .on_cancel(move |_, _, cx| {
+                on_cancel(cx);
+                true
+            })
+            .on_close(move |_, _, cx| release(cx))
+    });
+}
+
 impl Composer {
     /// Reset the thumbnail strip when the active session changes (its pending
     /// images belong to a specific session).
-    pub(in super::super) fn sync_images_session(&mut self, cx: &mut Context<Self>) {
-        let id = self.workspace_store.read(cx).active_session_id();
-        if id != self.images_session {
-            self.images_session = id;
+    pub(in super::super) fn sync_images_session(&mut self, cx: &mut App) {
+        if self.session_id != self.images_session {
+            let previous = std::mem::replace(&mut self.images_session, self.session_id.clone());
             self.pending_images.clear();
+            self.discard_files_of(previous, cx);
             self.image_load_generation = self.image_load_generation.wrapping_add(1);
             self.pending_image_loads = 0;
         }
@@ -127,11 +195,12 @@ impl Composer {
             return false;
         }
         let store = self.workspace_store.read(cx);
-        let session_id = store.active_session_id();
-        let attachments_dir = store.composer_state().attachments_dir;
+        let session_id = self.session_id.clone();
+        let attachments_dir = self.composer_state(cx).attachments_dir.clone();
         let link = store.attachment_link();
-        let remote_limit = store.client_remote_attachment_limit_bytes();
+        let remote_limit = crate::device::DevicePreferences::remote_attachment_limit_bytes(cx);
         self.pending_image_loads += 1;
+        cx.notify();
         let generation = self.image_load_generation;
         let result_name = name.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -173,7 +242,7 @@ impl Composer {
                 })
                 .await;
             let _ = this.update_in(cx, |composer, window, cx| {
-                if !composer.owns_image_load(generation, &session_id, cx) {
+                if !composer.owns_image_load(generation, &session_id) {
                     return;
                 }
                 let prepared = match prepared {
@@ -181,6 +250,7 @@ impl Composer {
                     Err(error) => {
                         composer.pending_image_loads =
                             composer.pending_image_loads.saturating_sub(1);
+                        cx.notify();
                         composer.notify_add_image_error(error, window, cx);
                         return;
                     }
@@ -198,13 +268,14 @@ impl Composer {
                     TransferVerdict::Reject => {
                         composer.pending_image_loads =
                             composer.pending_image_loads.saturating_sub(1);
+                        cx.notify();
                         window.push_notification(
                             Notification::error(
                                 crate::tr!(
                                     "attach.relay_rejected",
                                     name = result_name,
-                                    size = format_size(size as usize),
-                                    limit = format_size(remote_limit as usize)
+                                    size = format_size(size as u64),
+                                    limit = format_size(remote_limit)
                                 )
                                 .into_owned(),
                             ),
@@ -212,61 +283,28 @@ impl Composer {
                         );
                     }
                     TransferVerdict::Confirm => {
-                        let composer_entity = cx.entity();
-                        // Taken by whichever button fires; a dialog closed
-                        // by Escape or the backdrop releases the slot too.
-                        let prepared = Rc::new(RefCell::new(Some(prepared)));
-                        let session_id = session_id.clone();
-                        window.open_alert_dialog(cx, move |alert, _, _| {
-                            let composer = composer_entity.clone();
-                            let release_entity = composer_entity.clone();
-                            let prepared = prepared.clone();
-                            let dropped = prepared.clone();
-                            let session_id = session_id.clone();
-                            let result_name = result_name.clone();
-                            let release = move |cx: &mut App| {
-                                if dropped.borrow_mut().take().is_some() {
-                                    release_entity.update(cx, |composer, _cx| {
-                                        composer.pending_image_loads =
-                                            composer.pending_image_loads.saturating_sub(1);
-                                    });
-                                }
-                            };
-                            let on_cancel = release.clone();
-                            alert
-                                .title(crate::tr!("attach.tunnel_title"))
-                                .description(crate::tr!(
-                                    "attach.tunnel_body",
-                                    name = result_name,
-                                    size = format_size(size as usize)
-                                ))
-                                .button_props(
-                                    DialogButtons::default()
-                                        .ok_text(crate::tr!("attach.tunnel_confirm"))
-                                        .cancel_text(crate::tr!("mobile.cancel"))
-                                        .show_cancel(true),
+                        confirm_large_transfer(
+                            cx.entity(),
+                            result_name.clone(),
+                            size,
+                            window,
+                            cx,
+                            move |composer, window, cx| {
+                                composer.persist_image(
+                                    session_id,
+                                    generation,
+                                    result_name,
+                                    prepared,
+                                    window,
+                                    cx,
                                 )
-                                .on_ok(move |_, window, cx| {
-                                    if let Some(prepared) = prepared.borrow_mut().take() {
-                                        composer.update(cx, |composer, cx| {
-                                            composer.persist_image(
-                                                session_id.clone(),
-                                                generation,
-                                                result_name.clone(),
-                                                prepared,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                    true
-                                })
-                                .on_cancel(move |_, _, cx| {
-                                    on_cancel(cx);
-                                    true
-                                })
-                                .on_close(move |_, _, cx| release(cx))
-                        });
+                            },
+                            |composer, cx| {
+                                composer.pending_image_loads =
+                                    composer.pending_image_loads.saturating_sub(1);
+                                cx.notify();
+                            },
+                        );
                     }
                 }
             });
@@ -277,10 +315,10 @@ impl Composer {
 
     /// Whether a load started under `generation` for `session_id` still
     /// belongs to the strip on screen.
-    fn owns_image_load(&self, generation: u64, session_id: &Option<String>, cx: &App) -> bool {
+    pub(super) fn owns_image_load(&self, generation: u64, session_id: &Option<String>) -> bool {
         self.image_load_generation == generation
             && &self.images_session == session_id
-            && &self.workspace_store.read(cx).active_session_id() == session_id
+            && &self.session_id == session_id
     }
 
     fn notify_add_image_error(
@@ -315,15 +353,13 @@ impl Composer {
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |composer, window, cx| {
-                if !composer.owns_image_load(generation, &session_id, cx) {
+                if !composer.owns_image_load(generation, &session_id) {
                     return;
                 }
                 composer.pending_image_loads = composer.pending_image_loads.saturating_sub(1);
+                cx.notify();
                 match result {
-                    Ok(path) => {
-                        composer.pending_images.push(PendingImage { path, name });
-                        cx.notify();
-                    }
+                    Ok(path) => composer.pending_images.push(PendingImage { path, name }),
                     Err(err) => {
                         composer.notify_add_image_error(AddImageError::Persist(err), window, cx)
                     }
@@ -385,6 +421,22 @@ impl Composer {
         self.add_image(name, mime, PendingImageSource::Bytes(bytes), window, cx)
     }
 
+    /// Attach a dropped or pasted path: as an image when it is one the model
+    /// can see, otherwise as a file. Returns whether it was accepted.
+    pub(in super::super) fn add_path(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if tcode_core::attachments::is_image_attachment(&mime_from_path(&path)) {
+            self.add_image_path(path, window, cx)
+        } else {
+            self.add_file_path(path, window, cx);
+            true
+        }
+    }
+
     /// Add an image from a dropped file path.
     pub(in super::super) fn add_image_path(
         &mut self,
@@ -436,9 +488,7 @@ impl Composer {
                 }
                 ClipboardEntry::ExternalPaths(paths) => {
                     for path in paths.paths() {
-                        if mime_from_path(path).starts_with("image/") {
-                            accepted_image |= self.add_image_path(path.clone(), window, cx);
-                        }
+                        accepted_image |= self.add_path(path.clone(), window, cx);
                     }
                 }
                 ClipboardEntry::String(_) => {}
@@ -457,73 +507,165 @@ impl Composer {
         }
     }
 
+    /// The pending images under the field, and a slot for each still
+    /// loading. A thumbnail that goes narrows away and the ones after it move
+    /// over; the strip folds in with its first and away with its last. Each
+    /// thumbnail carries the gap after and above it, so a gap goes with it.
     pub(in super::super) fn render_image_strip(
         &self,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if self.pending_images.is_empty() {
-            return None;
-        }
-        let mut row = h_flex().w_full().gap_1().flex_wrap();
-        for (index, image) in self.pending_images.iter().enumerate() {
-            let path = image.path.clone();
-            let menu_path = path.to_string_lossy().into_owned();
-            let name = image.name.clone();
-            row = row.child(
-                Button::new(("thumb", index))
-                    .secondary()
-                    .small()
-                    .chip()
-                    .aria_label(name.clone())
-                    // A long file name truncates rather than taking the strip.
-                    .max_w(px(220.))
+    ) -> AnyElement {
+        let mut thumbs: Vec<(gpui::SharedString, StripItem)> = self
+            .pending_images
+            .iter()
+            .enumerate()
+            .map(|(index, image)| {
+                (
+                    image.path.to_string_lossy().into_owned().into(),
+                    StripItem::Image(index, image.clone()),
+                )
+            })
+            .collect();
+        thumbs.extend(
+            self.pending_files
+                .iter()
+                .enumerate()
+                .map(|(index, file)| (file.key(), StripItem::File(index))),
+        );
+        thumbs.extend(
+            (0..self.pending_image_loads)
+                .map(|slot| (format!("loading-{slot}").into(), StripItem::Loading)),
+        );
+        let strip = (!thumbs.is_empty()).then(|| (gpui::SharedString::from("strip"), thumbs));
+        crate::motion::keyed::keyed_owned(
+            &self.motion,
+            self.motion_key("image-strip"),
+            crate::motion::keyed::Fold::Down,
+            strip,
+            ROWS,
+            window,
+            cx,
+            |_, thumbs, window, cx| {
+                crate::motion::keyed::keyed_owned(
+                    &self.motion,
+                    self.motion_key("image-thumbs"),
+                    crate::motion::keyed::Fold::Across(px(0.)),
+                    thumbs.clone(),
+                    ROWS,
+                    window,
+                    cx,
+                    |key, thumb, window, cx| {
+                        let thumb = match thumb {
+                            StripItem::Image(index, image) => {
+                                self.render_thumb(key, *index, image, window, cx)
+                            }
+                            StripItem::File(index) => self.render_file_chip(key, *index, cx),
+                            StripItem::Loading => Button::new(gpui::ElementId::NamedChild(
+                                std::sync::Arc::new("thumb".into()),
+                                key.clone(),
+                            ))
+                            .secondary()
+                            .small()
+                            .chip()
+                            .icon(IconName::Image)
+                            .loading(true)
+                            .aria_label(crate::tr!("composer.loading"))
+                            .into_any_element(),
+                        };
+                        div().pr_1().pt_1().child(thumb).into_any_element()
+                    },
+                )
+                .render(h_flex().w_full().flex_wrap().pt_0p5())
+            },
+        )
+        .render(v_flex().w_full())
+    }
+
+    /// The thumbnail of the pending image at `index`; `key` names it for as
+    /// long as it is pending, wherever it moves in the strip.
+    fn render_thumb(
+        &self,
+        key: &gpui::SharedString,
+        index: usize,
+        image: &PendingImage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let path = image.path.clone();
+        // The picture fades in once it decodes.
+        let preview: gpui::ImageSource = crate::store::image_preview(
+            self.workspace_store.read(cx).image_host(),
+            path.clone(),
+            18.,
+            false,
+        );
+        let arrival = crate::motion::image_arrival(
+            crate::motion::Clock::from(&self.motion),
+            self.motion_key(format_args!("thumb-arrival-{key}")),
+            &preview,
+            ARRIVE,
+            window,
+            cx,
+        );
+        let menu_path = path.to_string_lossy().into_owned();
+        let name = image.name.clone();
+        let id = |part: &'static str| {
+            gpui::ElementId::NamedChild(std::sync::Arc::new(part.into()), key.clone())
+        };
+        Button::new(id("thumb"))
+            .secondary()
+            .small()
+            .chip()
+            .aria_label(name.clone())
+            // A long file name truncates rather than taking the strip.
+            .max_w(px(220.))
+            .overflow_hidden()
+            // The thumbnail is decoded at the size it draws, inside the
+            // chip's height; no owner sizes a chip's leading image.
+            .child(
+                img(preview)
+                    .opacity(arrival)
+                    .id("attachment-image")
+                    .size(px(18.))
+                    .rounded(crate::material::radius_chip(cx))
+                    .with_fallback(crate::image_viewer::unpreviewed(false, false, cx)),
+            )
+            .child(
+                div()
+                    .min_w_0()
                     .overflow_hidden()
-                    // The thumbnail is decoded at the size it draws, inside the
-                    // chip's height; no owner sizes a chip's leading image.
-                    .child(
-                        img(crate::store::image_preview(path, 18., false))
-                            .id("attachment-image")
-                            .size(px(18.))
-                            .rounded(crate::material::radius_chip(cx))
-                            .with_fallback(crate::image_viewer::unpreviewed(false, false, cx)),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_meta_mono(self.compact, cx)
-                            .child(crate::widgets::fade_text(name)),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_image_preview(index, window, cx);
-                    }))
-                    .child(
-                        Button::new(("thumb-x", index))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Close)
-                            .aria_label(crate::tr!("composer.remove_image"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.remove_image(index, cx);
-                            })),
-                    )
-                    .context_menu(move |menu, _, _| {
-                        menu.menu(
-                            crate::tr!("markdown.open_image").into_owned(),
-                            Box::new(ComposerMenu::ImageOpen(index)),
-                        )
-                        .separator()
-                        .path_items(&menu_path, None)
-                        .separator()
-                        .menu(
-                            crate::tr!("composer.remove_image").into_owned(),
-                            Box::new(ComposerMenu::ImageRemove(index)),
-                        )
-                    }),
-            );
-        }
-        Some(row.into_any_element())
+                    .text_meta_mono(self.compact, cx)
+                    .child(crate::widgets::fade_text(name)),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_image_preview(index, window, cx);
+            }))
+            .child(
+                Button::new(id("thumb-x"))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .aria_label(crate::tr!("composer.remove_image"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.remove_image(index, cx);
+                    })),
+            )
+            .context_menu(move |menu, _, _| {
+                menu.menu(
+                    crate::tr!("markdown.open_image").into_owned(),
+                    Box::new(ComposerMenu::ImageOpen(index)),
+                )
+                .separator()
+                .path_items(&menu_path, None)
+                .separator()
+                .menu(
+                    crate::tr!("composer.remove_image").into_owned(),
+                    Box::new(ComposerMenu::ImageRemove(index)),
+                )
+            })
+            .into_any_element()
     }
 
     /// Open the clicked thumbnail as a window-level lightbox (see
@@ -537,12 +679,14 @@ impl Composer {
         let Some(image) = self.pending_images.get(index) else {
             return;
         };
+        let host = self.workspace_store.read(cx).image_host();
         crate::image_viewer::open(
             crate::image_viewer::ViewerSource::original(
+                host,
                 tcode_protocol::OriginalTarget::File {
                     path: image.path.clone(),
                 },
-                crate::store::image_preview(image.path.clone(), 18., false),
+                crate::store::image_preview(host, image.path.clone(), 18., false),
             ),
             image.name.clone(),
             window,

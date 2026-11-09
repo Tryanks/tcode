@@ -45,7 +45,7 @@ fn capabilities(spec: &ModelSpec) -> Vec<ModelCapability> {
 /// A model's fast-mode switch: Claude's `fastMode` boolean or a Codex
 /// `serviceTier` select offering a fast tier, and above it an ultrafast tier
 /// when the select offers one. `None` when the model has neither. The
-/// composer's bolt and the Orchestrate Fast switch both key on it.
+/// composer's bolt keys on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FastMode {
     /// The option id the switch writes.

@@ -1,4 +1,5 @@
-//! Retry and foreground policy shared by browser and native transports.
+//! Retry policy shared by browser and native transports, and the wakes a
+//! native link takes from the app.
 
 #[derive(Default)]
 pub struct Backoff {
@@ -40,28 +41,10 @@ impl Backoff {
 pub enum Wake {
     Reconnect,
     Probe,
-}
-
-#[derive(Default)]
-pub struct Lifecycle {
-    background_ms: Option<u64>,
-}
-
-impl Lifecycle {
-    pub fn background(&mut self, now_ms: u64) {
-        self.background_ms.get_or_insert(now_ms);
-    }
-
-    /// Consumes the background interval: Foreground followed by Active probes once.
-    pub fn foreground(&mut self, now_ms: u64) -> Option<Wake> {
-        self.background_ms.take().map(|start| {
-            if now_ms.saturating_sub(start) >= 10_000 {
-                Wake::Reconnect
-            } else {
-                Wake::Probe
-            }
-        })
-    }
+    /// The app has left: close the link and everything it dials from, and
+    /// stay down until a [`Wake::Reconnect`]. The return syncs in full, so
+    /// nothing kept running through the absence would be used.
+    Park,
 }
 
 #[cfg(test)]
@@ -96,19 +79,5 @@ mod tests {
         assert!((800..=1200).contains(&backoff.failed(0, 0.5)));
         assert_eq!(backoff.attempt(), 6);
         assert!((1600..=2400).contains(&backoff.failed(0, 0.5)));
-    }
-
-    #[test]
-    fn foreground_uses_elapsed_background_time_and_deduplicates_phases() {
-        let mut lifecycle = Lifecycle::default();
-        assert_eq!(lifecycle.foreground(0), None);
-        lifecycle.background(100);
-        lifecycle.background(200);
-        assert_eq!(lifecycle.foreground(10_099), Some(Wake::Probe));
-        assert_eq!(lifecycle.foreground(10_100), None);
-        lifecycle.background(20_000);
-        assert_eq!(lifecycle.foreground(30_000), Some(Wake::Reconnect));
-        lifecycle.background(40_000);
-        assert_eq!(lifecycle.foreground(55_000), Some(Wake::Reconnect));
     }
 }

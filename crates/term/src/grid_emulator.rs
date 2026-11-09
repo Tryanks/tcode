@@ -266,7 +266,17 @@ impl GridEmulator {
         Self::with_size_and_title(cols, rows, String::new())
     }
 
+    /// [`Self::with_size`], keeping `history` lines of scrollback rather than
+    /// 1,000: for output read back whole, not a live terminal.
+    pub fn with_scrollback(cols: usize, rows: usize, history: usize) -> Self {
+        Self::build(cols, rows, String::new(), history)
+    }
+
     pub(crate) fn with_size_and_title(cols: usize, rows: usize, fallback_title: String) -> Self {
+        Self::build(cols, rows, fallback_title, 1000)
+    }
+
+    fn build(cols: usize, rows: usize, fallback_title: String, history: usize) -> Self {
         let size = GridSize {
             cols: cols.max(2),
             rows: rows.max(2),
@@ -287,7 +297,7 @@ impl GridEmulator {
             listener,
             WindowId::from(0),
             0,
-            1000,
+            history,
         );
         let core = Arc::new(GridCore {
             state: FairMutex::new(GridState {

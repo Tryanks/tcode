@@ -1,4 +1,5 @@
 use crate::material;
+use crate::motion::PresencePhase;
 use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -8,11 +9,21 @@ use gpui::{
     MouseButton, ParentElement, RenderOnce, StyleRefinement, Styled, Window,
     prelude::FluentBuilder as _,
 };
-use gpui::{Focusable as _, Role, SharedString, StatefulInteractiveElement, deferred, div, px};
+use gpui::{
+    Focusable as _, Role, SharedString, StatefulInteractiveElement, Task, deferred, div, px,
+};
 use gpui_base::StyledExt as _;
+use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Duration;
 
 pub use gpui_base::PopoverState;
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Styled tcode facade over the headless gpui-base popover.
 #[derive(IntoElement)]
@@ -30,6 +41,7 @@ pub struct Popover {
     mouse_button: MouseButton,
     overlay_closable: bool,
     appearance: bool,
+    hover: bool,
     on_open_change: Option<super::ToggleHandler>,
 }
 
@@ -54,6 +66,7 @@ impl Popover {
             mouse_button: MouseButton::Left,
             overlay_closable: true,
             appearance: true,
+            hover: false,
             on_open_change: None,
         }
     }
@@ -84,6 +97,13 @@ impl Popover {
     }
     pub fn appearance(mut self, value: bool) -> Self {
         self.appearance = value;
+        self
+    }
+    /// Open while the pointer rests on the trigger or the content, after
+    /// gpui-base `HoverCard`'s open and close delays, instead of on a press.
+    /// It takes no focus, as a hover card does not.
+    pub fn open_on_hover(mut self) -> Self {
+        self.hover = true;
         self
     }
     pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
@@ -143,6 +163,9 @@ impl RenderOnce for Popover {
         if self.sheet_title.is_some() {
             return self.render_sheet(window, cx);
         }
+        if self.hover {
+            return self.render_hover(window, cx);
+        }
 
         // gpui-base's `overlay_closable` dismisses on the outside press and
         // lets it through: it would also focus, select or press what the
@@ -152,12 +175,84 @@ impl RenderOnce for Popover {
         let release = dismissal.clone();
         let closable = self.overlay_closable;
         let appearance = self.appearance;
-        let content = self.content;
-        let children = self.children;
-        let style = self.style;
         let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| {
             PopoverState::new(self.default_open, cx)
         });
+        state.update(cx, |state, cx| {
+            state.track_focus(self.tracked_focus.clone());
+            state.set_on_open_change(self.on_open_change.clone());
+            if let Some(open) = self.open {
+                state.sync_open(open, window, cx);
+            }
+        });
+        let open = state.read(cx).is_open();
+        // Whether the popover has been open since it last left. One that has
+        // not samples nothing, so a mounted, closed trigger asks for no frames.
+        let shown = window
+            .use_keyed_state((self.id.clone(), "shown"), cx, |_, _| {
+                Rc::new(Cell::new(false))
+            })
+            .read(cx)
+            .clone();
+        let presence = (open || shown.get()).then(|| {
+            crate::motion::appear((self.id.clone(), "presence"), open, APPEAR, window, cx)
+        });
+        let leaving =
+            !open && presence.is_some_and(|presence| presence.phase == PresencePhase::Exiting);
+        shown.set(open || leaving);
+        let progress = presence.map_or(1., |presence| presence.progress);
+        let content = self.content;
+        let children = self.children;
+        let style = self.style;
+        let parent = window.current_view();
+        let trigger = self.trigger.map(|trigger| {
+            let state = state.clone();
+            move |open: bool, window: &Window, cx: &App| {
+                // gpui-base Popover::trigger installs no activation callback
+                // on the trigger element.
+                let toggle: SheetToggle = Rc::new(move |window, cx| {
+                    state.update(cx, |state, cx| state.toggle_open(window, cx));
+                    cx.notify(parent);
+                });
+                div()
+                    .child(trigger(open, Some(toggle), window, cx))
+                    .child(release.release_listener())
+                    .into_any_element()
+            }
+        });
+
+        if leaving && let Some(trigger) = trigger {
+            // gpui-base's Popover mounts content only while open and has no
+            // exit of its own, so while the content leaves this draws the same
+            // Popup tree base draws when open — the same element ids, so state
+            // inside the content carries over — with base's closed trigger
+            // wiring repeated, and the content inert.
+            let content =
+                content.map(|builder| state.update(cx, |state, cx| builder(state, window, cx)));
+            let surface = surface(appearance, progress, cx)
+                .children(content)
+                .children(children)
+                .refine_style(&style)
+                // Above the content: a leaving surface takes no hover or press
+                // for its own controls.
+                .child(div().absolute().inset_0().occlude());
+            let confirm = state.clone();
+            return gpui_base::Popup::new(self.id, trigger(false, window, cx))
+                .anchor(self.anchor)
+                .key_context("Popover")
+                .on_action(move |_: &gpui_base::actions::Confirm, window, cx| {
+                    confirm.update(cx, |state, cx| state.toggle_open(window, cx));
+                    cx.notify(parent);
+                })
+                .on_mouse_down(self.mouse_button, move |_, window, cx| {
+                    cx.stop_propagation();
+                    state.update(cx, |state, cx| state.show(window, cx));
+                    cx.notify(parent);
+                })
+                .content(div().id("content").child(surface))
+                .into_any_element();
+        }
+
         gpui_base::Popover::new(self.id)
             .anchor(self.anchor)
             .mouse_button(self.mouse_button)
@@ -165,34 +260,19 @@ impl RenderOnce for Popover {
             .overlay_closable(false)
             .when_some(self.open, |base, open| base.open(open))
             .when_some(self.tracked_focus, |base, focus| base.track_focus(&focus))
-            .when_some(self.trigger, |base, trigger| {
-                base.trigger_with(move |open, window, cx| {
-                    let parent = window.current_view();
-                    // gpui-base Popover::trigger installs no activation callback
-                    // on the trigger element.
-                    let toggle: SheetToggle = Rc::new(move |window, cx| {
-                        state.update(cx, |state, cx| state.toggle_open(window, cx));
-                        cx.notify(parent);
-                    });
-                    div()
-                        .child(trigger(open, Some(toggle), window, cx))
-                        .child(release.release_listener())
-                        .into_any_element()
-                })
-            })
+            .when_some(trigger, |base, trigger| base.trigger_with(trigger))
             .when_some(self.on_open_change, |base, callback| {
                 base.on_open_change(move |open, window, cx| callback(open, window, cx))
             })
             .content(move |state, window, cx| {
                 let popover = cx.entity();
-                let parent = window.current_view();
-                gpui_base::v_flex()
-                    .when(appearance, |el| {
-                        material::overlay_contour(el, cx)
-                            .p_1()
-                            .rounded(material::radius_overlay(cx))
-                    })
-                    .id("tcode-popover-content")
+                let content = content.map(|builder| builder(state, window, cx));
+                // Content that dismisses its popover while it is built (an
+                // empty menu) leaves at once rather than fading out.
+                if !state.is_open() {
+                    shown.set(false);
+                }
+                surface(appearance, progress, cx)
                     .when(closable, |el| {
                         el.on_mouse_down_out(move |_, window, cx| {
                             dismissal.consume(window, cx);
@@ -200,8 +280,7 @@ impl RenderOnce for Popover {
                             cx.notify(parent);
                         })
                     })
-                    .occlude()
-                    .when_some(content, |el, builder| el.child(builder(state, window, cx)))
+                    .children(content)
                     .children(children)
                     .refine_style(&style)
             })
@@ -210,6 +289,152 @@ impl RenderOnce for Popover {
             .render(window, cx)
             .into_any_element()
     }
+}
+
+/// gpui-base `HoverCard`'s open and close delays, which it does not export.
+const HOVER_OPEN_DELAY: Duration = Duration::from_millis(600);
+const HOVER_CLOSE_DELAY: Duration = Duration::from_millis(300);
+
+/// Whether a hover-opened popover is open, with gpui-base `HoverCard`'s
+/// rules: it opens once the pointer has rested on the trigger, and closes
+/// once the pointer has been off both the trigger and the content.
+#[derive(Default)]
+struct HoverIntent {
+    open: bool,
+    on_trigger: bool,
+    on_content: bool,
+    epoch: usize,
+    task: Option<Task<()>>,
+    on_open_change: Option<super::ToggleHandler>,
+}
+
+impl HoverIntent {
+    fn hover_trigger(&mut self, hovering: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_trigger = hovering;
+        if hovering {
+            self.schedule(true, window, cx);
+        } else if !self.on_content {
+            self.schedule(false, window, cx);
+        }
+    }
+
+    fn hover_content(&mut self, hovering: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_content = hovering;
+        if hovering {
+            self.epoch += 1;
+            self.task = None;
+        } else if !self.on_trigger {
+            self.schedule(false, window, cx);
+        }
+    }
+
+    fn schedule(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.epoch += 1;
+        let epoch = self.epoch;
+        let delay = if open {
+            HOVER_OPEN_DELAY
+        } else {
+            HOVER_CLOSE_DELAY
+        };
+        self.task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let stays = open || (!this.on_trigger && !this.on_content);
+                if this.epoch == epoch && stays && this.open != open {
+                    this.open = open;
+                    cx.notify();
+                    if let Some(callback) = this.on_open_change.clone() {
+                        callback(&open, window, cx);
+                    }
+                }
+            });
+        }));
+    }
+}
+
+impl Popover {
+    /// gpui-base's `HoverCard` unmounts its content the frame it closes and
+    /// has no presence hook, so a hover card is drawn here: the same
+    /// `Popup` the card draws, with this popover's surface and exit.
+    fn render_hover(self, window: &mut Window, cx: &mut App) -> AnyElement {
+        let intent = window.use_keyed_state((self.id.clone(), "hover"), cx, |_, _| {
+            HoverIntent::default()
+        });
+        intent.update(cx, |intent, _| intent.on_open_change = self.on_open_change);
+        let open = intent.read(cx).open;
+        let shown = window
+            .use_keyed_state((self.id.clone(), "shown"), cx, |_, _| {
+                Rc::new(Cell::new(false))
+            })
+            .read(cx)
+            .clone();
+        let presence = (open || shown.get()).then(|| {
+            crate::motion::appear((self.id.clone(), "presence"), open, APPEAR, window, cx)
+        });
+        let leaving =
+            !open && presence.is_some_and(|presence| presence.phase == PresencePhase::Exiting);
+        shown.set(open || leaving);
+        let progress = presence.map_or(1., |presence| presence.progress);
+        // On a phone there is no hover; like gpui-base's card, nothing opens
+        // it there but its own trigger's press.
+        let hoverable = !gpui_base::is_mobile();
+        let trigger = div()
+            .id("hover-trigger")
+            .children(self.trigger.map(|trigger| trigger(open, None, window, cx)))
+            .when(hoverable, |trigger| {
+                trigger.on_hover(window.listener_for(&intent, |intent, hovered, window, cx| {
+                    intent.hover_trigger(*hovered, window, cx)
+                }))
+            });
+        let id = self.id.clone();
+        let popup = gpui_base::Popup::new(self.id, trigger).anchor(self.anchor);
+        if !open && !leaving {
+            return popup.into_any_element();
+        }
+        // The content builder's state; nothing opens it, so it takes no focus.
+        let state = window.use_keyed_state((id, "hover-content"), cx, |_, cx| {
+            PopoverState::new(false, cx)
+        });
+        let content = self
+            .content
+            .map(|builder| state.update(cx, |state, cx| builder(state, window, cx)));
+        let surface = surface(self.appearance, progress, cx)
+            .children(content)
+            .children(self.children)
+            .refine_style(&self.style)
+            .when(open && hoverable, |surface| {
+                surface.on_hover(window.listener_for(&intent, |intent, hovered, window, cx| {
+                    intent.hover_content(*hovered, window, cx)
+                }))
+            })
+            // Above the content: a leaving surface takes no hover or press
+            // for its own controls.
+            .when(leaving, |surface| {
+                surface.child(div().absolute().inset_0().occlude())
+            });
+        popup
+            .content(div().id("content").child(surface))
+            .into_any_element()
+    }
+}
+
+/// The desktop popover's surface at `progress` of its appear motion.
+fn surface(
+    appearance: bool,
+    progress: f32,
+    cx: &App,
+) -> gpui::Stateful<material::Raised<gpui::Div>> {
+    if appearance {
+        material::overlay_contour(gpui_base::v_flex(), cx)
+            .p_1()
+            .rounded(material::radius_overlay(cx))
+    } else {
+        material::raised(gpui_base::v_flex())
+    }
+    .id("tcode-popover-content")
+    .occlude()
+    .opacity(progress)
+    .top(crate::motion::lift(progress))
 }
 
 impl Popover {
@@ -241,7 +466,6 @@ impl Popover {
             cx,
         );
         let drag = binding.read(cx);
-        let sheet_height = drag.height;
         let drag_progress = crate::edge_back::settle(
             (self.id.clone(), "edge-offset"),
             drag.progress,
@@ -253,7 +477,7 @@ impl Popover {
             gpui::SharedString::from(format!("{:?}-sheet", self.id)),
             open,
         )
-        .transition(gpui_base::motion::Transition::new(crate::edge_back::SETTLE))
+        .transition(gpui_base::motion::Transition::new(GLIDE))
         .sample(window, cx);
         let progress = presence.progress;
         let toggle: SheetToggle = Rc::new({
@@ -280,10 +504,8 @@ impl Popover {
         // Do not mount invisible hit targets over the trigger.
         if presence.should_render() && (open || progress > 0.) {
             let viewport = window.viewport_size();
-            let insets = crate::window_seam::content_insets(window);
-            // The sheet stops a window strip short of the top so the page it
-            // covers stays in view; no owner names that reserve yet.
-            let max_height = (viewport.height - insets.top - px(52.) - insets.bottom).max(px(0.));
+            let insets = crate::window_seam::content_insets_gliding("sheet-seam", None, window, cx);
+            let max_height = crate::overlay::sheet_max_height(&insets, window);
             // The grabber, the title row and the hairline above the content.
             let chrome_height =
                 px(material::SHEET_GRABBER_HEIGHT + material::SHEET_TITLE_HEIGHT + 1.);
@@ -302,7 +524,11 @@ impl Popover {
                 .w(viewport.width)
                 .max_w(viewport.width)
                 .flex_none()
-                .max_h(max_height)
+                // The sheet reaches the screen's bottom edge, under the home
+                // indicator and behind the keyboard; what it holds stays
+                // above them.
+                .max_h(max_height + insets.bottom)
+                .pb(insets.bottom)
                 .text_color(cx.theme().foreground)
                 .child(material::sheet_grabber(cx))
                 .child(
@@ -367,29 +593,14 @@ impl Popover {
                                 .bg(material::scrim(progress * (1. - drag_progress), cx)),
                         )
                         .surface(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .bottom(
-                                    insets.bottom
-                                        - crate::edge_back::BackProgress::offset(
-                                            if open {
-                                                drag_progress
-                                            } else {
-                                                drag_progress.max(1. - progress)
-                                            },
-                                            sheet_height,
-                                        ),
-                                )
-                                .w(viewport.width)
-                                .on_children_prepainted(move |bounds, _, cx| {
-                                    if let Some(bounds) = bounds.first() {
-                                        binding.update(cx, |binding, _| {
-                                            binding.height = bounds.size.height
-                                        });
-                                    }
-                                })
-                                .child(surface),
+                            crate::overlay::sheet_anchor(
+                                binding,
+                                drag_progress,
+                                progress,
+                                window,
+                                cx,
+                            )
+                            .child(surface),
                         ),
                 )
                 .with_priority(gpui_base::POPUP_PRIORITY),
@@ -461,14 +672,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
+        // The open sheet stops short of the status bar and reaches the
+        // screen's bottom edge, with what it holds above the keyboard.
+        crate::test_frames::draw_settled(cx);
         let sheet = cx.debug_bounds("touch-picker-sheet").unwrap();
         assert_eq!(sheet.top(), px(99.));
-        assert_eq!(sheet.bottom(), px(552.));
+        assert_eq!(sheet.bottom(), px(852.));
         let content = cx.debug_bounds("tall-content").unwrap();
         let viewport = cx.debug_bounds("touch-picker-content").unwrap();
-        assert!(viewport.bottom() <= sheet.bottom());
+        assert_eq!(viewport.bottom(), px(552.));
         assert!(viewport.size.height < content.size.height);
         cx.simulate_event(gpui::ScrollEvent {
             position: viewport.center(),
@@ -619,6 +831,98 @@ mod tests {
         assert_eq!((clicks.get(), releases.get()), (1, 1));
     }
 
+    struct LeavingHarness(Rc<Cell<usize>>);
+    impl Render for LeavingHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let chosen = self.0.clone();
+            div().size_full().child(
+                Popover::new("leaving-popover")
+                    .trigger(
+                        crate::widgets::Button::new("open")
+                            .label("Open")
+                            .debug_selector(|| "leaving-trigger".into()),
+                    )
+                    .content(move |_, _, _| {
+                        div()
+                            .child(
+                                div()
+                                    .id("leaving-list")
+                                    .debug_selector(|| "leaving-list".into())
+                                    .size(px(60.))
+                                    .overflow_y_scroll()
+                                    .child(
+                                        div()
+                                            .debug_selector(|| "leaving-rows".into())
+                                            .h(px(600.))
+                                            .w_full(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("leaving-option")
+                                    .debug_selector(|| "leaving-option".into())
+                                    .size(px(60.))
+                                    .on_click(move |_, _, _| chosen.set(chosen.get() + 1)),
+                            )
+                    }),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn a_dismissed_popover_leaves_inert_then_unmounts(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let chosen = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let chosen = chosen.clone();
+            move |_, _| LeavingHarness(chosen)
+        });
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let trigger = cx.debug_bounds("leaving-trigger").unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx)
+        });
+        let option = cx.debug_bounds("leaving-option").unwrap();
+        let list = cx.debug_bounds("leaving-list").unwrap();
+        cx.simulate_event(gpui::ScrollEvent {
+            position: list.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-200.))),
+            touch_phase: gpui::TouchPhase::Moved,
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let scrolled = |cx: &mut gpui::VisualTestContext| {
+            cx.debug_bounds("leaving-list").unwrap().top()
+                - cx.debug_bounds("leaving-rows").unwrap().top()
+        };
+        let offset = scrolled(cx);
+        assert!(offset > px(0.));
+
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let leaving = cx.debug_bounds("leaving-option").expect("still drawn");
+        assert_eq!(leaving.origin.x, option.origin.x);
+        assert_eq!(
+            scrolled(cx),
+            offset,
+            "state inside the content carries over"
+        );
+        cx.simulate_click(leaving.center(), Default::default());
+        assert_eq!(chosen.get(), 0, "a leaving popover takes no press");
+
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx)
+        });
+        assert!(cx.debug_bounds("leaving-option").is_none());
+    }
+
     #[gpui::test]
     fn bottom_sheet_options_receive_clicks_above_the_backdrop(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
@@ -645,5 +949,74 @@ mod tests {
             .expect("sheet option is laid out");
         window.simulate_click(bounds.center(), gpui::Modifiers::default());
         assert_eq!(selected.get(), 1);
+    }
+
+    struct HoverHarness(Rc<Cell<usize>>);
+    impl Render for HoverHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let chosen = self.0.clone();
+            div().size_full().p(px(40.)).child(
+                Popover::new("hover-popover")
+                    .open_on_hover()
+                    .trigger(
+                        crate::widgets::Button::new("hover-trigger")
+                            .label("Hover")
+                            .debug_selector(|| "hover-trigger".into()),
+                    )
+                    .content(move |_, _, _| {
+                        div()
+                            .id("hover-option")
+                            .debug_selector(|| "hover-option".into())
+                            .size(px(60.))
+                            .on_click(move |_, _, _| chosen.set(chosen.get() + 1))
+                    }),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn a_hover_popover_opens_on_rest_and_leaves_inert(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let chosen = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let chosen = chosen.clone();
+            move |_, _| HoverHarness(chosen)
+        });
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx)
+            });
+        };
+        draw(cx);
+        let trigger = cx.debug_bounds("hover-trigger").unwrap().center();
+        cx.simulate_mouse_move(trigger, None, Default::default());
+        draw(cx);
+        cx.executor().advance_clock(HOVER_OPEN_DELAY);
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let option = cx.debug_bounds("hover-option").expect("opened on rest");
+
+        // Onto the content, across the gap: it stays open.
+        cx.simulate_mouse_move(option.center(), None, Default::default());
+        cx.executor().advance_clock(HOVER_CLOSE_DELAY);
+        draw(cx);
+        assert!(cx.debug_bounds("hover-option").is_some(), "kept open");
+
+        cx.simulate_mouse_move(point(px(390.), px(840.)), None, Default::default());
+        cx.executor().advance_clock(HOVER_CLOSE_DELAY);
+        draw(cx);
+        let leaving = cx
+            .debug_bounds("hover-option")
+            .expect("still drawn while it leaves");
+        assert_eq!(leaving.origin.x, option.origin.x);
+        cx.simulate_click(leaving.center(), Default::default());
+        assert_eq!(chosen.get(), 0, "a leaving card takes no press");
+
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert!(cx.debug_bounds("hover-option").is_none());
     }
 }

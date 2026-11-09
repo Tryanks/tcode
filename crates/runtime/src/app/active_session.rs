@@ -27,16 +27,25 @@ pub struct QueuedMessage {
     /// Per-turn settings captured with the user's send gesture. A later mode
     /// toggle must affect later messages, not rewrite work already in the FIFO.
     pub(super) options: TurnOptions,
-    /// Byte length of visible context folded into `text`, including orchestration
-    /// context and per-turn pull-request instructions. The recorded event uses
-    /// it to split the injected prefix from the user's own words.
-    pub(super) context_len: Option<usize>,
     /// Context-window selection changed while the provider was live.
     pub(super) context_window_changed: Option<u64>,
+    /// Sent on a process that still runs settings the thread has left.
+    pub(super) kept_settings: bool,
+    /// The children's reports this message carries to the lead.
+    pub(super) reports: Vec<ReportHandover>,
     /// Orchestration callbacks arriving during the same provider-start window
     /// are folded into one wake-up turn. Once that turn is live, later callbacks
     /// are steered into it instead of becoming more queued turns.
     pub(super) kind: QueuedMessageKind,
+}
+
+/// A child's report callback on its way to the lead: the child's
+/// [`tcode_core::project::ChildExpectation::undelivered`] clears once the lead's
+/// provider takes this text.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ReportHandover {
+    pub(super) child: String,
+    pub(super) text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,21 +165,27 @@ pub struct ActiveSession {
     /// previews a different provider. Consumed only by a confirmed send.
     pub(super) pending_relay: Option<PendingRelay>,
     pub(super) runtime: Runtime,
-    /// The model the live provider process was actually started with. When the
-    /// user picks a different model we compare against this to decide whether a
-    /// restart is needed before the next turn.
+    /// A rewind holds the queue until the user next sends a message, which
+    /// goes ahead of it.
+    pub(super) queue_held: bool,
+    /// The model the live provider process actually runs. When the user picks
+    /// a different model we compare against this to decide whether it has to
+    /// change before the next turn.
     pub(super) live_model: Option<String>,
     /// The directory the live provider process was started in; a move to another
     /// directory restarts it before the next turn.
     pub(super) live_cwd: PathBuf,
+    /// The profile the live provider process was started with; a switch to
+    /// another account restarts it before the next turn.
+    pub(super) live_profile_id: Option<String>,
     pub(super) live_option_selections: Vec<OptionSelection>,
     pub(super) confirmed_option_selections: Vec<OptionSelection>,
-    /// A transient "the next queued send carries an injected context prefix of
-    /// this many bytes" flag, set by [`AppState::orchestrate_turn`] right before
-    /// it hands the composed text to `steer`. It is a
-    /// per-send annotation, consumed by the next `push_queued`, and never
-    /// persisted on the session.
-    pub(super) pending_context_len: Option<usize>,
+    /// Sent to the live process, which has yet to answer. Dispatch waits: the
+    /// message after a change is the one that asked for it.
+    pub(super) settings_apply_in_flight: Option<LiveSettings>,
+    /// What the live process last refused to take where it stands; only a
+    /// restart brings these.
+    pub(super) settings_refused: Option<LiveSettings>,
     /// Draft-only: run in the current checkout or a new dedicated
     /// worktree. Chosen in the checkout row before the first send; locked after.
     pub draft_workspace: WorkspaceMode,
@@ -193,12 +208,16 @@ pub struct ActiveSession {
     pub(super) turn_woken_by_control: bool,
     /// Set once an interrupt reached the provider; cleared when the turn ends.
     pub(super) interrupt_requested: bool,
+    /// When the first interrupt of that wait went out (unix ms).
+    pub(super) interrupt_requested_at: Option<u64>,
     /// A provider command (compaction, a goal change) asked for while the
     /// provider was starting; sent once it is live.
     pub(super) requested_command: Option<SessionCommand>,
     /// Provider-owned background tasks which outlive a completed model turn.
     /// Claude currently supplies this transient liveness signal.
     pub(super) background_task_count: usize,
+    /// The work behind that count, for a harness that lists it.
+    pub(super) background: super::background::BackgroundWork,
     /// Cleared when the live provider took none of Tcode's MCP servers.
     pub(super) mcp_servers_attached: bool,
     /// When this resident last went fully idle: the end of its live provider's
@@ -231,6 +250,14 @@ pub(super) struct PendingSteer {
     pub(super) attachments: Vec<Attachment>,
     pub(super) author: Option<Author>,
     pub(super) origin: Option<MessageOrigin>,
+    pub(super) reports: Vec<ReportHandover>,
+}
+
+/// The settings a live process can be asked to take without a restart.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct LiveSettings {
+    pub(super) model: Option<String>,
+    pub(super) option_selections: Vec<OptionSelection>,
 }
 
 #[derive(Debug, Clone)]
@@ -239,7 +266,9 @@ pub(super) struct PendingRelay {
     pub(super) from_model: Option<String>,
     /// The provider profile the history was produced against (`None` = the
     /// built-in profile). Two profiles of one [`ProviderKind`] are distinct
-    /// backends with isolated homes, so a profile switch is a relay too.
+    /// backends with isolated homes, so a profile switch is a relay too,
+    /// unless both are accounts of a provider that carries the native session
+    /// between them (`SessionMeta::session_transfer_from`).
     pub(super) from_profile: Option<String>,
 }
 
@@ -250,6 +279,7 @@ impl ActiveSession {
         provider_commands: Vec<ProviderCommand>,
     ) -> Self {
         let live_cwd = meta.cwd.clone();
+        let live_profile_id = meta.profile_id.clone();
         Self {
             meta,
             timeline: Timeline::default(),
@@ -259,11 +289,14 @@ impl ActiveSession {
             draft_device_id: None,
             pending_relay: None,
             runtime: Runtime::Idle,
+            queue_held: false,
             live_model: None,
             live_cwd,
+            live_profile_id,
             live_option_selections: Vec::new(),
             confirmed_option_selections: Vec::new(),
-            pending_context_len: None,
+            settings_apply_in_flight: None,
+            settings_refused: None,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
             queue: Vec::new(),
@@ -273,8 +306,10 @@ impl ActiveSession {
             turn_in_flight: false,
             turn_woken_by_control: false,
             interrupt_requested: false,
+            interrupt_requested_at: None,
             requested_command: None,
             background_task_count: 0,
+            background: Default::default(),
             mcp_servers_attached: true,
             idle_since: None,
             provider_commands,
@@ -287,12 +322,13 @@ impl ActiveSession {
     pub(super) fn resume_cursor_for_fresh_provider(&mut self) {
         self.shutdown_to_idle();
         self.meta.resume_cursor = None;
-        self.meta.pending_fork = false;
+        self.meta.pending_fork = None;
+        self.meta.session_transfer_from = None;
         self.pending_relay = None;
     }
 
     /// Whether the live provider is running a different model than the one now
-    /// selected in `meta.model` (so the next turn must restart the provider).
+    /// selected in `meta.model`.
     pub(super) fn model_changed_while_live(&self) -> bool {
         matches!(self.runtime, Runtime::Live(_)) && self.meta.model != self.live_model
     }
@@ -312,7 +348,8 @@ impl ActiveSession {
             .or(Some(descriptor))
     }
 
-    pub(super) fn options_changed_while_live(&self) -> bool {
+    /// The permission selection changed in a way only a restart applies.
+    fn permission_restart_pending(&self) -> bool {
         if !matches!(self.runtime, Runtime::Live(_)) {
             return false;
         }
@@ -322,7 +359,7 @@ impl ActiveSession {
                 id.as_str()
             }
         });
-        let permission_restart = permission.as_ref().is_some_and(|descriptor| {
+        permission.as_ref().is_some_and(|descriptor| {
             let default = match descriptor {
                 OptionDescriptor::Select { default_value, .. } => {
                     default_value.clone().map(serde_json::Value::String)
@@ -348,10 +385,23 @@ impl ActiveSession {
                     ..
                 }
             ) && value(&self.meta.option_selections) != value(&self.live_option_selections)
-        });
+        })
+    }
+
+    pub(super) fn options_changed_while_live(&self) -> bool {
+        if !matches!(self.runtime, Runtime::Live(_)) {
+            return false;
+        }
+        let permission_restart = self.permission_restart_pending();
         if self.meta.provider.caps().options_apply_live {
             return permission_restart;
         }
+        let permission = self.permission_descriptor();
+        let permission_id = permission.as_ref().map(|descriptor| match descriptor {
+            OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. } => {
+                id.as_str()
+            }
+        });
         let ignore_effort = self.meta.provider.caps().per_turn_effort;
         let model_selections = |selections: &[OptionSelection]| {
             let selections: Vec<_> = selections
@@ -370,7 +420,7 @@ impl ActiveSession {
     pub(super) fn fully_idle(&self) -> bool {
         !self.turn_in_flight
             && self.delivery_in_flight.is_none()
-            && self.queue.is_empty()
+            && (self.queue.is_empty() || self.queue_held)
             && self.background_task_count == 0
     }
 
@@ -378,6 +428,66 @@ impl ActiveSession {
         self.model_changed_while_live()
             || self.options_changed_while_live()
             || self.cwd_changed_while_live()
+            || self.profile_changed_while_live()
+    }
+
+    fn selected_settings(&self) -> LiveSettings {
+        LiveSettings {
+            model: self.meta.model.clone(),
+            option_selections: self.meta.option_selections.clone(),
+        }
+    }
+
+    /// The live process differs from the thread only in what it can be asked
+    /// to take where it stands, and has not refused these settings.
+    fn settings_apply_due(&self) -> bool {
+        self.meta.provider.caps().live_settings
+            && (self.model_changed_while_live() || self.options_changed_while_live())
+            && !self.cwd_changed_while_live()
+            && !self.profile_changed_while_live()
+            && !self.permission_restart_pending()
+            && self.settings_refused.as_ref() != Some(&self.selected_settings())
+    }
+
+    /// The live process cannot run this thread's settings without a restart.
+    pub(super) fn restart_required(&self) -> bool {
+        self.launch_settings_changed_while_live() && !self.settings_apply_due()
+    }
+
+    /// The live process's answer to [`Self::settings_apply_in_flight`].
+    pub(super) fn settle_settings_apply(&mut self, applied: bool) {
+        let Some(settings) = self.settings_apply_in_flight.take() else {
+            return;
+        };
+        if applied {
+            self.live_model = settings.model;
+            self.live_option_selections = settings.option_selections;
+        } else {
+            self.settings_refused = Some(settings);
+        }
+    }
+
+    /// Give up carrying the native session to the account the thread switched to (the copy
+    /// failed, or the provider closed before it resumed the copy): providers start fresh, and
+    /// the next message hands them the conversation from the account that holds it.
+    pub(super) fn fail_session_transfer(&mut self) {
+        self.meta.resume_cursor = None;
+        self.meta.pending_fork = None;
+    }
+
+    /// Whether the thread's native session stays behind in the profile
+    /// `session_transfer_from` names ([`Self::fail_session_transfer`]).
+    pub(super) fn session_transfer_failed(&self) -> bool {
+        self.meta.session_transfer_from.is_some() && self.meta.resume_cursor.is_none()
+    }
+
+    /// Whether the live provider runs under another profile than `meta.profile_id`
+    /// with no relay pending: the thread switched accounts and takes its native
+    /// session along. A relay keeps the old process until it is confirmed.
+    fn profile_changed_while_live(&self) -> bool {
+        matches!(self.runtime, Runtime::Live(_))
+            && self.pending_relay.is_none()
+            && self.live_profile_id != self.meta.profile_id
     }
 
     /// Whether the live provider runs in another directory than `meta.cwd`: the thread
@@ -387,10 +497,12 @@ impl ActiveSession {
     }
 
     /// A settings restart must not kill a running turn (a `/compact` included),
-    /// Claude-owned background work, or a turn whose provider delivery
-    /// acknowledgement has not landed yet.
+    /// provider-owned background work, or a turn whose provider delivery
+    /// acknowledgement has not landed yet. Only the first and last also hold
+    /// the queue: background work runs for as long as it likes, so a message
+    /// goes out beside it on the process as it is ([`Self::dispatch_next_pending`]).
     pub(super) fn settings_restart_deferred(&self) -> bool {
-        self.launch_settings_changed_while_live()
+        self.restart_required()
             && (self.turn_in_flight
                 || self.background_task_count > 0
                 || self.delivery_in_flight.is_some())
@@ -398,9 +510,10 @@ impl ActiveSession {
 
     /// The queued message the next dispatch would send, if one could go now.
     fn next_dispatchable(&self) -> Option<&QueuedMessage> {
-        if self.turn_in_flight
+        if self.queue_held
+            || self.turn_in_flight
             || self.delivery_in_flight.is_some()
-            || self.settings_restart_deferred()
+            || self.settings_apply_in_flight.is_some()
             || !matches!(self.runtime, Runtime::Live(_))
         {
             return None;
@@ -412,10 +525,13 @@ impl ActiveSession {
     }
 
     /// The id and text of the message that opens the fresh provider session of a moved
-    /// thread, which carries the handoff; `None` until that session is live and a message
-    /// can go.
-    pub(super) fn moved_handoff_message(&self) -> Option<(u64, String)> {
-        if self.meta.moved_from.is_none() || self.cwd_changed_while_live() {
+    /// thread, or of one whose native session could not be carried to its new account,
+    /// which carries the handoff; `None` until that session is live and a message can go.
+    pub(super) fn handoff_message(&self) -> Option<(u64, String)> {
+        if (self.meta.moved_from.is_none() && !self.session_transfer_failed())
+            || self.cwd_changed_while_live()
+            || self.profile_changed_while_live()
+        {
             return None;
         }
         self.next_dispatchable()
@@ -440,10 +556,13 @@ impl ActiveSession {
         }
         self.runtime = Runtime::Idle;
         self.delivery_in_flight = None;
+        self.settings_apply_in_flight = None;
         self.turn_in_flight = false;
         self.interrupt_requested = false;
+        self.interrupt_requested_at = None;
         self.requested_command = None;
         self.background_task_count = 0;
+        self.background.clear();
         self.idle_since = None;
         self._pump = None;
     }
@@ -452,10 +571,13 @@ impl ActiveSession {
     pub(super) fn mark_dead(&mut self) {
         self.runtime = Runtime::Idle;
         self.delivery_in_flight = None;
+        self.settings_apply_in_flight = None;
         self.turn_in_flight = false;
         self.interrupt_requested = false;
+        self.interrupt_requested_at = None;
         self.requested_command = None;
         self.background_task_count = 0;
+        self.background.clear();
         self._pump = None;
     }
 
@@ -475,6 +597,13 @@ impl ActiveSession {
             || self.delivery_in_flight.is_some()
             || !self.queue.is_empty()
             || self.background_task_count > 0
+    }
+
+    /// Whether the queue is all this thread has left: its start failed or its
+    /// provider died, so nothing is working on the unsent text, which waits for
+    /// the next start. A draft's scheduled send has yet to start at all.
+    pub(super) fn queue_stranded(&self) -> bool {
+        !self.draft && matches!(self.runtime, Runtime::Idle) && !self.queue.is_empty()
     }
 
     /// Whether a parent still has to wait for this thread: it has work, or its
@@ -550,13 +679,12 @@ impl ActiveSession {
             .map_err(|_| ())
     }
 
-    /// Append a message to the queue, consuming the staged context prefix.
+    /// Append a message to the queue.
     pub(super) fn push_queued(&mut self, text: String, attachments: Vec<Attachment>) -> u64 {
         self.idle_since = None;
         let id = self.next_queue_id;
         self.next_queue_id += 1;
         let options = self.turn_options();
-        let context_len = std::mem::take(&mut self.pending_context_len);
         self.queue.push(QueuedMessage {
             delivery_key: None,
             author: None,
@@ -567,11 +695,23 @@ impl ActiveSession {
             attachments,
             not_before: None,
             options,
-            context_len,
             context_window_changed: None,
+            kept_settings: false,
+            reports: Vec::new(),
             kind: QueuedMessageKind::User,
         });
         id
+    }
+
+    /// Put a steer the provider never took back in the queue, under its own
+    /// author and origin.
+    pub(super) fn requeue_steer(&mut self, steer: PendingSteer) {
+        self.push_queued(steer.text, steer.attachments);
+        if let Some(message) = self.queue.last_mut() {
+            message.author = steer.author;
+            message.origin = steer.origin.unwrap_or(MessageOrigin::Human);
+            message.reports = steer.reports;
+        }
     }
 
     /// Append a delayed user turn while capturing the same per-send settings
@@ -618,8 +758,9 @@ impl ActiveSession {
             attachments: Vec::new(),
             not_before: None,
             options,
-            context_len: None,
             context_window_changed: None,
+            kept_settings: false,
+            reports: Vec::new(),
             kind: QueuedMessageKind::OrchestrateCallback,
         });
         id
@@ -641,8 +782,9 @@ impl ActiveSession {
             attachments: Vec::new(),
             not_before: None,
             options,
-            context_len: None,
             context_window_changed: None,
+            kept_settings: false,
+            reports: Vec::new(),
             kind,
         });
         id
@@ -671,7 +813,8 @@ impl ActiveSession {
     /// be passed by ordinary work. A turn already in flight blocks dispatch for EVERY provider: a
     /// queued message is by definition one that waits for the running turn to
     /// finish. (Steering — the other way to send mid-turn — never goes through
-    /// here; see [`AppState::steer`].)
+    /// here; see [`AppState::steer`].) A restart background work defers does not
+    /// block it: the message runs on the live process's settings and says so.
     pub(super) fn dispatch_next_pending(&mut self) -> Result<bool, ()> {
         let Some(send) = self.next_dispatchable().cloned() else {
             return Ok(false);
@@ -679,6 +822,17 @@ impl ActiveSession {
         let Runtime::Live(commands) = &self.runtime else {
             return Ok(false);
         };
+        if self.settings_apply_due() {
+            let settings = self.selected_settings();
+            commands
+                .try_send(SessionCommand::ApplySettings {
+                    model: settings.model.clone(),
+                    option_selections: settings.option_selections.clone(),
+                })
+                .map_err(|_| ())?;
+            self.settings_apply_in_flight = Some(settings);
+            return Ok(false);
+        }
         let text = send.wire_text(&self.provider_commands);
         commands
             .try_send(SessionCommand::SendTurn {
@@ -688,6 +842,10 @@ impl ActiveSession {
                 attachments: send.attachments,
             })
             .map_err(|_| ())?;
+        let kept_settings = self.restart_required();
+        if let Some(message) = self.queue.iter_mut().find(|message| message.id == send.id) {
+            message.kept_settings = kept_settings;
+        }
         self.idle_since = None;
         self.delivery_in_flight = Some(send.id);
         Ok(true)

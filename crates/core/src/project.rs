@@ -84,6 +84,36 @@ pub enum SettledOverride {
     Active,
 }
 
+/// The thread a fork or a branch was made from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkOrigin {
+    pub thread_id: String,
+    /// Its title then, which stands in once that thread is gone.
+    pub title: String,
+    /// The branch this thread went on in, by the token of the rewind that left
+    /// it ([`agent::ForkPoint::Branch`]); no other thread may take it up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+/// `pending_fork` was a bool: a fork of the whole session.
+fn stored_pending_fork<'de, D>(deserializer: D) -> Result<Option<agent::ForkPoint>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Whole(bool),
+        Point(agent::ForkPoint),
+    }
+    Ok(match Stored::deserialize(deserializer)? {
+        Stored::Whole(true) => Some(agent::ForkPoint::Tail),
+        Stored::Whole(false) => None,
+        Stored::Point(point) => Some(point),
+    })
+}
+
 /// Index entry describing one persisted session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -146,14 +176,28 @@ pub struct SessionMeta {
     pub worktree: Option<WorktreeInfo>,
     #[serde(default)]
     pub resume_cursor: Option<ResumeCursor>,
-    /// Whether the next provider start must fork `resume_cursor` rather than
-    /// resume it in place.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub pending_fork: bool,
+    /// Where the next provider start must go on instead of resuming
+    /// `resume_cursor` in place.
+    #[serde(
+        default,
+        deserialize_with = "stored_pending_fork",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pending_fork: Option<agent::ForkPoint>,
+    /// The thread this one was made from, when it is a fork or a branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_origin: Option<ForkOrigin>,
     /// The directory a move to another project took this thread from, until the next turn
     /// hands the conversation to a fresh provider session in `cwd`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved_from: Option<PathBuf>,
+    /// The provider profile (a built-in one by its id) whose home holds this thread's native
+    /// session, after the thread switched to another account of the same provider and until
+    /// the session starts there: the next start copies it into the current profile's home
+    /// and resumes it. With `resume_cursor` cleared, the session could not be carried, and
+    /// the next message hands the conversation over from that profile instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_transfer_from: Option<String>,
     /// Set when this thread was imported from another tool's local history
     /// ("claude:<id>" / "codex:<id>"). Used to keep re-imports idempotent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -166,7 +210,8 @@ pub struct SessionMeta {
     /// absent in every index file written before ACP existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_agent_id: Option<String>,
-    /// Parent orchestrator thread for native child sessions.
+    /// The thread that started this one as its subagent, or whose provider-native subagent
+    /// this mirrors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     /// Set when this session mirrors a provider-native subagent transcript.
@@ -174,19 +219,12 @@ pub struct SessionMeta {
     /// sessions are read-only: disabled composer, no provider process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_subagent: Option<String>,
-    /// Whether this session receives the tcode_orchestrate MCP registration.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub orchestrate_enabled: bool,
-    /// Set (unix secs) when orchestrate `cancel` stopped this dispatched
-    /// child: its result is not delivered. A message admitted to it clears it.
+    /// Set (unix secs) when this subagent was cancelled or archived unsettled: its result is
+    /// not delivered. A message admitted to it clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancelled_at: Option<u64>,
-    /// Maximum inline result characters for this child's terminal callback.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_max_chars: Option<u32>,
-    /// The report this dispatched child owes its lead, opened by the lead's
-    /// latest message. Absent until the first dispatch or `send`, and after
-    /// `cancel`.
+    /// The report this subagent owes its lead, opened by the lead's latest message. Absent
+    /// after a cancel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expectation: Option<ChildExpectation>,
     /// This thread's own `tcode_control` grant, set by an approved request; absent means its project's or the default applies.
@@ -227,6 +265,11 @@ pub struct ChildExpectation {
     /// Whether the child was already asked once to report after going quiet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reminded: bool,
+    /// The callback carrying the child's latest report, outcome or failure,
+    /// kept until the lead's provider takes it: the lead's queue does not
+    /// outlive the host, and the next start sends it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undelivered: Option<String>,
 }
 
 impl ChildExpectation {
@@ -236,6 +279,7 @@ impl ChildExpectation {
             opened_at: now_secs,
             delivered_item: None,
             reminded: false,
+            undelivered: None,
         }
     }
 }
@@ -299,14 +343,13 @@ impl SessionMeta {
             || (self.settled_override.is_none() && self.settled_at.is_some())
     }
 
-    /// A dispatched orchestrate child or a provider-native subagent mirror:
-    /// reached from its parent, never listed on its own.
+    /// A subagent another thread started or a provider-native subagent mirror: reached from
+    /// its parent, never listed on its own.
     pub fn is_subagent(&self) -> bool {
         self.parent_session_id.is_some() || self.native_subagent.is_some()
     }
 
-    /// A child its lead dispatched through orchestrate, as opposed to a
-    /// provider-native subagent mirror.
+    /// A subagent its lead started, as opposed to a provider-native subagent mirror.
     pub fn is_dispatched(&self) -> bool {
         self.parent_session_id.is_some() && self.native_subagent.is_none()
     }
@@ -377,16 +420,16 @@ impl SessionMeta {
             active_order: None,
             worktree: None,
             resume_cursor: None,
-            pending_fork: false,
+            pending_fork: None,
+            fork_origin: None,
             moved_from: None,
+            session_transfer_from: None,
             imported_from: None,
             option_selections: Vec::new(),
             acp_agent_id: None,
             parent_session_id: None,
             native_subagent: None,
-            orchestrate_enabled: false,
             cancelled_at: None,
-            result_max_chars: None,
             expectation: None,
             control_grant: None,
             control_grant_requests: Vec::new(),
@@ -444,16 +487,17 @@ pub struct ProjectGroup {
 
 /// Group `sessions` under their `projects` and order projects using `sort`.
 /// Callers choose the row order for their lifecycle or archive surface.
-pub fn group_sessions(
+pub fn group_sessions<'a>(
     projects: &[Project],
-    sessions: &[SessionMeta],
+    sessions: impl IntoIterator<Item = &'a SessionMeta> + Clone,
     sort: ProjectSort,
 ) -> Vec<ProjectGroup> {
     let mut groups: Vec<ProjectGroup> = projects
         .iter()
         .map(|project| {
             let sessions: Vec<SessionMeta> = sessions
-                .iter()
+                .clone()
+                .into_iter()
                 .filter(|s| s.project_id.as_deref() == Some(project.id.as_str()))
                 .cloned()
                 .collect();
@@ -711,10 +755,9 @@ mod tests {
             "approval_mode": "read_only"
         });
         let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
-        assert!(!meta.pending_fork);
+        assert_eq!(meta.pending_fork, None);
         assert_eq!(meta.parent_session_id, None);
         assert_eq!(meta.native_subagent, None);
-        assert!(!meta.orchestrate_enabled);
         assert_eq!(meta.archived_at, None);
         assert_eq!(meta.worktree, None);
         let json = serde_json::to_value(&meta).unwrap();
@@ -725,18 +768,34 @@ mod tests {
             "pending_fork",
             "parent_session_id",
             "native_subagent",
-            "orchestrate_enabled",
             "archived_at",
             "worktree",
         ] {
             assert!(json.get(omitted).is_none(), "unexpected field: {omitted}");
         }
 
+        for (stored, point) in [
+            (serde_json::json!(true), Some(agent::ForkPoint::Tail)),
+            (serde_json::json!(false), None),
+            (
+                serde_json::json!({"before": {"checkpoint_id": "prompt-2"}}),
+                Some(agent::ForkPoint::Before {
+                    checkpoint_id: "prompt-2".into(),
+                }),
+            ),
+        ] {
+            let meta: SessionMeta = serde_json::from_value(serde_json::json!({
+                "id": "fork", "title": "Fork", "provider": "codex", "cwd": "/work",
+                "created_at": 1, "updated_at": 2, "pending_fork": stored,
+            }))
+            .unwrap();
+            assert_eq!(meta.pending_fork, point);
+        }
+
         let mut meta = meta;
-        meta.pending_fork = true;
+        meta.pending_fork = Some(agent::ForkPoint::Tail);
         meta.parent_session_id = Some("parent".into());
         meta.native_subagent = Some("spawn-1".into());
-        meta.orchestrate_enabled = true;
         meta.archived_at = Some(1234);
         meta.worktree = Some(WorktreeInfo {
             root_project_path: PathBuf::from("/proj"),

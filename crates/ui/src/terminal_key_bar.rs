@@ -566,8 +566,7 @@ mod tests {
         let pump = link.clone();
         let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            pump.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
-                .await;
+            pump.pump_with_timer(|delay| executor.timer(delay)).await;
         });
         let store = cx.new(|cx| {
             crate::store::WorkspaceStore::new_attached(
@@ -575,14 +574,18 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         let (drawer, cx) = cx.add_window_view(|window, cx| {
-            crate::terminal_drawer::TerminalDrawer::new(store.clone(), window, cx)
+            crate::terminal_drawer::TerminalDrawer::new(
+                store.clone(),
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
         });
         for (topic, event) in [
             (
@@ -623,9 +626,11 @@ mod tests {
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         assert_eq!(
-            store.read_with(cx, |store, _| store.with_terminal_workspace(|workspace| {
-                workspace.active().map(|entry| entry.id)
-            })),
+            store.read_with(cx, |store, cx| store.with_terminal_workspace_for(
+                store.sole_thread().as_deref(),
+                |workspace| { workspace.active().map(|entry| entry.id) },
+                cx,
+            )),
             Some(Some(7)),
             "the drawer must have a replicated active terminal before focus is tested"
         );

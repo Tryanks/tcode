@@ -3,16 +3,6 @@ use tcode_core::settings::SettingsPatch;
 use tcode_core::thread_sort::ThreadSection;
 
 impl AppState {
-    pub(super) fn native_rewind_blocked(&self, active: &ActiveSession) -> bool {
-        !active.meta.provider.caps().native_rewind
-            || active.turn_in_flight
-            || active.delivery_in_flight.is_some()
-            || active.background_task_count > 0
-            || active.timeline.turn_running
-            || !active.queue.is_empty()
-            || self.pending_native_rewinds.contains_key(&active.meta.id)
-    }
-
     pub(super) fn checkout_blocked(active: &ActiveSession) -> bool {
         // A provider that dies without closing its timeline turn must not block
         // checkout forever: the promise is no foreground turn.
@@ -66,7 +56,7 @@ impl AppState {
                 .map_err(|message| error("invalid_settings", message))?;
         }
         let host_kind = match command {
-            Command::SetHostToken { host, .. } => {
+            Command::SetHostToken { host, .. } | Command::VerifyHostToken { host, .. } => {
                 Some((host, self.settings.source_control.kind(host)))
             }
             Command::PatchSettings {
@@ -131,8 +121,26 @@ impl AppState {
                     "This project is no longer available.",
                 ));
             }
+            Command::CreateThirdPartyProfile { provider, .. }
+                if !provider
+                    .harness()
+                    .endpoint
+                    .is_some_and(|endpoint| endpoint.profiles) =>
+            {
+                return Err(error(
+                    "no_endpoint_profiles",
+                    "This provider has no endpoint profiles.",
+                ));
+            }
             Command::SetProfileSecret { profile_id, .. }
-            | Command::UpdateProfileSettings { profile_id, .. }
+                if !self.settings.owns_secrets(profile_id) =>
+            {
+                return Err(error(
+                    "unknown_profile",
+                    "This provider profile is no longer available.",
+                ));
+            }
+            Command::UpdateProfileSettings { profile_id, .. }
             | Command::DeleteProfile { profile_id }
             | Command::StartProviderLogin { profile_id }
             | Command::SubmitProviderLoginCode { profile_id, .. }
@@ -329,19 +337,52 @@ impl AppState {
                     "There is no terminal available to split.",
                 ));
             }
-            Command::RewindTurn { turn, mode, .. }
-                if self.native_rewind_blocked(active)
-                    || active
-                        .timeline
-                        .turns
-                        .get(*turn)
-                        .and_then(|turn| turn.provider_checkpoint_id.as_ref())
-                        .is_none()
-                    || (*turn == 0 && mode.includes_conversation()) =>
+            Command::RewindTurn {
+                turn,
+                steer,
+                checkpoint_id,
+                mode,
+                ..
+            }
+            | Command::PreviewRewind {
+                turn,
+                steer,
+                checkpoint_id,
+                mode,
+                ..
+            } if self
+                .rewind_checkpoint(
+                    active,
+                    &super::rewind::RewindAt {
+                        turn: *turn,
+                        steer: steer.as_deref(),
+                        checkpoint: checkpoint_id.as_deref(),
+                    },
+                    *mode,
+                )
+                .is_none() =>
             {
                 return Err(error(
                     "rewind_unavailable",
-                    "This turn cannot be rewound now.",
+                    "This message cannot be rewound to now.",
+                ));
+            }
+            Command::UndoRewind { checkpoint_id, .. }
+                if self.rewind_undo_token(active, checkpoint_id).is_none() =>
+            {
+                return Err(error(
+                    "rewind_unavailable",
+                    "This rewind cannot be undone now.",
+                ));
+            }
+            Command::OpenRewoundBranch {
+                turn,
+                checkpoint_id,
+                ..
+            } if Self::rewound_branch(active, *turn, checkpoint_id).is_none() => {
+                return Err(error(
+                    "rewind_unavailable",
+                    "This rewind left no branch to open now.",
                 ));
             }
             Command::ActivateTerminal { terminal_id, .. }
@@ -447,7 +488,6 @@ impl AppState {
             Command::SendTurn { .. }
                 | Command::ScheduleTurn { .. }
                 | Command::ConfirmRelayAndSend { .. }
-                | Command::OrchestrateTurn { .. }
                 | Command::Steer { .. }
         ) {
             if Self::conversation_read_only(&active.meta) {

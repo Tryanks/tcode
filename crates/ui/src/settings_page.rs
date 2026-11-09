@@ -1,6 +1,7 @@
 //! Full-page settings route with section navigation and editable settings.
 
 mod control;
+mod disk_usage;
 pub(crate) mod thread_behavior;
 
 use std::rc::Rc;
@@ -20,13 +21,15 @@ use gpui::{
 };
 use gpui_base::{InteractiveElementExt as _, v_flex};
 
-use crate::acp_panel::{AcpAgentCard, AcpPanel};
-use crate::orchestrate_settings::OrchestrateSettingsPanel;
+use crate::acp_panel::AcpPanel;
+use crate::device::DevicePreferences;
+use crate::harness_dialog::{HarnessDialog, HarnessId, ManagePlugins};
 use crate::plugins_settings::PluginsSettingsPanel;
-use crate::provider_card::{ManagePlugins, ProviderCard};
 use crate::provider_model_picker::ProviderModelPicker;
-use crate::settings::{ImageMode, LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, ThemeMode};
-use crate::store::WorkspaceStore;
+use crate::settings::{
+    ImageMode, LANGUAGE_ENGLISH, LANGUAGE_JAPANESE, LANGUAGE_SIMPLIFIED_CHINESE, ThemeMode,
+};
+use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::theme::{self, ActiveTheme as _, ThemeMode as UiThemeMode};
 use crate::time::{humanize_ago, now_secs};
 use crate::typography::TextRole as _;
@@ -34,9 +37,18 @@ use crate::window_caption;
 use crate::window_drag_area;
 use crate::window_state::WindowState;
 use tcode_core::project::SessionMeta;
-use tcode_core::settings::{FallbackReviewSettings, TitleGenerationSettings};
+use tcode_core::settings::TitleGenerationSettings;
 
-use crate::settings_rows::{FIELD_WIDTH, SelectRowOption, ToggleRow};
+use crate::settings_rows::{SelectRowOption, ToggleRow};
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
 const NAV_WIDTH: f32 = 255.;
 /// Archived rows rendered per page. Each row carries two buttons with click
@@ -52,17 +64,47 @@ fn page_bounds(total: usize, page: usize, per_page: usize) -> (usize, usize, usi
     (page, start, start.saturating_add(per_page).min(total))
 }
 
+/// The Advanced disclosure's button, its chevron turning with the fold.
+#[derive(IntoElement)]
+struct AdvancedToggle {
+    expanded: bool,
+    on_click: crate::widgets::button::ClickHandler,
+}
+
+impl gpui::RenderOnce for AdvancedToggle {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let on_click = self.on_click;
+        Button::new("settings-advanced-toggle")
+            .text()
+            .xsmall()
+            .text_caption(cx)
+            .icon(crate::widgets::Chevron::icon(
+                "settings-advanced-toggle",
+                self.expanded,
+                window,
+                cx,
+            ))
+            .label(crate::tr!("settings.advanced"))
+            .aria_expanded(self.expanded)
+            .debug_selector(|| "settings-advanced-toggle".into())
+            .on_click(move |event, window, cx| on_click(event, window, cx))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
     General,
     Threads,
     ProjectThreadRules,
     Providers,
+    /// One harness's settings, on a compact window.
+    Harness,
     SourceControl,
+    /// One platform of Git Platforms, managed on a phone's pushed page.
+    SourceControlHost,
     Usage,
     Browser,
     ComputerUse,
-    Orchestrate,
     Control,
     Plugins,
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -84,7 +126,7 @@ enum Section {
 /// Traverse, the least used, comes last. Choosing a machine lives in
 /// `crate::remote`.
 #[cfg(feature = "remote-hosting")]
-const SECTIONS: [Section; 16] = [
+const SECTIONS: [Section; 15] = [
     Section::General,
     Section::Remote,
     Section::Spaces,
@@ -95,7 +137,6 @@ const SECTIONS: [Section; 16] = [
     Section::Providers,
     Section::SourceControl,
     Section::Usage,
-    Section::Orchestrate,
     Section::Plugins,
     Section::Archived,
     Section::ComputerUse,
@@ -103,7 +144,7 @@ const SECTIONS: [Section; 16] = [
     Section::Maintenance,
 ];
 #[cfg(all(target_family = "wasm", not(feature = "remote-hosting")))]
-const SECTIONS: [Section; 15] = [
+const SECTIONS: [Section; 14] = [
     Section::General,
     Section::Remote,
     Section::Spaces,
@@ -113,7 +154,6 @@ const SECTIONS: [Section; 15] = [
     Section::Providers,
     Section::SourceControl,
     Section::Usage,
-    Section::Orchestrate,
     Section::Plugins,
     Section::Archived,
     Section::ComputerUse,
@@ -121,14 +161,13 @@ const SECTIONS: [Section; 15] = [
     Section::Maintenance,
 ];
 #[cfg(not(any(feature = "remote-hosting", target_family = "wasm")))]
-const SECTIONS: [Section; 12] = [
+const SECTIONS: [Section; 11] = [
     Section::General,
     Section::Threads,
     Section::Control,
     Section::Providers,
     Section::SourceControl,
     Section::Usage,
-    Section::Orchestrate,
     Section::Plugins,
     Section::Archived,
     Section::ComputerUse,
@@ -248,11 +287,12 @@ impl Section {
             Self::Threads
             | Self::ProjectThreadRules
             | Self::SourceControl
+            | Self::SourceControlHost
             | Self::Providers
+            | Self::Harness
             | Self::Usage
             | Self::Browser
             | Self::ComputerUse
-            | Self::Orchestrate
             | Self::Control
             | Self::Plugins
             | Self::Archived
@@ -281,10 +321,11 @@ impl Section {
             | Self::ProjectThreadRules
             | Self::General
             | Self::SourceControl
+            | Self::SourceControlHost
             | Self::Providers
+            | Self::Harness
             | Self::Usage
             | Self::ComputerUse
-            | Self::Orchestrate
             | Self::Control
             | Self::Plugins
             | Self::Archived
@@ -305,11 +346,12 @@ impl Section {
             Self::Threads => "settings-nav-threads",
             Self::ProjectThreadRules => "settings-nav-project-rules",
             Self::SourceControl => "settings-nav-source-control",
+            Self::SourceControlHost => "settings-nav-source-control-host",
             Self::Providers => "settings-nav-providers",
+            Self::Harness => "settings-nav-harness",
             Self::Usage => "settings-nav-usage",
             Self::Browser => "settings-nav-browser",
             Self::ComputerUse => "settings-nav-computer-use",
-            Self::Orchestrate => "settings-nav-orchestrate",
             Self::Control => "settings-nav-control",
             Self::Plugins => "settings-nav-plugins",
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -329,12 +371,11 @@ impl Section {
         match self {
             Self::General => IconName::Settings,
             Self::Threads | Self::ProjectThreadRules => IconName::MessageSquare,
-            Self::SourceControl => IconName::Github,
-            Self::Providers => IconName::Bot,
+            Self::SourceControl | Self::SourceControlHost => IconName::Github,
+            Self::Providers | Self::Harness => IconName::Bot,
             Self::Usage => IconName::ChartPie,
             Self::Browser => IconName::Globe,
             Self::ComputerUse => IconName::LayoutDashboard,
-            Self::Orchestrate => IconName::Map,
             Self::Control => IconName::Layers,
             Self::Plugins => IconName::Puzzle,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -354,12 +395,13 @@ impl Section {
         match self {
             Self::General => crate::tr!("settings.general"),
             Self::Threads | Self::ProjectThreadRules => crate::tr!("settings.threads"),
-            Self::SourceControl => crate::tr!("settings.source_control"),
-            Self::Providers => crate::tr!("settings.providers"),
+            Self::SourceControl | Self::SourceControlHost => {
+                crate::tr!("settings.source_control")
+            }
+            Self::Providers | Self::Harness => crate::tr!("settings.providers"),
             Self::Usage => crate::tr!("settings.usage"),
             Self::Browser => crate::tr!("settings.browser"),
             Self::ComputerUse => crate::tr!("settings.computer_use"),
-            Self::Orchestrate => crate::tr!("settings.orchestrate"),
             Self::Control => crate::tr!("control.title"),
             Self::Plugins => crate::tr!("settings.plugins"),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -378,17 +420,17 @@ impl Section {
     }
 }
 
+/// The remote attachment ceiling as the settings field shows it, in MiB.
+fn remote_attachment_limit_value(cx: &App) -> String {
+    (DevicePreferences::remote_attachment_limit_bytes(cx) / (1024 * 1024)).to_string()
+}
+
 /// An input seeded from replicated settings.
 ///
 /// `pushed` is the last value this page wrote into the field, so an echoed
 /// change event can be told apart from a real edit; `dirty` then freezes the
 /// field against later snapshots so a host update cannot overwrite what the
 /// user is in the middle of typing.
-/// The remote attachment ceiling as the settings field shows it, in MiB.
-fn remote_attachment_limit_value(store: &WorkspaceStore) -> String {
-    (store.client_remote_attachment_limit_bytes() / (1024 * 1024)).to_string()
-}
-
 struct SettingsInput {
     state: Entity<InputState>,
     pushed: String,
@@ -413,6 +455,12 @@ impl SettingsInput {
         true
     }
 
+    fn follow(&mut self, value: String, window: &mut Window, cx: &mut App) {
+        if crate::settings_rows::follow_input(&self.state, &value, window, cx) {
+            self.pushed = value;
+        }
+    }
+
     fn push(&mut self, value: String, window: &mut Window, cx: &mut App) {
         self.pushed = value.clone();
         self.state
@@ -421,25 +469,30 @@ impl SettingsInput {
 }
 
 /// Apply a settings theme mode to the live window (shared with the palette's
-/// "Toggle theme" action).
+/// "Toggle theme" action), its colours gliding to the new palette.
 pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
-    match mode {
-        ThemeMode::Light => theme::change_mode(UiThemeMode::Light, Some(window), cx),
-        ThemeMode::Dark => theme::change_mode(UiThemeMode::Dark, Some(window), cx),
-        ThemeMode::System => theme::sync_system_appearance(Some(window), cx),
-    }
+    let mode = match mode {
+        ThemeMode::Light => UiThemeMode::Light,
+        ThemeMode::Dark => UiThemeMode::Dark,
+        ThemeMode::System => window.appearance().into(),
+    };
+    theme::glide_mode(mode, window, cx);
 }
 
 pub struct SettingsPage {
     store: Entity<WorkspaceStore>,
+    /// The window's hosts, whose settings the machine group chooses between
+    /// when more than one is this device's to manage.
+    hosts: Vec<Entity<WorkspaceStore>>,
     window_state: Entity<WindowState>,
-    /// One card per native profile, keyed by profile id (built-in + user).
-    provider_cards: Vec<(String, Entity<ProviderCard>)>,
-    provider_card_subscriptions: Vec<Subscription>,
+    /// The harness shown as a page of the compact settings stack.
+    harness_page: Option<Entity<HarnessDialog>>,
+    harness_page_scroll: ScrollHandle,
+    /// The open harness dialog's or page's requests to this page.
+    harness_subscriptions: Vec<Subscription>,
     /// Long-lived state for the modal ACP marketplace and custom form.
     acp_panel: Entity<AcpPanel>,
     /// Editable main-model identities and child-model routing matrix.
-    orchestrate_panel: Entity<OrchestrateSettingsPanel>,
     /// Each enabled profile's native plugin catalog.
     plugins_panel: Entity<PluginsSettingsPanel>,
     source_control_panel: Entity<crate::source_control_settings::SourceControlPanel>,
@@ -448,28 +501,44 @@ pub struct SettingsPage {
     remote: RemotePanels,
     /// Shared provider/model picker configured for background thread titles.
     title_model_picker: Entity<ProviderModelPicker>,
-    /// Shared provider/model picker configured for fallback reviews.
-    fallback_review_model_picker: Entity<ProviderModelPicker>,
     /// Editable name this client presents to machines it connects to.
     device_name_input: SettingsInput,
-    /// Stable entities keep expanded state and lazily-created inputs across rerenders.
-    acp_cards: Vec<(String, Entity<AcpAgentCard>)>,
     section: Section,
     /// Whether this page holds the store's archived threads.
     archived_held: bool,
+    /// Whether this page holds what Maintenance shows of the host: its
+    /// storage migration and disk usage.
+    maintenance_held: bool,
+    /// The providers whose disk usage is unfolded.
+    disk_usage_open: std::collections::HashSet<agent::ProviderKind>,
     capabilities: SettingsCapabilities,
     /// Whether the machine group's **Advanced** subgroup is open, once the user
     /// has said. `None` keeps the capability-derived default.
     advanced_expanded: Option<bool>,
+    /// The rail's opacity, below 1 while a route that draws its own left
+    /// column rises over Settings or Settings over it.
+    rail_opacity: f32,
     /// Latches the one usage refresh fired when Usage becomes the active
     /// section; cleared as soon as the page shows anything else.
     usage_refresh_sent: bool,
     /// Editable "Home URL" for the Browser page; committed on change.
     home_url_input: SettingsInput,
+    /// Editable "New project folder"; committed on change.
+    new_project_dir_input: SettingsInput,
+    /// Editable custom "Add Project start folder"; committed on change.
+    project_start_custom_input: SettingsInput,
+    /// The host's home, which the Projects rows write `~` paths under. Asked
+    /// of the host when those rows are drawn, until it answers.
+    host_home: Option<SharedString>,
+    /// An ask for the host's home is on its way or has been answered.
+    host_home_requested: bool,
     auto_settle_input: SettingsInput,
     project_rules_editor: Option<Entity<thread_behavior::ProjectRulesEditor>>,
     project_rules_subscription: Option<Subscription>,
     control: control::ControlSection,
+    /// The page's size-class motion: the window draws the page under
+    /// another parent when it turns compact or wide.
+    motion: crate::motion::owned::Owned,
     remote_attachment_limit_input: SettingsInput,
     /// Zero-based page shown by the Archived Threads list.
     archived_page: usize,
@@ -487,41 +556,90 @@ pub struct SettingsPage {
     section_scroll: ScrollHandle,
     content_scroll: ScrollHandle,
     project_rules_scroll: ScrollHandle,
+    /// The platform a phone manages on its own page.
+    source_control_host: Option<Entity<crate::source_control_settings::HostEditor>>,
+    source_control_host_subscription: Option<Subscription>,
+    source_control_host_scroll: ScrollHandle,
+    _source_control_subscription: Subscription,
     _subscriptions: Vec<Subscription>,
 }
 
 impl SettingsPage {
+    /// The row `id` of this page, gliding when the window turns compact or
+    /// wide.
+    fn flip_row(&self, id: impl Into<SharedString>, cx: &App) -> crate::settings_rows::FlipRow {
+        crate::settings_rows::flip_row(&self.motion, id, self.window_state.read(cx).compact)
+    }
+
+    pub(crate) fn set_hosts(&mut self, hosts: Vec<Entity<WorkspaceStore>>, cx: &mut Context<Self>) {
+        self.hosts = hosts;
+        cx.notify();
+    }
+
+    /// The hosts the machine group can show, in the window's order. One that
+    /// is down is left out unless the page shows it, or a page over a down
+    /// host would lose its way to the others.
+    fn settings_hosts(&self, cx: &App) -> Vec<&Entity<WorkspaceStore>> {
+        self.hosts
+            .iter()
+            .filter(|store| {
+                let host = store.read(cx);
+                host.scope().is_full()
+                    && (*store == &self.store || !crate::sidebar::host_down(host))
+            })
+            .collect()
+    }
+
     fn section_applies(&self, section: &Section, cx: &App) -> bool {
         section.available(&self.capabilities, self.store.read(cx).scope().is_full())
     }
-    fn take_requested_section(
-        window_state: &Entity<WindowState>,
-        cx: &mut Context<Self>,
-    ) -> Option<Section> {
-        window_state
-            .update(cx, |state, _| state.pending_settings_section.take())
-            .map(|section| match section.as_str() {
-                "providers" => Section::Providers,
-                "usage" => Section::Usage,
-                "source_control" => Section::SourceControl,
-                "browser" => Section::Browser,
-                "computer_use" => Section::ComputerUse,
-                "orchestrate" => Section::Orchestrate,
-                "control" => Section::Control,
-                "plugins" => Section::Plugins,
-                #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-                "remote" => Section::Remote,
-                #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-                "spaces" => Section::Spaces,
-                #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-                "group" => Section::Group,
-                #[cfg(feature = "remote-hosting")]
-                "traverse" => Section::Traverse,
-                "archived" => Section::Archived,
-                "thread_behavior" | "threads" => Section::Threads,
-                "maintenance" => Section::Maintenance,
-                _ => Section::General,
-            })
+    /// Open the section a link elsewhere in the app names, the way choosing
+    /// it here would.
+    pub(crate) fn open_section(&mut self, name: &str, cx: &mut Context<Self>) {
+        let section = match name {
+            "providers" => Section::Providers,
+            "usage" => Section::Usage,
+            "source_control" => Section::SourceControl,
+            "browser" => Section::Browser,
+            "computer_use" => Section::ComputerUse,
+            "control" => Section::Control,
+            "plugins" => Section::Plugins,
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            "remote" => Section::Remote,
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            "spaces" => Section::Spaces,
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            "group" => Section::Group,
+            #[cfg(feature = "remote-hosting")]
+            "traverse" => Section::Traverse,
+            "archived" => Section::Archived,
+            "thread_behavior" | "threads" => Section::Threads,
+            "maintenance" => Section::Maintenance,
+            _ => Section::General,
+        };
+        self.select_section(section, cx);
+    }
+
+    /// Show on `to` the section `from` shows, so choosing another host keeps
+    /// the page where it was.
+    pub(crate) fn carry_section(from: &Entity<Self>, to: &Entity<Self>, cx: &mut App) {
+        let section = match from.read(cx).section {
+            Section::ProjectThreadRules => Section::Threads,
+            Section::Harness => Section::Providers,
+            Section::SourceControlHost => Section::SourceControl,
+            section => section,
+        };
+        to.update(cx, |page, cx| {
+            if page.section == section || !page.section_applies(&section, cx) {
+                return;
+            }
+            page.section = section;
+            page.sync_holds(cx);
+            if section.advanced() {
+                page.advanced_expanded = Some(true);
+            }
+            cx.notify();
+        });
     }
 
     fn return_to_settings_root(window_state: &Entity<WindowState>, cx: &mut Context<Self>) {
@@ -553,21 +671,14 @@ impl SettingsPage {
                 cx,
             )
         });
-        let fallback_review = store.read(cx).settings().fallback_review;
-        let fallback_review_model_picker = cx.new(|cx| {
-            ProviderModelPicker::selection(
-                store.clone(),
-                "fallback-review-model-popover",
-                "fallback-review-model-dropdown",
-                fallback_review.provider,
-                fallback_review.model,
-                fallback_review.profile_id,
-                cx,
-            )
-        });
+        let device = DevicePreferences::entity(cx);
         let subscriptions = vec![
-            cx.observe(&store, |this, _, cx| {
-                let selection = this.store.read(cx).settings().title_generation;
+            cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
+                if change.topic != TopicKind::Settings {
+                    return;
+                }
+                let settings = this.store.read(cx).settings();
+                let selection = settings.title_generation;
                 this.title_model_picker.update(cx, |picker, cx| {
                     picker.set_selected(
                         selection.provider,
@@ -578,27 +689,18 @@ impl SettingsPage {
                 });
                 cx.notify();
             }),
-            cx.observe(&store, |this, _, cx| {
-                let selection = this.store.read(cx).settings().fallback_review;
-                this.fallback_review_model_picker.update(cx, |picker, cx| {
-                    picker.set_selected(
-                        selection.provider,
-                        selection.model,
-                        selection.profile_id,
-                        cx,
-                    );
-                });
-                cx.notify();
-            }),
-            cx.observe(&window_state, |this, _, cx| {
-                let window_state = this.window_state.clone();
-                if let Some(section) = Self::take_requested_section(&window_state, cx) {
-                    this.select_section(section, cx);
-                }
-                cx.notify();
-            }),
+            cx.observe(&window_state, |_, _, cx| cx.notify()),
             cx.observe_in(&store, window, |this, _, window, cx| {
                 this.hydrate_inputs(window, cx);
+            }),
+            // Each host's page draws this device's fields: what is set on one,
+            // or anywhere else, shows on the others, but for the field being
+            // typed in.
+            cx.observe_in(&device, window, |this, _, window, cx| {
+                let name = DevicePreferences::device_name(cx);
+                this.device_name_input.follow(name, window, cx);
+                let limit = remote_attachment_limit_value(cx);
+                this.remote_attachment_limit_input.follow(limit, window, cx);
             }),
             cx.subscribe(&title_model_picker, |this, _, event, cx| {
                 let selected = event.0.clone();
@@ -611,32 +713,9 @@ impl SettingsPage {
                     cx,
                 );
             }),
-            cx.subscribe(&fallback_review_model_picker, |this, _, event, cx| {
-                let selected = event.0.clone();
-                this.dispatch_settings(
-                    move |store| {
-                        store.set_fallback_review_provider(selected.provider);
-                        store.set_fallback_review_model(selected.id);
-                        store.set_fallback_review_profile_id(selected.profile_id);
-                    },
-                    cx,
-                );
-            }),
         ];
 
-        // Consume relaunch and in-app navigation requests through the same
-        // channel used by in-app Settings links.
-        let requested_section = Self::take_requested_section(&window_state, cx);
-        let full_scope = store.read(cx).scope().is_full();
-        let section = requested_section
-            .filter(|section| section.available(&capabilities, full_scope))
-            .unwrap_or(Section::General);
-        if requested_section.is_some_and(|section| !section.available(&capabilities, full_scope)) {
-            Self::return_to_settings_root(&window_state, cx);
-        }
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
-        let orchestrate_panel =
-            cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
         let content_scroll = ScrollHandle::new();
         let plugins_panel = cx.new(|cx| {
             PluginsSettingsPanel::new(
@@ -653,10 +732,12 @@ impl SettingsPage {
         // the host's settings actually arrive, so a portable client never shows
         // its local defaults as if they were the host's configuration.
         let home_url_input = cx.new(|cx| InputState::new(window, cx));
-        let device_name = store.read(cx).client_device_name();
+        let new_project_dir_input = cx.new(|cx| InputState::new(window, cx));
+        let project_start_custom_input = cx.new(|cx| InputState::new(window, cx));
+        let device_name = DevicePreferences::device_name(cx);
         let device_name_input =
             cx.new(|cx| InputState::new(window, cx).default_value(device_name.clone()));
-        let remote_attachment_limit = remote_attachment_limit_value(store.read(cx));
+        let remote_attachment_limit = remote_attachment_limit_value(cx);
         let remote_attachment_limit_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .step(1.)
@@ -677,35 +758,49 @@ impl SettingsPage {
                 cx,
             )
         });
+        let source_control_subscription = cx.subscribe_in(
+            &source_control_panel,
+            window,
+            |page: &mut Self, _, crate::source_control_settings::ManageHost(host), window, cx| {
+                page.manage_source_control_host(host.clone(), window, cx)
+            },
+        );
         let mut page = Self {
             store,
+            hosts: Vec::new(),
             window_state,
-            provider_cards: Vec::new(),
-            provider_card_subscriptions: Vec::new(),
+            harness_page: None,
+            harness_page_scroll: ScrollHandle::new(),
+            harness_subscriptions: Vec::new(),
             acp_panel,
-            orchestrate_panel,
             plugins_panel,
             source_control_panel,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             remote,
             title_model_picker,
-            fallback_review_model_picker,
             device_name_input: SettingsInput {
                 state: device_name_input.clone(),
                 pushed: device_name,
                 dirty: false,
             },
-            acp_cards: Vec::new(),
-            section,
+            section: Section::General,
             archived_held: false,
+            maintenance_held: false,
+            disk_usage_open: Default::default(),
             capabilities,
             advanced_expanded: None,
+            rail_opacity: 1.,
             usage_refresh_sent: false,
             home_url_input: SettingsInput::new(home_url_input.clone()),
+            new_project_dir_input: SettingsInput::new(new_project_dir_input.clone()),
+            project_start_custom_input: SettingsInput::new(project_start_custom_input.clone()),
+            host_home: None,
+            host_home_requested: false,
             auto_settle_input: SettingsInput::new(auto_settle_input.clone()),
             project_rules_editor: None,
             project_rules_subscription: None,
             control: control::ControlSection::default(),
+            motion: Default::default(),
             remote_attachment_limit_input: SettingsInput {
                 state: remote_attachment_limit_input.clone(),
                 pushed: remote_attachment_limit,
@@ -719,6 +814,10 @@ impl SettingsPage {
             section_scroll: ScrollHandle::new(),
             content_scroll,
             project_rules_scroll: ScrollHandle::new(),
+            source_control_host: None,
+            source_control_host_subscription: None,
+            source_control_host_scroll: ScrollHandle::new(),
+            _source_control_subscription: source_control_subscription,
             _subscriptions: subscriptions,
         };
         page._subscriptions
@@ -730,6 +829,32 @@ impl SettingsPage {
                     }
                 }
             }));
+        page._subscriptions.push(
+            cx.subscribe(&new_project_dir_input, |this, input, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    if this.new_project_dir_input.is_user_edit(&value) {
+                        let dir = Some(value.trim().to_owned()).filter(|dir| !dir.is_empty());
+                        this.dispatch_settings(move |store| store.set_new_project_dir(dir), cx);
+                    }
+                }
+            }),
+        );
+        page._subscriptions.push(cx.subscribe(
+            &project_start_custom_input,
+            |this, input, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    if this.project_start_custom_input.is_user_edit(&value) {
+                        let dir = Some(value.trim().to_owned()).filter(|dir| !dir.is_empty());
+                        this.dispatch_settings(
+                            move |store| store.set_project_start_custom(dir),
+                            cx,
+                        );
+                    }
+                }
+            },
+        ));
         page._subscriptions
             .push(cx.subscribe(&device_name_input, |this, input, event, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -763,16 +888,19 @@ impl SettingsPage {
                 }
             },
         ));
-        page.build_provider_cards(cx);
-        page.sync_acp_cards(window, cx);
         page.hydrate_inputs(window, cx);
         page._subscriptions.push(cx.on_release(|this, cx| {
-            if this.archived_held {
-                this.store
-                    .update(cx, |store, _| store.release_archived_sessions());
-            }
+            this.store.update(cx, |store, _| {
+                if this.archived_held {
+                    store.release_archived_sessions();
+                }
+                if this.maintenance_held {
+                    store.release_storage_migration();
+                    store.release_disk_usage();
+                }
+            });
         }));
-        page.sync_archived(cx);
+        page.sync_holds(cx);
         page
     }
 
@@ -799,6 +927,39 @@ impl SettingsPage {
             let value = settings.browser.home_url.clone().unwrap_or_default();
             self.home_url_input.push(value, window, cx);
         }
+        if !self.new_project_dir_input.dirty {
+            let value = settings.new_project_dir.clone().unwrap_or_default();
+            self.new_project_dir_input.push(value, window, cx);
+        }
+        if !self.project_start_custom_input.dirty {
+            let value = settings.project_start_custom.clone().unwrap_or_default();
+            self.project_start_custom_input.push(value, window, cx);
+        }
+    }
+
+    /// Ask the host where its home is, until it answers: listing `~` answers
+    /// with it. A failed ask is made again the next time the rows are drawn.
+    pub(super) fn fetch_host_home(&mut self, cx: &mut Context<Self>) {
+        if self.host_home_requested || !self.store.read(cx).can_manage_host() {
+            return;
+        }
+        self.host_home_requested = true;
+        let listing = self
+            .store
+            .update(cx, |store, cx| store.browse_directories("~".into(), cx));
+        cx.spawn(async move |this, cx| {
+            let listing = listing.await;
+            let _ = this.update(cx, |page, cx| match listing {
+                Ok(listing) => {
+                    page.host_home = listing
+                        .home
+                        .map(|home| home.to_string_lossy().into_owned().into());
+                    cx.notify();
+                }
+                Err(_) => page.host_home_requested = false,
+            });
+        })
+        .detach();
     }
 
     fn commit_home_url(&self, cx: &mut Context<Self>) {
@@ -822,7 +983,7 @@ impl SettingsPage {
             .trim()
             .to_string();
         let name = (!value.is_empty()).then_some(value);
-        self.dispatch_settings(move |store| store.set_client_device_name(name), cx);
+        DevicePreferences::set_device_name(name, cx);
     }
 
     fn commit_remote_attachment_limit(&self, cx: &mut Context<Self>) {
@@ -837,57 +998,46 @@ impl SettingsPage {
         else {
             return;
         };
-        self.dispatch_settings(
-            move |store| store.set_client_remote_attachment_limit_mib(Some(limit)),
-            cx,
-        );
+        DevicePreferences::set_remote_attachment_limit_mib(Some(limit), cx);
     }
 
-    fn build_provider_cards(&mut self, cx: &mut Context<Self>) {
-        let profiles = self.store.read(cx).all_provider_profiles();
-        self.provider_cards = profiles
-            .into_iter()
-            .map(|profile| {
-                let store = self.store.clone();
-                let kind = profile.kind;
-                let id = profile.id.clone();
-                let card = cx.new(|cx| ProviderCard::new(store, kind, id, cx));
-                (profile.id, card)
-            })
-            .collect();
-        self.provider_card_subscriptions = self
-            .provider_cards
-            .iter()
-            .map(|(_, card)| {
-                cx.subscribe(card, |this, _, ManagePlugins(profile_id), cx| {
-                    this.select_section(Section::Plugins, cx);
-                    let profile_id = profile_id.clone();
-                    this.plugins_panel
-                        .update(cx, |panel, cx| panel.focus_profile(profile_id, cx));
-                })
-            })
-            .collect();
-    }
-
-    /// Reconcile card entities by installed id, preserving editors for agents
-    /// that were not installed or removed since the previous render.
-    fn sync_acp_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let installed: Vec<_> = self.store.read(cx).settings_installed_acp_agents();
-        let mut old = std::mem::take(&mut self.acp_cards);
-        self.acp_cards = installed
-            .into_iter()
-            .map(|agent| {
-                let card = old
-                    .iter()
-                    .position(|(id, _)| id == &agent.id)
-                    .map(|index| old.swap_remove(index).1)
-                    .unwrap_or_else(|| {
-                        let store = self.store.clone();
-                        cx.new(|cx| AcpAgentCard::new(store, &agent, window, cx))
-                    });
-                (agent.id, card)
-            })
-            .collect();
+    /// Open a harness's settings: a dialog on a wide window, a page of the
+    /// settings stack on a compact one.
+    fn open_harness(&mut self, harness: HarnessId, window: &mut Window, cx: &mut Context<Self>) {
+        let compact = self.window_state.read(cx).compact;
+        let store = self.store.clone();
+        let dialog = if compact {
+            let page = cx.new(|cx| HarnessDialog::new(store, harness, true, window, cx));
+            self.harness_page = Some(page.clone());
+            self.section = Section::Harness;
+            self.window_state.update(cx, |state, cx| {
+                state.go(crate::window_state::Destination::SettingsHarness, cx)
+            });
+            page
+        } else {
+            crate::harness_dialog::open(store, harness, window, cx)
+        };
+        self.harness_subscriptions = vec![
+            cx.subscribe(&dialog, |this, _, ManagePlugins(profile_id), cx| {
+                if this.section == Section::Harness {
+                    this.window_state.update(cx, |state, cx| state.back(cx));
+                    this.harness_page = None;
+                }
+                this.select_section(Section::Plugins, cx);
+                let profile_id = profile_id.clone();
+                this.plugins_panel
+                    .update(cx, |panel, cx| panel.focus_profile(profile_id, cx));
+            }),
+            cx.subscribe(&dialog, |this, _, _: &gpui::DismissEvent, cx| {
+                if this.section == Section::Harness {
+                    this.window_state.update(cx, |state, cx| state.back(cx));
+                    this.section = Section::Providers;
+                    this.harness_page = None;
+                    cx.notify();
+                }
+            }),
+        ];
+        cx.notify();
     }
 
     fn open_acp_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -919,34 +1069,47 @@ impl SettingsPage {
         });
     }
 
-    /// The index leaves archived threads out; the Archived section holds
-    /// them only while it is open.
-    fn sync_archived(&mut self, cx: &mut Context<Self>) {
-        let open = self.section == Section::Archived;
-        if open == self.archived_held {
-            return;
+    /// What a section shows only while it is open: the archived threads,
+    /// which the index leaves out, and the host's storage migration and
+    /// disk usage.
+    fn sync_holds(&mut self, cx: &mut Context<Self>) {
+        let archived = self.section == Section::Archived;
+        if archived != self.archived_held {
+            self.archived_held = archived;
+            self.store.update(cx, |store, cx| {
+                if archived {
+                    store.hold_archived_sessions(cx);
+                } else {
+                    store.release_archived_sessions();
+                }
+            });
         }
-        self.archived_held = open;
-        self.store.update(cx, |store, cx| {
-            if open {
-                store.hold_archived_sessions(cx);
-            } else {
-                store.release_archived_sessions();
-            }
-        });
+        let maintenance = self.section == Section::Maintenance;
+        if maintenance != self.maintenance_held {
+            self.maintenance_held = maintenance;
+            self.store.update(cx, |store, _| {
+                if maintenance {
+                    store.hold_storage_migration();
+                    store.hold_disk_usage();
+                } else {
+                    store.release_storage_migration();
+                    store.release_disk_usage();
+                }
+            });
+        }
     }
 
     fn select_section(&mut self, section: Section, cx: &mut Context<Self>) {
         self.host_permissions = None;
         if !self.section_applies(&section, cx) {
             self.section = Section::General;
-            self.sync_archived(cx);
+            self.sync_holds(cx);
             Self::return_to_settings_root(&self.window_state, cx);
             cx.notify();
             return;
         }
         self.section = section;
-        self.sync_archived(cx);
+        self.sync_holds(cx);
         // Arriving from a deep link or the palette must not leave the selected
         // section hidden inside a folded subgroup.
         if section.advanced() {
@@ -971,12 +1134,37 @@ impl SettingsPage {
         {
             return Section::Threads.label();
         }
+        if self.section == Section::SourceControlHost {
+            return match &self.source_control_host {
+                Some(editor)
+                    if self.window_state.read(cx).destination()
+                        == crate::window_state::Destination::SettingsSourceControlHost =>
+                {
+                    editor.read(cx).host.clone().into()
+                }
+                _ => Section::SourceControl.label(),
+            };
+        }
         // The phone page names just the project: the nav bar has no room for
         // the dialog's sentence-long title.
         if self.section == Section::ProjectThreadRules
             && let Some(editor) = &self.project_rules_editor
         {
             return editor.read(cx).project.name.clone().into();
+        }
+        if self.section == Section::Harness {
+            if self.window_state.read(cx).destination()
+                != crate::window_state::Destination::SettingsHarness
+            {
+                return Section::Providers.label();
+            }
+            if let Some(page) = &self.harness_page {
+                return crate::harness_dialog::harness_name(
+                    self.store.read(cx),
+                    page.read(cx).harness(),
+                )
+                .into();
+            }
         }
         self.section.label()
     }
@@ -994,6 +1182,9 @@ impl SettingsPage {
                 crate::tr!("settings.this_device").into_owned(),
                 "settings-device-caption",
             ),
+            SectionGroup::Machine if self.settings_hosts(cx).len() > 1 => {
+                return self.host_selector(cx);
+            }
             SectionGroup::Machine => {
                 let store = self.store.read(cx);
                 let name = if store.is_remote() {
@@ -1018,6 +1209,67 @@ impl SettingsPage {
             .into_any_element()
     }
 
+    /// The machine group's caption over several hosts: it names the host
+    /// whose settings the group holds and chooses another.
+    fn host_selector(&self, cx: &Context<Self>) -> AnyElement {
+        let shown = self.store.read(cx).host_key();
+        let options = self
+            .settings_hosts(cx)
+            .into_iter()
+            .map(|store| {
+                let store = store.read(cx);
+                let host = store.host_key();
+                SelectRowOption {
+                    id: format!("settings-host-{}", host.name()).into(),
+                    label: store.host_title(),
+                    description: None,
+                    selected: host == shown,
+                    value: host,
+                }
+            })
+            .collect();
+        let label = crate::tr!(
+            "settings.machine_settings",
+            name = self.store.read(cx).host_title()
+        );
+        let trigger = Button::new("settings-host-selector")
+            .debug_selector(|| "settings-host-selector".into())
+            .text()
+            .xsmall()
+            .aria_label(crate::tr!("settings.choose_host"))
+            .child(
+                gpui_base::h_flex()
+                    .gap_1()
+                    .text_caption(cx)
+                    .child(label)
+                    .child(
+                        Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground),
+                    ),
+            );
+        gpui_base::h_flex()
+            .pl(px(crate::material::CARD_INSET))
+            .pb(cx.theme().tokens.spacing.sm)
+            .child(crate::settings_rows::select_menu(
+                trigger,
+                "settings-host-popover",
+                "settings-host-menu",
+                200.,
+                crate::tr!("settings.choose_host").into_owned().into(),
+                options,
+                self.window_state.read(cx).compact,
+                |host, _, cx| crate::shell::choose_settings_host(host, cx),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// Draw the rail at `opacity` from this frame on.
+    pub(crate) fn fade_rail(this: &Entity<Self>, opacity: f32, cx: &mut App) {
+        if this.read(cx).rail_opacity != opacity {
+            this.update(cx, |page, _| page.rail_opacity = opacity);
+        }
+    }
+
     fn advanced_expanded(&self) -> bool {
         self.advanced_expanded
             .unwrap_or(!self.capabilities.folds_advanced())
@@ -1027,30 +1279,19 @@ impl SettingsPage {
     /// compact section list: the same caption style as a group's, plus the
     /// chevron that opens it.
     fn advanced_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
-        let expanded = self.advanced_expanded();
         let spacing = &cx.theme().tokens.spacing;
-        div()
+        // A row, so the button is as wide as its label, not the rail.
+        gpui_base::h_flex()
             .pl(px(crate::material::CARD_INSET))
             .pt(spacing.sm)
             .pb(spacing.sm)
-            .child(
-                Button::new("settings-advanced-toggle")
-                    .text()
-                    .xsmall()
-                    .text_caption(cx)
-                    .icon(if expanded {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .label(crate::tr!("settings.advanced"))
-                    .aria_expanded(expanded)
-                    .debug_selector(|| "settings-advanced-toggle".into())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.advanced_expanded = Some(!this.advanced_expanded());
-                        cx.notify();
-                    })),
-            )
+            .child(AdvancedToggle {
+                expanded: self.advanced_expanded(),
+                on_click: Rc::new(cx.listener(|this, _, _, cx| {
+                    this.advanced_expanded = Some(!this.advanced_expanded());
+                    cx.notify();
+                })),
+            })
             .into_any_element()
     }
 
@@ -1092,7 +1333,21 @@ impl SettingsPage {
 
     fn render_nav(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let spacing = cx.theme().tokens.spacing;
-        let mut tabs = v_flex().flex_1().min_h_0().px(spacing.sm).gap(spacing.xxs);
+        // One selection over the device, machine and advanced rails: its
+        // fill glides from a row of one to a row of another.
+        let mark = Rc::new(crate::widgets::tabs::Glide::new(
+            &"settings-rail".into(),
+            Some(crate::widgets::tabs::item_key(&self.section.id().into())),
+            window,
+            cx,
+        ));
+        let mut tabs = v_flex()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .px(spacing.sm)
+            .gap(spacing.xxs)
+            .child(mark.rail(cx));
         for (index, group) in [SectionGroup::Device, SectionGroup::Machine]
             .into_iter()
             .enumerate()
@@ -1122,15 +1377,22 @@ impl SettingsPage {
                     "settings-machine-tabs"
                 })
                 .rail()
+                .shared_mark(mark.clone())
                 .aria_label(crate::tr!("settings.title"))
                 .items(plain),
             );
             if sections.iter().any(|section| section.advanced()) {
-                tabs = tabs.child(self.advanced_toggle(cx));
-                if self.advanced_expanded() {
-                    tabs = tabs.child(
+                tabs = tabs.child(self.advanced_toggle(cx)).child(
+                    crate::widgets::Collapsible::new(
+                        "settings-advanced-tabs-fold",
+                        self.advanced_expanded(),
+                    )
+                    .motion(&self.motion)
+                    .w_full()
+                    .content(
                         TabBar::new("settings-advanced-tabs")
                             .rail()
+                            .shared_mark(mark.clone())
                             .aria_label(crate::tr!("settings.advanced"))
                             .items(
                                 sections
@@ -1139,18 +1401,32 @@ impl SettingsPage {
                                     .map(|section| self.nav_item(section, cx))
                                     .collect::<Vec<_>>(),
                             ),
-                    );
-                }
+                    ),
+                );
             }
         }
+        // Settings replaces the whole window, so this rail is the window's
+        // left column: it carries the wordmark and clears the platform's
+        // own window controls, exactly as the workspace sidebar does, and
+        // keeps its width beside a side cutout.
+        let seam = crate::window_seam::insets_along(
+            "settings-rail-seam",
+            gpui::Edges {
+                right: false,
+                ..gpui::Edges::all(true)
+            },
+            window,
+            cx,
+        );
         v_flex()
             .flex_none()
-            .w(px(NAV_WIDTH))
+            .w(px(NAV_WIDTH) + seam.left)
             .h_full()
+            .pt(seam.top)
+            .pb(seam.bottom)
+            .pl(seam.left)
+            .opacity(self.rail_opacity)
             .bg(cx.theme().sidebar)
-            // Settings replaces the whole window, so this rail is the window's
-            // left column: it carries the wordmark and clears the platform's
-            // own window controls, exactly as the workspace sidebar does.
             .child(
                 window_drag_area(
                     "settings-nav-drag",
@@ -1205,11 +1481,15 @@ impl SettingsPage {
                 card = card.child(crate::material::grouped(plain, cx));
             }
             if !advanced.is_empty() {
-                card = card
-                    .child(self.advanced_toggle(cx))
-                    .when(advanced_expanded, |card| {
-                        card.child(crate::material::grouped(advanced, cx))
-                    });
+                card = card.child(self.advanced_toggle(cx)).child(
+                    crate::widgets::Collapsible::new(
+                        "settings-advanced-list-fold",
+                        advanced_expanded,
+                    )
+                    .motion(&self.motion)
+                    .w_full()
+                    .content(crate::material::grouped(advanced, cx)),
+                );
             }
             column = column.child(card);
         }
@@ -1248,12 +1528,11 @@ impl SettingsPage {
         // below), so the cluster is placed out of flow at the strip's right edge
         // and the column reserves matching trailing room for it — its actions
         // therefore end left of the buttons rather than under them.
-        let (right_panel_open, right_tab) = self.store.read(cx).window_caption_state();
         let hosts_caption = window_caption::hosts_caption_for_state(
             window_caption::CaptionSurface::Settings,
             self.window_state.read(cx).route(),
-            right_panel_open,
-            right_tab,
+            false,
+            Default::default(),
         );
         // Align the header title and actions with the centered content column.
         window_drag_area(
@@ -1307,17 +1586,12 @@ impl SettingsPage {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, window, cx| {
-                    store.update(cx, |store, _cx| {
-                        store.reset_settings();
-                        store.reset_client_preferences();
-                    });
+                    store.update(cx, |store, _cx| store.reset_settings());
+                    DevicePreferences::restore_defaults(window, cx);
                     // Provider profiles and installed agents survive the reset,
                     // so their cards need no rebuild — only the panels and
                     // inputs holding a copy of a reset preference do.
                     page.update(cx, |page, cx| {
-                        let store = page.store.clone();
-                        page.orchestrate_panel =
-                            cx.new(|cx| OrchestrateSettingsPanel::new(store, window, cx));
                         // The Home URL input now holds a stale override.
                         let home_url = page
                             .store
@@ -1328,12 +1602,14 @@ impl SettingsPage {
                             .clone()
                             .unwrap_or_default();
                         page.home_url_input.push(home_url, window, cx);
-                        let device_name = page.store.read(cx).client_device_name();
+                        page.new_project_dir_input.push(String::new(), window, cx);
+                        page.project_start_custom_input
+                            .push(String::new(), window, cx);
+                        let device_name = DevicePreferences::device_name(cx);
                         page.device_name_input.push(device_name, window, cx);
-                        let limit = remote_attachment_limit_value(page.store.read(cx));
+                        let limit = remote_attachment_limit_value(cx);
                         page.remote_attachment_limit_input.push(limit, window, cx);
                     });
-                    apply_theme(ThemeMode::System, window, cx);
                     true
                 })
         });
@@ -1364,7 +1640,10 @@ impl SettingsPage {
         if self.section != Section::Plugins {
             self.plugins_panel.update(cx, |panel, _| panel.hide());
         }
-        if self.section == Section::SourceControl {
+        if matches!(
+            self.section,
+            Section::SourceControl | Section::SourceControlHost
+        ) {
             self.source_control_panel
                 .update(cx, |panel, cx| panel.show(cx));
         } else {
@@ -1373,15 +1652,16 @@ impl SettingsPage {
         }
         let column = match self.section {
             Section::General => self.render_general(cx),
-            Section::Threads => self.render_threads(cx),
+            Section::Threads => self.render_threads(window, cx),
             Section::ProjectThreadRules => v_flex().children(self.project_rules_editor.clone()),
             Section::SourceControl => self.render_source_control(cx),
+            Section::SourceControlHost => v_flex().children(self.source_control_host.clone()),
             Section::Providers => self.render_providers(window, cx),
-            Section::Usage => self.render_usage(cx),
+            Section::Harness => v_flex().children(self.harness_page.clone()),
+            Section::Usage => self.render_usage(window, cx),
             Section::Browser => self.render_browser(cx),
             Section::ComputerUse => self.render_computer_use(cx),
-            Section::Orchestrate => v_flex().child(self.orchestrate_panel.clone()),
-            Section::Control => self.render_control(cx),
+            Section::Control => self.render_control(window, cx),
             Section::Plugins => v_flex().child(self.plugins_panel.clone()),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Section::Remote => v_flex().child(self.remote.remote.clone()),
@@ -1391,21 +1671,35 @@ impl SettingsPage {
             Section::Group => v_flex().child(self.remote.group.clone()),
             #[cfg(feature = "remote-hosting")]
             Section::Traverse => v_flex().child(self.remote.traverse.clone()),
-            Section::Archived => self.render_archived(cx),
-            Section::Maintenance => self.render_maintenance(cx),
+            Section::Archived => self.render_archived(window, cx),
+            Section::Maintenance => self.render_maintenance(window, cx),
         };
-        let scroll = if self.section == Section::ProjectThreadRules {
-            &self.project_rules_scroll
+        // The rail swaps sections in place, so a newly chosen section fades in;
+        // compact sections arrive through the shell's navigation stack. The
+        // fade is the page's, so the window turning wide mid-way carries it on
+        // rather than fading the section in again under the page's new parent.
+        let entering = self
+            .motion
+            .entered("section", self.section, CHANGE, window, cx);
+        let column = if self.window_state.read(cx).compact {
+            column
         } else {
-            &self.content_scroll
+            v_flex().opacity(entering).child(column)
         };
-        self.render_content_column(column, scroll, cx)
+        let scroll = match self.section {
+            Section::ProjectThreadRules => &self.project_rules_scroll,
+            Section::SourceControlHost => &self.source_control_host_scroll,
+            Section::Harness => &self.harness_page_scroll,
+            _ => &self.content_scroll,
+        };
+        self.render_content_column(column, scroll, window, cx)
     }
 
     fn render_content_column(
         &self,
         column: gpui::Div,
         scroll: &ScrollHandle,
+        window: &mut Window,
         cx: &App,
     ) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
@@ -1419,38 +1713,30 @@ impl SettingsPage {
                 .overflow_y_scroll()
                 .lock_scroll_axis()
                 .track_scroll(scroll)
-                .child(crate::settings_rows::content_column(column, compact, cx)),
+                .child(crate::settings_rows::content_column(
+                    column,
+                    compact,
+                    &self.motion,
+                    window,
+                    cx,
+                )),
         )
         .into_any_element()
     }
 
     fn render_general(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let store = self.store.read(cx);
-        let settings = store.settings();
-        let language_overridden = store.client_language_override().is_some();
-        let theme_overridden = store.client_theme_override().is_some();
-        let device_name_overridden = store.client_device_name_override().is_some();
-        let attachment_limit_overridden = store.client_remote_attachment_limit_override().is_some();
-        let provider_marks_reset = crate::settings_rows::reset_action(
-            "reset-sidebar-provider-marks",
-            settings.sidebar_provider_marks,
-            cx.listener(|this, _, _, cx| {
-                this.dispatch_settings(|store| store.set_sidebar_provider_marks(false), cx)
-            }),
-        );
-        let appearance = vec![
-            self.language_row(settings.language.as_deref(), language_overridden, cx),
-            self.theme_row(settings.theme_mode, theme_overridden, cx),
-            self.toggle_row(
-                "sidebar-provider-marks",
-                crate::tr!("settings.sidebar_provider_marks.title"),
-                crate::tr!("settings.sidebar_provider_marks.description"),
-                settings.sidebar_provider_marks,
-                provider_marks_reset,
-                cx,
-                WorkspaceStore::set_sidebar_provider_marks,
-            ),
+        let language = DevicePreferences::language(cx);
+        let theme = DevicePreferences::theme(cx);
+        let device_name_overridden = DevicePreferences::device_name_overridden(cx);
+        let attachment_limit_overridden =
+            DevicePreferences::remote_attachment_limit_mib(cx).is_some();
+        let mut appearance = vec![
+            self.language_row(language.as_deref(), cx),
+            self.theme_row(theme, cx),
         ];
+        if self.settings_hosts(cx).len() <= 1 {
+            appearance.push(self.provider_marks_row(cx));
+        }
         let device = vec![
             self.device_name_row(device_name_overridden, cx),
             self.remote_attachment_limit_row(attachment_limit_overridden, cx),
@@ -1469,7 +1755,29 @@ impl SettingsPage {
             ))
     }
 
-    fn render_maintenance(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    /// Whether the sidebar marks this host's threads with their provider: a
+    /// setting of the host, so over several hosts it is among the threads'.
+    fn provider_marks_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let marks = self.store.read(cx).settings().sidebar_provider_marks;
+        let reset = crate::settings_rows::reset_action(
+            "reset-sidebar-provider-marks",
+            marks,
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_sidebar_provider_marks(false), cx)
+            }),
+        );
+        self.toggle_row(
+            "sidebar-provider-marks",
+            crate::tr!("settings.sidebar_provider_marks.title"),
+            crate::tr!("settings.sidebar_provider_marks.description"),
+            marks,
+            reset,
+            cx,
+            WorkspaceStore::set_sidebar_provider_marks,
+        )
+    }
+
+    fn render_maintenance(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let throttle_disabled = self
             .store
             .read(cx)
@@ -1495,8 +1803,13 @@ impl SettingsPage {
             cx,
             |store, checked| store.set_inactive_frame_throttle_disabled(!checked),
         )];
+        let migration = self.store.read(cx).storage_migration().cloned();
+        let migration = crate::motion::shown("storage-migration", migration, SHOW, window, cx)
+            .map(|shown| shown.fold(self.storage_migration_group(&shown.value, cx)));
         v_flex()
             .gap(crate::material::section_gap(cx))
+            .children(migration)
+            .children(self.disk_usage_groups(window, cx))
             .child(crate::settings_rows::settings_group(
                 crate::tr!("settings.performance_section"),
                 performance,
@@ -1509,28 +1822,76 @@ impl SettingsPage {
             ))
     }
 
+    /// The host moving an older build's threads into its current storage.
+    fn storage_migration_group(
+        &self,
+        migration: &tcode_protocol::StorageMigration,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let compact = self.window_state.read(cx).compact;
+        let percent = 100. * migration.moved as f32 / migration.total.max(1) as f32;
+        let row = crate::material::group_row_stacked(cx)
+            .debug_selector(|| "storage-migration".into())
+            .child(
+                gpui_base::h_flex()
+                    .w_full()
+                    .items_start()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_caption(cx)
+                            .child(crate::tr!("settings.storage_migration.title")),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_meta_mono(compact, cx)
+                            .child(format!("{}%", percent.floor() as u32)),
+                    ),
+            )
+            .child(
+                crate::widgets::progress::Progress::new("storage-migration-progress")
+                    .small()
+                    .value(percent),
+            )
+            .when(migration.waiting_for_space, |row| {
+                row.child(
+                    div()
+                        .text_secondary(compact, cx)
+                        .child(crate::tr!("settings.storage_migration.waiting_for_space")),
+                )
+            });
+        crate::settings_rows::settings_group(
+            crate::tr!("settings.storage_migration.section"),
+            vec![row.into_any_element()],
+            cx,
+        )
+    }
+
     /// The whole-settings escape hatch: the per-item buttons cover single
     /// settings, this one covers the rest and keeps its confirm dialog.
     fn restore_all_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-            .child(crate::settings_rows::row_labels(
+        let row = self.flip_row("restore-all", cx);
+        let layout = row.row(
+            crate::settings_rows::row_labels(
                 crate::tr!("settings.reset_all"),
                 Some(crate::tr!("settings.restore_description").into()),
                 None,
-                self.window_state.read(cx).compact,
+                row.compact(),
                 cx,
-            ))
-            .child(
-                Button::new("restore-defaults")
-                    .danger()
-                    .outline()
-                    .small()
-                    .label(crate::tr!("settings.restore"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.confirm_restore(window, cx);
-                    })),
-            )
-            .into_any_element()
+            ),
+            Button::new("restore-defaults")
+                .danger()
+                .outline()
+                .small()
+                .label(crate::tr!("settings.restore"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.confirm_restore(window, cx);
+                })),
+            cx,
+        );
+        row.render(layout)
     }
 
     fn title_generation_row(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1553,46 +1914,19 @@ impl SettingsPage {
                 );
             }),
         );
-        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-            .child(crate::settings_rows::row_labels(
+        let row = self.flip_row("title-generation", cx);
+        let layout = row.row(
+            crate::settings_rows::row_labels(
                 crate::tr!("settings.title_generation.title"),
                 Some(crate::tr!("settings.title_generation.description").into()),
                 reset,
-                self.window_state.read(cx).compact,
+                row.compact(),
                 cx,
-            ))
-            .child(self.title_model_picker.clone())
-            .into_any_element()
-    }
-
-    fn fallback_review_model_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let overridden =
-            self.store.read(cx).settings().fallback_review != FallbackReviewSettings::default();
-        let reset = crate::settings_rows::reset_action(
-            "reset-fallback-review-model",
-            overridden,
-            cx.listener(|this, _, _, cx| {
-                let default = FallbackReviewSettings::default();
-                this.dispatch_settings(
-                    move |store| {
-                        store.set_fallback_review_provider(default.provider);
-                        store.set_fallback_review_model(default.model);
-                        store.set_fallback_review_profile_id(default.profile_id);
-                    },
-                    cx,
-                );
-            }),
+            ),
+            self.title_model_picker.clone(),
+            cx,
         );
-        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-            .child(crate::settings_rows::row_labels(
-                crate::tr!("settings.fallback_review_model.title"),
-                Some(crate::tr!("settings.fallback_review_model.description").into()),
-                reset,
-                self.window_state.read(cx).compact,
-                cx,
-            ))
-            .child(self.fallback_review_model_picker.clone())
-            .into_any_element()
+        row.render(layout)
     }
 
     fn device_name_row(&self, overridden: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1601,30 +1935,30 @@ impl SettingsPage {
             "reset-device-name",
             overridden,
             cx.listener(|this, _, window, cx| {
-                this.dispatch_settings(|store| store.set_client_device_name(None), cx);
-                let name = this.store.read(cx).client_device_name();
+                DevicePreferences::set_device_name(None, cx);
+                let name = DevicePreferences::device_name(cx);
                 this.device_name_input.push(name, window, cx);
             }),
         );
-        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-            .debug_selector(|| "settings-device-name-row".into())
-            .child(crate::settings_rows::row_labels(
-                crate::tr!("settings.device_name.title"),
-                Some(crate::tr!("settings.device_name.description").into()),
-                reset,
-                self.window_state.read(cx).compact,
+        let row = self.flip_row("device-name", cx);
+        let layout = row
+            .row(
+                crate::settings_rows::row_labels(
+                    crate::tr!("settings.device_name.title"),
+                    Some(crate::tr!("settings.device_name.description").into()),
+                    reset,
+                    compact,
+                    cx,
+                ),
+                row.field(
+                    Input::new(&self.device_name_input.state)
+                        .placeholder(crate::tr!("settings.device_name.placeholder")),
+                    cx,
+                ),
                 cx,
-            ))
-            .child(
-                div()
-                    .when(compact, |field| field.w_full())
-                    .when(!compact, |field| field.w(px(FIELD_WIDTH)))
-                    .child(
-                        Input::new(&self.device_name_input.state)
-                            .placeholder(crate::tr!("settings.device_name.placeholder")),
-                    ),
             )
-            .into_any_element()
+            .debug_selector(|| "settings-device-name-row".into());
+        row.render(layout)
     }
 
     fn remote_attachment_limit_row(&self, overridden: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1632,28 +1966,27 @@ impl SettingsPage {
             "reset-remote-attachment-limit",
             overridden,
             cx.listener(|this, _, window, cx| {
-                this.dispatch_settings(
-                    |store| store.set_client_remote_attachment_limit_mib(None),
-                    cx,
-                );
-                let limit = remote_attachment_limit_value(this.store.read(cx));
+                DevicePreferences::set_remote_attachment_limit_mib(None, cx);
+                let limit = remote_attachment_limit_value(cx);
                 this.remote_attachment_limit_input.push(limit, window, cx);
             }),
         );
-        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-            .debug_selector(|| "settings-remote-attachment-limit-row".into())
-            .child(crate::settings_rows::row_labels(
-                crate::tr!("settings.remote_attachment_limit.title"),
-                Some(crate::tr!("settings.remote_attachment_limit.description").into()),
-                reset,
-                self.window_state.read(cx).compact,
-                cx,
-            ))
-            .child(
+        let row = self.flip_row("remote-attachment-limit", cx);
+        let layout = row
+            .row(
+                crate::settings_rows::row_labels(
+                    crate::tr!("settings.remote_attachment_limit.title"),
+                    Some(crate::tr!("settings.remote_attachment_limit.description").into()),
+                    reset,
+                    row.compact(),
+                    cx,
+                ),
                 crate::widgets::input::NumberInput::new(&self.remote_attachment_limit_input.state)
                     .accessibility_label(crate::tr!("settings.remote_attachment_limit.title")),
+                cx,
             )
-            .into_any_element()
+            .debug_selector(|| "settings-remote-attachment-limit-row".into());
+        row.render(layout)
     }
 
     fn render_tcode_update_popover(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1701,28 +2034,9 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// Settings → Providers: native providers and installed ACP agents share one
+    /// Settings → Harnesses: native providers and installed ACP agents share one
     /// bordered list. The marketplace lives behind the Add agent dialog.
     fn render_providers(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
-        self.sync_acp_cards(window, cx);
-        // Reconcile the profile cards with the current profile set: creating or
-        // deleting a profile changes it, and the card list must follow (else a
-        // deleted profile's card lingers and its Delete looks like a no-op).
-        let current_ids: Vec<String> = self
-            .store
-            .read(cx)
-            .all_provider_profiles()
-            .into_iter()
-            .map(|profile| profile.id)
-            .collect();
-        let card_ids: Vec<String> = self
-            .provider_cards
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect();
-        if current_ids != card_ids {
-            self.build_provider_cards(cx);
-        }
         let checked_at = self.store.read(cx).providers_checked_at();
         let checking = self.store.read(cx).providers_checking();
         let run = self.store.read(cx).provider_update_run();
@@ -1741,16 +2055,29 @@ impl SettingsPage {
                     .text_caption(cx)
                     .child(crate::tr!("settings.providers_section")),
             );
-        if let Some(checked_at) = checked_at {
+        let checked = checked_at.map(|checked_at| {
             let ago = humanize_ago(now_secs().saturating_sub(checked_at));
+            crate::tr!("providers.checked", when = ago).into_owned()
+        });
+        if let Some(checked) = crate::motion::shown("providers-checked", checked, SHOW, window, cx)
+        {
             header = header.child(
-                div()
-                    .text_secondary(compact, cx)
-                    .child(crate::tr!("providers.checked", when = ago).into_owned()),
+                checked.fade(
+                    div()
+                        .text_secondary(compact, cx)
+                        .child(checked.value.clone()),
+                ),
             );
         }
-        if self.store.read(cx).tcode_update_status().update_available {
-            header = header.child(self.render_tcode_update_popover(cx));
+        let update_available = self.store.read(cx).tcode_update_status().update_available;
+        if let Some(update) = crate::motion::shown(
+            "tcode-update",
+            update_available.then_some(()),
+            SHOW,
+            window,
+            cx,
+        ) {
+            header = header.child(update.fade(self.render_tcode_update_popover(cx)));
         }
         header = header.child(
             Button::new("add-acp-agent")
@@ -1762,17 +2089,26 @@ impl SettingsPage {
                     this.open_acp_dialog(window, cx);
                 })),
         );
-        if !automatic.is_empty() {
+        if let Some(update_all) = crate::motion::shown(
+            "update-all-providers",
+            (!automatic.is_empty()).then(|| automatic.clone()),
+            SHOW,
+            window,
+            cx,
+        ) {
+            let automatic = update_all.value.clone();
             header = header.child(
-                Button::new("update-all-providers")
-                    .outline()
-                    .xsmall()
-                    .loading(run.is_some())
-                    .label(crate::tr!("providers.update_all"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.store
-                            .update(cx, |store, _cx| store.update_providers(automatic.clone()));
-                    })),
+                update_all.fade(
+                    Button::new("update-all-providers")
+                        .outline()
+                        .xsmall()
+                        .loading(run.is_some())
+                        .label(crate::tr!("providers.update_all"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.store
+                                .update(cx, |store, _cx| store.update_providers(automatic.clone()));
+                        })),
+                ),
             );
         }
         header = header.child(
@@ -1813,43 +2149,76 @@ impl SettingsPage {
             |store, checked| store.set_provider_update_checks_disabled(!checked),
         )];
 
-        let provider_rows: Vec<AnyElement> = self
-            .provider_cards
-            .iter()
-            .map(|(_, card)| card.clone().into_any_element())
-            .collect();
+        // One row per harness: each native one this client sees, then each
+        // installed ACP agent.
+        let harnesses: Vec<(SharedString, HarnessId)> = {
+            let store = self.store.read(cx);
+            let profiles = store.all_provider_profiles();
+            agent::ProviderKind::NATIVE
+                .into_iter()
+                .filter(|kind| profiles.iter().any(|profile| profile.kind == *kind))
+                .map(HarnessId::Native)
+                .chain(
+                    store
+                        .settings_installed_acp_agents()
+                        .into_iter()
+                        .map(|agent| HarnessId::Acp(agent.id)),
+                )
+                .map(|harness| (SharedString::from(harness.key()), harness))
+                .collect()
+        };
+        let page = cx.entity().downgrade();
+        let store = self.store.clone();
+        let provider_rows = crate::settings_rows::grouped_keyed(
+            "harness-rows",
+            harnesses,
+            window,
+            cx,
+            |_, harness, _, cx| {
+                let page = page.clone();
+                let open = harness.clone();
+                crate::provider_card::harness_row(
+                    &store,
+                    harness,
+                    move |_, window, cx| {
+                        _ = page.update(cx, |page, cx| page.open_harness(open.clone(), window, cx));
+                    },
+                    cx,
+                )
+            },
+        );
 
         let mut section = v_flex().w_full().gap_3().child(header);
-        if let Some(run) = run {
+        if let Some(shown) = crate::motion::shown("provider-update-run", run, SHOW, window, cx) {
+            let run = &shown.value;
             section = section.child(
-                v_flex()
-                    .w_full()
-                    .gap_2()
-                    .px(px(crate::material::CARD_INSET))
-                    .child(
-                        div().text_secondary(compact, cx).child(
-                            crate::tr!(
-                                "providers.update_progress",
-                                provider = run
-                                    .current
-                                    .map(|provider| provider.display_name())
-                                    .unwrap_or_default(),
-                                completed = run.completed,
-                                total = run.total
-                            )
-                            .into_owned(),
+                shown.fold(
+                    v_flex()
+                        .w_full()
+                        .gap_2()
+                        .px(px(crate::material::CARD_INSET))
+                        .child(
+                            div().text_secondary(compact, cx).child(
+                                crate::tr!(
+                                    "providers.update_progress",
+                                    provider = run
+                                        .current
+                                        .map(|provider| provider.display_name())
+                                        .unwrap_or_default(),
+                                    completed = run.completed,
+                                    total = run.total
+                                )
+                                .into_owned(),
+                            ),
+                        )
+                        .child(
+                            crate::widgets::progress::Progress::new("provider-update-progress")
+                                .value(100. * run.completed as f32 / run.total.max(1) as f32),
                         ),
-                    )
-                    .child(
-                        crate::widgets::progress::Progress::new("provider-update-progress")
-                            .value(100. * run.completed as f32 / run.total.max(1) as f32),
-                    ),
+                ),
             );
         }
-        section = section.child(crate::material::grouped(provider_rows, cx));
-        for (_, card) in &self.acp_cards {
-            section = section.child(card.clone());
-        }
+        section = section.child(crate::material::group(cx).child(provider_rows));
         // The update toggle follows the cards it governs; above them its caption
         // would stack straight under the page's own header row.
         section.child(div().pt(crate::material::section_gap(cx)).child(
@@ -1863,7 +2232,7 @@ impl SettingsPage {
 
     /// Show the rate-limit windows each enabled Codex / Claude Code profile
     /// reports; missing windows are not synthesized.
-    fn render_usage(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let store = self.store.read(cx);
         let profiles: Vec<_> = store
             .enabled_profiles()
@@ -1896,12 +2265,17 @@ impl SettingsPage {
                 .text_caption(cx)
                 .child(crate::tr!("usage.section")),
         );
-        if let Some(updated_at) = updated_at {
+        let updated = updated_at.map(|updated_at| {
             let ago = humanize_ago(now_secs().saturating_sub(updated_at));
+            crate::tr!("usage.updated", when = ago).into_owned()
+        });
+        if let Some(updated) = crate::motion::shown("usage-updated", updated, SHOW, window, cx) {
             header = header.child(
-                div()
-                    .text_secondary(compact, cx)
-                    .child(crate::tr!("usage.updated", when = ago).into_owned()),
+                updated.fade(
+                    div()
+                        .text_secondary(compact, cx)
+                        .child(updated.value.clone()),
+                ),
             );
         }
         header = header.child(
@@ -1917,77 +2291,187 @@ impl SettingsPage {
                 })),
         );
 
-        let mut section = v_flex().w_full().gap_3().child(header);
-        if rows.is_empty() {
-            section = section.child(crate::material::grouped(
-                vec![self.usage_note_row(crate::tr!("usage.no_profiles").into_owned(), None, cx)],
-                cx,
-            ));
+        // Each card and the note carry the gap above them, so it comes and
+        // goes with them.
+        let mut section = v_flex().w_full().child(header);
+        if let Some(none) = crate::motion::shown(
+            "usage-no-profiles",
+            rows.is_empty().then_some(()),
+            SHOW,
+            window,
+            cx,
+        ) {
+            section = section.child(div().w_full().pt_3().child(none.fade(
+                crate::material::grouped(
+                    vec![self.usage_note_row(
+                        crate::tr!("usage.no_profiles").into_owned(),
+                        None,
+                        cx,
+                    )],
+                    cx,
+                ),
+            )));
         }
-        for (profile_id, name, kind, usage, checking) in rows {
-            let mut card_rows = vec![self.usage_card_header(
-                &name,
-                kind,
-                usage.as_ref().and_then(|u| u.plan.clone()),
-                cx,
-            )];
-            match &usage {
-                Some(usage) if usage.error.is_some() || !usage.windows.is_empty() => {
-                    if let Some(error) = usage.error.clone() {
-                        card_rows.push(self.usage_note_row(
-                            crate::tr!("usage.unavailable").into_owned(),
-                            Some(error),
-                            cx,
-                        ));
-                    }
-                    let now = now_secs();
-                    card_rows.extend(
-                        usage
-                            .windows
-                            .iter()
-                            .map(|window| self.usage_window_row(window, now, cx)),
-                    );
-                }
-                _ if checking => card_rows.push(self.usage_note_row(
-                    crate::tr!("usage.checking").into_owned(),
-                    None,
-                    cx,
-                )),
-                _ => card_rows.push(self.usage_note_row(
-                    crate::tr!("usage.no_data").into_owned(),
-                    None,
-                    cx,
-                )),
-            }
-            section = section.child(
+        let cards = rows
+            .into_iter()
+            .map(|row| (SharedString::from(row.0.clone()), row));
+        let cards = crate::motion::keyed(
+            "usage-cards",
+            cards,
+            ROWS,
+            window,
+            cx,
+            |_, (profile_id, name, kind, usage, checking), window, cx| {
                 div()
-                    .id(SharedString::from(format!("usage-card-{profile_id}")))
-                    .child(crate::material::grouped(card_rows, cx)),
-            );
-        }
-        section
+                    .w_full()
+                    .pt_3()
+                    .child(self.usage_card(
+                        profile_id,
+                        name,
+                        *kind,
+                        usage.as_ref(),
+                        *checking,
+                        window,
+                        cx,
+                    ))
+                    .into_any_element()
+            },
+        );
+        section.child(cards.render(v_flex().w_full()))
+    }
+
+    /// One profile's usage: its header, then its windows, or why there are
+    /// none.
+    #[allow(clippy::too_many_arguments)]
+    fn usage_card(
+        &self,
+        profile_id: &str,
+        name: &str,
+        kind: agent::ProviderKind,
+        usage: Option<&tcode_core::usage::ProviderUsage>,
+        checking: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let card_id = gpui::ElementId::from(SharedString::from(format!("usage-card-{profile_id}")));
+        let plan = crate::motion::shown(
+            (card_id.clone(), "plan"),
+            usage.and_then(|u| u.plan.clone()),
+            SHOW,
+            window,
+            cx,
+        );
+        let header = self.usage_card_header(profile_id, name, kind, plan, cx);
+        let reported = usage.filter(|usage| usage.error.is_some() || !usage.windows.is_empty());
+        let error = crate::motion::shown(
+            (card_id.clone(), "error"),
+            reported.and_then(|usage| usage.error.clone()),
+            SHOW,
+            window,
+            cx,
+        );
+        let hairline =
+            |cx: &App| crate::material::row_hairline(px(crate::material::CARD_INSET), cx);
+        let slot = match reported {
+            Some(_) => "windows",
+            None if checking => "checking",
+            None => "no-data",
+        };
+        let body = crate::motion::cross_fade(
+            (card_id.clone(), "body"),
+            slot,
+            CHANGE,
+            window,
+            cx,
+            |slot, window, cx| match *slot {
+                "windows" => {
+                    // The error fold draws its own hairline, and each window
+                    // the one above it, so each line folds away with its row.
+                    let error = match error.as_ref() {
+                        Some(error) => {
+                            error.fold(div().child(hairline(cx)).child(self.usage_note_row(
+                                crate::tr!("usage.unavailable").into_owned(),
+                                Some(error.value.clone()),
+                                cx,
+                            )))
+                        }
+                        None => div().into_any_element(),
+                    };
+                    let now = now_secs();
+                    let windows = reported
+                        .into_iter()
+                        .flat_map(|usage| usage.windows.iter())
+                        .map(|window| {
+                            (
+                                SharedString::from(crate::usage::window_label(window)),
+                                window.clone(),
+                            )
+                        });
+                    let windows = crate::motion::keyed(
+                        (card_id.clone(), "windows"),
+                        windows,
+                        ROWS,
+                        window,
+                        cx,
+                        |_, window, _, cx| {
+                            crate::settings_rows::hairlined(
+                                self.usage_window_row(window, now, cx),
+                                cx,
+                            )
+                        },
+                    );
+                    v_flex()
+                        .w_full()
+                        .child(error)
+                        .child(windows.render(v_flex().w_full()))
+                        .into_any_element()
+                }
+                slot => v_flex()
+                    .w_full()
+                    .child(hairline(cx))
+                    .child(self.usage_note_row(
+                        if slot == "checking" {
+                            crate::tr!("usage.checking").into_owned()
+                        } else {
+                            crate::tr!("usage.no_data").into_owned()
+                        },
+                        None,
+                        cx,
+                    ))
+                    .into_any_element(),
+            },
+        );
+        div()
+            .id(card_id)
+            .child(crate::material::grouped(vec![header, body], cx))
+            .into_any_element()
     }
 
     fn usage_card_header(
         &self,
+        profile_id: &str,
         name: &str,
         kind: agent::ProviderKind,
-        plan: Option<String>,
+        plan: Option<crate::motion::Shown<String>>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let compact = self.window_state.read(cx).compact;
         crate::material::group_row(cx)
             .text_body(compact, cx)
-            .child(crate::provider_card::provider_glyph(kind))
+            .child(crate::provider_card::profile_glyph(
+                self.store.read(cx),
+                kind,
+                Some(profile_id),
+            ))
             .child(div().flex_1().child(name.to_owned()))
             .when_some(plan, |row, plan| {
-                row.child(crate::material::semantic_chip(
-                    crate::usage::plan_label(&plan),
+                row.child(plan.fade(crate::material::semantic_chip(
+                    crate::usage::plan_label(&plan.value),
                     cx.theme().muted,
                     muted,
                     cx,
-                ))
+                )))
             })
             .into_any_element()
     }
@@ -2051,38 +2535,75 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// Archived sessions grouped by project with restore and permanent-delete actions.
-    fn render_archived(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let full = self.store.read(cx).scope().is_full();
+    /// Archived sessions: loading, the empty state and the list cross-fade
+    /// into one another.
+    fn render_archived(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let groups = self.store.read(cx).archived_groups();
-        if groups.is_empty() {
-            let loading = self.store.read(cx).archived_loading();
-            return v_flex()
-                .gap(crate::material::section_gap(cx))
-                .child(crate::material::group_caption(
-                    crate::tr!("settings.archived_section"),
-                    cx,
-                ))
-                .child(if loading {
-                    crate::material::empty_row(crate::tr!("settings.archived_loading"), cx)
-                } else {
-                    crate::material::empty_state(
-                        Icon::new(Section::Archived.icon()),
-                        crate::tr!("settings.archived_empty"),
-                        crate::tr!("settings.archived_empty_desc"),
-                        cx,
-                    )
-                });
-        }
+        let slot = if !groups.is_empty() {
+            "list"
+        } else if self.store.read(cx).archived_loading() {
+            "loading"
+        } else {
+            "empty"
+        };
+        let mut groups = Some(groups).filter(|groups| !groups.is_empty());
+        let body = crate::motion::cross_fade(
+            "archived-body",
+            slot,
+            CHANGE,
+            window,
+            cx,
+            |slot, window, cx| {
+                match *slot {
+                    "list" => match groups.take() {
+                        Some(groups) => self
+                            .render_archived_list(groups, window, cx)
+                            .into_any_element(),
+                        // A list leaving for the empty state has no rows left.
+                        None => div().into_any_element(),
+                    },
+                    slot => v_flex()
+                        .gap(crate::material::section_gap(cx))
+                        .child(crate::material::group_caption(
+                            crate::tr!("settings.archived_section"),
+                            cx,
+                        ))
+                        .child(if slot == "loading" {
+                            crate::material::empty_row(crate::tr!("settings.archived_loading"), cx)
+                        } else {
+                            crate::material::empty_state(
+                                Icon::new(Section::Archived.icon()),
+                                crate::tr!("settings.archived_empty"),
+                                String::new(),
+                                cx,
+                            )
+                        })
+                        .into_any_element(),
+                }
+            },
+        );
+        v_flex().child(body)
+    }
 
-        let flat: Vec<(SharedString, SessionMeta)> = groups
+    fn render_archived_list(
+        &mut self,
+        groups: Vec<tcode_core::project::ProjectGroup>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let full = self.store.read(cx).scope().is_full();
+
+        let flat: Vec<((SharedString, SharedString), SessionMeta)> = groups
             .into_iter()
             .flat_map(|group| {
-                let project_name = SharedString::from(group.project.name);
+                let project = (
+                    SharedString::from(group.project.id),
+                    SharedString::from(group.project.name),
+                );
                 group
                     .sessions
                     .into_iter()
-                    .map(move |meta| (project_name.clone(), meta))
+                    .map(move |meta| (project.clone(), meta))
             })
             .collect();
         let total = flat.len();
@@ -2090,8 +2611,10 @@ impl SettingsPage {
         self.archived_page = page;
 
         let now = now_secs();
-        let mut col = v_flex()
-            .gap(crate::material::section_gap(cx))
+        // Each part below the controls carries the gap above it, so a project
+        // whose last archived thread goes takes its gap with it.
+        let gap = crate::material::section_gap(cx);
+        let col = v_flex()
             .child(
                 gpui_base::h_flex()
                     .items_center()
@@ -2141,86 +2664,109 @@ impl SettingsPage {
                         )
                     }),
             )
-            .child(crate::material::group_caption(
+            .child(div().pt(gap).child(crate::material::group_caption(
                 crate::tr!("settings.archived_section"),
                 cx,
-            ));
-        {
-            let mut group_name: Option<SharedString> = None;
-            let mut rows: Vec<AnyElement> = Vec::new();
-            for (offset, (project_name, meta)) in flat[start..end].iter().enumerate() {
-                if group_name.as_ref() != Some(project_name)
-                    && let Some(previous) = group_name.replace(project_name.clone())
-                {
-                    col = col.child(
-                        v_flex()
-                            .child(crate::material::group_caption(previous, cx))
-                            .child(crate::material::group(cx).children(std::mem::take(&mut rows))),
-                    );
-                }
-                let key = start + offset;
-                let archived_at = meta.archived_at.unwrap_or(meta.created_at);
-                let archived_when = humanize_ago(now.saturating_sub(archived_at));
-                let created_when = humanize_ago(now.saturating_sub(meta.created_at));
-                let desc = format!(
-                    "{} · {}",
-                    crate::tr!("settings.archived_at", when = archived_when),
-                    crate::tr!("settings.archived_created", when = created_when),
-                );
-                let id_unarchive = meta.id.clone();
-                let id_delete = meta.id.clone();
-                let title = meta.title.clone();
-                rows.push(
-                    crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-                        .child(crate::settings_rows::row_labels(
-                            meta.title.clone(),
-                            Some(desc.into()),
-                            None,
-                            self.window_state.read(cx).compact,
-                            cx,
-                        ))
-                        .child(
-                            gpui_base::h_flex()
-                                .flex_none()
-                                .gap_2()
-                                .child(
-                                    Button::new(("unarchive", key))
-                                        .outline()
-                                        .small()
-                                        .label(crate::tr!("settings.unarchive"))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            let id = id_unarchive.clone();
-                                            this.store.update(cx, |store, _cx| {
-                                                store.unarchive_session(id);
-                                            });
-                                        })),
-                                )
-                                .when(full, |row| {
-                                    row.child(
-                                        Button::new(("delete-perm", key))
-                                            .danger()
-                                            .small()
-                                            .label(crate::tr!("settings.delete_permanently"))
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.confirm_delete_archived(
-                                                    &id_delete, &title, window, cx,
-                                                );
-                                            })),
-                                    )
-                                }),
-                        )
-                        .into_any_element(),
-                );
-            }
-            if let Some(previous) = group_name {
-                col = col.child(
-                    v_flex()
-                        .child(crate::material::group_caption(previous, cx))
-                        .child(crate::material::group(cx).children(rows)),
-                );
+            )));
+        // The page's rows by project, in order; a page turned is a new set of
+        // rows, so the old page folds away as the new one folds in.
+        let mut projects: Vec<(SharedString, (SharedString, Vec<SessionMeta>))> = Vec::new();
+        for ((project_id, project_name), meta) in &flat[start..end] {
+            match projects.last_mut() {
+                Some((id, (_, sessions))) if id == project_id => sessions.push(meta.clone()),
+                _ => projects.push((
+                    project_id.clone(),
+                    (project_name.clone(), vec![meta.clone()]),
+                )),
             }
         }
-        col
+        let compact = self.window_state.read(cx).compact;
+        let projects = crate::motion::keyed(
+            "archived-projects",
+            projects,
+            ROWS,
+            window,
+            cx,
+            |project_id, (project_name, sessions), window, cx| {
+                let rows = sessions
+                    .iter()
+                    .map(|meta| (SharedString::from(meta.id.clone()), meta.clone()));
+                let rows = crate::motion::keyed(
+                    SharedString::from(format!("archived-rows-{project_id}")),
+                    rows,
+                    ROWS,
+                    window,
+                    cx,
+                    |_, meta, _, cx| self.archived_row(meta, now, full, compact, cx),
+                );
+                v_flex()
+                    .pt(gap)
+                    .child(crate::material::group_caption(project_name.clone(), cx))
+                    .child(rows.render(crate::material::group(cx)))
+                    .into_any_element()
+            },
+        );
+        col.child(projects.render(v_flex().w_full()))
+    }
+
+    fn archived_row(
+        &self,
+        meta: &SessionMeta,
+        now: u64,
+        full: bool,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let archived_at = meta.archived_at.unwrap_or(meta.created_at);
+        let archived_when = humanize_ago(now.saturating_sub(archived_at));
+        let created_when = humanize_ago(now.saturating_sub(meta.created_at));
+        let desc = format!(
+            "{} · {}",
+            crate::tr!("settings.archived_at", when = archived_when),
+            crate::tr!("settings.archived_created", when = created_when),
+        );
+        let id_unarchive = meta.id.clone();
+        let id_delete = meta.id.clone();
+        let title = meta.title.clone();
+        let row =
+            crate::settings_rows::flip_row(&self.motion, format!("archived-{}", meta.id), compact);
+        let layout = row.row(
+            crate::settings_rows::row_labels(
+                meta.title.clone(),
+                Some(desc.into()),
+                None,
+                compact,
+                cx,
+            ),
+            gpui_base::h_flex()
+                .flex_none()
+                .gap_2()
+                .child(
+                    Button::new(SharedString::from(format!("unarchive-{}", meta.id)))
+                        .outline()
+                        .small()
+                        .label(crate::tr!("settings.unarchive"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let id = id_unarchive.clone();
+                            this.store.update(cx, |store, _cx| {
+                                store.unarchive_session(id);
+                            });
+                        })),
+                )
+                .when(full, |row| {
+                    row.child(
+                        Button::new(SharedString::from(format!("delete-perm-{}", meta.id)))
+                            .danger()
+                            .small()
+                            .label(crate::tr!("settings.delete_permanently"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.confirm_delete_archived(&id_delete, &title, window, cx);
+                            })),
+                    )
+                }),
+            cx,
+        );
+        row.render(layout)
     }
 
     fn confirm_delete_archived(
@@ -2306,16 +2852,6 @@ impl SettingsPage {
                 this.dispatch_settings(|store| store.set_computer_use_allow_input(true), cx)
             }),
         );
-        let allow_foreground_fallback_reset = crate::settings_rows::reset_action(
-            "reset-cu-allow-foreground-fallback",
-            settings.computer_use.allow_foreground_fallback,
-            cx.listener(|this, _, _, cx| {
-                this.dispatch_settings(
-                    |store| store.set_computer_use_allow_foreground_fallback(false),
-                    cx,
-                )
-            }),
-        );
         let show_agent_cursor_reset = crate::settings_rows::reset_action(
             "reset-cu-show-agent-cursor",
             !settings.computer_use.show_agent_cursor,
@@ -2342,15 +2878,6 @@ impl SettingsPage {
                 allow_input_reset,
                 cx,
                 WorkspaceStore::set_computer_use_allow_input,
-            ),
-            self.toggle_row(
-                "cu-allow-foreground-fallback",
-                crate::tr!("computer_use.allow_foreground_fallback.title"),
-                crate::tr!("computer_use.allow_foreground_fallback.description"),
-                settings.computer_use.allow_foreground_fallback,
-                allow_foreground_fallback_reset,
-                cx,
-                WorkspaceStore::set_computer_use_allow_foreground_fallback,
             ),
             self.toggle_row(
                 "cu-show-agent-cursor",
@@ -2449,24 +2976,23 @@ impl SettingsPage {
                 this.home_url_input.push(String::new(), window, cx);
             }),
         );
-        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-            .child(crate::settings_rows::row_labels(
+        let row = self.flip_row("browser-home-url", cx);
+        let layout = row.row(
+            crate::settings_rows::row_labels(
                 crate::tr!("browser.home_url.title"),
                 Some(crate::tr!("browser.home_url.description").into()),
                 reset,
-                self.window_state.read(cx).compact,
+                compact,
                 cx,
-            ))
-            .child(
-                div()
-                    .when(compact, |field| field.w_full())
-                    .when(!compact, |field| field.w(px(FIELD_WIDTH)))
-                    .child(
-                        Input::new(&self.home_url_input.state)
-                            .placeholder(crate::tr!("browser.home_url.placeholder")),
-                    ),
-            )
-            .into_any_element()
+            ),
+            row.field(
+                Input::new(&self.home_url_input.state)
+                    .placeholder(crate::tr!("browser.home_url.placeholder")),
+                cx,
+            ),
+            cx,
+        );
+        row.render(layout)
     }
 
     fn image_mode_row(&self, mode: ImageMode, cx: &mut Context<Self>) -> AnyElement {
@@ -2500,9 +3026,11 @@ impl SettingsPage {
             crate::tr!("computer_use.image_mode.title")
                 .into_owned()
                 .into(),
-            crate::tr!("computer_use.image_mode.description")
-                .into_owned()
-                .into(),
+            Some(
+                crate::tr!("computer_use.image_mode.description")
+                    .into_owned()
+                    .into(),
+            ),
             label.into_owned().into(),
             vec![
                 option(
@@ -2522,7 +3050,7 @@ impl SettingsPage {
                 ),
             ],
             reset,
-            self.window_state.read(cx).compact,
+            self.flip_row("cu-image-mode-dropdown", cx),
             {
                 let page = cx.entity();
                 move |mode, _, cx| {
@@ -2564,6 +3092,37 @@ impl SettingsPage {
         None
     }
 
+    /// A phone manages one platform on a page pushed over Git Platforms.
+    fn manage_source_control_host(
+        &mut self,
+        host: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.clone();
+        let editor = cx.new(|cx| {
+            crate::source_control_settings::HostEditor::new(store, host, false, true, window, cx)
+        });
+        self.source_control_host_subscription = Some(cx.subscribe(
+            &editor,
+            |this, _, _: &gpui::DismissEvent, cx| {
+                this.window_state.update(cx, |state, cx| state.back(cx));
+                this.section = Section::SourceControl;
+                this.source_control_host = None;
+                cx.notify();
+            },
+        ));
+        self.source_control_host = Some(editor);
+        self.section = Section::SourceControlHost;
+        self.window_state.update(cx, |state, cx| {
+            state.go(
+                crate::window_state::Destination::SettingsSourceControlHost,
+                cx,
+            )
+        });
+        cx.notify();
+    }
+
     fn render_source_control(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let remove_credits = self.store.read(cx).settings().remove_agent_credits_on_merge;
         let reset = crate::settings_rows::reset_action(
@@ -2585,7 +3144,14 @@ impl SettingsPage {
         v_flex()
             .gap(crate::material::section_gap(cx))
             .child(self.source_control_panel.clone())
-            .child(crate::material::group(cx).child(row))
+            .child(
+                v_flex()
+                    .child(crate::material::group_caption(
+                        crate::tr!("source_control.merge_section"),
+                        cx,
+                    ))
+                    .child(crate::material::group(cx).child(row)),
+            )
     }
 
     /// A [`ToggleRow`] for one local setting, written through `intent`.
@@ -2596,7 +3162,7 @@ impl SettingsPage {
         title: impl Into<SharedString>,
         desc: impl Into<SharedString>,
         checked: bool,
-        reset: Option<AnyElement>,
+        reset: impl Into<Option<AnyElement>>,
         cx: &mut Context<Self>,
         intent: fn(&mut WorkspaceStore, bool),
     ) -> AnyElement {
@@ -2615,16 +3181,7 @@ impl SettingsPage {
         .into_any_element()
     }
 
-    fn theme_row(&self, mode: ThemeMode, overridden: bool, cx: &mut Context<Self>) -> AnyElement {
-        let reset = crate::settings_rows::reset_action(
-            "reset-theme",
-            overridden,
-            cx.listener(|this, _, window, cx| {
-                this.dispatch_settings(|store| store.set_client_theme(None), cx);
-                let fallback = this.store.read(cx).settings().theme_mode;
-                apply_theme(fallback, window, cx);
-            }),
-        );
+    fn theme_row(&self, mode: ThemeMode, cx: &mut Context<Self>) -> AnyElement {
         let label = match mode {
             ThemeMode::System => crate::tr!("settings.theme.system"),
             ThemeMode::Light => crate::tr!("settings.theme.light"),
@@ -2643,7 +3200,7 @@ impl SettingsPage {
             "theme-options-menu",
             160.,
             crate::tr!("settings.theme.title").into_owned().into(),
-            crate::tr!("settings.theme.description").into_owned().into(),
+            None,
             label.into_owned().into(),
             vec![
                 option(
@@ -2658,41 +3215,19 @@ impl SettingsPage {
                 ),
                 option(ThemeMode::Dark, "theme-option-dark", "settings.theme.dark"),
             ],
-            reset,
-            self.window_state.read(cx).compact,
-            {
-                let page = cx.entity();
-                move |mode, window, cx| {
-                    page.update(cx, |page, cx| {
-                        page.dispatch_settings(|store| store.set_client_theme(Some(mode)), cx)
-                    });
-                    apply_theme(mode, window, cx);
-                }
-            },
+            None,
+            self.flip_row("theme-dropdown", cx),
+            DevicePreferences::set_theme,
             cx,
         )
     }
 
-    fn language_row(
-        &self,
-        language: Option<&str>,
-        overridden: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn language_row(&self, language: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let selected = language.map(str::to_owned);
-        let reset = crate::settings_rows::reset_action(
-            "reset-language",
-            overridden,
-            cx.listener(|this, _, window, cx| {
-                this.dispatch_settings(|store| store.set_client_language(None), cx);
-                let fallback = this.store.read(cx).settings().language;
-                crate::settings::apply_locale(fallback.as_deref());
-                window.refresh();
-            }),
-        );
         let label = match language {
             Some(LANGUAGE_ENGLISH) => crate::tr!("settings.language.english"),
             Some(LANGUAGE_SIMPLIFIED_CHINESE) => crate::tr!("settings.language.chinese"),
+            Some(LANGUAGE_JAPANESE) => crate::tr!("settings.language.japanese"),
             _ => crate::tr!("settings.language.system"),
         };
         let option = |value, key: &'static str| SelectRowOption {
@@ -2708,9 +3243,7 @@ impl SettingsPage {
             "language-options-menu",
             160.,
             crate::tr!("settings.language.title").into_owned().into(),
-            crate::tr!("settings.language.description")
-                .into_owned()
-                .into(),
+            None,
             label.into_owned().into(),
             vec![
                 option(None, "settings.language.system"),
@@ -2719,21 +3252,11 @@ impl SettingsPage {
                     Some(LANGUAGE_SIMPLIFIED_CHINESE),
                     "settings.language.chinese",
                 ),
+                option(Some(LANGUAGE_JAPANESE), "settings.language.japanese"),
             ],
-            reset,
-            self.window_state.read(cx).compact,
-            {
-                let page = cx.entity();
-                move |language, window, cx| {
-                    page.update(cx, |page, cx| {
-                        let preference = Some(language.unwrap_or("system").to_owned());
-                        page.dispatch_settings(|store| store.set_client_language(preference), cx);
-                        let effective = page.store.read(cx).settings().language;
-                        crate::settings::apply_locale(effective.as_deref());
-                    });
-                    window.refresh();
-                }
-            },
+            None,
+            self.flip_row("language-dropdown", cx),
+            DevicePreferences::set_language,
             cx,
         )
     }
@@ -2754,8 +3277,23 @@ impl SettingsPage {
             && self.window_state.read(cx).destination()
                 == crate::window_state::Destination::SettingsThreadRules
         {
-            let column = self.render_threads(cx);
-            return self.render_content_column(column, &self.content_scroll, cx);
+            let column = self.render_threads(window, cx);
+            return self.render_content_column(column, &self.content_scroll, window, cx);
+        }
+        if destination == crate::window_state::Destination::SettingsSection
+            && self.window_state.read(cx).destination()
+                == crate::window_state::Destination::SettingsSourceControlHost
+        {
+            let column = self.render_source_control(cx);
+            return self.render_content_column(column, &self.content_scroll, window, cx);
+        }
+        if self.section == Section::SourceControlHost
+            && self.window_state.read(cx).destination()
+                != crate::window_state::Destination::SettingsSourceControlHost
+        {
+            self.section = Section::SourceControl;
+            self.source_control_host = None;
+            self.source_control_host_subscription = None;
         }
         if self.section == Section::ProjectThreadRules
             && self.window_state.read(cx).destination()
@@ -2763,6 +3301,21 @@ impl SettingsPage {
         {
             self.section = Section::Threads;
             self.project_rules_editor = None;
+        }
+        // The harness list under a harness's page, likewise.
+        if destination == crate::window_state::Destination::SettingsSection
+            && self.window_state.read(cx).destination()
+                == crate::window_state::Destination::SettingsHarness
+        {
+            let column = self.render_providers(window, cx);
+            return self.render_content_column(column, &self.content_scroll, window, cx);
+        }
+        if self.section == Section::Harness
+            && self.window_state.read(cx).destination()
+                != crate::window_state::Destination::SettingsHarness
+        {
+            self.section = Section::Providers;
+            self.harness_page = None;
         }
         self.render_content(window, cx)
     }
@@ -2779,14 +3332,23 @@ impl Render for SettingsPage {
             .text_color(cx.theme().foreground)
             .child(self.render_nav(window, cx))
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .bg(crate::material::content_surface(cx))
-                    .shadow_sm()
-                    .child(self.render_header(window, cx))
-                    .child(self.render_content(window, cx)),
+                crate::window_seam::inset_from_seam(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .bg(crate::material::content_surface(cx))
+                        .shadow_sm(),
+                    "settings-content-seam",
+                    gpui::Edges {
+                        left: false,
+                        ..gpui::Edges::all(true)
+                    },
+                    window,
+                    cx,
+                )
+                .child(self.render_header(window, cx))
+                .child(self.render_content(window, cx)),
             )
             .into_any_element()
     }
@@ -2828,6 +3390,35 @@ mod tests {
         );
     }
 
+    /// A full-scope store whose host is scripted by the test: what the store
+    /// sends arrives on the first channel, and lines sent on the second
+    /// arrive from the host while the returned pump runs.
+    fn scripted_store(
+        attachment: WorkspaceAttachment,
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WorkspaceStore>,
+        async_channel::Receiver<String>,
+        async_channel::Sender<String>,
+        gpui::Task<()>,
+    ) {
+        cx.update(crate::theme::init);
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|delay| executor.timer(delay))
+                .await;
+        });
+        let store = cx.new(|cx| WorkspaceStore::new_attached(link, attachment, None, None, cx));
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        (store, outgoing, incoming, pump)
+    }
+
     #[gpui::test]
     fn archived_delete_uses_response_worktree_sharing_and_preserves_the_cleanup_choice(
         cx: &mut TestAppContext,
@@ -2838,24 +3429,9 @@ mod tests {
         };
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
-        cx.update(crate::theme::init);
-        let (to_host, outgoing) = async_channel::unbounded();
-        let (incoming, from_host) = async_channel::unbounded();
-        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
-        let link = tcode_client::HostLink::new(to_host, from_host);
-        let pump_link = link.clone();
-        let executor = cx.background_executor.clone();
-        let _pump = cx.background_executor.spawn(async move {
-            pump_link
-                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
-                .await;
-        });
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
-        });
-        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, _| store.select_session("live".into()));
-        let window_state = cx.new(|_| WindowState::new(false));
+        let (store, outgoing, incoming, _pump) = scripted_store(WorkspaceAttachment::Local, cx);
+        store.update(cx, |store, cx| store.show_alone("live".into(), cx));
+        let window_state = cx.new(|_| WindowState::default());
         let mut page = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
@@ -2970,6 +3546,241 @@ mod tests {
         }
     }
 
+    /// A client attached to another machine shows that machine's storage
+    /// migration in Maintenance only while the host says one runs: nothing
+    /// before, a card while it runs, nothing once it is done; and it stops
+    /// following once Maintenance closes.
+    #[gpui::test]
+    fn maintenance_shows_the_hosts_storage_migration_only_while_it_runs(cx: &mut TestAppContext) {
+        use tcode_protocol::{
+            ClientPayload, EventEnvelope, HostMessage, ServerEvent, StorageMigration, Subscription,
+            Topic, decode_client_line, encode_line,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        let attachment = WorkspaceAttachment::Remote {
+            host_id: "studio".into(),
+            host_name: "Studio".into(),
+        };
+        let (store, outgoing, incoming, _pump) = scripted_store(attachment, cx);
+        let window_state = cx.new(|_| WindowState::default());
+        let mut page = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
+            page = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let page = page.unwrap();
+        let follows = |outgoing: &async_channel::Receiver<String>, subscribe: bool| {
+            std::iter::from_fn(|| outgoing.try_recv().ok()).find_map(|line| {
+                let message = decode_client_line(&line).unwrap();
+                match message.payload {
+                    ClientPayload::Subscribe(Subscription {
+                        topic: Topic::StorageMigration,
+                        ..
+                    }) if subscribe => Some(message.id),
+                    ClientPayload::Unsubscribe(Subscription {
+                        topic: Topic::StorageMigration,
+                        ..
+                    }) if !subscribe => Some(message.id),
+                    _ => None,
+                }
+            })
+        };
+        let send = |request_id, migration| {
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id,
+                        topic: Topic::StorageMigration,
+                        event: ServerEvent::StorageMigrationReplaced(migration),
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        };
+        let shown = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            crate::test_frames::draw_settled(cx);
+            cx.debug_bounds("storage-migration").is_some()
+        };
+
+        page.update(cx, |page, cx| page.select_section(Section::Maintenance, cx));
+        cx.run_until_parked();
+        let request = follows(&outgoing, true).expect("Maintenance follows the migration");
+        send(Some(request), None);
+        assert!(!shown(cx), "no card while no migration runs");
+
+        send(
+            None,
+            Some(StorageMigration {
+                moved: 30,
+                total: 120,
+                waiting_for_space: false,
+            }),
+        );
+        assert!(shown(cx), "a card while the host moves threads");
+
+        send(None, None);
+        assert!(!shown(cx), "the card leaves once the move is done");
+
+        page.update(cx, |page, cx| page.select_section(Section::General, cx));
+        cx.run_until_parked();
+        assert!(
+            follows(&outgoing, false).is_some(),
+            "only Maintenance follows it"
+        );
+    }
+
+    /// Maintenance on a client attached to another machine shows that
+    /// machine's disk usage as its host measured it: a compact loading state
+    /// before the first measurement, then Tcode's total and a row for each
+    /// provider the host listed, which stay while the host measures again.
+    #[gpui::test]
+    fn maintenance_shows_the_hosts_disk_usage_and_keeps_it_while_measuring_again(
+        cx: &mut TestAppContext,
+    ) {
+        use agent::ProviderKind;
+        use tcode_protocol::{
+            AccountDiskUsage, ClientPayload, DiskUsage, DiskUsageState, EventEnvelope, HostMessage,
+            ProviderDiskUsage, ServerEvent, Subscription, TcodeDiskUsage, Topic,
+            decode_client_line, encode_line,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        let attachment = WorkspaceAttachment::Remote {
+            host_id: "studio".into(),
+            host_name: "Studio".into(),
+        };
+        let (store, outgoing, incoming, _pump) = scripted_store(attachment, cx);
+        let window_state = cx.new(|_| WindowState::default());
+        let mut page = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
+            page = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let page = page.unwrap();
+        // The spinner of a measurement running rests only with motion reduced.
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let send = |request_id, state| {
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id,
+                        topic: Topic::DiskUsage,
+                        event: ServerEvent::DiskUsageReplaced(state),
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        };
+        let shown = |cx: &mut VisualTestContext, selectors: &[&'static str]| {
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            crate::test_frames::draw_settled(cx);
+            selectors
+                .iter()
+                .filter(|selector| cx.debug_bounds(selector).is_some())
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        let account = |profile_id: &str, dir: &str, bytes| AccountDiskUsage {
+            profile_id: profile_id.into(),
+            dirs: vec![dir.into()],
+            bytes,
+            parts: Vec::new(),
+        };
+        let usage = DiskUsage {
+            measured_at: 0,
+            tcode: TcodeDiskUsage {
+                dir: "~/.tcode".into(),
+                conversations: 40 << 30,
+                images: 70 << 20,
+                worktrees: 0,
+                other: 5 << 20,
+            },
+            providers: vec![
+                ProviderDiskUsage {
+                    provider: ProviderKind::Codex,
+                    bytes: 30 << 30,
+                    accounts: vec![account("codex", "~/.codex", 30 << 30)],
+                },
+                ProviderDiskUsage {
+                    provider: ProviderKind::ClaudeCode,
+                    bytes: 6 << 30,
+                    accounts: vec![
+                        account("claude", "~/.claude", 6 << 30),
+                        account("work", "~/.tcode/profile-homes/work", 10 << 20),
+                    ],
+                },
+            ],
+        };
+        let selectors = [
+            "disk-usage-measuring",
+            "disk-usage-remeasuring",
+            "disk-usage-tcode",
+            "disk-usage-tcode-conversations",
+            "disk-usage-tcode-worktrees",
+            "disk-usage-provider-codex",
+            "disk-usage-provider-claude",
+            "disk-usage-provider-pi",
+        ];
+
+        page.update(cx, |page, cx| page.select_section(Section::Maintenance, cx));
+        cx.run_until_parked();
+        let request = std::iter::from_fn(|| outgoing.try_recv().ok())
+            .find_map(|line| match decode_client_line(&line).unwrap() {
+                message @ tcode_protocol::ClientMessage {
+                    payload:
+                        ClientPayload::Subscribe(Subscription {
+                            topic: Topic::DiskUsage,
+                            ..
+                        }),
+                    ..
+                } => Some(message.id),
+                _ => None,
+            })
+            .expect("Maintenance follows the disk usage");
+        send(
+            Some(request),
+            DiskUsageState {
+                last: None,
+                measuring: true,
+            },
+        );
+        assert_eq!(shown(cx, &selectors), ["disk-usage-measuring"]);
+
+        send(
+            None,
+            DiskUsageState {
+                last: Some(usage.clone()),
+                measuring: false,
+            },
+        );
+        let rows = [
+            "disk-usage-tcode",
+            "disk-usage-tcode-conversations",
+            "disk-usage-tcode-worktrees",
+            "disk-usage-provider-codex",
+            "disk-usage-provider-claude",
+        ];
+        assert_eq!(shown(cx, &selectors), rows);
+
+        send(
+            None,
+            DiskUsageState {
+                last: Some(usage),
+                measuring: true,
+            },
+        );
+        assert_eq!(
+            shown(cx, &selectors),
+            [&["disk-usage-remeasuring"][..], &rows[..]].concat()
+        );
+    }
+
     struct CompactSettingsProbe {
         page: Entity<SettingsPage>,
     }
@@ -2991,16 +3802,9 @@ mod tests {
         )
         .unwrap();
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                host.link(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(host.link(), WorkspaceAttachment::Local, None, None, cx)
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let mut page_handle = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let page = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
@@ -3041,16 +3845,9 @@ mod tests {
         )
         .expect("spawn settings test host");
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                host.link(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(host.link(), WorkspaceAttachment::Local, None, None, cx)
         });
-        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let window_state = cx.new(|_| WindowState::default().with_compact(true));
         let (probe, cx) = cx.add_window_view(|window, cx| {
             let page = cx.new(|cx| {
                 let mut page = SettingsPage::new(store.clone(), window_state.clone(), window, cx);
@@ -3111,7 +3908,6 @@ mod tests {
                 "settings-nav-threads",
                 "settings-nav-providers",
                 "settings-nav-usage",
-                "settings-nav-orchestrate",
                 "settings-nav-archived",
             ] {
                 assert!(
@@ -3151,8 +3947,11 @@ mod tests {
             state.enter_workspace(cx);
             state.open_settings(cx);
             state.go(crate::window_state::Destination::SettingsSection, cx);
-            state.pending_settings_section = Some("browser".into());
-            cx.notify();
+        });
+        probe.update(cx, |probe, cx| {
+            probe
+                .page
+                .update(cx, |page, cx| page.open_section("browser", cx))
         });
         cx.run_until_parked();
         assert_eq!(
@@ -3168,6 +3967,114 @@ mod tests {
     /// defaults as the host's configuration, must adopt the host's values the
     /// moment they arrive, and must never overwrite what the user has since
     /// typed — no matter how many snapshots follow.
+    /// Settings → Control gathers the grant requests of every thread, so
+    /// one waiting in a thread the user has not opened can be answered here:
+    /// approving one widens that thread's own grant on the host and leaves
+    /// the other waiting; a thread's own grant is listed and revoked here.
+    /// "Show more" asks for a longer newest-first list, and a new filter asks
+    /// for the first page of what it matches: the two the host answers.
+    #[gpui::test]
+    fn the_activity_list_pages_and_filters_through_the_host(cx: &mut TestAppContext) {
+        use tcode_protocol::{
+            ClientPayload, ControlActivityEntry, ControlActivityFilter, ControlActivityPage,
+            ControlActivityThread, HostMessage, Query, QueryResponse, decode_client_line,
+            encode_line,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        let (store, outgoing, incoming, _pump) = scripted_store(WorkspaceAttachment::Local, cx);
+        let window_state = cx.new(|_| WindowState::default());
+        let mut page = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
+            page = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let page = page.unwrap();
+        cx.simulate_resize(gpui::size(px(1024.), px(3000.)));
+        let asked = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            std::iter::from_fn(|| outgoing.try_recv().ok())
+                .filter_map(|line| {
+                    let message = decode_client_line(&line).unwrap();
+                    match message.payload {
+                        ClientPayload::Query(Query::ControlActivity { limit, filter }) => {
+                            Some((message.id, limit, filter))
+                        }
+                        _ => None,
+                    }
+                })
+                .last()
+                .expect("the page asked the host")
+        };
+        let answer = |id, total, cx: &mut VisualTestContext| {
+            let entry = ControlActivityEntry {
+                target_thread_id: "target".into(),
+                target_title: "Target".into(),
+                at: 1,
+                action: agent::ControlAction {
+                    actor_thread_id: "actor".into(),
+                    actor_title: "Actor".into(),
+                    action: "send_message".into(),
+                    detail: None,
+                },
+            };
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::QueryResult {
+                        id,
+                        result: Ok(QueryResponse::ControlActivity(ControlActivityPage {
+                            entries: vec![entry],
+                            total,
+                            threads: vec![ControlActivityThread {
+                                id: "target".into(),
+                                title: "Target".into(),
+                            }],
+                            actions: vec!["send_message".into()],
+                        })),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            cx.run_until_parked();
+            crate::test_frames::draw_settled(cx);
+        };
+
+        page.update(cx, |page, cx| page.select_section(Section::Control, cx));
+        crate::test_frames::draw(cx);
+        let (id, limit, filter) = asked(cx);
+        assert_eq!((limit, &filter), (50, &ControlActivityFilter::default()));
+
+        answer(id, 1, cx);
+        assert!(
+            cx.debug_bounds("control-activity-more").is_none(),
+            "every match is listed"
+        );
+
+        let refresh = cx.debug_bounds("control-activity-refresh").unwrap();
+        cx.simulate_click(refresh.center(), Default::default());
+        let (id, ..) = asked(cx);
+        answer(id, 60, cx);
+        let more = cx
+            .debug_bounds("control-activity-more")
+            .expect("more match");
+        cx.simulate_click(more.center(), Default::default());
+        let (id, limit, _) = asked(cx);
+        assert_eq!(limit, 100);
+        answer(id, 60, cx);
+
+        let thread = cx.debug_bounds("control-activity-thread").unwrap();
+        cx.simulate_click(thread.center(), Default::default());
+        crate::test_frames::draw_settled(cx);
+        let option = cx
+            .debug_bounds("control-activity-thread-Target")
+            .expect("the log's threads are offered");
+        cx.simulate_click(option.center(), Default::default());
+        let (_, limit, filter) = asked(cx);
+        assert_eq!(limit, 50, "a filter starts over at the first page");
+        assert_eq!(filter.thread_id.as_deref(), Some("target"));
+    }
+
     #[gpui::test]
     fn editable_settings_wait_for_the_host_and_then_keep_the_user_edit(cx: &mut TestAppContext) {
         let root = crate::store::tests::scratch_root("settings-hydration");
@@ -3184,16 +4091,9 @@ mod tests {
         // No blocking seed: this is the portable client's timeline, where the
         // first snapshot lands after the page already exists.
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                host.link(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(host.link(), WorkspaceAttachment::Local, None, None, cx)
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (page, cx) = cx.add_window_view(|window, cx| {
             SettingsPage::new(store.clone(), window_state.clone(), window, cx)
         });
@@ -3212,7 +4112,7 @@ mod tests {
         // hydrates rather than a fixed number of turns, so a slow CI runner
         // cannot race the first snapshot.
         let drain = |cx: &mut VisualTestContext| {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let deadline = crate::store::tests::host_deadline();
             loop {
                 store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
                 cx.run_until_parked();
@@ -3256,7 +4156,7 @@ mod tests {
             }),
         )
         .expect("patch settings");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = crate::store::tests::host_deadline();
         loop {
             store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
             cx.run_until_parked();
@@ -3284,6 +4184,88 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The new project folder's placeholder is written under the host's
+    /// home, which the page asks the host for; a failed ask is asked again
+    /// when the page is next drawn, rather than leaving `~` for good.
+    #[gpui::test]
+    fn the_host_home_is_asked_again_after_a_failed_ask(cx: &mut TestAppContext) {
+        use tcode_protocol::{
+            ClientPayload, DirectoryListing, HostMessage, Query, QueryResponse, decode_client_line,
+            encode_line,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        let (store, outgoing, incoming, _pump) = scripted_store(WorkspaceAttachment::Local, cx);
+        let window_state = cx.new(|_| WindowState::default());
+        let mut page = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
+            page = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let page = page.unwrap();
+        let asked_home = |outgoing: &async_channel::Receiver<String>| {
+            std::iter::from_fn(|| outgoing.try_recv().ok())
+                .filter_map(|line| {
+                    let message = decode_client_line(&line).unwrap();
+                    match message.payload {
+                        ClientPayload::Query(Query::BrowseDirectories { path }) if path == "~" => {
+                            Some(message.id)
+                        }
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let answer = |id, result| {
+            incoming
+                .try_send(encode_line(&HostMessage::QueryResult { id, result }).unwrap())
+                .unwrap();
+        };
+        let drawn = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            crate::test_frames::draw_settled(cx);
+            page.read_with(cx, |page, cx| {
+                page.new_project_dir_input
+                    .state
+                    .read(cx)
+                    .presentation()
+                    .placeholder()
+                    .to_string()
+            })
+        };
+
+        page.update(cx, |page, cx| page.select_section(Section::Threads, cx));
+        drawn(cx);
+        let [first] = asked_home(&outgoing)[..] else {
+            panic!("drawing the Projects rows asks for the host's home once");
+        };
+        answer(
+            first,
+            Err(tcode_protocol::ProtocolError {
+                code: "transport_closed".into(),
+                message: "The host went away.".into(),
+            }),
+        );
+        assert_eq!(drawn(cx), "~/TcodeProjects");
+
+        let [again] = asked_home(&outgoing)[..] else {
+            panic!("the next drawing asks again");
+        };
+        answer(
+            again,
+            Ok(QueryResponse::Directories(DirectoryListing {
+                directory: "/host/home".into(),
+                parent: Some("/host".into()),
+                home: Some("/host/home".into()),
+                entries: vec![],
+            })),
+        );
+        assert_eq!(drawn(cx), "/host/home/TcodeProjects");
+        assert!(asked_home(&outgoing).is_empty(), "an answer is kept");
+    }
+
     #[gpui::test]
     fn switching_language_relocalizes_the_device_name_placeholder(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -3294,10 +4276,10 @@ mod tests {
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, cx)
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let mut page = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));

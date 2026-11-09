@@ -1,0 +1,8 @@
+{"type":"tool_execution_start","toolCallId":"call-bash","toolName":"bash","args":{"command":"echo hi; exit 3"}}
+{"type":"tool_execution_end","toolCallId":"call-bash","toolName":"bash","result":{"content":[{"type":"text","text":"hi\n\n\nCommand exited with code 3"}],"structuredContent":{"output":"hi\n","truncated":false,"exit_code":3,"wall_time_seconds":0},"isError":true},"isError":true}
+{"type":"tool_execution_start","toolCallId":"call-edit","toolName":"edit","args":{"path":"a.txt","edits":[{"oldText":"hello","newText":"bye"}]}}
+{"type":"tool_execution_end","toolCallId":"call-edit","toolName":"edit","result":{"content":[{"type":"text","text":"Successfully replaced 1 block(s) in a.txt."}],"details":{"diff":"-1 hello\n+1 bye\n 2 world","patch":"--- a.txt\n+++ a.txt\n@@ -1,2 +1,2 @@\n-hello\n+bye\n world\n","firstChangedLine":1}},"isError":false}
+{"type":"tool_execution_start","toolCallId":"call-write","toolName":"write","args":{"path":"new.txt","content":"fresh\n"}}
+{"type":"tool_execution_end","toolCallId":"call-write","toolName":"write","result":{"content":[{"type":"text","text":"Successfully wrote to new.txt"}]},"isError":false}
+{"type":"tool_execution_start","toolCallId":"call-read","toolName":"read","args":{"path":"blue.png"}}
+{"type":"tool_execution_end","toolCallId":"call-read","toolName":"read","result":{"content":[{"type":"text","text":"Read image file [image/png]"},{"type":"image","data":"iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg==","mimeType":"image/png"}],"structuredContent":{"type":"image","data":"iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg==","mimeType":"image/png","note":"Read image file [image/png]"}},"isError":false}

@@ -545,7 +545,7 @@ fn mcp_child_linking_is_bound_to_its_token_and_rejects_a_thread_override() {
         ],
     );
     let settings_store = SettingsStore::new(store.root().clone());
-    let mut settings = settings_store.load();
+    let mut settings = settings_store.try_load().unwrap();
     settings.source_control.hosts.insert(
         "github.com".into(),
         tcode_core::settings::HostSettings {
@@ -784,9 +784,7 @@ fn the_agent_tools_are_disclosed_before_the_first_turn() {
     let host = crate::pipe::spawn_host((*store).clone(), services).unwrap();
     for (provider, disclosed) in [(ProviderKind::ClaudeCode, true), (ProviderKind::Pi, false)] {
         let tools = smol::block_on(host.update_state_for_test(move |state, _| {
-            let mut meta =
-                SessionMeta::new(provider, PathBuf::from("/tmp/synthetic-checkout"), None);
-            meta.orchestrate_enabled = true;
+            let meta = SessionMeta::new(provider, PathBuf::from("/tmp/synthetic-checkout"), None);
             let id = meta.id.clone();
             state.sessions.push(meta.clone());
             state
@@ -802,10 +800,7 @@ fn the_agent_tools_are_disclosed_before_the_first_turn() {
             "{provider:?}: shown exactly when its provider would receive the tools"
         );
         if let Some(tools) = tools {
-            let description = orchestrate_mcp::tool_descriptions()
-                .into_iter()
-                .find(|(name, _)| name == "settle_all")
-                .unwrap();
+            let description = preview_mcp::tool_descriptions().into_iter().next().unwrap();
             assert!(tools.tools.contains(&description));
         }
     }
@@ -1117,6 +1112,9 @@ fn a_review_draft_is_the_hosts_across_a_restart_and_a_moved_head_keeps_it_until_
         ),
         (OLD, "Two things", vec![3, 8])
     );
+    // The restarted host is another process, which nothing the stopped host
+    // left running reaches.
+    let mut cx = TestAppContext::default();
     let state = cx.new_entity(TestClientState::new(store.clone()));
     state.update(&mut cx, |state, _| {
         state.pull_requests = PullRequestRuntime::new(api);
@@ -1959,6 +1957,17 @@ fn a_partly_posted_review_keeps_only_unposted_drafts_for_the_next_submission() {
             unreachable!()
         }
         fn forget_credential(&self, _: &str) {
+            unreachable!()
+        }
+        fn check_token(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> tcode_core::settings::TokenCheck {
+            unreachable!()
+        }
+        fn identify(&self, _: &str) {
             unreachable!()
         }
         fn pull_request_url(&self, _: &str) -> Option<(PullRequestKey, String)> {

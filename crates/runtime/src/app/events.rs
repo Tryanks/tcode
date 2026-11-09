@@ -4,6 +4,7 @@ use tcode_core::control::WatchEvent;
 impl AppState {
     /// Handle one canonical event from the live provider.
     pub(super) fn on_event(&mut self, session_id: &str, event: AgentEvent, cx: &mut HostCx) {
+        let mut handed_over = Vec::new();
         if matches!(
             &event,
             AgentEvent::TurnCompleted { .. }
@@ -30,9 +31,12 @@ impl AppState {
         }
 
         match &event {
-            AgentEvent::RewindFailed { error, .. } => {
-                self.pending_native_rewinds.remove(session_id);
-                self.report_error(RuntimeError::ProviderMessage(error.clone()), cx);
+            AgentEvent::RewindPreviewed { .. }
+            | AgentEvent::RewindCompleted { .. }
+            | AgentEvent::RewindFailed { .. }
+            | AgentEvent::RewindUndone { .. }
+            | AgentEvent::RewindUndoFailed { .. } => {
+                self.on_rewind_outcome(session_id, event, cx);
                 return;
             }
             AgentEvent::TurnAccepted { delivery_id } => {
@@ -43,6 +47,19 @@ impl AppState {
                 if let Some(resident) = self.resident_mut(session_id) {
                     resident.mcp_servers_attached = false;
                 }
+                return;
+            }
+            AgentEvent::BackgroundTaskList { tasks } => {
+                if let Some(resident) = self.resident_mut(session_id) {
+                    resident.background.list(tasks);
+                }
+                return;
+            }
+            AgentEvent::SettingsApplied { applied } => {
+                if let Some(resident) = self.resident_mut(session_id) {
+                    resident.settle_settings_apply(*applied);
+                }
+                self.queue_automatic_turn(session_id, |_| {}, cx);
                 return;
             }
             AgentEvent::BackgroundTasksChanged { count } => {
@@ -67,7 +84,20 @@ impl AppState {
                 return;
             }
             AgentEvent::SessionClosed { reason } => {
-                self.pending_native_rewinds.remove(session_id);
+                // A provider started on a carried session that closes before it reports the
+                // session started could not resume the copy.
+                if let Some(resident) = self.resident_mut(session_id)
+                    && resident.meta.session_transfer_from.is_some()
+                    && resident.live_profile_id == resident.meta.profile_id
+                {
+                    resident.fail_session_transfer();
+                }
+                self.settle_rewind_unanswered(
+                    session_id,
+                    agent::RewindFailureReason::ProcessGone,
+                    cx,
+                );
+                self.requeue_unconfirmed_steers(session_id, cx);
                 self.clear_approvals(session_id);
                 self.interrupt_native_subagent_work(session_id, cx);
                 self.close_orchestrator_children(session_id, cx);
@@ -82,6 +112,7 @@ impl AppState {
                             parked.mark_dead();
                             !parked.queue.is_empty()
                         });
+                        self.repair_orphaned_turn(session_id, cx);
                         let is_child = self
                             .sessions
                             .iter()
@@ -112,8 +143,10 @@ impl AppState {
                 if let Some(active) = self.resident_mut(session_id) {
                     active.mark_dead();
                 }
+                self.repair_orphaned_turn(session_id, cx);
                 self.report_error(
                     RuntimeError::ProviderClosed {
+                        harness: self.thread_harness_name(session_id),
                         reason: reason.clone(),
                     },
                     cx,
@@ -257,9 +290,16 @@ impl AppState {
             }
             AgentEvent::SessionStarted { resume, model, .. } => {
                 let mut filled_default_model = false;
+                // A session carried from another account now lives in this one's home.
+                let carried = self
+                    .resident(session_id)
+                    .is_some_and(|resident| resident.live_profile_id == resident.meta.profile_id);
                 if let Some(meta) = self.meta_mut(session_id) {
                     meta.resume_cursor = Some(resume.clone());
-                    meta.pending_fork = false;
+                    if carried {
+                        meta.session_transfer_from = None;
+                    }
+                    meta.pending_fork = None;
                     if meta.model.is_none() {
                         meta.model = model.clone();
                         filled_default_model = model.is_some();
@@ -278,6 +318,7 @@ impl AppState {
                 {
                     resident.turn_in_flight = false;
                     resident.interrupt_requested = false;
+                    resident.interrupt_requested_at = None;
                 }
             }
             AgentEvent::TurnCompleted { .. } => {
@@ -301,35 +342,6 @@ impl AppState {
                 if self.residents.live.contains_key(session_id) {
                     self.refresh_git_status(session_id, cx);
                 }
-            }
-            AgentEvent::RewindCompleted { mode, prefill, .. } => {
-                self.pending_native_rewinds.remove(session_id);
-                if mode.includes_conversation()
-                    && let Some(prefill) = prefill
-                {
-                    // Ownership of this one-shot value crosses serde exactly
-                    // once. The client replica retains it per session until
-                    // the composer consumes it.
-                    self.emit_domain(
-                        Topic::SessionStatus {
-                            session_id: session_id.to_owned(),
-                        },
-                        ServerEvent::NativeRewindPrefill {
-                            session_id: session_id.to_owned(),
-                            text: prefill.clone(),
-                        },
-                        cx,
-                    );
-                }
-                if let Some(meta) = self.meta_mut(session_id) {
-                    meta.updated_at = now_secs();
-                    let meta = meta.clone();
-                    self.persist_meta(&meta, cx);
-                }
-                emit_runtime(
-                    cx,
-                    RuntimeEvent::Notice(RuntimeNotice::NativeRewindCompleted { mode: *mode }),
-                );
             }
             AgentEvent::Error { message, .. } => {
                 emit_runtime(
@@ -367,11 +379,16 @@ impl AppState {
                 }
             }
             AgentEvent::SteerAccepted { request_id } => {
-                if let Some(resident) = self.resident_mut(session_id) {
-                    resident
-                        .pending_steers
-                        .retain(|steer| steer.request_id != *request_id);
-                }
+                handed_over = self
+                    .resident_mut(session_id)
+                    .and_then(|resident| {
+                        let position = resident
+                            .pending_steers
+                            .iter()
+                            .position(|steer| steer.request_id == *request_id)?;
+                        Some(resident.pending_steers.remove(position).reports)
+                    })
+                    .unwrap_or_default();
             }
             AgentEvent::SteerRejected { request_id } => {
                 // The turn ended before the provider could fold the steer in,
@@ -390,6 +407,18 @@ impl AppState {
                     log::warn!("provider rejected unknown steer {request_id} in {session_id}");
                     return;
                 };
+                if steer
+                    .origin
+                    .is_some_and(|origin| origin != MessageOrigin::Human)
+                {
+                    // Not a person's send: it does not ask for a relay's confirmation.
+                    self.queue_automatic_turn(
+                        session_id,
+                        |session| session.requeue_steer(steer),
+                        cx,
+                    );
+                    return;
+                }
                 let previous = (cx.author.take(), cx.origin.take(), cx.delivery_key.take());
                 cx.author = steer.author;
                 cx.origin = steer.origin;
@@ -407,118 +436,21 @@ impl AppState {
                     RuntimeEvent::Notice(RuntimeNotice::ProviderMessage(message.clone())),
                 );
             }
-            AgentEvent::TurnBlocked {
-                category,
-                model,
-                detail,
-            } => {
-                if self.settings.abort_on_model_fallback {
-                    let active_review = self
-                        .residents
-                        .live
-                        .get_mut(session_id)
-                        .filter(|active| active.meta.id == session_id)
-                        .map(|active| {
-                            active.queue.clear();
-                            let refused = active
-                                .timeline
-                                .entries
-                                .iter()
-                                .rev()
-                                .find_map(|entry| match &entry.content {
-                                    EntryContent::Item(ItemContent::UserMessage {
-                                        text,
-                                        context_len,
-                                        ..
-                                    }) => Some(
-                                        context_len
-                                            .and_then(|len| text.get(len..))
-                                            .unwrap_or(text)
-                                            .trim()
-                                            .to_string(),
-                                    ),
-                                    _ => None,
-                                })
-                                .filter(|text| !text.is_empty());
-                            (active.meta.cwd.clone(), refused)
-                        });
-                    if let Some((cwd, refused)) = active_review {
-                        self.emit_domain(
-                            Topic::SessionStatus {
-                                session_id: session_id.to_owned(),
-                            },
-                            ServerEvent::ModelFallbackBlocked {
-                                session_id: session_id.to_owned(),
-                                category: category.clone(),
-                                model: model.clone(),
-                                fallback_model: None,
-                                detail: detail.clone(),
-                            },
-                            cx,
-                        );
-                        if self.settings.fallback_review_advisor {
-                            if let Some(refused) = refused {
-                                self.maybe_run_fallback_review(
-                                    session_id,
-                                    category.as_ref(),
-                                    refused,
-                                    cwd,
-                                    cx,
-                                );
-                            } else {
-                                log::debug!(
-                                    "fallback review skipped for session {session_id}: no user text"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            AgentEvent::ModelFallbackDetected {
-                expected,
-                actual,
-                category,
-                ..
-            } => {
-                if self.settings.abort_on_model_fallback {
-                    let stopped = self
-                        .residents
-                        .live
-                        .get_mut(session_id)
-                        .filter(|active| active.meta.id == session_id)
-                        .map(|active| {
-                            active.queue.clear();
-                            active.shutdown_to_idle();
-                        })
-                        .is_some();
-                    if stopped {
-                        self.record_event(session_id, &event, cx);
-                        self.close_abandoned_turn(session_id, cx);
-                        self.emit_domain(
-                            Topic::SessionStatus {
-                                session_id: session_id.to_owned(),
-                            },
-                            ServerEvent::ModelFallbackBlocked {
-                                session_id: session_id.to_owned(),
-                                category: category.clone(),
-                                model: Some(expected.clone()),
-                                fallback_model: Some(actual.clone()),
-                                detail: String::new(),
-                            },
-                            cx,
-                        );
-                        return;
-                    }
-                }
-            }
             AgentEvent::ProviderRelay { .. }
             | AgentEvent::PlanResolved { .. }
+            | AgentEvent::ModelFallbackDetected { .. }
+            | AgentEvent::TurnBlocked { .. }
             | AgentEvent::ServedModel { .. }
             | AgentEvent::TurnChangesUpdated { .. }
             | AgentEvent::TurnCheckpoint { .. }
+            | AgentEvent::SteerCheckpoint { .. }
+            | AgentEvent::CheckpointsCleared
+            | AgentEvent::RewindUndoClosed
+            | AgentEvent::RewindAvailability { .. }
             | AgentEvent::ItemStarted(_)
             | AgentEvent::ItemUpdated(_)
             | AgentEvent::ItemCompleted(_)
+            | AgentEvent::ItemBackgrounded { .. }
             | AgentEvent::SteerRequested { .. }
             | AgentEvent::Delta { .. }
             | AgentEvent::ApprovalRequested(_)
@@ -528,6 +460,7 @@ impl AppState {
             | AgentEvent::TokenUsage(_)
             | AgentEvent::ContextCompacted(_)
             | AgentEvent::ContextWindowChanged { .. }
+            | AgentEvent::SettingsKept
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::GoalUpdated { .. }
             | AgentEvent::ControlAction(_)
@@ -537,7 +470,7 @@ impl AppState {
         }
 
         self.record_approval_event(session_id, &event);
-        self.record_event(session_id, &event, cx);
+        self.record_handover(session_id, &event, &handed_over, cx);
 
         let retry_pending = self.resident(session_id).is_some_and(|resident| {
             resident
@@ -573,12 +506,14 @@ impl AppState {
         if matches!(event, AgentEvent::TurnCompleted { .. }) {
             if let Some(resident) = self.resident_mut(session_id) {
                 resident.interrupt_requested = false;
+                resident.interrupt_requested_at = None;
             }
-            self.refresh_provider_usage_if_stale(cx);
+            self.refresh_session_usage_if_stale(session_id, cx);
             // The turn is over: the next queued message (if any) now goes out as
             // an ordinary turn, FIFO, one at a time.
             let mut restart = false;
-            let mut restart_deferred = false;
+            // A restart would drop the answer of a rewind that stopped this turn.
+            let rewinding = self.rewind_requests.contains_key(session_id);
             let is_active = if let Some(active) = self
                 .residents
                 .live
@@ -586,17 +521,15 @@ impl AppState {
                 .filter(|active| active.meta.id == session_id)
             {
                 active.turn_in_flight = false;
-                restart = !active.queue.is_empty() && active.launch_settings_changed_while_live();
-                restart_deferred = restart && active.background_task_count > 0;
+                let restartable = active.background_task_count == 0 && !rewinding;
+                restart = restartable
+                    && !active.queue.is_empty()
+                    && !active.queue_held
+                    && active.restart_required();
                 // A thread that moved during this turn leaves the old directory now,
                 // whether or not anything waits to go.
-                let moved = active.cwd_changed_while_live() && active.background_task_count == 0;
-                if restart_deferred {
-                    log::info!(
-                        "deferring settings restart for {} background task(s)",
-                        active.background_task_count
-                    );
-                } else if restart || moved {
+                let moved = restartable && active.cwd_changed_while_live();
+                if restart || moved {
                     active.shutdown_to_idle();
                 }
                 true
@@ -604,9 +537,7 @@ impl AppState {
                 false
             };
             if is_active && restart {
-                if !restart_deferred {
-                    self.ensure_started(session_id, cx);
-                }
+                self.ensure_started(session_id, cx);
             } else if is_active {
                 if self.dispatch_next_queued(session_id, cx).is_err() {
                     self.report_error(RuntimeError::ProcessGone, cx);
@@ -630,22 +561,44 @@ impl AppState {
             }
             self.settle_self_if_due(session_id, true, cx);
         }
-
-        if matches!(event, AgentEvent::RewindCompleted { .. })
-            && !self.residents.live.contains_key(session_id)
-        {
-            self.on_background_turn_completed(session_id, cx);
-        }
     }
 
     /// Append to the event log + fold into the matching active or background timeline.
     /// The same wall-clock timestamp is persisted and folded exactly once so
     /// the on-disk log and the loaded timeline agree.
     pub(super) fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut HostCx) {
-        self.record_event_at(session_id, now_millis(), event, cx);
+        self.record_event_at(session_id, now_millis(), event, Vec::new(), cx);
     }
 
-    fn record_event_at(&mut self, session_id: &str, ts: u64, event: &AgentEvent, cx: &mut HostCx) {
+    /// Record `event`, which says the lead's provider took `reports`, in one
+    /// store write with the metas of the children that no longer owe them:
+    /// a host that stops after the provider took a report never finds it
+    /// still owed and sends it again.
+    pub(super) fn record_handover(
+        &mut self,
+        session_id: &str,
+        event: &AgentEvent,
+        reports: &[ReportHandover],
+        cx: &mut HostCx,
+    ) {
+        let metas = self.settle_reports(reports);
+        self.record_event_at(session_id, now_millis(), event, metas.clone(), cx);
+        for meta in metas {
+            if let Some(child) = self.resident_mut(&meta.id) {
+                child.meta = meta.clone();
+            }
+            self.adopt_meta(meta, cx);
+        }
+    }
+
+    pub(super) fn record_event_at(
+        &mut self,
+        session_id: &str,
+        ts: u64,
+        event: &AgentEvent,
+        metas: Vec<SessionMeta>,
+        cx: &mut HostCx,
+    ) {
         let author = match event {
             AgentEvent::ItemCompleted(ThreadItem {
                 content: ItemContent::UserMessage { .. },
@@ -705,16 +658,19 @@ impl AppState {
         let topic = Topic::SessionEvents {
             session_id: session_id.to_string(),
         };
+        let mut streams = None;
         if self.event_records.contains_key(session_id) {
             self.emit_domain(
                 topic,
                 ServerEvent::SessionEvent(history::wire_record(&record).into_owned()),
                 cx,
             );
-            self.event_records
-                .get_mut(session_id)
-                .expect("checked above")
-                .push(record);
+            streams = Some(
+                self.event_records
+                    .get_mut(session_id)
+                    .expect("checked above")
+                    .push(record),
+            );
         } else {
             // A session nobody holds needs no row named: the append alone
             // keeps the record, and any later read of the log is queued
@@ -736,6 +692,8 @@ impl AppState {
                 author,
                 origin,
                 event: Box::new(event.clone()),
+                streams,
+                metas,
             },
             cx,
         );
@@ -748,6 +706,17 @@ impl AppState {
         }
         if let Some(session) = self.resident_mut(session_id) {
             session.timeline.apply_at(Some(ts), event);
+            // What closes a rewind's undo may close the one leaving a branch.
+            if matches!(
+                event,
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::UserMessage { .. },
+                    ..
+                }) | AgentEvent::SteerRequested { .. }
+                    | AgentEvent::RewindUndoClosed
+            ) {
+                self.release_left_branch(session_id, cx);
+            }
         } else {
             self.release_stale_session_logs(cx);
         }
@@ -761,7 +730,7 @@ impl AppState {
         event: &AgentEvent,
         cx: &mut HostCx,
     ) {
-        self.record_event_at(session_id, ts, event, cx);
+        self.record_event_at(session_id, ts, event, Vec::new(), cx);
     }
 
     /// Deliver an event as a session's provider would.
@@ -947,69 +916,6 @@ impl AppState {
         });
     }
 
-    fn maybe_run_fallback_review(
-        &self,
-        session_id: &str,
-        category: Option<&agent::ClassifierCategory>,
-        refused: String,
-        cwd: PathBuf,
-        cx: &mut HostCx,
-    ) {
-        let review_meta = fallback_review_session_meta(&self.settings, cwd);
-        let settings = self.settings.clone();
-        let launch_env = self.prepare_session_env(&review_meta, cx);
-        let prompt = fallback_review_prompt(category, &refused);
-        let provider_launcher = self.provider_launcher.clone();
-        let executor = cx.clone();
-        let session_id = session_id.to_owned();
-
-        let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
-            let launch_env = match launch_env.await {
-                Ok(env) => env,
-                Err(error) => {
-                    host_cx.enqueue(move |state, cx| {
-                        state.report_error(RuntimeError::PersistSettings { error }, cx);
-                    });
-                    return;
-                }
-            };
-            let options =
-                session_options(&review_meta, &settings, launch_env, McpServers::default());
-            let review = run_fallback_review(
-                provider_launcher,
-                review_meta.provider,
-                options,
-                prompt,
-                executor,
-            )
-            .await;
-            host_cx.enqueue(move |state, cx| {
-                if let Some((assessment, draft)) = review
-                    .as_deref()
-                    .map(parse_fallback_review)
-                    .filter(|(assessment, _)| !assessment.is_empty())
-                {
-                    state.emit_domain(
-                        Topic::SessionStatus {
-                            session_id: session_id.clone(),
-                        },
-                        ServerEvent::FallbackReviewReady {
-                            session_id,
-                            assessment,
-                            draft,
-                        },
-                        cx,
-                    );
-                } else {
-                    log::debug!(
-                        "fallback review failed or returned no assessment for session {session_id}"
-                    );
-                }
-            });
-        });
-    }
-
     pub(super) fn apply_generated_title(
         &mut self,
         session_id: &str,
@@ -1047,23 +953,10 @@ pub(super) fn title_session_meta(settings: &Settings, cwd: PathBuf) -> SessionMe
         .profile_id
         .clone()
         .filter(|id| settings.resolved_profile(id).is_some());
-    meta.orchestrate_enabled = false;
     meta.option_selections.push(OptionSelection {
         id: "reasoningEffort".into(),
         value: serde_json::Value::String(AI_TITLE_REASONING_EFFORT.into()),
     });
-    meta
-}
-
-pub(super) fn fallback_review_session_meta(settings: &Settings, cwd: PathBuf) -> SessionMeta {
-    let review = &settings.fallback_review;
-    let model = (!review.model.trim().is_empty()).then(|| review.model.trim().to_string());
-    let mut meta = SessionMeta::new(review.provider, cwd, model);
-    meta.profile_id = review
-        .profile_id
-        .clone()
-        .filter(|id| settings.resolved_profile(id).is_some());
-    meta.orchestrate_enabled = false;
     meta
 }
 
@@ -1177,151 +1070,6 @@ pub(super) async fn generate_ai_title_inner(
     )
     .await;
     raw_title
-}
-
-pub(super) async fn run_fallback_review(
-    provider_launcher: ProviderLauncher,
-    provider: ProviderKind,
-    mut options: SessionOptions,
-    prompt: String,
-    executor: HostCx,
-) -> Option<String> {
-    let scratch =
-        std::env::temp_dir().join(format!("tcode-fallback-review-{}", uuid::Uuid::new_v4()));
-    let scratch_for_create = scratch.clone();
-    if let Err(err) = executor
-        .unblock(move || std::fs::create_dir_all(&scratch_for_create))
-        .await
-    {
-        log::debug!("could not create fallback review scratch directory: {err}");
-        return None;
-    }
-    options.cwd = scratch.clone();
-
-    let review = smol::future::or(
-        run_fallback_review_inner(provider_launcher, provider, options, prompt),
-        async {
-            smol::Timer::after(AI_TITLE_TIMEOUT).await;
-            None
-        },
-    )
-    .await;
-    let _ = executor
-        .unblock(move || std::fs::remove_dir_all(scratch))
-        .await;
-    review
-}
-
-pub(super) async fn run_fallback_review_inner(
-    provider_launcher: ProviderLauncher,
-    provider: ProviderKind,
-    options: SessionOptions,
-    prompt: String,
-) -> Option<String> {
-    let handle = provider_launcher.launch(provider, options).await.ok()?;
-    handle
-        .commands
-        .send(SessionCommand::SendTurn {
-            delivery_id: 0,
-            text: prompt,
-            options: Some(TurnOptions { effort: None }),
-            attachments: Vec::new(),
-        })
-        .await
-        .ok()?;
-
-    let mut completed_text = String::new();
-    let mut streamed_text = String::new();
-    let review = loop {
-        let Ok(event) = handle.events.recv().await else {
-            break None;
-        };
-        match event {
-            AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::AssistantMessage { text, .. },
-                ..
-            }) => completed_text.push_str(&text),
-            AgentEvent::Delta {
-                kind: agent::DeltaKind::AssistantText,
-                text,
-                ..
-            } => streamed_text.push_str(&text),
-            AgentEvent::ApprovalRequested(_) => break None,
-            AgentEvent::UserInputRequested { .. }
-            | AgentEvent::Error { fatal: true, .. }
-            | AgentEvent::SessionClosed { .. } => break None,
-            AgentEvent::TurnCompleted { status, usage, .. } => {
-                if !title_turn_generated_output(status, usage.as_ref()) {
-                    break None;
-                }
-                let text = if completed_text.trim().is_empty() {
-                    &streamed_text
-                } else {
-                    &completed_text
-                };
-                let text = text.trim();
-                break (!text.is_empty()).then(|| text.to_string());
-            }
-            _ => {}
-        }
-    };
-    let _ = handle.commands.send(SessionCommand::Shutdown).await;
-    smol::future::or(
-        async {
-            while let Ok(event) = handle.events.recv().await {
-                if matches!(event, AgentEvent::SessionClosed { .. }) {
-                    break;
-                }
-            }
-        },
-        async {
-            smol::Timer::after(std::time::Duration::from_secs(2)).await;
-        },
-    )
-    .await;
-    review
-}
-
-pub(super) fn fallback_review_prompt(
-    category: Option<&agent::ClassifierCategory>,
-    refused: &str,
-) -> String {
-    let category = match category {
-        Some(agent::ClassifierCategory::Cyber) => "cybersecurity",
-        Some(agent::ClassifierCategory::Bio) => "biology",
-        Some(agent::ClassifierCategory::Other(_)) | None => "safety",
-    };
-    format!(
-        "You are a safety-review advisor inside a coding tool. A user's request to a coding agent was stopped by an automated safety classifier that flagged it as potentially {category}-related. The classifier is intentionally broad and often flags legitimate coding, security, and biology work.\n\nYour job is ONLY to advise the user. Produce two things and nothing else:\n1) A brief assessment (2-4 sentences): is this plausibly a false positive, and why or why not? Be specific about what looks legitimate or genuinely concerning.\n2) IF AND ONLY IF you judge it a likely false positive, a short first-person clarification the USER can review, edit, and choose to send back to the coding agent. State concrete, checkable facts in the user's own voice (e.g. \"This is a test machine on my own LAN that I administer\"), NOT a generic assurance like \"this has no safety risk\". If you do not think it is a false positive, leave the draft blank.\n\nYou are advising, not deciding. You cannot approve or send anything, and must not pretend the user has agreed to any text. Do not restate these instructions.\n\nThe stopped request was:\n<<<\n{refused}\n>>>\n\nRespond in EXACTLY this format, with the literal delimiter line:\nASSESSMENT: <your 2-4 sentence assessment>\n---DRAFT---\n<the first-person clarification, or leave blank>"
-    )
-}
-
-pub(super) fn parse_fallback_review(text: &str) -> (String, String) {
-    let mut offset = 0;
-    let mut split = None;
-    for line in text.split_inclusive('\n') {
-        if line.trim() == "---DRAFT---" {
-            split = Some((offset, offset + line.len()));
-            break;
-        }
-        offset += line.len();
-    }
-
-    let (assessment, draft) = split
-        .map(|(start, end)| (&text[..start], text[end..].trim()))
-        .unwrap_or((text, ""));
-    let assessment = assessment.trim();
-    let assessment = assessment
-        .get("ASSESSMENT".len()..)
-        .filter(|_| {
-            assessment
-                .get(.."ASSESSMENT".len())
-                .is_some_and(|label| label.eq_ignore_ascii_case("ASSESSMENT"))
-        })
-        .and_then(|rest| rest.trim_start().strip_prefix(':'))
-        .unwrap_or(assessment)
-        .trim();
-    (assessment.to_string(), draft.to_string())
 }
 
 pub(super) fn title_turn_generated_output(

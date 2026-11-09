@@ -2,6 +2,7 @@
 //!
 //! RPC records are framed by LF only. Extension confirmation UI is transported generically.
 
+use crate::{LaterHistory, RewindFailure, RewindFailureReason, RewindMode};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -13,21 +14,25 @@ use smol::channel::{Receiver, Sender};
 #[cfg(test)]
 use crate::TurnStatus;
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
-use crate::process::{ChildOutput, send_json as write_json, spawn_line_reader};
+use crate::process::{ChildOutput, ProcessTree, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
-    ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus,
-    LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand, ProviderCommandKind,
-    ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle, SessionOptions,
-    ThreadItem, TokenUsage, UserInputDelivery, UserInputOption, UserInputQuestion,
+    ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ForkPoint, ItemContent,
+    ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand,
+    ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
+    SessionOptions, ThreadItem, TokenUsage, ToolOutput, UserInputDelivery, UserInputOption,
+    UserInputQuestion,
 };
 
+/// The directory pi launched with `launch_env` keeps its settings, sign-in
+/// and sessions in: `PI_CODING_AGENT_DIR`, else `~/.pi/agent`.
+pub fn agent_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
+    launch_env
+        .child_path(ProviderKind::Pi, "PI_CODING_AGENT_DIR")
+        .or_else(|| dirs::home_dir().map(|home| home.join(".pi/agent")))
+}
+
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    if opts.fork {
-        return Err(AgentError::Protocol(
-            "session fork is not supported for this provider".into(),
-        ));
-    }
     crate::spawn_session(
         ProviderKind::Pi,
         opts,
@@ -49,7 +54,7 @@ fn list_models_blocking(
     launch_env: &LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     let binary = crate::resolve_binary(binary_path, "pi")?;
-    let mut cmd = crate::process::command(&binary);
+    let mut cmd = crate::process::harness_command(&binary);
     cmd.arg("--mode")
         .arg("rpc")
         .arg("--no-session")
@@ -59,9 +64,10 @@ fn list_models_blocking(
     for (key, value) in launch_env.pairs(ProviderKind::Pi) {
         cmd.env(key, value);
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|err| AgentError::Spawn(format!("spawning `{}`: {err}", binary.display())))?;
+    let mut child = ProcessTree::new(
+        cmd.spawn()
+            .map_err(|err| AgentError::Spawn(format!("spawning `{}`: {err}", binary.display())))?,
+    );
     let mut stdin = BufWriter::new(
         child
             .stdin
@@ -216,12 +222,36 @@ async fn run_actor(
             return;
         }
     };
-    let mut cmd = crate::process::command(&binary);
+    let mut cmd = crate::process::harness_command(&binary);
     cmd.args(&opts.extra_args).arg("--mode").arg("rpc");
-    if let Some(thinking) = selected_thinking(&opts.option_selections) {
+    // Which entry to fork before, or `None` for the leaf.
+    let fork_at = match &opts.fork {
+        Some(ForkPoint::Before { checkpoint_id }) => Some(Some(checkpoint_id.clone())),
+        Some(ForkPoint::Tail) => Some(None),
+        Some(ForkPoint::Branch { .. }) | None => None,
+    };
+    // A level set at launch is written to the session opened, which a fork
+    // must leave as it found it: it goes to the fork once that is made.
+    let thinking = selected_thinking(&opts.option_selections);
+    if let Some(thinking) = thinking.filter(|_| fork_at.is_none()) {
         cmd.arg("--thinking").arg(thinking);
     }
-    if let Some(session) = resume_session(&opts.resume) {
+    let session = match &opts.fork {
+        Some(ForkPoint::Branch { token }) => {
+            // pi would start an empty session at a path it does not find.
+            if !Path::new(token).is_file() {
+                let _ = ready
+                    .send(Err(AgentError::Provider(format!(
+                        "pi no longer has the session {token}"
+                    ))))
+                    .await;
+                return;
+            }
+            Some(token.as_str())
+        }
+        _ => resume_session(&opts.resume),
+    };
+    if let Some(session) = session {
         cmd.arg("--session").arg(session);
     }
     cmd.current_dir(&opts.cwd)
@@ -231,8 +261,12 @@ async fn run_actor(
     for (key, value) in opts.launch_env.pairs(ProviderKind::Pi) {
         cmd.env(key, value);
     }
+    if let Err(err) = crate::process::refuse_batch_line_breaks(cmd.get_program(), cmd.get_args()) {
+        let _ = ready.send(Err(err)).await;
+        return;
+    }
     let mut child = match cmd.spawn() {
-        Ok(child) => child,
+        Ok(child) => ProcessTree::new(child),
         Err(err) => {
             let _ = ready
                 .send(Err(AgentError::Spawn(format!(
@@ -285,7 +319,12 @@ async fn run_actor(
         pending_dialogs: HashSet::new(),
         pending_steers: HashMap::new(),
         requested_model: opts.model.clone(),
+        pending_settings: None,
+        fork_at: fork_at.zip(Some(thinking.map(str::to_owned))),
         stderr_tail,
+        requests: HashMap::new(),
+        entries_cursor: None,
+        session_file: None,
     };
     let startup = actor.initialize().await;
     if let Err(err) = startup {
@@ -314,7 +353,7 @@ async fn run_actor(
 }
 
 struct PiActor {
-    child: Child,
+    child: ProcessTree<Child>,
     stdin: BufWriter<ChildStdin>,
     lines: Receiver<ChildOutput>,
     events: Sender<AgentEvent>,
@@ -327,7 +366,50 @@ struct PiActor {
     /// acknowledging the stdin write.
     pending_steers: HashMap<String, String>,
     requested_model: Option<String>,
+    pending_settings: Option<PendingSettings>,
+    /// The entry to fork before at startup, or `None` to clone at the leaf,
+    /// and the thinking level to set in the fork.
+    fork_at: Option<(Option<String>, Option<String>)>,
     stderr_tail: crate::process::StderrTail,
+    /// RPC requests whose responses carry a rewind's or a restore point's
+    /// next step, by request id.
+    requests: HashMap<String, PiRequest>,
+    /// The last session entry `get_entries` returned; the next read starts
+    /// after it.
+    entries_cursor: Option<String>,
+    /// The session file pi works in now: what a fork leaves, to return to.
+    session_file: Option<String>,
+}
+
+/// What a pi RPC response settles.
+/// A live settings change pi has yet to answer in full.
+struct PendingSettings {
+    model: Option<String>,
+    outstanding: HashSet<String>,
+    applied: bool,
+}
+
+enum PiRequest {
+    /// The session's new entries: the first user message after the cursor is
+    /// the prompt of `turn`, when one just finished.
+    Entries { turn: Option<String> },
+    /// `fork` before the user message `checkpoint_id`, leaving `previous`.
+    Fork {
+        checkpoint_id: String,
+        previous: Option<String>,
+        /// The fork stops a running turn, which ends interrupted.
+        stops_turn: bool,
+    },
+    /// `get_state` after a fork: the new session the conversation goes on in.
+    Forked {
+        checkpoint_id: String,
+        prefill: Option<String>,
+        previous: Option<String>,
+    },
+    /// `switch_session` back to the branch a fork left.
+    Return { checkpoint_id: String },
+    /// `get_state` after returning.
+    Returned { checkpoint_id: String },
 }
 
 impl SessionActor for PiActor {
@@ -394,7 +476,7 @@ impl SessionActor for PiActor {
                 let confirmed = match &decision {
                     ApprovalDecision::Option(id) if id == "confirm" => true,
                     ApprovalDecision::Option(id) if id == "decline" => false,
-                    ApprovalDecision::Cancel => false,
+                    ApprovalDecision::Cancel | ApprovalDecision::Feedback(_) => false,
                     ApprovalDecision::Option(_) => return Ok(()),
                 };
                 if !self.pending_approvals.remove(&request_id) {
@@ -444,12 +526,52 @@ impl SessionActor for PiActor {
                 send_json(&mut self.stdin, &response).map_err(|err| err.to_string())?;
                 Ok(())
             }
-            SessionCommand::Rewind { .. } => {
-                self.events
-                    .emit(AgentEvent::Warning {
-                        message: "pi rewind is not exposed by Tcode's native adapter".into(),
-                    })
-                    .await;
+            SessionCommand::Rewind {
+                checkpoint_id,
+                mode: RewindMode::Conversation,
+            } => {
+                // pi's fork aborts a running turn; its end may not be told.
+                let stops_turn =
+                    self.mapper.current_turn.is_some() && !self.mapper.interrupt_pending;
+                if stops_turn {
+                    self.mapper.interrupt_pending = true;
+                }
+                let id = self.request_id();
+                send_json(
+                    &mut self.stdin,
+                    &json!({"id":id,"type":"fork","entryId":checkpoint_id}),
+                )
+                .map_err(|err| err.to_string())?;
+                self.requests.insert(
+                    id,
+                    PiRequest::Fork {
+                        checkpoint_id,
+                        previous: self.session_file.clone(),
+                        stops_turn,
+                    },
+                );
+                Ok(())
+            }
+            SessionCommand::UndoRewind {
+                checkpoint_id,
+                undo_token,
+            } => {
+                let id = self.request_id();
+                send_json(
+                    &mut self.stdin,
+                    &json!({"id":id,"type":"switch_session","sessionPath":undo_token}),
+                )
+                .map_err(|err| err.to_string())?;
+                self.requests
+                    .insert(id, PiRequest::Return { checkpoint_id });
+                Ok(())
+            }
+            command @ (SessionCommand::Rewind { .. } | SessionCommand::PreviewRewind { .. }) => {
+                if let Some(event) = command
+                    .rewind_refusal(RewindFailure::new(RewindFailureReason::Unsupported, None))
+                {
+                    self.events.emit(event).await;
+                }
                 Ok(())
             }
             // Progress arrives as `compaction_start` / `compaction_end`.
@@ -458,10 +580,17 @@ impl SessionActor for PiActor {
                 &json!({"id":"tcode-compact","type":"compact"}),
             )
             .map_err(|err| err.to_string()),
+            SessionCommand::ApplySettings {
+                model,
+                option_selections,
+            } => self.apply_settings(model, &option_selections),
             SessionCommand::RetryTurn { .. }
             | SessionCommand::SetOption { .. }
+            | SessionCommand::StopBackgroundTask { .. }
+            | SessionCommand::MoveToBackground { .. }
             | SessionCommand::SetGoal { .. }
             | SessionCommand::ClearGoal
+            | SessionCommand::ReadAccountUsage { .. }
             | SessionCommand::Shutdown => Ok(()),
         }
     }
@@ -494,6 +623,27 @@ impl SessionActor for PiActor {
 
 impl PiActor {
     async fn initialize(&mut self) -> Result<(), AgentError> {
+        // Before anything that writes to the session open now, the source.
+        if let Some((entry_id, thinking)) = self.fork_at.take() {
+            let request = match entry_id {
+                Some(entry_id) => json!({"id":"tcode-fork","type":"fork","entryId":entry_id}),
+                None => json!({"id":"tcode-fork","type":"clone"}),
+            };
+            send_json(&mut self.stdin, &request)?;
+            let forked = self.wait_response("tcode-fork").await?;
+            if forked.pointer("/data/cancelled") == Some(&json!(true)) {
+                return Err(AgentError::Provider(
+                    "an extension cancelled the fork".into(),
+                ));
+            }
+            if let Some(level) = thinking {
+                send_json(
+                    &mut self.stdin,
+                    &json!({"id":"tcode-thinking","type":"set_thinking_level","level":level}),
+                )?;
+                self.wait_response("tcode-thinking").await?;
+            }
+        }
         if let Some(model) = self.requested_model.as_deref() {
             let (provider, model_id) = model.split_once('/').ok_or_else(|| {
                 AgentError::Protocol(format!(
@@ -528,6 +678,10 @@ impl PiActor {
             cursor.insert("session_file".into(), Value::String(path.to_owned()));
         }
         let model = model_wire_id(data.get("model"));
+        self.session_file = data
+            .get("sessionFile")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         self.events
             .emit(AgentEvent::SessionStarted {
                 provider_session_id: session_id,
@@ -535,6 +689,16 @@ impl PiActor {
                 model,
             })
             .await;
+
+        // Restore points are the user messages entered from here on.
+        send_json(
+            &mut self.stdin,
+            &json!({"id":"tcode-entries","type":"get_entries"}),
+        )?;
+        match self.wait_response("tcode-entries").await {
+            Ok(response) => self.entries_cursor = last_entry_id(&response),
+            Err(err) => log::debug!("pi get_entries unavailable: {err}"),
+        }
 
         send_json(
             &mut self.stdin,
@@ -595,6 +759,196 @@ impl PiActor {
         }
     }
 
+    /// The session pi works in now, from a `get_state` response.
+    async fn adopt_session(&mut self, state: &Value) {
+        let data = state.get("data").unwrap_or(&Value::Null);
+        let Some(session_id) = data.get("sessionId").and_then(Value::as_str) else {
+            return;
+        };
+        let mut cursor = serde_json::Map::new();
+        cursor.insert("session_id".into(), Value::String(session_id.to_owned()));
+        self.session_file = data
+            .get("sessionFile")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if let Some(path) = &self.session_file {
+            cursor.insert("session_file".into(), Value::String(path.clone()));
+        }
+        self.events
+            .emit(AgentEvent::SessionStarted {
+                provider_session_id: session_id.to_owned(),
+                resume: ResumeCursor(Value::Object(cursor)),
+                model: model_wire_id(data.get("model")),
+            })
+            .await;
+    }
+
+    /// Read the entries after the cursor; `turn` names the turn that just
+    /// finished, whose prompt they hold.
+    fn read_entries(&mut self, turn: Option<String>) -> Result<(), String> {
+        let id = self.request_id();
+        let mut request = json!({"id":id,"type":"get_entries"});
+        if let Some(cursor) = &self.entries_cursor {
+            request["since"] = json!(cursor);
+        }
+        send_json(&mut self.stdin, &request).map_err(|err| err.to_string())?;
+        self.requests.insert(id, PiRequest::Entries { turn });
+        Ok(())
+    }
+
+    fn request(&mut self, command: &str, request: PiRequest) -> Result<(), String> {
+        let id = self.request_id();
+        send_json(&mut self.stdin, &json!({"id":id,"type":command}))
+            .map_err(|err| err.to_string())?;
+        self.requests.insert(id, request);
+        Ok(())
+    }
+
+    /// A response a rewind, its undo or a restore point waited for.
+    async fn settle_request(&mut self, request: PiRequest, message: &Value) {
+        let success = message
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let data = message.get("data").unwrap_or(&Value::Null);
+        let cancelled = data.get("cancelled").and_then(Value::as_bool) == Some(true);
+        let failure = |reason| RewindFailure::new(reason, response_error(message));
+        match request {
+            PiRequest::Entries { turn } => {
+                if !success {
+                    // The cursor names an entry this session lacks: start over.
+                    log::debug!("pi get_entries failed: {}", response_error(message));
+                    self.entries_cursor = None;
+                    return;
+                }
+                if let Some(cursor) = last_entry_id(message) {
+                    self.entries_cursor = Some(cursor);
+                }
+                let prompt = data
+                    .get("entries")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .find(|entry| {
+                        entry.get("type").and_then(Value::as_str) == Some("message")
+                            && entry.pointer("/message/role").and_then(Value::as_str)
+                                == Some("user")
+                    })
+                    .and_then(|entry| entry.get("id").and_then(Value::as_str));
+                if let (Some(turn_id), Some(checkpoint_id)) = (turn, prompt) {
+                    self.events
+                        .emit(AgentEvent::TurnCheckpoint {
+                            turn_id,
+                            checkpoint_id: checkpoint_id.to_owned(),
+                        })
+                        .await;
+                }
+            }
+            PiRequest::Fork {
+                checkpoint_id,
+                previous,
+                stops_turn,
+            } => {
+                if !success || cancelled {
+                    // Nothing was forked, so a running turn goes on.
+                    if stops_turn {
+                        self.mapper.interrupt_pending = false;
+                    }
+                    let reason = if !success && response_error(message).contains("Invalid entry") {
+                        RewindFailureReason::TargetNotFound
+                    } else {
+                        RewindFailureReason::Other
+                    };
+                    let mut failure = failure(reason);
+                    if cancelled {
+                        failure.detail = Some("an extension cancelled the fork".into());
+                    }
+                    self.events
+                        .emit(AgentEvent::RewindFailed {
+                            checkpoint_id,
+                            mode: RewindMode::Conversation,
+                            failure,
+                        })
+                        .await;
+                    return;
+                }
+                self.end_aborted_turn().await;
+                let prefill = data.get("text").and_then(Value::as_str).map(str::to_owned);
+                if let Err(err) = self.request(
+                    "get_state",
+                    PiRequest::Forked {
+                        checkpoint_id,
+                        prefill,
+                        previous,
+                    },
+                ) {
+                    log::warn!("pi get_state after a fork not sent: {err}");
+                }
+            }
+            PiRequest::Forked {
+                checkpoint_id,
+                prefill,
+                previous,
+            } => {
+                self.adopt_session(message).await;
+                self.entries_cursor = None;
+                let _ = self.read_entries(None);
+                self.events
+                    .emit(AgentEvent::RewindCompleted {
+                        checkpoint_id,
+                        mode: RewindMode::Conversation,
+                        prefill,
+                        prefill_attachments: Vec::new(),
+                        later_history: LaterHistory::Branch,
+                        files: None,
+                        incomplete: None,
+                        // The session the fork left stays on disk, to return to.
+                        undo_token: previous
+                            .filter(|previous| Some(previous) != self.session_file.as_ref()),
+                    })
+                    .await;
+            }
+            PiRequest::Return { checkpoint_id } => {
+                if !success || cancelled {
+                    let mut failure = failure(RewindFailureReason::Other);
+                    if cancelled {
+                        failure.detail = Some("an extension cancelled the switch".into());
+                    }
+                    self.events
+                        .emit(AgentEvent::RewindUndoFailed {
+                            checkpoint_id,
+                            failure,
+                        })
+                        .await;
+                    return;
+                }
+                if let Err(err) = self.request("get_state", PiRequest::Returned { checkpoint_id }) {
+                    log::warn!("pi get_state after returning not sent: {err}");
+                }
+            }
+            PiRequest::Returned { checkpoint_id } => {
+                self.adopt_session(message).await;
+                self.entries_cursor = None;
+                let _ = self.read_entries(None);
+                self.events
+                    .emit(AgentEvent::RewindUndone { checkpoint_id })
+                    .await;
+            }
+        }
+    }
+
+    /// A turn the fork aborted ends interrupted, whether or not pi said so.
+    async fn end_aborted_turn(&mut self) {
+        if self.mapper.current_turn.is_none() {
+            return;
+        }
+        self.mapper.interrupt_pending = true;
+        let _ = self.cancel_pending_ui();
+        for event in self.mapper.complete_turn() {
+            self.events.emit(event).await;
+        }
+    }
+
     async fn handle_line(&mut self, line: &str) {
         let message: Value = match serde_json::from_str(line) {
             Ok(message) => message,
@@ -608,6 +962,23 @@ impl PiActor {
             }
         };
         if message.get("type").and_then(Value::as_str) == Some("response") {
+            let success = message.get("success").and_then(Value::as_bool) == Some(true);
+            if let Some(event) = message
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| self.settle_settings(id, success))
+            {
+                self.events.emit(event).await;
+                return;
+            }
+            if let Some(request) = message
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| self.requests.remove(id))
+            {
+                self.settle_request(request, &message).await;
+                return;
+            }
             let success = message
                 .get("success")
                 .and_then(Value::as_bool)
@@ -637,14 +1008,19 @@ impl PiActor {
             return;
         }
         let events = self.mapper.on_message(&message);
-        let turn_completed = events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }));
+        let turn_completed = events.iter().find_map(|event| match event {
+            AgentEvent::TurnCompleted { turn_id, .. } => Some(turn_id.clone()),
+            _ => None,
+        });
         for event in events {
             self.events.emit(event).await;
         }
-        if turn_completed {
+        if let Some(turn_id) = turn_completed {
             let _ = self.cancel_pending_ui();
+            // Its prompt is now an entry: a point a fork can go back before.
+            if let Err(err) = self.read_entries(Some(turn_id)) {
+                log::warn!("pi get_entries not sent: {err}");
+            }
         }
     }
 
@@ -751,6 +1127,74 @@ impl PiActor {
             .await;
     }
 
+    /// `set_model`, then `set_thinking_level`, which pi clamps to the model:
+    /// its RPC answers each in turn, and the last answer settles the change.
+    fn apply_settings(
+        &mut self,
+        model: Option<String>,
+        selections: &[OptionSelection],
+    ) -> Result<(), String> {
+        let mut requests = Vec::new();
+        if model != self.requested_model {
+            let Some((provider, model_id)) = model.as_deref().and_then(|m| m.split_once('/'))
+            else {
+                // The default model is chosen at start; a running process
+                // cannot be asked for it.
+                self.pending_settings = None;
+                let _ = self
+                    .events
+                    .try_send(AgentEvent::SettingsApplied { applied: false });
+                return Ok(());
+            };
+            let id = self.request_id();
+            requests.push((
+                id.clone(),
+                json!({"id":id,"type":"set_model","provider":provider,"modelId":model_id}),
+            ));
+        }
+        if let Some(level) = crate::selection_str(selections, "reasoningEffort") {
+            let id = self.request_id();
+            requests.push((
+                id.clone(),
+                json!({"id":id,"type":"set_thinking_level","level":level}),
+            ));
+        }
+        if requests.is_empty() {
+            let _ = self
+                .events
+                .try_send(AgentEvent::SettingsApplied { applied: true });
+            return Ok(());
+        }
+        self.pending_settings = Some(PendingSettings {
+            model,
+            outstanding: requests.iter().map(|(id, _)| id.clone()).collect(),
+            applied: true,
+        });
+        for (_, request) in requests {
+            send_json(&mut self.stdin, &request).map_err(|err| err.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// One answer to [`Self::apply_settings`]; `None` when `id` is not one.
+    fn settle_settings(&mut self, id: &str, success: bool) -> Option<AgentEvent> {
+        let pending = self.pending_settings.as_mut()?;
+        if !pending.outstanding.remove(id) {
+            return None;
+        }
+        pending.applied &= success;
+        if !pending.outstanding.is_empty() {
+            return None;
+        }
+        let pending = self.pending_settings.take()?;
+        if pending.applied {
+            self.requested_model = pending.model;
+        }
+        Some(AgentEvent::SettingsApplied {
+            applied: pending.applied,
+        })
+    }
+
     fn request_id(&mut self) -> String {
         let id = format!("tcode-{}", self.next_request);
         self.next_request += 1;
@@ -799,7 +1243,9 @@ struct PiMapper {
 struct PiTool {
     name: String,
     input: Value,
-    output: String,
+    output: ToolOutput,
+    /// The latest `AgentToolResult`.
+    result: Option<Value>,
 }
 
 impl PiMapper {
@@ -964,18 +1410,14 @@ impl PiMapper {
                     .or_else(|| tool.get("input"))
                     .cloned()
                     .unwrap_or(Value::Null);
-                let existed = self
-                    .tool_items
-                    .insert(
-                        id.clone(),
-                        PiTool {
-                            name: name.clone(),
-                            input: input.clone(),
-                            output: String::new(),
-                        },
-                    )
-                    .is_some();
-                let item = tool_item(&id, &name, input, String::new(), ItemStatus::InProgress);
+                let tool = PiTool {
+                    name,
+                    input,
+                    output: ToolOutput::default(),
+                    result: None,
+                };
+                let item = tool_item(&id, &tool, ItemStatus::InProgress);
+                let existed = self.tool_items.insert(id, tool).is_some();
                 return vec![if existed {
                     AgentEvent::ItemUpdated(item)
                 } else {
@@ -1151,12 +1593,15 @@ impl PiMapper {
         } else {
             event.get("result")
         };
-        let output = result.map(result_text).unwrap_or_default();
+        let output = result
+            .map(|result| ToolOutput::from_content(result.get("content").unwrap_or(&Value::Null)))
+            .unwrap_or_default();
         let was_known = self.tool_items.contains_key(&id);
         let tool = self.tool_items.entry(id.clone()).or_insert_with(|| PiTool {
             name: event_name.unwrap_or("tool").to_owned(),
             input: event_input.clone().unwrap_or(Value::Null),
-            output: String::new(),
+            output: ToolOutput::default(),
+            result: None,
         });
         if let Some(name) = event_name {
             tool.name = name.to_owned();
@@ -1166,27 +1611,12 @@ impl PiMapper {
         }
         if has_result {
             tool.output = output;
+            tool.result = result.cloned();
         }
         if status == ItemStatus::Failed {
             self.failed = true;
         }
-        let mut item = tool_item(
-            &id,
-            &tool.name,
-            tool.input.clone(),
-            tool.output.clone(),
-            status,
-        );
-        if status == ItemStatus::Completed
-            && crate::image_reads::is_read_tool(&tool.name)
-            && let ItemContent::ToolCall { image_reads, .. } = &mut item.content
-        {
-            *image_reads = crate::image_reads::content_images(
-                result
-                    .and_then(|r| r.get("content"))
-                    .unwrap_or(&Value::Null),
-            );
-        }
+        let item = tool_item(&id, tool, status);
         vec![match status {
             ItemStatus::InProgress if has_result => AgentEvent::ItemUpdated(item),
             ItemStatus::InProgress if was_known => AgentEvent::ItemUpdated(item),
@@ -1196,16 +1626,29 @@ impl PiMapper {
     }
 }
 
-fn tool_item(id: &str, name: &str, input: Value, output: String, status: ItemStatus) -> ThreadItem {
-    let content = match name {
+/// The canonical item for a pi tool call. Its `result` carries what the
+/// content text leaves out: bash's `structuredContent.exit_code` and edit's
+/// `details.patch`, a unified diff.
+fn tool_item(id: &str, tool: &PiTool, status: ItemStatus) -> ThreadItem {
+    let PiTool {
+        name,
+        input,
+        output,
+        result,
+    } = tool;
+    let result = result.as_ref();
+    let content = match name.as_str() {
         "bash" => ItemContent::CommandExecution {
             command: input
                 .get("command")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned(),
-            output,
-            exit_code: None,
+            output: output.text.clone(),
+            exit_code: result
+                .and_then(|result| result.pointer("/structuredContent/exit_code"))
+                .and_then(Value::as_i64)
+                .and_then(|code| i32::try_from(code).ok()),
             status,
         },
         "edit" | "write" => ItemContent::FileChange {
@@ -1220,17 +1663,34 @@ fn tool_item(id: &str, name: &str, input: Value, output: String, status: ItemSta
                         } else {
                             FileChangeKind::Modify
                         },
-                        diff: None,
+                        diff: if name == "write" {
+                            input
+                                .get("content")
+                                .and_then(Value::as_str)
+                                .filter(|content| !content.is_empty())
+                                .map(|content| {
+                                    content
+                                        .lines()
+                                        .map(|line| format!("+{line}"))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                })
+                        } else {
+                            result
+                                .and_then(|result| result.pointer("/details/patch"))
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        },
                     }]
                 })
                 .unwrap_or_default(),
             status,
         },
         _ => ItemContent::ToolCall {
-            image_reads: Vec::new(),
-            name: name.to_owned(),
-            input,
-            output: (!output.is_empty()).then_some(output),
+            image_reads: output.images.clone(),
+            name: name.clone(),
+            input: input.clone(),
+            output: (!output.text.is_empty()).then(|| output.text.clone()),
             status,
         },
     };
@@ -1422,17 +1882,6 @@ fn cancel_pending_dialogs(
     Ok(())
 }
 
-fn result_text(result: &Value) -> String {
-    result
-        .get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|part| part.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn custom_message_id(message: &Value) -> String {
     format!(
         "pi-custom-{}",
@@ -1521,20 +1970,10 @@ fn resume_session(resume: &Option<ResumeCursor>) -> Option<&str> {
 /// Naming them beats a blanket notice: the person reading it wants to know
 /// which opted-in tools went missing, not that a protocol lacks a feature.
 fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
-    [
-        (
-            crate::McpRegistration::SERVER_NAME_ORCHESTRATE,
-            "orchestration",
-        ),
-        (
-            crate::McpRegistration::SERVER_NAME_ORCHESTRATE_REPORT,
-            "result reporting",
-        ),
-        (
-            crate::McpRegistration::SERVER_NAME_COMPUTER_USE,
-            "computer-use",
-        ),
-    ]
+    [(
+        crate::McpRegistration::SERVER_NAME_COMPUTER_USE,
+        "computer-use",
+    )]
     .into_iter()
     .filter_map(|(server_name, label)| {
         opts.mcp_servers
@@ -1543,6 +1982,17 @@ fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
             .then_some(label)
     })
     .collect()
+}
+
+/// The id of the last entry a `get_entries` response holds.
+fn last_entry_id(response: &Value) -> Option<String> {
+    response
+        .pointer("/data/entries")?
+        .as_array()?
+        .last()?
+        .get("id")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 fn ensure_success(message: &Value) -> Result<(), AgentError> {
@@ -1830,28 +2280,62 @@ mod tests {
             .collect()
     }
 
+    /// Each `result` is what pi 1.4.0's own `bash`, `edit`, `write` and
+    /// `read` tools returned in a scratch directory (`createToolDefinition(..)
+    /// .execute`), in the `tool_execution_*` events `pi --mode rpc` forwards
+    /// verbatim. The items keep bash's exit code, edit's unified patch, the
+    /// written text and the read image.
     #[test]
-    fn image_read_results_exclude_failed_reads_and_image_generation() {
-        for (name, failed, expected) in [
-            ("read", false, 2),
-            ("read", true, 0),
-            ("generate_image", false, 0),
-        ] {
-            let mut mapper = PiMapper::new();
-            mapper.on_message(&json!({"type":"tool_execution_start","toolCallId":"read","toolName":name,"args":{"path":"image.png"}}));
-            let events = mapper.on_message(&json!({"type":"tool_execution_end","toolCallId":"read","isError":failed,"result":{"content":[{"type":"image","mimeType":"image/png","data":"AQID"},{"type":"image","mimeType":"image/jpeg","data":"BAUG"}]}}));
-            let AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::ToolCall { image_reads, .. },
-                ..
-            }) = &events[0]
-            else {
-                panic!("tool completion: {events:?}")
-            };
-            assert_eq!(image_reads.len(), expected, "{name}, failed={failed}");
-            if expected != 0 {
-                assert_eq!(image_reads[1].data_base64, "BAUG");
+    fn tool_results_keep_exit_code_patch_and_images() {
+        let mut mapper = PiMapper::new();
+        let mut completed = Vec::new();
+        for line in include_str!("../tests/fixtures/pi/tool_results.jsonl").lines() {
+            for event in mapper.on_message(&serde_json::from_str(line).unwrap()) {
+                if let AgentEvent::ItemCompleted(item) = event {
+                    completed.push(item.content);
+                }
             }
         }
+        assert_eq!(
+            completed,
+            [
+                ItemContent::CommandExecution {
+                    command: "echo hi; exit 3".into(),
+                    output: "hi\n\n\nCommand exited with code 3".into(),
+                    exit_code: Some(3),
+                    status: ItemStatus::Failed,
+                },
+                ItemContent::FileChange {
+                    changes: vec![FileChange {
+                        path: "a.txt".into(),
+                        kind: FileChangeKind::Modify,
+                        diff: Some(
+                            "--- a.txt\n+++ a.txt\n@@ -1,2 +1,2 @@\n-hello\n+bye\n world\n".into()
+                        ),
+                    }],
+                    status: ItemStatus::Completed,
+                },
+                ItemContent::FileChange {
+                    changes: vec![FileChange {
+                        path: "new.txt".into(),
+                        kind: FileChangeKind::Create,
+                        diff: Some("+fresh".into()),
+                    }],
+                    status: ItemStatus::Completed,
+                },
+                ItemContent::ToolCall {
+                    image_reads: vec![Attachment {
+                        media_type: "image/png".into(),
+                        data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg==".into(),
+                        source_path: None,
+                    }],
+                    name: "read".into(),
+                    input: json!({"path": "blue.png"}),
+                    output: Some("Read image file [image/png]".into()),
+                    status: ItemStatus::Completed,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -2088,5 +2572,355 @@ mod tests {
                 ..
             })] if provider_kind == "pi-extension" && summary == "first\nsecond"
         ));
+    }
+
+    /// A stand-in for `pi --mode rpc` 1.5.0 answering with its documented
+    /// shapes (docs/rpc-commands.md: get_state, get_entries, fork,
+    /// switch_session): session `a` until a fork before entry `u1` moves to
+    /// `b`, and `switch_session` back to `a`'s file.
+    #[cfg(unix)]
+    const RPC_STAND_IN: &str = r#"#!/bin/sh
+file=/s/a.jsonl
+session=a
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"get_state"'*)
+      printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"sessionId":"%s","sessionFile":"%s"}}\n' "$id" "$session" "$file" ;;
+    *'"get_commands"'*)
+      printf '{"id":"%s","type":"response","command":"get_commands","success":true,"data":{"commands":[]}}\n' "$id" ;;
+    *'"get_entries"'*)
+      if [ "$prompted" = 1 ]; then
+        prompted=
+        printf '{"id":"%s","type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"message","id":"u1","parentId":null,"message":{"role":"user","content":"first prompt"}},{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":[]}}],"leafId":"a1"}}\n' "$id"
+      else
+        printf '{"id":"%s","type":"response","command":"get_entries","success":true,"data":{"entries":[],"leafId":null}}\n' "$id"
+      fi ;;
+    *'"set_model"'*|*'"set_thinking_level"'*)
+      printf '{"id":"%s","type":"response","command":"set","success":true}\n' "$id" ;;
+    *'"prompt"'*)
+      prompted=1
+      printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
+      printf '{"type":"agent_start"}\n{"type":"agent_settled"}\n' ;;
+    *'"fork"'*'"entryId":"u1"'*|*'"entryId":"u1"'*'"fork"'*)
+      file=/s/b.jsonl; session=b
+      printf '{"id":"%s","type":"response","command":"fork","success":true,"data":{"text":"first prompt","cancelled":false}}\n' "$id" ;;
+    *'"fork"'*)
+      printf '{"id":"%s","type":"response","command":"fork","success":false,"error":"Invalid entry ID for forking"}\n' "$id" ;;
+    *'"clone"'*)
+      file=/s/b.jsonl; session=b
+      printf '{"id":"%s","type":"response","command":"clone","success":true,"data":{"cancelled":false}}\n' "$id" ;;
+    *'"sessionPath":"/s/a.jsonl"'*)
+      file=/s/a.jsonl; session=a
+      printf '{"id":"%s","type":"response","command":"switch_session","success":true,"data":{"cancelled":false}}\n' "$id" ;;
+  esac
+done
+"#;
+
+    /// A new model and thinking level go to the running process with
+    /// `set_model`, then `set_thinking_level`, and the change is applied once
+    /// pi answered both; pi has no way back to its default model. Verified
+    /// against pi 1.5.0 with a stand-in provider: the next prompt runs on the
+    /// new model with the new thinking budget.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_model_and_thinking_level_go_to_the_running_process() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("agent-pi-live-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("pi");
+        let requests = dir.join("requests");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\n{stand_in}",
+                stand_in = RPC_STAND_IN.trim_start_matches("#!/bin/sh\n").replace(
+                    "  id=$(printf",
+                    &format!(
+                        "  printf '%s\\n' \"$line\" >> '{}'\n  id=$(printf",
+                        requests.display()
+                    )
+                )
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        smol::block_on(async {
+            let handle = start(SessionOptions {
+                cwd: dir.clone(),
+                model: Some("provider/model".into()),
+                resume: None,
+                fork: None,
+                binary_path: Some(bin.clone()),
+                option_selections: Vec::new(),
+                mcp_servers: Vec::new(),
+                launch_env: LaunchEnv::default(),
+                extra_args: Vec::new(),
+                acp: None,
+                instructions: None,
+            })
+            .await
+            .unwrap();
+            let applied = |events: Receiver<AgentEvent>| async move {
+                loop {
+                    if let AgentEvent::SettingsApplied { applied } = events.recv().await.unwrap() {
+                        return applied;
+                    }
+                }
+            };
+            for (model, expected) in [(Some("provider/other"), true), (None, false)] {
+                handle
+                    .commands
+                    .send(SessionCommand::ApplySettings {
+                        model: model.map(str::to_owned),
+                        option_selections: vec![OptionSelection {
+                            id: "reasoningEffort".into(),
+                            value: json!("high"),
+                        }],
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(applied(handle.events.clone()).await, expected, "{model:?}");
+            }
+            let _ = handle.commands.send(SessionCommand::Shutdown).await;
+            let log = std::fs::read_to_string(&requests).unwrap();
+            let lines: Vec<&str> = log.lines().collect();
+            let position = |needle: &str| lines.iter().rposition(|line| line.contains(needle));
+            assert!(position("\"modelId\":\"other\"").is_some(), "{log}");
+            assert!(
+                position("\"modelId\":\"other\"") < position("set_thinking_level"),
+                "{log}"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A forked thread starts on the source's file, forks there, before a
+    /// prompt or at the leaf, before anything else that writes to the session
+    /// open, and goes on in the session pi made; a branch a rewind left is opened as it is, with
+    /// no fork, and one pi no longer has fails the start.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_thread_goes_on_where_its_start_says() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("agent-pi-start-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("pi");
+        let requests = dir.join("requests");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n{stand_in}",
+                log = requests.display(),
+                stand_in = RPC_STAND_IN.trim_start_matches("#!/bin/sh\n").replace(
+                    "  id=$(printf",
+                    &format!(
+                        "  printf '%s\\n' \"$line\" >> '{}'\n  id=$(printf",
+                        requests.display()
+                    )
+                )
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let branch = dir.join("left.jsonl");
+        std::fs::write(&branch, "").unwrap();
+        let options = |fork| SessionOptions {
+            cwd: dir.clone(),
+            model: Some("provider/model".into()),
+            resume: Some(ResumeCursor(
+                json!({"session_id": "a", "session_file": "/s/a.jsonl"}),
+            )),
+            fork,
+            binary_path: Some(bin.clone()),
+            option_selections: vec![OptionSelection {
+                id: "reasoningEffort".into(),
+                value: json!("high"),
+            }],
+            mcp_servers: Vec::new(),
+            launch_env: LaunchEnv::default(),
+            extra_args: Vec::new(),
+            acp: None,
+            instructions: None,
+        };
+        smol::block_on(async {
+            let session = |events: Receiver<AgentEvent>| async move {
+                loop {
+                    if let AgentEvent::SessionStarted { resume, .. } = events.recv().await.unwrap()
+                    {
+                        return resume.0;
+                    }
+                }
+            };
+            let handle = start(options(Some(ForkPoint::Before {
+                checkpoint_id: "u1".into(),
+            })))
+            .await
+            .unwrap();
+            assert_eq!(
+                session(handle.events.clone()).await,
+                json!({"session_id": "b", "session_file": "/s/b.jsonl"})
+            );
+            let _ = handle.commands.send(SessionCommand::Shutdown).await;
+            let log = std::fs::read_to_string(&requests).unwrap();
+            let lines: Vec<&str> = log.lines().collect();
+            assert!(
+                lines[0].contains("--session /s/a.jsonl") && !lines[0].contains("--thinking"),
+                "{log}"
+            );
+            let position = |needle: &str| lines.iter().position(|line| line.contains(needle));
+            assert!(
+                position("\"type\":\"fork\"") < position("set_thinking_level"),
+                "{log}"
+            );
+            assert!(
+                position("set_thinking_level") < position("set_model"),
+                "{log}"
+            );
+
+            std::fs::remove_file(&requests).unwrap();
+            let handle = start(options(Some(ForkPoint::Tail))).await.unwrap();
+            assert_eq!(
+                session(handle.events.clone()).await,
+                json!({"session_id": "b", "session_file": "/s/b.jsonl"})
+            );
+            let _ = handle.commands.send(SessionCommand::Shutdown).await;
+            let log = std::fs::read_to_string(&requests).unwrap();
+            let position = |needle: &str| log.lines().position(|line| line.contains(needle));
+            assert!(
+                position("\"type\":\"clone\"") < position("set_model"),
+                "{log}"
+            );
+
+            std::fs::remove_file(&requests).unwrap();
+            let token = branch.to_string_lossy().into_owned();
+            let handle = start(options(Some(ForkPoint::Branch {
+                token: token.clone(),
+            })))
+            .await
+            .unwrap();
+            session(handle.events.clone()).await;
+            let _ = handle.commands.send(SessionCommand::Shutdown).await;
+            let log = std::fs::read_to_string(&requests).unwrap();
+            assert!(log.contains(&format!("--session {token}")), "{log}");
+            assert!(!log.contains("\"type\":\"fork\""), "{log}");
+
+            assert!(matches!(
+                start(options(Some(ForkPoint::Branch {
+                    token: "/s/gone.jsonl".into(),
+                })))
+                .await,
+                Err(AgentError::Provider(_))
+            ));
+        });
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// pi rewinds by forking: each finished turn's prompt entry is a restore
+    /// point; a rewind forks before it into a new session the thread then
+    /// resumes, with the prompt to edit and the old session to go back to;
+    /// returning switches back to it. An entry pi does not know is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_rewind_forks_before_the_prompt_and_returns_to_the_branch_it_left() {
+        use std::os::unix::fs::PermissionsExt;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("agent-pi-fork-{nonce}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("pi");
+        std::fs::write(&bin, RPC_STAND_IN).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        smol::block_on(async {
+            let handle = start(SessionOptions {
+                cwd: dir.clone(),
+                model: None,
+                resume: None,
+                fork: None,
+                binary_path: Some(bin.clone()),
+                option_selections: Vec::new(),
+                mcp_servers: Vec::new(),
+                launch_env: LaunchEnv::default(),
+                extra_args: Vec::new(),
+                acp: None,
+                instructions: None,
+            })
+            .await
+            .unwrap();
+            let next = async |kind: &str| loop {
+                let event = handle.events.recv().await.unwrap();
+                let value = serde_json::to_value(&event).unwrap();
+                if value["type"] == kind {
+                    return value;
+                }
+            };
+            next("session_started").await;
+            handle
+                .commands
+                .send(SessionCommand::SendTurn {
+                    delivery_id: 1,
+                    text: "first prompt".into(),
+                    options: None,
+                    attachments: Vec::new(),
+                })
+                .await
+                .unwrap();
+            let completed = next("turn_completed").await;
+            assert_eq!(
+                next("turn_checkpoint").await,
+                json!({"type": "turn_checkpoint", "turn_id": completed["turn_id"], "checkpoint_id": "u1"})
+            );
+
+            handle
+                .commands
+                .send(SessionCommand::Rewind {
+                    checkpoint_id: "unknown".into(),
+                    mode: RewindMode::Conversation,
+                })
+                .await
+                .unwrap();
+            let failed = next("rewind_failed").await;
+            assert_eq!(failed["failure"]["reason"], "target_not_found");
+
+            handle
+                .commands
+                .send(SessionCommand::Rewind {
+                    checkpoint_id: "u1".into(),
+                    mode: RewindMode::Conversation,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                next("session_started").await["resume"],
+                json!({"session_id": "b", "session_file": "/s/b.jsonl"})
+            );
+            assert_eq!(
+                next("rewind_completed").await,
+                json!({"type": "rewind_completed", "checkpoint_id": "u1", "mode": "conversation",
+                       "prefill": "first prompt", "later_history": "branch",
+                       "undo_token": "/s/a.jsonl"})
+            );
+
+            handle
+                .commands
+                .send(SessionCommand::UndoRewind {
+                    checkpoint_id: "u1".into(),
+                    undo_token: "/s/a.jsonl".into(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                next("session_started").await["resume"],
+                json!({"session_id": "a", "session_file": "/s/a.jsonl"})
+            );
+            assert_eq!(
+                next("rewind_undone").await,
+                json!({"type": "rewind_undone", "checkpoint_id": "u1"})
+            );
+            let _ = handle.commands.send(SessionCommand::Shutdown).await;
+        });
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

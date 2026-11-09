@@ -34,8 +34,8 @@ pub fn flattened_theme_json() -> String {
     flattened
 }
 
-/// Where a client should attach at launch: the host it used last, if that
-/// record still exists. A client with no such record opens on the hosts list.
+/// The host a client's window shows first at launch: the one it was last
+/// on, if that record still exists.
 pub fn last_host_target(host: &dyn ClientHost) -> Option<AttachmentTarget> {
     let id = host.last_host_id()?;
     host.load_hosts()
@@ -49,6 +49,9 @@ pub struct ShellOptions {
     /// The title the window carries until an attachment names one.
     pub title: SharedString,
     pub fonts: Vec<Cow<'static, [u8]>>,
+    /// Fonts left out of `fonts` because one language alone needs them, as
+    /// (language, URL): fetched the first time that language is shown.
+    pub locale_fonts: Vec<(&'static str, String)>,
     /// The palette this client renders with. Clients whose window is opaque
     /// hand over a theme with the translucent canvas already flattened.
     pub theme_json: Cow<'static, str>,
@@ -57,9 +60,10 @@ pub struct ShellOptions {
     /// The user's first OS-configured language when the platform has a more
     /// authoritative API than `sys_locale`. Desktop leaves this as `None`.
     pub system_locale: Option<String>,
-    /// The platform whose application lifecycle can suspend this client. Its
-    /// foreground transitions wake the connection (see [`lifecycle_wake`]);
-    /// a desktop window is never suspended and leaves this as `None`.
+    /// The platform whose application lifecycle can suspend this client.
+    /// Leaving parks the connection and returning reconnects it (see
+    /// [`lifecycle_wakes`]); a desktop window is never suspended and leaves
+    /// this as `None`.
     pub lifecycle: Option<Rc<dyn gpui::Platform>>,
     pub setup: ShellSetup,
 }
@@ -70,6 +74,7 @@ impl Default for ShellOptions {
             window: WindowOptions::default(),
             title: crate::tr!("app.name").into(),
             fonts: vec![Cow::Borrowed(crate::assets::DM_SANS)],
+            locale_fonts: Vec::new(),
             theme_json: Cow::Borrowed(THEME_JSON),
             activate: false,
             system_locale: None,
@@ -81,9 +86,8 @@ impl Default for ShellOptions {
 
 #[cfg(any(target_os = "android", target_os = "ios", target_family = "wasm"))]
 impl ShellOptions {
-    /// Supply monospace on platforms without a system monospace font.
-    /// Register the bundled family and select it anywhere the shared
-    /// theme asks for the desktop-only SF Mono family.
+    /// Supply monospace on platforms without a system monospace font:
+    /// register the bundled family and make it every theme's monospace.
     pub fn with_bundled_monospace(mut self) -> Self {
         self.fonts.extend([
             Cow::Borrowed(crate::assets::LILEX_REGULAR),
@@ -94,7 +98,12 @@ impl ShellOptions {
         #[cfg(target_family = "wasm")]
         self.fonts
             .push(Cow::Borrowed(crate::assets::TERMINAL_SYMBOLS));
-        self.theme_json = Cow::Owned(self.theme_json.replace("SF Mono", "Lilex"));
+        let mut file: serde_json::Value =
+            serde_json::from_str(&self.theme_json).expect("the embedded theme is JSON");
+        for theme in file["themes"].as_array_mut().into_iter().flatten() {
+            theme["mono_font.family"] = "Lilex".into();
+        }
+        self.theme_json = Cow::Owned(file.to_string());
         self
     }
 }
@@ -123,17 +132,15 @@ pub fn init_client(cx: &mut App, host: &dyn ClientHost, options: &ShellOptions) 
         )));
     }
     crate::i18n::set_platform_system_locale(options.system_locale.as_deref());
-    let language = host.load_preferences().language;
-    crate::i18n::apply_locale(match language.as_deref() {
-        Some("system") | None => None,
-        override_locale => override_locale,
-    });
+    crate::i18n::apply_locale(crate::device::language(&host.load_preferences()));
     cx.text_system()
         .add_fonts(options.fonts.clone())
         .expect("failed to register bundled application fonts");
+    crate::i18n::set_locale_fonts(options.locale_fonts.clone(), cx);
     theme::init_with_json(&options.theme_json, cx);
     crate::markdown::init(cx);
     crate::image_viewer::init(cx);
+    crate::add_project_dialog::init(cx);
     crate::shortcut::init(cx);
     // Global ⌘K / Ctrl-K opens/closes the command palette (handled by
     // AppShell). `secondary` is gpui's platform modifier: Command on a Mac,
@@ -197,22 +204,20 @@ pub fn run_shell(
     setup.restore_navigation |= gpui_base::is_mobile();
     let setup = Rc::new(RefCell::new(Some(setup)));
     let mounted: Rc<RefCell<Option<Entity<AppShell>>>> = Rc::new(RefCell::new(None));
-    // Who this client is, and how it re-points at another host. Installed
+    // Who this client is, and how it asks the window for a host. Installed
     // *before* the window, because the views the window builds — the pair form
     // most of all — ask this global what kind of client they are on.
-    // Switching resolves the window's shell when it is actually asked to, not
+    // A request resolves the window's shell when it is actually made, not
     // when this global is installed: the shell does not exist yet here, and the
     // cell below is emptied as soon as the window hands it over.
     cx.set_global(ClientAttachment::new(
         host,
         has_local,
-        |target, window, cx| {
-            crate::shell::switch_current(target, window, cx);
-        },
+        crate::shell::request_host,
     ));
     let captured = mounted.clone();
     let window = open_client_window(cx, options.window, title, move |window, cx| {
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let shell = cx.new(|cx| {
             AppShell::new(
                 window_state,
@@ -251,42 +256,38 @@ pub fn run_shell(
     (window, shell)
 }
 
-/// Application recovery policy for a client the OS can suspend: every
-/// foreground transition probes or reconnects the attachment once, depending
-/// on how long the client was away.
+/// Application recovery policy for a client the OS can suspend: leaving
+/// parks the attachment's link, which closes it and the device's endpoint at
+/// once, and the return reconnects it and syncs in full. Android keeps a
+/// stopped app running and iOS suspends it; neither keeps anything for the
+/// return.
 fn lifecycle_wakes(
     platform: &dyn gpui::Platform,
 ) -> async_channel::Receiver<tcode_client::recovery::Wake> {
     let (sender, receiver) = async_channel::unbounded();
-    let mut lifecycle = tcode_client::recovery::Lifecycle::default();
+    let mut away = false;
     platform.on_app_lifecycle(Box::new(move |phase| {
-        // Wall time includes device sleep. A backward clock correction
-        // saturates to a short absence and still gets a bounded probe.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        if let Some(wake) = lifecycle_wake(&mut lifecycle, phase, now) {
+        if let Some(wake) = lifecycle_wake(&mut away, phase) {
             let _ = sender.try_send(wake);
         }
     }));
     receiver
 }
 
+/// Once per absence each way: Foreground followed by Active reconnects once.
 fn lifecycle_wake(
-    lifecycle: &mut tcode_client::recovery::Lifecycle,
+    away: &mut bool,
     phase: gpui::AppLifecyclePhase,
-    now_ms: u64,
 ) -> Option<tcode_client::recovery::Wake> {
+    use tcode_client::recovery::Wake;
     match phase {
         gpui::AppLifecyclePhase::Background => {
-            lifecycle.background(now_ms);
-            None
+            (!std::mem::replace(away, true)).then_some(Wake::Park)
         }
         gpui::AppLifecyclePhase::Foreground | gpui::AppLifecyclePhase::Active => {
-            lifecycle.foreground(now_ms)
+            std::mem::take(away).then_some(Wake::Reconnect)
         }
-        _ => None,
+        gpui::AppLifecyclePhase::Inactive | gpui::AppLifecyclePhase::Disconnected => None,
     }
 }
 
@@ -295,23 +296,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_lifecycle_phase_hook_probes_or_reconnects_once() {
+    fn leaving_parks_the_link_once_and_the_return_reconnects_it_once() {
         use gpui::AppLifecyclePhase as Phase;
-        use tcode_client::recovery::{Lifecycle, Wake};
-        let mut lifecycle = Lifecycle::default();
-        assert_eq!(lifecycle_wake(&mut lifecycle, Phase::Background, 0), None);
+        use tcode_client::recovery::Wake;
+        let mut away = false;
+        assert_eq!(lifecycle_wake(&mut away, Phase::Active), None);
+        assert_eq!(lifecycle_wake(&mut away, Phase::Inactive), None);
         assert_eq!(
-            lifecycle_wake(&mut lifecycle, Phase::Foreground, 9_999),
-            Some(Wake::Probe)
+            lifecycle_wake(&mut away, Phase::Background),
+            Some(Wake::Park)
         );
-        assert_eq!(lifecycle_wake(&mut lifecycle, Phase::Active, 10_000), None);
+        assert_eq!(lifecycle_wake(&mut away, Phase::Background), None);
         assert_eq!(
-            lifecycle_wake(&mut lifecycle, Phase::Background, 20_000),
-            None
-        );
-        assert_eq!(
-            lifecycle_wake(&mut lifecycle, Phase::Active, 30_000),
+            lifecycle_wake(&mut away, Phase::Foreground),
             Some(Wake::Reconnect)
         );
+        assert_eq!(lifecycle_wake(&mut away, Phase::Active), None);
     }
 }

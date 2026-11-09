@@ -8,6 +8,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::plugin_command::claude::op_args;
 use crate::{
     AgentError, CommandAcceptance, DeclaredComponents, MarketplaceAction, PluginAction,
     PluginContext, PluginInstallation, PluginListing, PluginOp, PluginOpOutcome, PluginScope,
@@ -51,10 +52,22 @@ pub(crate) async fn list(context: &PluginContext) -> Result<PluginListing, Agent
     let in_context = InContext::new(context);
     let mut listing = listing(plugins, marketplaces, &in_context);
 
+    // Details do not depend on the directory, so a project's listing reads
+    // them only for what this project's scopes hold; the listing from
+    // outside any project reads the rest.
     let installed: Vec<String> = listing
         .entries
         .iter()
-        .filter(|entry| !entry.installations.is_empty())
+        .filter(|entry| {
+            entry.installations.iter().any(|installation| {
+                !context.project
+                    || (!installation.other_project
+                        && matches!(
+                            installation.scope,
+                            PluginScope::Project | PluginScope::Local
+                        ))
+            })
+        })
         .map(|entry| entry.id.clone())
         .collect();
     let mut details = HashMap::new();
@@ -108,88 +121,6 @@ pub(crate) async fn run(
 
 fn args(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|part| (*part).to_string()).collect()
-}
-
-/// The argv for one mutation. `-y` is never passed: a marketplace-declared
-/// command runs only with the `--accept-command` hash a person accepted.
-/// Every plugin mutation names its scope, because the CLI's default
-/// auto-detects one from the working directory.
-fn op_args(op: &PluginOp) -> Result<Vec<String>, AgentError> {
-    let args = match op {
-        PluginOp::Install {
-            id,
-            scope,
-            accept_command,
-        }
-        | PluginOp::Update {
-            id,
-            scope,
-            accept_command,
-        } => {
-            let verb = if matches!(op, PluginOp::Install { .. }) {
-                "install"
-            } else {
-                "update"
-            };
-            let mut args = plugin_args(verb, id, *scope)?;
-            if let Some(sha256) = accept_command {
-                args.extend(["--accept-command".into(), operand(sha256)?]);
-            }
-            args
-        }
-        PluginOp::Uninstall { id, scope } => plugin_args("uninstall", id, *scope)?,
-        PluginOp::SetEnabled { id, scope, enabled } => {
-            plugin_args(if *enabled { "enable" } else { "disable" }, id, *scope)?
-        }
-        PluginOp::AddMarketplace { source } => vec![
-            "plugin".into(),
-            "marketplace".into(),
-            "add".into(),
-            operand(source)?,
-            "--scope".into(),
-            "user".into(),
-        ],
-        PluginOp::RemoveMarketplace { name } => vec![
-            "plugin".into(),
-            "marketplace".into(),
-            "remove".into(),
-            operand(name)?,
-        ],
-    };
-    Ok(args)
-}
-
-fn plugin_args(verb: &str, id: &str, scope: PluginScope) -> Result<Vec<String>, AgentError> {
-    Ok(vec![
-        "plugin".into(),
-        verb.into(),
-        operand(id)?,
-        "--scope".into(),
-        scope_arg(scope)?.into(),
-        "--json".into(),
-    ])
-}
-
-/// A value placed in a positional slot must not be read as an option.
-fn operand(value: &str) -> Result<String, AgentError> {
-    if value.is_empty() || value.starts_with('-') {
-        return Err(AgentError::Protocol(format!(
-            "refusing to pass {value:?} to `claude plugin`"
-        )));
-    }
-    Ok(value.to_string())
-}
-
-fn scope_arg(scope: PluginScope) -> Result<&'static str, AgentError> {
-    match scope {
-        PluginScope::User => Ok("user"),
-        PluginScope::Project => Ok("project"),
-        PluginScope::Local => Ok("local"),
-        PluginScope::Managed => Ok("managed"),
-        PluginScope::Session => Err(AgentError::Protocol(
-            "Claude Code session plugins have no management command".into(),
-        )),
-    }
 }
 
 fn scope_from_native(scope: &str) -> Option<PluginScope> {
@@ -511,11 +442,13 @@ fn listing(
                     id: installed.id.clone(),
                     name,
                     version: None,
+                    latest_version: None,
                     description: None,
-                    // Installed entries carry no source; only an
-                    // available listing of the same id names it.
+                    // Installed entries carry no source; an available
+                    // listing of the same id names it, and otherwise the
+                    // marketplace's kind stands for it.
                     source: PluginSource {
-                        kind: PluginSourceKind::Unknown,
+                        kind: marketplace_kind(marketplace.as_deref()),
                         marketplace,
                     },
                     installations: Vec::new(),
@@ -524,6 +457,7 @@ fn listing(
                         mcp_servers: Some(Vec::new()),
                         ..DeclaredComponents::default()
                     }),
+                    always_on: None,
                     errors: Vec::new(),
                     actions: Vec::new(),
                     diagnostics: Vec::new(),
@@ -541,13 +475,23 @@ fn listing(
                 }
             }
         }
+        // Each listed `enabled` is the effective value in the listing's
+        // directory, which is the scope's own where nothing narrower
+        // overrides it: a local setting, or a user one listed outside any
+        // project. `projectEnabled` is the project's own setting.
+        let scope_enabled = match scope {
+            PluginScope::Project if in_this_context => installed.project_enabled,
+            PluginScope::Local if in_this_context => installed.enabled,
+            PluginScope::User if in_context.project.is_none() => installed.enabled,
+            _ => None,
+        };
         entry.installations.push(PluginInstallation {
             scope,
             location: installed.install_path,
             version: installed.version,
-            scope_enabled: (scope == PluginScope::Project && in_this_context)
-                .then_some(installed.project_enabled)
-                .flatten(),
+            scope_enabled,
+            other_project: !in_this_context
+                && matches!(scope, PluginScope::Project | PluginScope::Local),
         });
         if in_this_context {
             here[index].push(scope);
@@ -577,6 +521,7 @@ fn listing(
             id: available.plugin_id,
             name: available.name,
             version: available.version,
+            latest_version: None,
             description: available.description,
             source: PluginSource {
                 marketplace: available.marketplace_name,
@@ -585,6 +530,7 @@ fn listing(
             installations: Vec::new(),
             enabled: Tri::Unknown,
             declared: None,
+            always_on: None,
             errors: Vec::new(),
             actions: Vec::new(),
             diagnostics: Vec::new(),
@@ -592,7 +538,7 @@ fn listing(
         here.push(Vec::new());
     }
     for (entry, here) in entries.iter_mut().zip(&here) {
-        entry.actions = actions(entry.enabled, here, in_context);
+        entry.actions = actions(entry, here, in_context);
     }
 
     let mut marketplace_actions = vec![MarketplaceAction::Add];
@@ -644,10 +590,14 @@ fn source_kind(source: &Value, marketplace: PluginSourceKind) -> PluginSourceKin
     }
 }
 
-/// Native operations offered for one entry in this context. Enablement is
-/// reported only as the effective value, so both directions are offered
-/// when it is unknown.
-fn actions(enabled: Tri, here: &[PluginScope], in_context: &InContext) -> Vec<PluginAction> {
+/// Native operations offered for one entry in this context. A scope whose
+/// own enablement is not reported goes by the effective value, and both
+/// directions are offered when that is unknown too.
+fn actions(
+    entry: &ProviderPluginEntry,
+    here: &[PluginScope],
+    in_context: &InContext,
+) -> Vec<PluginAction> {
     let mut actions = Vec::new();
     for &scope in in_context.scopes() {
         if !here.contains(&scope) {
@@ -662,6 +612,12 @@ fn actions(enabled: Tri, here: &[PluginScope], in_context: &InContext) -> Vec<Pl
     }
     if !here.is_empty() {
         for &scope in in_context.scopes() {
+            let enabled = entry
+                .installations
+                .iter()
+                .find(|installation| installation.scope == scope && !installation.other_project)
+                .and_then(|installation| installation.scope_enabled)
+                .map_or(entry.enabled, Tri::from);
             if enabled != Tri::Yes {
                 actions.push(PluginAction::Enable { scope });
             }
@@ -679,6 +635,11 @@ fn apply_details(entry: &mut ProviderPluginEntry, text: &str) {
     let mut complete = true;
     let mut declared = entry.declared.clone().unwrap_or_default();
     let mut in_inventory = false;
+    entry.always_on = text.lines().find_map(|line| {
+        let cost = line.trim().strip_prefix("Always-on:")?.trim();
+        let cost = cost.split("  ").next()?.trim();
+        (!cost.is_empty()).then(|| cost.to_string())
+    });
     for line in text.lines() {
         let trimmed = line.trim();
         if let Some(description) = trimmed.strip_prefix("Description:") {
@@ -796,11 +757,13 @@ mod tests {
         assert_eq!(alpha.name, "alpha");
         assert_eq!(alpha.version.as_deref(), Some("1.0.0"));
         assert_eq!(alpha.enabled, Tri::Yes);
+        // An installed plugin's listing names no source; its marketplace,
+        // a directory, stands for it.
         assert_eq!(
             alpha.source,
             PluginSource {
                 marketplace: Some("tcode-probe".into()),
-                kind: PluginSourceKind::Unknown,
+                kind: PluginSourceKind::LocalPath,
             }
         );
         assert_eq!(
@@ -813,6 +776,7 @@ mod tests {
                     )),
                     version: Some("1.0.0".into()),
                     scope_enabled: None,
+                    other_project: false,
                 },
                 PluginInstallation {
                     scope: PluginScope::Project,
@@ -821,6 +785,7 @@ mod tests {
                     )),
                     version: Some("1.0.0".into()),
                     scope_enabled: Some(true),
+                    other_project: false,
                 },
             ]
         );
@@ -930,9 +895,11 @@ mod tests {
                 apps: None,
             })
         );
+        assert_eq!(alpha.always_on.as_deref(), Some("~32 tok"));
         assert!(alpha.diagnostics.is_empty());
 
         apply_details(&mut alpha, "alpha 1.0.0\n  Source: alpha@tcode-probe\n");
+        assert_eq!(alpha.always_on, None);
         assert_eq!(
             alpha.diagnostics,
             [(

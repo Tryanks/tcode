@@ -1,3 +1,4 @@
+use crate::widgets::TooltipTrigger as _;
 use crate::{
     sizing::{Sizable, Size},
     theme::ActiveTheme as _,
@@ -5,12 +6,15 @@ use crate::{
 };
 use gpui::{
     App, ElementId, Hsla, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _,
-    px,
+    StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::StyledExt as _;
+use gpui_base::motion::{Transition, transition};
 use gpui_base::{SwitchThumb, SwitchTrack};
 use std::rc::Rc;
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[derive(IntoElement)]
 pub struct Switch {
@@ -83,7 +87,7 @@ impl Styled for Switch {
 }
 
 impl RenderOnce for Switch {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let checked = self.checked;
         let (width, height, thumb) = match self.size {
             Size::XSmall | Size::Small => (px(28.), px(16.), px(12.)),
@@ -93,7 +97,39 @@ impl RenderOnce for Switch {
         let checked_bg = self.color.unwrap_or(cx.theme().primary);
         let unchecked_bg = cx.theme().muted;
         let thumb_bg = cx.theme().background;
+        let settle = || Transition::new(GLIDE);
+        let track_bg = transition(
+            (self.id.clone(), "track-bg"),
+            if checked { checked_bg } else { unchecked_bg },
+            settle(),
+            window,
+            cx,
+        );
+        let thumb_left = transition(
+            (self.id.clone(), "thumb-left"),
+            if checked {
+                width - thumb - inset * 2
+            } else {
+                px(0.)
+            },
+            settle(),
+            window,
+            cx,
+        );
+        let opacity = transition(
+            (self.id.clone(), "dim"),
+            if self.disabled { 0.5 } else { 1. },
+            settle(),
+            window,
+            cx,
+        );
+        // gpui-base's Switch keeps its own focus handle, leaving only GPUI's
+        // `focus_visible`, which switches at once, to show the keyboard's
+        // focus: it is handed this handle instead, and the ring fades in and
+        // out over the track (`motion::focus_ring`).
+        let focus = crate::motion::focus_ring::handle(&self.id, window, cx);
         gpui_base::Switch::new(self.id.clone())
+            .track_focus(&focus)
             .checked(checked)
             .disabled(self.disabled)
             .when_some(
@@ -107,7 +143,7 @@ impl RenderOnce for Switch {
             .gap_2()
             .items_center()
             .refine_style(&self.style)
-            .child(
+            .child(crate::motion::focus_ring::Ringed::new(
                 SwitchTrack::new((self.id, "track"))
                     .checked(checked)
                     .disabled(self.disabled)
@@ -118,31 +154,23 @@ impl RenderOnce for Switch {
                     .items_center()
                     .border(inset)
                     .border_color(cx.theme().background.opacity(0.))
-                    .bg(unchecked_bg)
-                    .styles(|styles| {
-                        styles
-                            .checked(|style| style.bg(checked_bg))
-                            .disabled(|style| style.opacity(0.5))
-                    })
+                    .bg(track_bg)
+                    .opacity(opacity)
                     .child(
                         SwitchThumb::new(checked)
                             .disabled(self.disabled)
                             .size(thumb)
                             .rounded(height)
                             .bg(thumb_bg)
-                            .styles(|styles| {
-                                styles.checked(|style| style.left(width - thumb - inset * 2))
-                            })
-                            .left(if checked {
-                                width - thumb - inset * 2
-                            } else {
-                                px(0.)
-                            }),
+                            .left(thumb_left),
                     )
                     .when_some(self.tooltip, |this, text| {
-                        this.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                        this.with_tooltip(move |_, _| Tooltip::new(text.clone()))
                     }),
-            )
+                &focus,
+                crate::motion::focus_ring::corners(height),
+                cx,
+            ))
             .when_some(self.label, |this, label| {
                 this.child(div().line_height(height).child(label))
             })

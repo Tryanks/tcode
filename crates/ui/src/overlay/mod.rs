@@ -1,9 +1,11 @@
 mod dialog;
 mod notification;
+mod tooltip;
 
 pub(crate) use dialog::DIALOG_LIST_HEIGHT;
 pub use dialog::{AlertDialog, Dialog, DialogActions, DialogButtons, DialogContent};
 pub use notification::{Notification, NotificationType};
+pub(crate) use tooltip::{TooltipBuilder, TooltipHost, TooltipOwner};
 
 use std::rc::Rc;
 
@@ -16,6 +18,9 @@ use gpui::{
 use crate::theme::ActiveTheme as _;
 use dialog::ActiveDialog;
 use notification::NotificationList;
+
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// The release guard for popups gpui-base dismisses on a press outside them.
 ///
@@ -78,21 +83,28 @@ impl OutsideDismissal {
 /// modal and toast layers.
 pub(crate) struct Overlays {
     dialogs: Vec<ActiveDialog>,
+    next_dialog_id: usize,
     sheets: Vec<gpui::WeakEntity<SheetBack>>,
     notifications: Entity<NotificationList>,
+    /// Where the toasts were drawn, so turning compact or wide glides them
+    /// from the corner to the bottom edge and back.
+    toast_place: crate::motion::reflow::ReflowState,
 }
 
 /// Register the overlays every window root mounts. Call before opening windows.
 pub(crate) fn init(cx: &mut App) {
     gpui_base::Root::register_plugin(cx, Overlays::new);
+    gpui_base::Root::register_plugin(cx, TooltipHost::new);
 }
 
 impl Overlays {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(_: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             dialogs: Vec::new(),
+            next_dialog_id: 0,
             sheets: Vec::new(),
-            notifications: cx.new(|cx| NotificationList::new(window, cx)),
+            notifications: cx.new(NotificationList::new),
+            toast_place: Default::default(),
         }
     }
 
@@ -107,14 +119,24 @@ impl Overlays {
         overlays.update(cx, |overlays, cx| f(overlays, window, cx))
     }
 
+    /// Closing marks a dialog to leave rather than removing it: it stays in
+    /// the stack, inert, until its exit has played, and `render` drops it.
     fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(dialog) = self.dialogs.pop() {
-            if dialog.focus_handle.contains_focused(window, cx)
-                && let Some(previous) = dialog
+        if let Some(dialog) = self.dialogs.iter_mut().rev().find(|dialog| !dialog.closing) {
+            dialog.closing = true;
+            // A leaving dialog is still rendered, so focus must not stay in it.
+            if dialog.focus_handle.contains_focused(window, cx) {
+                match dialog
                     .previous_focus_handle
+                    .as_ref()
                     .and_then(|focus| focus.upgrade())
-            {
-                previous.focus(window, cx);
+                {
+                    Some(previous) => previous.focus(window, cx),
+                    None => {
+                        window.blur(cx);
+                        crate::shell::return_keyboard(window, cx);
+                    }
+                }
             }
             cx.notify();
         }
@@ -123,14 +145,30 @@ impl Overlays {
     fn close_all_dialogs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let previous = self
             .dialogs
-            .first()
+            .iter()
+            .find(|dialog| !dialog.closing)
             .and_then(|dialog| dialog.previous_focus_handle.clone())
             .and_then(|focus| focus.upgrade());
-        self.dialogs.clear();
-        if let Some(previous) = previous {
-            previous.focus(window, cx);
+        let focused = self
+            .dialogs
+            .iter()
+            .any(|dialog| dialog.focus_handle.contains_focused(window, cx));
+        for dialog in &mut self.dialogs {
+            dialog.closing = true;
+        }
+        match previous {
+            Some(previous) => previous.focus(window, cx),
+            None if focused => {
+                window.blur(cx);
+                crate::shell::return_keyboard(window, cx);
+            }
+            None => {}
         }
         cx.notify();
+    }
+
+    fn open_dialogs(&self) -> usize {
+        self.dialogs.iter().filter(|dialog| !dialog.closing).count()
     }
 }
 
@@ -142,21 +180,53 @@ impl gpui_base::RootPlugin for Overlays {
                 .text_color(cx.theme().foreground)
                 .font_family(cx.theme().font_family.clone()),
         );
+        // Read on every frame, so a language change re-picks the forms with
+        // the window refresh that re-translates the text.
+        surface.text_style().font_fallbacks = crate::i18n::cjk_font_fallbacks();
+        crate::i18n::fetch_locale_font(cx);
     }
 }
 
 impl Render for Overlays {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let dialog_count = self.dialogs.len();
+        let mut samples = self
+            .dialogs
+            .iter()
+            .map(|active| {
+                crate::motion::appear(
+                    ElementId::from(("tcode-dialog", active.id)),
+                    !active.closing,
+                    APPEAR,
+                    window,
+                    cx,
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_iter();
+        let mut presences = Vec::with_capacity(self.dialogs.len());
+        self.dialogs.retain(|_| {
+            let sample = samples.next().expect("one sample per dialog");
+            let keep = sample.should_render();
+            if keep {
+                presences.push(sample);
+            }
+            keep
+        });
+        let topmost = self.dialogs.iter().rposition(|active| !active.closing);
         let dialogs = self
             .dialogs
             .iter()
+            .zip(presences)
             .enumerate()
-            .map(|(index, active)| {
-                let dialog = (active.builder)(Dialog::new(cx), window, cx);
-                dialog
-                    .layer(index, index + 1 == dialog_count)
-                    .focus_handle(active.focus_handle.clone())
+            .map(|(index, (active, presence))| {
+                // Layers repeat while a dialog leaves under a new one; the
+                // slot keeps each opening's element ids its own.
+                div().id(("tcode-dialog-slot", active.id)).child(
+                    (active.builder)(Dialog::new(cx), window, cx)
+                        .layer(active.layer, topmost == Some(index))
+                        .focus_handle(active.focus_handle.clone())
+                        .presence(presence),
+                )
             })
             .collect::<Vec<_>>();
 
@@ -164,9 +234,42 @@ impl Render for Overlays {
         // dialog centred in the raw window would sit under a notch, and a toast
         // pinned to the corner would sit under the status bar.
         let compact = crate::window_seam::window_is_compact(window, cx);
-        let seam = crate::window_seam::content_insets(window);
+        let seam = crate::window_seam::content_insets_gliding("overlay-seam", None, window, cx);
         let inset = px(crate::material::COMPACT_PAGE_INSET);
-        div()
+        // Each layout places the toasts against the window, and only a
+        // change of layout moves them: a resize within one keeps them where
+        // it anchors them.
+        let place = self.toast_place.scope(u64::from(compact)).in_window();
+        let toasts = div()
+            .debug_selector(|| "notification-position".into())
+            .absolute()
+            .when(compact, |el| {
+                el.left(seam.left + inset)
+                    .right(seam.right + inset)
+                    .bottom(seam.bottom + inset)
+                    .flex()
+                    .justify_center()
+            })
+            .when(!compact, |el| {
+                el.top_0()
+                    .right_0()
+                    .mt(seam.top + inset)
+                    .mr(seam.right + inset)
+            });
+        // Toasts on screen are a deferred draw, so they are on the window's
+        // overlay surface, above a web page composed beneath it; none is
+        // deferred while there are none (a deferred draw makes the window
+        // build its whole shell again for any change inside it).
+        let toasts = if self.notifications.read(cx).is_empty() {
+            toasts.child(self.notifications.clone()).into_any_element()
+        } else {
+            // Only toasts on screen glide: an empty list moving between the
+            // layouts carries nothing a toast arriving later should start
+            // from.
+            gpui::deferred(toasts.child(place.part("toasts", self.notifications.clone())))
+                .into_any_element()
+        };
+        let root = div()
             .absolute()
             .inset_0()
             // The edit menu floats above what was selected, under any dialog.
@@ -182,25 +285,8 @@ impl Render for Overlays {
                         .children(dialogs),
                 )
             })
-            .child(
-                div()
-                    .debug_selector(|| "notification-position".into())
-                    .absolute()
-                    .when(compact, |el| {
-                        el.left(seam.left + inset)
-                            .right(seam.right + inset)
-                            .bottom(seam.bottom + inset)
-                            .flex()
-                            .justify_center()
-                    })
-                    .when(!compact, |el| {
-                        el.top_0()
-                            .right_0()
-                            .mt(seam.top + inset)
-                            .mr(seam.right + inset)
-                    })
-                    .child(self.notifications.clone()),
-            )
+            .child(toasts);
+        place.render(root)
     }
 }
 
@@ -242,7 +328,13 @@ impl OverlayExt for Window {
             let focus_handle = cx.focus_handle();
             let previous_focus_handle = window.focused(cx).map(|focus| focus.downgrade());
             focus_handle.focus(window, cx);
+            let id = host.next_dialog_id;
+            host.next_dialog_id += 1;
+            let layer = host.open_dialogs();
             host.dialogs.push(ActiveDialog {
+                id,
+                closing: false,
+                layer,
                 focus_handle,
                 previous_focus_handle,
                 builder: Rc::new(build),
@@ -315,6 +407,14 @@ impl OverlayExt for Window {
     }
 }
 
+/// What each notification of `window` says, in the order shown.
+#[cfg(test)]
+pub(crate) fn notifications_said(window: &mut Window, cx: &mut App) -> Vec<gpui::SharedString> {
+    Overlays::update(window, cx, |host, _, cx| {
+        host.notifications.read(cx).said(cx)
+    })
+}
+
 type SheetClose = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// A sheet's binding to the window's edge-back gesture, scoped by its base focus trap.
@@ -375,12 +475,55 @@ pub(crate) fn bind_sheet(
     state
 }
 
+/// The tallest a sheet's content may stand: it stops a window strip short of
+/// the top, so the page it covers stays in view, and clear of the home
+/// indicator and keyboard, which `insets` carry.
+pub(crate) fn sheet_max_height(
+    insets: &gpui::Edges<gpui::Pixels>,
+    window: &Window,
+) -> gpui::Pixels {
+    (window.viewport_size().height
+        - insets.top
+        - px(crate::window_caption::CAPTION_STRIP_HEIGHT)
+        - insets.bottom)
+        .max(px(0.))
+}
+
+/// Where a sheet stands at the window's bottom edge: lowered by the
+/// edge-back drag, by what is left of `presence` while it comes or goes, and
+/// measuring the height that drag is taken against.
+pub(crate) fn sheet_anchor(
+    binding: Entity<SheetBack>,
+    drag_progress: f32,
+    presence: f32,
+    window: &Window,
+    cx: &App,
+) -> gpui::Div {
+    let sheet = binding.read(cx);
+    let lowered = if sheet.open {
+        drag_progress
+    } else {
+        drag_progress.max(1. - presence)
+    };
+    let offset = crate::edge_back::BackProgress::offset(lowered, sheet.height);
+    div()
+        .absolute()
+        .left_0()
+        .bottom(-offset)
+        .w(window.viewport_size().width)
+        .on_children_prepainted(move |bounds, _, cx| {
+            if let Some(bounds) = bounds.first() {
+                binding.update(cx, |binding, _| binding.height = bounds.size.height);
+            }
+        })
+}
+
 pub(crate) fn dialog_open(window: &Window, cx: &App) -> bool {
     window
         .root::<gpui_base::Root>()
         .flatten()
         .and_then(|root| root.read(cx).plugin::<Overlays>())
-        .is_some_and(|overlays| !overlays.read(cx).dialogs.is_empty())
+        .is_some_and(|overlays| overlays.read(cx).open_dialogs() > 0)
 }
 
 pub(crate) fn active_sheet(window: &Window, cx: &App) -> Option<Entity<SheetBack>> {
@@ -448,7 +591,6 @@ mod tests {
                     crate::store::WorkspaceAttachment::Local,
                     None,
                     None,
-                    false,
                     cx,
                 )
             });
@@ -499,6 +641,38 @@ mod tests {
             );
         }
 
+        /// Answer every directory listing asked so far with an empty folder.
+        fn answer_listings(&self, cx: &mut TestAppContext) {
+            let asked: Vec<_> = std::iter::from_fn(|| self.outgoing.try_recv().ok())
+                .filter_map(|line| {
+                    let message = tcode_protocol::decode_client_line(&line).unwrap();
+                    match message.payload {
+                        tcode_protocol::ClientPayload::Query(
+                            tcode_protocol::Query::BrowseDirectories { path },
+                        ) => Some((message.id, path)),
+                        _ => None,
+                    }
+                })
+                .collect();
+            for (id, path) in asked {
+                let directory = std::path::PathBuf::from(path.trim_end_matches('/'));
+                self.send(
+                    tcode_protocol::HostMessage::QueryResult {
+                        id,
+                        result: Ok(tcode_protocol::QueryResponse::Directories(
+                            tcode_protocol::DirectoryListing {
+                                parent: directory.parent().map(std::path::Path::to_path_buf),
+                                directory,
+                                home: Some("/host/home".into()),
+                                entries: vec![],
+                            },
+                        )),
+                    },
+                    cx,
+                );
+            }
+        }
+
         fn commands(&self) -> Vec<(u64, tcode_protocol::Command)> {
             std::iter::from_fn(|| self.outgoing.try_recv().ok())
                 .filter_map(|line| {
@@ -539,9 +713,6 @@ mod tests {
         draw(cx);
         // Tab follows the rendered form's focus order, starting at the modal.
         cx.simulate_keystrokes("tab");
-        if kind == "import" {
-            cx.simulate_keystrokes("tab tab");
-        }
         cx.simulate_keystrokes(if cfg!(target_os = "macos") {
             "cmd-a"
         } else {
@@ -550,15 +721,20 @@ mod tests {
         cx.simulate_input(if invalid {
             "   "
         } else if kind == "create" {
+            // A bare name is a project in the new-project folder.
             "New project"
         } else {
             "/host/destination"
         });
+        if kind == "create" {
+            // The host lists the new-project folder: no such project there yet.
+            host.answer_listings(cx);
+        }
         host.commands();
         cx.simulate_keystrokes("enter");
         draw(cx);
         assert_eq!(
-            overlays(&root, cx).read_with(cx, |host, _| host.dialogs.len()),
+            overlays(&root, cx).read_with(cx, |host, _| host.open_dialogs()),
             1,
             "Enter must leave the dialog open until the action succeeds"
         );
@@ -576,6 +752,7 @@ mod tests {
             },
             "create" => Command::CreateNewProject {
                 name: "New project".into(),
+                parent: None,
             },
             "change" => Command::SetProjectRoot {
                 project_id: "project".into(),
@@ -608,20 +785,190 @@ mod tests {
             },
             cx,
         );
-        if kind == "create" {
+        if kind != "change" {
             assert_eq!(
-                overlays(&root, cx).read_with(cx, |host, _| host.dialogs.len()),
+                overlays(&root, cx).read_with(cx, |host, _| host.open_dialogs()),
                 1,
-                "creation waits until the project appears in the host index"
+                "a new project opens once it appears in the host index"
             );
             host.index(cx);
         }
         draw(cx);
         assert_eq!(
-            overlays(&root, cx).read_with(cx, |host, _| host.dialogs.len()),
+            overlays(&root, cx).read_with(cx, |host, _| host.open_dialogs()),
             0,
             "a successful action closes the dialog"
         );
+    }
+
+    /// Opens a [`Dialog::sheet`] form whose cancel `vetoes` or not, at rest.
+    fn open_sheet(
+        vetoes: Rc<std::cell::Cell<bool>>,
+        closed: Rc<std::cell::Cell<usize>>,
+        width: f32,
+        cx: &mut TestAppContext,
+    ) -> &mut VisualTestContext {
+        cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let body = cx.new(|_| Body);
+            gpui_base::Root::new(body, window, cx)
+        });
+        cx.simulate_resize(size(px(width), px(800.)));
+        cx.update(|window, cx| {
+            window.open_dialog(cx, move |dialog, _, _| {
+                let (vetoes, closed) = (vetoes.clone(), closed.clone());
+                dialog
+                    .sheet()
+                    .title("Connect")
+                    .child(div().debug_selector(|| "form".into()).h(px(120.)))
+                    .on_cancel(move |_, _, _| !vetoes.get())
+                    .on_close(move |_, _, _| closed.set(closed.get() + 1))
+            });
+        });
+        crate::test_frames::draw_settled(cx);
+        cx
+    }
+
+    /// On a phone width the form rises from the bottom edge across the whole
+    /// window, its content above the keyboard; on a wide window it stays the
+    /// centred card.
+    #[gpui::test]
+    fn a_sheet_dialog_stands_on_the_bottom_edge_only_when_compact(cx: &mut TestAppContext) {
+        let shut = || Rc::new(std::cell::Cell::new(false));
+        let closed = Rc::new(std::cell::Cell::new(0));
+        let cx = open_sheet(shut(), closed, 390., cx);
+        let sheet = cx.debug_bounds("dialog-sheet").expect("the sheet form");
+        assert_eq!(sheet.left(), px(0.));
+        assert_eq!(sheet.size.width, px(390.));
+        assert_eq!(sheet.bottom(), px(800.));
+
+        let keyboard = px(300.);
+        crate::window_seam::occlude_for_test(
+            cx,
+            gpui::Edges {
+                bottom: keyboard,
+                ..Default::default()
+            },
+        );
+        crate::test_frames::draw_settled(cx);
+        let form = cx.debug_bounds("form").unwrap();
+        assert!(form.bottom() <= px(800.) - keyboard, "{form:?}");
+
+        cx.simulate_resize(size(px(1024.), px(800.)));
+        crate::window_seam::occlude_for_test(cx, Default::default());
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            cx.debug_bounds("dialog-sheet").is_none(),
+            "a wide window keeps the card"
+        );
+        assert!(cx.debug_bounds("form").unwrap().bottom() < px(800.));
+    }
+
+    /// The sheet form closes the ways a dialog does, and a cancel that says no
+    /// keeps it open whichever way it was asked.
+    #[gpui::test]
+    fn a_sheet_dialog_closes_as_a_dialog_does(cx: &mut TestAppContext) {
+        let vetoes = Rc::new(std::cell::Cell::new(true));
+        let closed = Rc::new(std::cell::Cell::new(0));
+        let cx = open_sheet(vetoes.clone(), closed.clone(), 390., cx);
+        let backdrop = gpui::point(px(195.), px(20.));
+
+        cx.simulate_click(backdrop, Default::default());
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("dialog-sheet").is_some());
+        assert_eq!(closed.get(), 0);
+
+        vetoes.set(false);
+        cx.simulate_click(backdrop, Default::default());
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("dialog-sheet").is_none());
+        assert_eq!(closed.get(), 1);
+    }
+
+    #[gpui::test]
+    fn closed_dialog_leaves_inert_then_unmounts(cx: &mut TestAppContext) {
+        use gpui::StatefulInteractiveElement as _;
+        cx.update(crate::theme::init);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let body = cx.new(|_| Body);
+            gpui_base::Root::new(body, window, cx)
+        });
+        let clicks = Rc::new(std::cell::Cell::new(0));
+        cx.update(|window, cx| {
+            let clicks = clicks.clone();
+            window.open_dialog(cx, move |dialog, _, _| {
+                let clicks = clicks.clone();
+                dialog
+                    .child(
+                        div()
+                            .id("probe")
+                            .debug_selector(|| "dialog-probe".into())
+                            .size_10()
+                            .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+                    )
+                    .child(
+                        div()
+                            .id("dialog-scroller")
+                            .debug_selector(|| "dialog-scroller".into())
+                            .h(px(100.))
+                            .overflow_y_scroll()
+                            .child(div().h(px(400.)))
+                            .child(div().debug_selector(|| "dialog-row".into()).h(px(20.))),
+                    )
+            });
+        });
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let probe = cx.debug_bounds("dialog-probe").expect("open dialog");
+        cx.simulate_click(probe.center(), Default::default());
+        assert_eq!(clicks.get(), 1, "an open dialog takes clicks");
+        let scroller = cx.debug_bounds("dialog-scroller").unwrap();
+        cx.simulate_event(gpui::ScrollEvent {
+            position: scroller.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-300.))),
+            ..Default::default()
+        });
+        draw(cx);
+        let row_offset = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("dialog-row").unwrap().top()
+                - cx.debug_bounds("dialog-scroller").unwrap().top()
+        };
+        let scrolled = row_offset(cx);
+        assert!(scrolled < px(400.), "the body scrolled: {scrolled:?}");
+
+        cx.update(|window, cx| window.close_dialog(cx));
+        assert!(!cx.update(|window, cx| dialog_open(window, cx)));
+        draw(cx);
+        assert_eq!(
+            overlays(&root, cx).read_with(cx, |host, _| host.dialogs.len()),
+            1,
+            "a closed dialog stays mounted while it leaves"
+        );
+        assert_eq!(
+            row_offset(cx),
+            scrolled,
+            "a leaving dialog keeps its scroll offset"
+        );
+        let leaving = cx.debug_bounds("dialog-probe").expect("leaving dialog");
+        cx.simulate_click(leaving.center(), Default::default());
+        assert_eq!(clicks.get(), 1, "a leaving dialog takes no clicks");
+        let focus =
+            overlays(&root, cx).read_with(cx, |host, _| host.dialogs[0].focus_handle.clone());
+        assert!(
+            !cx.update(|window, cx| focus.contains_focused(window, cx)),
+            "a press on a leaving dialog does not focus it"
+        );
+
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(
+            overlays(&root, cx).read_with(cx, |host, _| host.dialogs.len()),
+            0,
+            "the dialog unmounts once its exit has played"
+        );
+        assert!(cx.debug_bounds("dialog-probe").is_none());
     }
 
     #[gpui::test]
@@ -695,6 +1042,124 @@ mod tests {
         assert_eq!(position.right(), px(1184.));
     }
 
+    /// A tablet turning compact draws the toast on screen as the bottom
+    /// pill, under another parent than the corner's stack: it glides from
+    /// the corner down to the bottom edge, shown all the way, rather than
+    /// jumping there and coming in again.
+    #[gpui::test]
+    fn a_shown_toast_glides_to_the_bottom_as_the_window_turns_compact(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let body = cx.new(|_| Body);
+            gpui_base::Root::new(body, window, cx)
+        });
+        cx.simulate_resize(size(px(1024.), px(800.)));
+        cx.update(|window, cx| window.push_notification("Copied", cx));
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
+        draw(cx);
+        let corner = cx
+            .debug_bounds("wide-toast")
+            .expect("the corner card")
+            .top();
+        // The pill and how opaque its fill is painted.
+        let pill = |cx: &mut VisualTestContext| {
+            let pill = cx.debug_bounds("compact-toast").expect("the pill");
+            let fill = cx.update(|window, _| {
+                let scaled = pill.scale(window.scale_factor());
+                window
+                    .painted_quads()
+                    .iter()
+                    .filter(|quad| quad.bounds == scaled)
+                    .filter_map(|quad| quad.background.as_solid().map(|fill| fill.a))
+                    .reduce(f32::max)
+                    .expect("the pill's fill")
+            });
+            (pill.top(), fill)
+        };
+
+        cx.simulate_resize(size(px(899.), px(800.)));
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let (gliding, shown) = pill(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
+        draw(cx);
+        let (bottom, rest) = pill(cx);
+        assert!(
+            corner < gliding && gliding < bottom,
+            "{gliding:?} between {corner:?} and {bottom:?}"
+        );
+        assert_eq!(
+            shown, rest,
+            "the pill is shown all the way, not coming in again"
+        );
+    }
+
+    #[gpui::test]
+    fn a_dismissed_toast_leaves_inert_then_unmounts(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let body = cx.new(|_| Body);
+            gpui_base::Root::new(body, window, cx)
+        });
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.update(|window, cx| window.push_notification(Notification::error("Failed"), cx));
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+
+        cx.update(|window, cx| window.clear_notifications(cx));
+        draw(cx);
+        let leaving = cx
+            .debug_bounds("compact-toast")
+            .expect("a leaving toast stays mounted for its exit");
+        cx.simulate_click(leaving.center(), gpui::Modifiers::default());
+        draw(cx);
+        cx.update(|window, cx| {
+            assert!(
+                !dialog_open(window, cx),
+                "tapping a leaving error does not open its details"
+            )
+        });
+
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert!(cx.debug_bounds("compact-toast").is_none());
+    }
+
+    /// A card that stays until closed, closed long after it came in, still
+    /// plays its exit and unmounts.
+    #[gpui::test]
+    fn a_card_that_stays_leaves_when_closed_later(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let body = cx.new(|_| Body);
+            gpui_base::Root::new(body, window, cx)
+        });
+        cx.simulate_resize(size(px(1200.), px(800.)));
+        cx.update(|window, cx| {
+            window.push_notification(Notification::info("Stays").autohide(false), cx)
+        });
+        draw(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(30));
+        draw(cx);
+        assert!(cx.debug_bounds("wide-toast").is_some());
+
+        cx.update(|window, cx| window.clear_notifications(cx));
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
+        draw(cx);
+        assert!(cx.debug_bounds("wide-toast").is_none());
+        overlays(&root, cx).read_with(cx, |root, cx| {
+            root.notifications.read(cx).assert_messages(cx, &[]);
+        });
+    }
+
     #[gpui::test]
     fn compact_notification_timeouts(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
@@ -711,6 +1176,8 @@ mod tests {
         draw(cx);
         cx.executor()
             .advance_clock(std::time::Duration::from_secs(3));
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         assert!(cx.debug_bounds("compact-toast").is_none());
         cx.update(|window, cx| {
@@ -730,6 +1197,8 @@ mod tests {
         assert!(cx.debug_bounds("compact-toast").is_some());
         cx.executor()
             .advance_clock(std::time::Duration::from_secs(2));
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         assert!(cx.debug_bounds("compact-toast").is_none());
     }
