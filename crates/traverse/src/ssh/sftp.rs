@@ -21,9 +21,17 @@ pub(super) struct Sftp {
     next_handle: u64,
 }
 
+/// Directory entries one `readdir` answer holds at most, as OpenSSH's
+/// sftp-server sends them, so an answer stays within any client's packet.
+const ENTRIES_PER_READ: usize = 100;
+
 enum Open {
     File(tokio::fs::File),
-    Dir { path: PathBuf, listed: bool },
+    /// `entries` is `None` until the first `readdir` reads the directory.
+    Dir {
+        path: PathBuf,
+        entries: Option<std::collections::VecDeque<File>>,
+    },
 }
 
 impl Sftp {
@@ -321,30 +329,38 @@ impl russh_sftp::server::Handler for Sftp {
             id,
             handle: self.insert(Open::Dir {
                 path,
-                listed: false,
+                entries: None,
             }),
         })
     }
 
     async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, Self::Error> {
-        let Some(Open::Dir { path, listed }) = self.handles.get_mut(&handle) else {
+        let Some(Open::Dir { path, entries }) = self.handles.get_mut(&handle) else {
             return Err(StatusCode::Failure.with_message("no such handle"));
         };
-        if std::mem::replace(listed, true) {
+        if entries.is_none() {
+            let mut listing = tokio::fs::read_dir(&path).await.map_err(failure)?;
+            let mut read = std::collections::VecDeque::new();
+            while let Some(entry) = listing.next_entry().await.map_err(failure)? {
+                let Ok(metadata) = entry.metadata().await else {
+                    continue;
+                };
+                read.push_back(File::new(
+                    entry.file_name().to_string_lossy(),
+                    FileAttributes::from(&metadata),
+                ));
+            }
+            *entries = Some(read);
+        }
+        let entries = entries.as_mut().expect("read above");
+        if entries.is_empty() {
             return Err(StatusCode::Eof.into());
         }
-        let mut entries = tokio::fs::read_dir(&path).await.map_err(failure)?;
-        let mut files = Vec::new();
-        while let Some(entry) = entries.next_entry().await.map_err(failure)? {
-            let Ok(metadata) = entry.metadata().await else {
-                continue;
-            };
-            files.push(File::new(
-                entry.file_name().to_string_lossy(),
-                FileAttributes::from(&metadata),
-            ));
-        }
-        Ok(Name { id, files })
+        let count = entries.len().min(ENTRIES_PER_READ);
+        Ok(Name {
+            id,
+            files: entries.drain(..count).collect(),
+        })
     }
 
     async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {

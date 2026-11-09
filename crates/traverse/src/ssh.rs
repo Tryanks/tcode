@@ -31,6 +31,7 @@ use crate::wire::{self, HostLine, LineReader};
 /// The machine's SSH host key, beside its iroh identity in the data dir.
 const HOST_KEY_FILE: &str = "ssh_host_ed25519_key";
 
+#[derive(Clone)]
 pub(crate) struct Server {
     config: Arc<server::Config>,
 }
@@ -283,33 +284,59 @@ async fn run_channel(channel: Channel<Msg>, handle: server::Handle) {
         }
     };
     let home = std::env::home_dir().unwrap_or_else(std::env::temp_dir);
-    let exit = match start {
-        Start::Sftp => serve_sftp(&mut input, &output, setup, home).await,
+    let reply = Reply {
+        output: &output,
+        handle: &handle,
+        id,
+    };
+    let ended = match start {
+        Start::Sftp => match serve_sftp(&mut input, &output, setup, home).await {
+            Some(exit) => reply.exit(exit).await,
+            None => false,
+        },
         start => match setup.pty {
-            Some(size) => run_pty(&mut input, &output, start, setup, size, &home).await,
-            None => run_pipes(&mut input, &output, start, setup, &home).await,
+            Some(size) => match run_pty(&mut input, &output, start, setup, size, &home).await {
+                Some(exit) => reply.exit(exit).await,
+                None => false,
+            },
+            None => run_pipes(&mut input, &reply, start, setup, &home).await,
         },
     };
-    // `None`: the client closed the channel, which russh already answered.
-    let Some(exit) = exit else {
-        return;
-    };
-    match exit {
-        Exit::Status(status) => {
-            let _ = output.exit_status(status).await;
-        }
-        Exit::Signal {
-            signal,
-            core_dumped,
-        } => {
-            let _ = handle
-                .exit_signal_request(id, signal, core_dumped, String::new(), String::new())
-                .await;
-        }
-        Exit::Unknown => {}
+    // Not ended: the client closed the channel, which russh already
+    // answered.
+    if ended {
+        let _ = output.eof().await;
+        let _ = output.close().await;
     }
-    let _ = output.eof().await;
-    let _ = output.close().await;
+}
+
+/// Where a channel's exit is told.
+struct Reply<'a> {
+    output: &'a ChannelWriteHalf<Msg>,
+    handle: &'a server::Handle,
+    id: ChannelId,
+}
+
+impl Reply<'_> {
+    /// Tell the client how the program ended; always `true`.
+    async fn exit(&self, exit: Exit) -> bool {
+        match exit {
+            Exit::Status(status) => {
+                let _ = self.output.exit_status(status).await;
+            }
+            Exit::Signal {
+                signal,
+                core_dumped,
+            } => {
+                let _ = self
+                    .handle
+                    .exit_signal_request(self.id, signal, core_dumped, String::new(), String::new())
+                    .await;
+            }
+            Exit::Unknown => {}
+        }
+        true
+    }
 }
 
 /// The user's shell running `command` the way OpenSSH's server runs it.
@@ -341,23 +368,39 @@ fn pty_program(start: &Start) -> (String, Vec<String>) {
     match start {
         Start::Command(command) => {
             let (shell, _) = term::user_shell();
+            // The pseudoterminal's process builder quotes each argument the
+            // way MSVC programs parse them, and has no raw command line:
+            // `/s` has cmd.exe drop exactly the quotes it adds around a
+            // command with spaces, so the command reaches cmd.exe as sent
+            // unless it holds a double quote of its own.
             #[cfg(windows)]
-            let flag = if is_cmd(&shell) { "/c" } else { "-c" };
+            let flags: &[&str] = if is_cmd(&shell) {
+                &["/s", "/c"]
+            } else {
+                &["-c"]
+            };
             #[cfg(not(windows))]
-            let flag = "-c";
-            (shell, vec![flag.to_owned(), command.clone()])
+            let flags: &[&str] = &["-c"];
+            let mut args: Vec<String> = flags.iter().map(|flag| (*flag).to_owned()).collect();
+            args.push(command.clone());
+            (shell, args)
         }
         Start::Shell | Start::Sftp => term::user_shell(),
     }
 }
 
+/// Run a session's program on pipes; `false` when the client closed the
+/// channel first. The exit goes out once the program ends, as sshd sends it,
+/// even while something it left behind keeps its output open; the channel
+/// ends with that output.
 async fn run_pipes(
     input: &mut ChannelReadHalf,
-    output: &ChannelWriteHalf<Msg>,
+    reply: &Reply<'_>,
     start: Start,
     setup: Setup,
     home: &Path,
-) -> Option<Exit> {
+) -> bool {
+    let output = reply.output;
     let mut command = match &start {
         Start::Command(command) => shell_command(command),
         Start::Shell | Start::Sftp => {
@@ -380,7 +423,7 @@ async fn run_pipes(
         Err(error) => {
             let message = format!("tcode: could not start the shell: {error}\r\n");
             let _ = output.extended_data_bytes(1, message.into_bytes()).await;
-            return Some(Exit::Status(127));
+            return reply.exit(Exit::Status(127)).await;
         }
     };
     #[cfg_attr(not(unix), allow(unused_variables))]
@@ -401,8 +444,14 @@ async fn run_pipes(
         tokio::join!(
             copy_out(stdout, output.make_writer()),
             copy_out(stderr, output.make_writer_ext(Some(1))),
+            async {
+                let exit = match child.wait().await {
+                    Ok(status) => exit_of(status),
+                    Err(_) => Exit::Unknown,
+                };
+                reply.exit(exit).await
+            },
         );
-        child.wait().await
     };
     let feed = async {
         loop {
@@ -430,11 +479,8 @@ async fn run_pipes(
         }
     };
     tokio::select! {
-        status = finished => Some(match status {
-            Ok(status) => exit_of(status),
-            Err(_) => Exit::Unknown,
-        }),
-        () = feed => None,
+        () = finished => true,
+        () = feed => false,
     }
 }
 

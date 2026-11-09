@@ -156,9 +156,10 @@ struct Shared {
     hosting_changed: Arc<tokio::sync::Notify>,
     /// See [`TraverseHost::hosting_events`].
     hosting_listeners: Mutex<Vec<async_channel::Sender<HostingState>>>,
-    /// The SSH server `ssh` streams reach, set up on the first one.
+    /// The SSH server `ssh` streams reach, set up on the first one that
+    /// finds it can be.
     #[cfg(feature = "ssh")]
-    ssh: std::sync::OnceLock<Result<crate::ssh::Server, String>>,
+    ssh: Mutex<Option<crate::ssh::Server>>,
 }
 
 pub struct TraverseHost {
@@ -283,7 +284,7 @@ impl TraverseHost {
                 hosting_changed: Arc::new(tokio::sync::Notify::new()),
                 hosting_listeners: Mutex::new(Vec::new()),
                 #[cfg(feature = "ssh")]
-                ssh: std::sync::OnceLock::new(),
+                ssh: Mutex::new(None),
             });
             shared.observe_spaces(&shared.state.lock().unwrap());
             // A fetched manifest is applied to the running endpoint, whether
@@ -2702,10 +2703,14 @@ impl StreamTask {
                 };
                 #[cfg(feature = "ssh")]
                 {
-                    let server = self.shared.ssh.get_or_init(|| {
-                        crate::ssh::Server::load(&self.shared.data_dir)
-                            .map_err(|error| error.to_string())
-                    });
+                    let server = {
+                        let mut server = self.shared.ssh.lock().unwrap();
+                        match &*server {
+                            Some(loaded) => Ok(loaded.clone()),
+                            None => crate::ssh::Server::load(&self.shared.data_dir)
+                                .inspect(|loaded| *server = Some(loaded.clone())),
+                        }
+                    };
                     match server {
                         Ok(server) => server.serve(send, reader).await,
                         Err(error) => {
