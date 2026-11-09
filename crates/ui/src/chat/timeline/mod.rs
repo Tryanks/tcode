@@ -2366,9 +2366,25 @@ mod tests {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, &store, "chat baseline", |cx| {
+        // A host still reading the thread's log answers with the window it
+        // read and sends the records it accepted meanwhile live after it, so
+        // the thread is all there only once its last record is.
+        driver.wait_until(cx, &store, "the seeded turns", |cx| {
             store.read_with(cx, |store, cx| {
-                !store.chat_loading_for(store.sole_thread().as_deref(), cx)
+                let thread = store.sole_thread();
+                !store.chat_loading_for(thread.as_deref(), cx)
+                    && store
+                        .with_timeline_for(
+                            thread.as_deref(),
+                            |timeline| {
+                                timeline
+                                    .entries
+                                    .last()
+                                    .is_some_and(|entry| entry.id == "streaming")
+                            },
+                            cx,
+                        )
+                        .unwrap_or(false)
             })
         });
         let window_state = cx.new(|_| WindowState::default());
