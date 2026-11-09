@@ -871,19 +871,10 @@ impl ChatView {
         let traffic_lights = window_caption::traffic_light_inset(window);
         let motion = self.motion.clone();
         // Controls that come and go with what the thread has widen into
-        // their rows, so the title and their neighbours move aside; the
-        // badge also narrows out as the header folds into its overflow
-        // tier, which has no room for it. The toggles are sampled in every
-        // tier and fade with the tier that draws them. Their clocks are the
-        // view's, so a pane re-parented by the dock carries them on.
-        let badge = motion.shown(
-            "header-pr-badge-fold",
-            self.active_pull_requests(cx)
-                .filter(|links| !links.is_empty() && !overflow),
-            SHOW,
-            window,
-            cx,
-        );
+        // their rows, so the title and their neighbours move aside. The
+        // toggles are sampled in every tier and fade with the tier that
+        // draws them. Their clocks are the view's, so a pane re-parented by
+        // the dock carries them on.
         let toggle_gap = gpui::rems(0.25).to_pixels(window.rem_size());
         let agents_toggle = motion.shown(
             "agents-toggle-fold",
@@ -1062,15 +1053,15 @@ impl ChatView {
                     .flex_1()
                     .min_w(px(168.))
                     .h_full()
-                    // The title keeps its floor; numbers past the stretch's end
-                    // clip here rather than run under the git button.
+                    // The title keeps its floor; past the stretch's end it
+                    // clips here rather than run under the git button.
                     .overflow_hidden()
                     .gap_2()
                     .items_center()
                     .relative()
                     .child(
                         // Sized by its text, not `bar_title`'s zero basis, so the title
-                        // runs its full length and the badge follows it.
+                        // runs its full length and the host follows it.
                         window_caption::drag_region(title_el.flex_initial())
                             .context_menu(title_menu),
                     )
@@ -1086,45 +1077,7 @@ impl ChatView {
                                 .text_secondary(false, cx)
                                 .child(crate::widgets::fade_text(host)),
                         )
-                    })
-                    .when_some(
-                        badge.and_then(|badge| {
-                            let numbers = crate::pull_requests::numbers(&badge.value, cx)?;
-                            let label = crate::pull_requests::badge_label(&badge.value, cx)?;
-                            Some((badge, numbers, label))
-                        }),
-                        |header, (badge, numbers, label)| {
-                            // Every number shows until the numbers reach half the
-                            // title's stretch; past that they clip, so the title
-                            // keeps the other half however many are linked. A
-                            // badge that comes or goes widens into the row.
-                            let gap = gpui::rems(0.5).to_pixels(window.rem_size());
-                            let button = Button::new("header-pr-badge")
-                                .motion(&self.motion)
-                                .debug_selector(|| "header-pr-badge".into())
-                                .on_mouse_down(gpui::MouseButton::Left, stop_press)
-                                .ghost()
-                                .small()
-                                .compact()
-                                .selected(right_panel_open && right_tab == RightTab::PullRequests)
-                                .tooltip(crate::tr!("pull_requests.toggle"))
-                                .aria_label(label)
-                                .child(numbers)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.on_toggle_panel(&TogglePanel::PullRequests, window, cx)
-                                }));
-                            // Another number linked widens the badge as its chip
-                            // widens in (`pull_requests::numbers`).
-                            header.child(
-                                h_flex()
-                                    .flex_none()
-                                    .max_w(gpui::relative(0.5))
-                                    .overflow_hidden()
-                                    .ml(-gap * (1. - badge.progress()))
-                                    .child(badge.fold_across(button)),
-                            )
-                        },
-                    ),
+                    }),
             )
             .when(show_actions, |this| {
                 this.children(self.labelled_swap(
