@@ -10245,7 +10245,11 @@ pub(crate) mod tests {
         // What a copy takes, or None when it takes nothing.
         let copy = |cx: &mut VisualTestContext| {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
-            cx.simulate_keystrokes("cmd-c");
+            cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+                "cmd-c"
+            } else {
+                "ctrl-c"
+            });
             draw(cx);
             cx.read_from_clipboard()
                 .and_then(|item| item.text())
