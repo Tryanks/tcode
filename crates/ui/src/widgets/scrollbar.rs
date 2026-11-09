@@ -26,8 +26,8 @@ use web_time::Instant;
 use gpui::{
     Anchor, App, Bounds, ContentMask, CursorStyle, Element, ElementId, EntityId, GlobalElementId,
     Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, IsZero as _, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, ScrollEvent, Style,
-    TouchDragEvent, TouchPhase, Window, fill, point, px, relative, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, ScrollEvent, Size,
+    Style, TouchDragEvent, TouchPhase, Window, fill, point, px, relative, size,
 };
 use gpui_base::animation::{ease_in_cubic, ease_out_cubic};
 use gpui_base::{ScrollbarEntrance, ScrollbarHandle, ScrollbarMode};
@@ -279,6 +279,8 @@ struct State {
     /// Where in the thumb the drag holds it.
     grab: Pixels,
     last_offset: Point<Pixels>,
+    /// The viewport's size as of `last_offset`.
+    last_viewport: Size<Pixels>,
     last_scroll: Option<Instant>,
     last_update: Instant,
     drag_update_scheduled: bool,
@@ -296,6 +298,7 @@ impl State {
             dragging: false,
             grab: px(0.),
             last_offset: Point::default(),
+            last_viewport: Size::default(),
             last_scroll: None,
             last_update: now,
             drag_update_scheduled: false,
@@ -541,10 +544,21 @@ impl Element for Scrollbar {
 
         let mut state = shared.get(now);
         let offset = self.handle.offset();
+        // Gap: gpui-base's scrollbar comes in on any change of the offset,
+        // so a window resize, which moves a list held at its end, shows it
+        // and fades it out again once the idle hold ends, drawing the view
+        // frame by frame long after the size settled. Only a change of the
+        // offset within a viewport of the same size is a scroll here.
+        let viewport_size = self.handle.viewport_bounds().size;
+        let resized =
+            state.last_viewport != Size::default() && state.last_viewport != viewport_size;
         if offset != state.last_offset {
             state.last_offset = offset;
-            state.last_scroll = Some(now);
+            if !resized {
+                state.last_scroll = Some(now);
+            }
         }
+        state.last_viewport = viewport_size;
         let hovered = state.hovered_bar || state.hovered_thumb;
         let showing = state.visibility.sample(now).opacity > 0.;
         // Hovered, it stays in once shown, or comes in when hover shows it.
