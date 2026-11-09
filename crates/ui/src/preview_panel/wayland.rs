@@ -7,7 +7,7 @@
 //! window and its popups (`<select>` menus, context menus) and the frames are
 //! shown on a GPUI Fast native composition surface of the preview's window.
 //! Pointer input reaches the page through the surface's input consumer, keys
-//! through the element returned by [`element`].
+//! and input method text through the element returned by [`element`].
 //!
 //! GTK can be initialized once per process, on one display, so a process that
 //! opened its first preview here keeps all of GTK on the nest.
@@ -15,6 +15,7 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_int};
+use std::ops::Range;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
@@ -22,16 +23,17 @@ use gdk::glib;
 use gdk::glib::translate::ToGlibPtr as _;
 use gpui::{
     AnyElement, AnyWindowHandle, App, AsyncApp, Bounds, ClipboardItem, CursorStyle,
-    DispatchEventResult, Entity, FocusHandle, Focusable as _, InteractiveElement as _,
-    IntoElement as _, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent,
-    MouseButton, NavigationDirection, ParentElement as _, Pixels, PlatformInput, ScrollDelta,
-    Styled as _, TouchPhase, Window, WindowCompositionSurface, canvas, div,
+    DispatchEventResult, Entity, FocusHandle, Focusable as _, InputHandler,
+    InteractiveElement as _, IntoElement as _, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
+    ModifiersChangedEvent, MouseButton, NavigationDirection, ParentElement as _, Pixels,
+    PlatformInput, ScrollDelta, Styled as _, TouchPhase, UTF16Selection, Window,
+    WindowCompositionSurface, canvas, div, point, px, size,
 };
 use gpui_webview::WebView;
 use gtk::prelude::*;
 use raw_window_handle::{HasDisplayHandle as _, RawDisplayHandle, RawWindowHandle};
 use wayland_nest::{
-    Crop, Event, Frame, Nest, PointerEvent, Presenter, ScrollSource, Target, ViewId,
+    Caret, Crop, Event, Frame, Nest, PointerEvent, Presenter, ScrollSource, Target, ViewId,
 };
 use webkit2gtk::{HitTestResultExt as _, WebViewExt as _};
 use wry::{WebViewBuilderExtUnix as _, WebViewExtUnix as _};
@@ -148,6 +150,11 @@ fn start(window: &Window, cx: &mut App) -> Result<Rc<Host>, String> {
                 Event::Clipboard(text) => {
                     cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(text)));
                 }
+                Event::TextInput { view, caret } => {
+                    if let Some(slot) = host.slots.borrow().get(&view) {
+                        slot.caret.set(caret);
+                    }
+                }
             }
         }
     })
@@ -176,6 +183,20 @@ fn init_gtk(socket: &str) -> Result<(), String> {
     }
     // Marks GTK initialized for gtk-rs; GTK itself is already up.
     gtk::init().map_err(|error| error.to_string())?;
+    // The nest hands the host's input method text to GTK through
+    // text-input-v3, which only GTK's "wayland" IM module speaks, and GTK 3
+    // picks that module only when asked. GTK_IM_MODULE in the environment
+    // still wins (`_gtk_im_module_get_default_context_id`, gtk/gtkimmodule.c
+    // in GTK 3.24), and a module it names never sees that text.
+    if let Some(settings) = gtk::Settings::default() {
+        settings.set_gtk_im_module(Some("wayland"));
+    }
+    if let Some(module) = std::env::var_os("GTK_IM_MODULE").filter(|module| module != "wayland") {
+        log::warn!(
+            "preview: GTK_IM_MODULE={module:?} keeps input method text from the page; \
+             only keys a US layout types reach it"
+        );
+    }
     let display = gdk::Display::default().ok_or("GTK has no display")?;
     if display.type_().name() != "GdkWaylandDisplay" {
         return Err(format!(
@@ -246,6 +267,9 @@ pub(super) fn build(
         focus: view.focus_handle(cx),
         focused: Cell::new(false),
         modifiers: Cell::new(SentModifiers::default()),
+        held: RefCell::new(HashMap::new()),
+        composing: RefCell::new(None),
+        caret: Cell::new(None),
     });
 
     let input = Rc::downgrade(&slot);
@@ -377,6 +401,15 @@ impl Geometry {
         }
     }
 
+    /// A rectangle of the view's coordinates in the window.
+    fn window_bounds(&self, caret: Caret) -> Bounds<Pixels> {
+        let logical = |value: i32| px(value as f32 / self.scale);
+        Bounds::new(
+            self.document.origin + point(logical(caret.x), logical(caret.y)),
+            size(logical(caret.width), logical(caret.height)),
+        )
+    }
+
     /// A window position in the view's coordinates (its device pixels).
     fn view_position(&self, position: gpui::Point<Pixels>) -> (f64, f64) {
         let offset = position - self.document.origin;
@@ -410,6 +443,12 @@ struct Slot {
     focus: FocusHandle,
     focused: Cell<bool>,
     modifiers: Cell<SentModifiers>,
+    /// The nest key each held GPUI key pressed, by GPUI key name.
+    held: RefCell<HashMap<String, u32>>,
+    /// The input method's composition, while there is one.
+    composing: RefCell<Option<String>>,
+    /// Where the page's text field draws its caret, in the view.
+    caret: Cell<Option<Caret>>,
 }
 
 impl Slot {
@@ -533,7 +572,11 @@ impl Slot {
         }
         if let Some(host) = self.nest() {
             if !focused {
+                for (_, code) in self.held.borrow_mut().drain() {
+                    host.nest.key(code, false);
+                }
                 self.sync_modifiers(&host, Modifiers::default(), false);
+                self.composing.take();
             }
             host.nest.focus(focused.then_some(self.id));
         }
@@ -636,33 +679,46 @@ impl Slot {
             .detach();
     }
 
-    /// Forwards a key the US layout can type; returns whether it was.
+    /// Forwards a key the nest's US layout can type; returns whether it was.
+    /// A character it cannot type (é on a French layout, or a dead key's
+    /// result) is left to GPUI, which hands it to [`PageInput`] as text.
     fn key(&self, keystroke: &Keystroke, pressed: bool, repeat: bool, cx: &App) -> bool {
         let Some(host) = self.nest() else {
             return false;
         };
         let modifiers = keystroke.modifiers;
-        if pressed
-            && !repeat
+        if !pressed {
+            let Some(code) = self.held.borrow_mut().remove(&keystroke.key) else {
+                return false;
+            };
+            host.nest.key(code, false);
+            self.sync_modifiers(&host, modifiers, false);
+            return true;
+        }
+        if !repeat
             && (modifiers.control
                 || modifiers.platform
                 || (modifiers.shift && keystroke.key == "insert"))
         {
             offer_clipboard(cx);
         }
-        let Some((code, shift)) = wayland_nest::evdev_key(&keystroke.key) else {
+        // A shortcut is the key under the US layout GPUI guesses for it, and
+        // anything else is the character the user's layout typed.
+        let shortcut = modifiers.control || modifiers.alt || modifiers.platform;
+        let typed = match &keystroke.key_char {
+            Some(text) if !shortcut => text,
+            _ => &keystroke.key,
+        };
+        let Some((code, shift)) = wayland_nest::evdev_key(typed) else {
             return false;
         };
-        if pressed {
-            self.sync_modifiers(&host, keystroke.modifiers, shift);
-            if repeat {
-                host.nest.key(code, false);
-            }
-            host.nest.key(code, true);
-        } else {
-            host.nest.key(code, false);
-            self.sync_modifiers(&host, keystroke.modifiers, false);
+        self.sync_modifiers(&host, modifiers, shift);
+        // A repeat, or a key GPUI made from an input method's commit (which
+        // has no release), presses a key that is still down.
+        if let Some(down) = self.held.borrow_mut().insert(keystroke.key.clone(), code) {
+            host.nest.key(down, false);
         }
+        host.nest.key(code, true);
         true
     }
 
@@ -737,6 +793,122 @@ fn offer_clipboard(cx: &App) {
     }
 }
 
+/// The page's text input as GPUI's platform input sees it: what the input
+/// method composes and commits goes to the page's focused text field through
+/// the nest. The page's text is not mirrored here, so the document is the
+/// composition alone.
+struct PageInput(Rc<Slot>);
+
+impl InputHandler for PageInput {
+    fn selected_text_range(
+        &mut self,
+        _: bool,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Option<UTF16Selection> {
+        let end = self.0.composing.borrow().as_deref().map_or(0, utf16_len);
+        Some(UTF16Selection {
+            range: end..end,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(&mut self, _: &mut Window, _: &mut App) -> Option<Range<usize>> {
+        Some(0..utf16_len(self.0.composing.borrow().as_deref()?))
+    }
+
+    fn text_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Option<String> {
+        None
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        _: &mut App,
+    ) {
+        let composing = self.0.composing.take();
+        let Some(host) = self.0.nest() else {
+            return;
+        };
+        if !text.is_empty() {
+            host.nest.commit_text(text.into());
+        } else if composing.is_some() {
+            host.nest.compose_text(String::new(), None);
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        selected: Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut App,
+    ) {
+        let Some(host) = self.0.nest() else {
+            return;
+        };
+        let end = utf16_len(text);
+        let selected = selected.unwrap_or(end..end);
+        let cursor = byte_offset(text, selected.start)..byte_offset(text, selected.end);
+        self.0
+            .composing
+            .replace((!text.is_empty()).then(|| text.to_owned()));
+        host.nest.compose_text(text.into(), Some(cursor));
+    }
+
+    /// Keeps the composition as typed text.
+    fn unmark_text(&mut self, _: &mut Window, _: &mut App) {
+        if let Some(text) = self.0.composing.take()
+            && let Some(host) = self.0.nest()
+        {
+            host.nest.commit_text(text);
+        }
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Option<Bounds<Pixels>> {
+        Some(self.0.geometry.get()?.window_bounds(self.0.caret.get()?))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _: gpui::Point<Pixels>,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Option<usize> {
+        None
+    }
+}
+
+fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+/// The byte offset in `text` of the UTF-16 offset `utf16`.
+fn byte_offset(text: &str, utf16: usize) -> usize {
+    let mut units = 0;
+    for (offset, c) in text.char_indices() {
+        if units >= utf16 {
+            return offset;
+        }
+        units += c.len_utf16();
+    }
+    text.len()
+}
+
 fn button(button: MouseButton) -> Option<u32> {
     use wayland_nest::button;
     Some(match button {
@@ -749,7 +921,7 @@ fn button(button: MouseButton) -> Option<u32> {
 }
 
 /// Wraps a preview built by [`build`] with what the nest needs from GPUI:
-/// layout, keyboard focus and keys, and the page's cursor.
+/// layout, keyboard focus, keys and input method text, and the page's cursor.
 pub(super) fn element(view: Entity<WebView>, cx: &App) -> AnyElement {
     let webkit = view.read(cx).raw().webview().as_ptr() as usize;
     let slot = current_host().and_then(|host| {
@@ -792,10 +964,11 @@ pub(super) fn element(view: Entity<WebView>, cx: &App) -> AnyElement {
                     laid_out.layout(bounds, clip, window.scale_factor());
                     laid_out.set_focused(laid_out.focus.is_focused(window));
                 },
-                move |_, _, window, _| {
+                move |_, _, window, cx| {
                     if painted.hovered.get() {
                         window.set_window_cursor_style(painted.cursor.get());
                     }
+                    window.handle_input(&painted.focus, PageInput(painted.clone()), cx);
                 },
             )
             .absolute()

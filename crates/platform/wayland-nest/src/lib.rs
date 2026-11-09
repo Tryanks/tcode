@@ -9,7 +9,8 @@
 //! back as an [`Event::Frame`]. [`Presenter`] puts those frames on a
 //! `wl_surface` of the host's own connection. Input goes the other way through
 //! [`Nest::pointer`] and [`Nest::key`], in the view's window-geometry
-//! coordinates.
+//! coordinates, and text an input method composes through
+//! [`Nest::compose_text`] and [`Nest::commit_text`].
 #![cfg(target_os = "linux")]
 
 mod compose;
@@ -66,6 +67,19 @@ pub enum Event {
     Closed { view: ViewId },
     /// The embedded client copied text to the clipboard.
     Clipboard(String),
+    /// Where the text field of `view` that takes text draws its caret, for
+    /// placing an input method's candidates; `None` once no text field of
+    /// the view takes text or its caret is unknown.
+    TextInput { view: ViewId, caret: Option<Caret> },
+}
+
+/// A rectangle in a view's window-geometry coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Caret {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 #[derive(Clone, Copy, Debug)]
