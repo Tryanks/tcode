@@ -20,7 +20,7 @@ use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
 use gdk::glib;
-use gdk::glib::translate::ToGlibPtr as _;
+use gdk::glib::translate::{IntoGlib as _, ToGlibPtr as _};
 use gpui::{
     AnyElement, AnyWindowHandle, App, AsyncApp, Bounds, ClipboardItem, CursorStyle,
     DispatchEventResult, Entity, FocusHandle, Focusable as _, InputHandler,
@@ -273,7 +273,7 @@ pub(super) fn build(
     let webkit = raw.webview();
     let before = signal_marker(&webkit);
     let view = WebView::new(raw, window, cx);
-    disconnect_handlers_since(&webkit, before);
+    disconnect_press_forwarding(&webkit, before);
 
     let slot = Rc::new(Slot {
         id,
@@ -345,20 +345,52 @@ fn signal_marker(object: &impl IsA<glib::Object>) -> std::ffi::c_ulong {
     raw
 }
 
-/// gpui-webview's `WebView::new` forwards each GTK button press on the page
-/// back to GPUI as a synthetic click, so overlays close when the page is
-/// clicked on X11. Here GPUI already sees every real press before forwarding
-/// it to the nest, and the synthetic click would land on this preview's own
-/// input consumer and be forwarded again, without end. The handlers
-/// `WebView::new` connected are the ones numbered after `before`.
-fn disconnect_handlers_since(object: &impl IsA<glib::Object>, before: std::ffi::c_ulong) {
-    let after = signal_marker(object);
-    let instance: *mut glib::gobject_ffi::GObject = object.as_ref().to_glib_none().0;
-    for id in before + 1..after {
-        // SAFETY: `instance` is alive; both calls only look up `id` on it.
-        unsafe {
-            if glib::gobject_ffi::g_signal_handler_is_connected(instance, id) != 0 {
-                glib::gobject_ffi::g_signal_handler_disconnect(instance, id);
+/// gpui-webview's `WebView::new` (0.9.0, `linux::forward_mouse_down`)
+/// connects a `button-press-event` handler that forwards each GTK press on
+/// the page back to GPUI as a synthetic click, so overlays close when the
+/// page is clicked on X11. Here GPUI already sees every real press before
+/// forwarding it to the nest, and the synthetic click would land on this
+/// preview's own input consumer and be forwarded again, without end. That
+/// handler is the `button-press-event` handler numbered after `before`.
+fn disconnect_press_forwarding(webkit: &webkit2gtk::WebView, before: std::ffi::c_ulong) {
+    use glib::gobject_ffi::{
+        G_SIGNAL_MATCH_ID, G_SIGNAL_MATCH_UNBLOCKED, g_signal_handler_block,
+        g_signal_handler_disconnect, g_signal_handler_find, g_signal_handler_unblock,
+        g_signal_lookup,
+    };
+    let after = signal_marker(webkit);
+    let instance: *mut glib::gobject_ffi::GObject =
+        webkit.upcast_ref::<glib::Object>().to_glib_none().0;
+    // SAFETY: `instance` is alive for these calls; the lookups only read,
+    // and every handler blocked here is unblocked before returning.
+    unsafe {
+        let signal = g_signal_lookup(
+            c"button-press-event".as_ptr(),
+            gtk::Widget::static_type().into_glib(),
+        );
+        // GLib finds one handler at a time; blocking each one found lists
+        // the next.
+        let mut handlers = Vec::new();
+        loop {
+            let id = g_signal_handler_find(
+                instance,
+                G_SIGNAL_MATCH_ID | G_SIGNAL_MATCH_UNBLOCKED,
+                signal,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            if id == 0 {
+                break;
+            }
+            g_signal_handler_block(instance, id);
+            handlers.push(id);
+        }
+        for id in handlers {
+            g_signal_handler_unblock(instance, id);
+            if before < id && id < after {
+                g_signal_handler_disconnect(instance, id);
             }
         }
     }
