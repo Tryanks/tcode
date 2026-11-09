@@ -285,6 +285,7 @@ impl TimelineView {
                     .flatten();
                 let painted = this.painted_rows.clone();
                 let (left, right) = this.column_insets(cx);
+                let overhang = this.layout.overhang;
                 v_flex()
                     .id(("timeline-row", row.identity))
                     .debug_selector(move || format!("timeline-row-{index}"))
@@ -295,12 +296,25 @@ impl TimelineView {
                             }),
                         ));
                     })
+                    .relative()
                     .w_full()
                     .items_center()
                     .pl(left)
                     .pr(right)
-                    .rounded(crate::material::radius_card(cx))
-                    .bg(highlight)
+                    // The mark spans the body, not the list's overhang past
+                    // it, which the pane may clip.
+                    .when(highlight.a > 0., |item| {
+                        item.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left_0()
+                                .right(overhang)
+                                .rounded(crate::material::radius_card(cx))
+                                .bg(highlight),
+                        )
+                    })
                     // A press inside the mark lets it go, and still does what
                     // it does: it selects, follows a link, presses a button.
                     // A drag that selects starts with that press.

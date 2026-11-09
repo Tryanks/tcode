@@ -183,6 +183,12 @@ fn sweep(from: (f32, f32), to: (f32, f32), cx: &mut VisualTestContext) -> u64 {
     layouts
 }
 
+/// The window at `at`, its motion landed.
+fn settle_at(at: (f32, f32), cx: &mut VisualTestContext) {
+    cx.simulate_resize(size(px(at.0), px(at.1)));
+    crate::test_frames::draw_settled(cx);
+}
+
 /// Once the window has its new size, what the resize set moving lands and
 /// nothing draws again: no scrollbar comes in for the list the resize moved
 /// and fades out once its hold ends, seconds after.
@@ -206,5 +212,26 @@ fn a_window_resized_into_full_screen_rests_once_its_size_does(cx: &mut TestAppCo
     assert!(
         drawn.iter().all(|frame| *frame < MOTION_FRAMES as u32),
         "frames drawn after the size settled: {drawn:?}"
+    );
+}
+
+/// Widening the window while the thread's column keeps its widest lays out
+/// what heightening it does, give or take the few sizes at which the list's
+/// own width does change: the rows off screen keep their heights, rather
+/// than all being laid out again at every size the window passes through.
+/// Both start where the rail is in, so neither has it come in on the way.
+#[gpui::test]
+fn a_window_widened_into_full_screen_lays_out_what_one_heightened_does(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let cx = mount_scene(cx);
+    settle_at((TO.0, FROM.1), cx);
+    let heightened = sweep((TO.0, FROM.1), TO, cx);
+    let from = (1300., FROM.1);
+    settle_at(from, cx);
+    let widened = sweep(from, TO, cx);
+    let per_size = heightened / STEPS as u64;
+    assert!(
+        widened <= heightened + 3 * per_size,
+        "widening computed {widened} layouts, heightening {heightened}"
     );
 }
