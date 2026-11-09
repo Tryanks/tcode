@@ -334,6 +334,7 @@ fn run(
     loop {
         let turn = catch_panic(|| {
             let dispatched = event_loop.dispatch(None, &mut state);
+            state.read_selection();
             state.flush_frames();
             if let Err(error) = state.dh.flush_clients() {
                 log::debug!("wayland nest: flushing the client failed: {error}");
@@ -418,8 +419,10 @@ struct State {
     images: HashMap<ObjectId, (WlSurface, Image)>,
     keyboard_view: Option<ViewId>,
     text_inputs: text_input::TextInputs,
-    /// The clipboard text last exchanged in either direction.
+    /// The clipboard text the host last offered, while it is the selection.
     clipboard: Option<Arc<str>>,
+    /// The seat and type of a selection the client set, to be read.
+    copied: Option<(Seat<State>, &'static str)>,
     events: async_channel::Sender<Event>,
     epoch: Instant,
 }
@@ -491,6 +494,7 @@ impl State {
             keyboard_view: None,
             text_inputs: text_input::TextInputs::default(),
             clipboard: None,
+            copied: None,
             events,
             epoch: Instant::now(),
         })
@@ -747,6 +751,38 @@ impl State {
         let bounds = Rectangle::new(Point::from((-parent.x, -parent.y)), self.view_size(view));
         let geometry = positioner.get_unconstrained_geometry(bounds);
         Rectangle::new(clamp_point(geometry.loc), geometry.size)
+    }
+
+    /// Reads the text the client last copied and hands it to the host.
+    fn read_selection(&mut self) {
+        let Some((seat, mime_type)) = self.copied.take() else {
+            return;
+        };
+        let (read, write) = match rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC) {
+            Ok(pipe) => pipe,
+            Err(error) => {
+                log::debug!("wayland nest: clipboard pipe failed: {error}");
+                return;
+            }
+        };
+        if let Err(error) =
+            request_data_device_client_selection(&seat, mime_type.to_string(), write)
+        {
+            log::debug!("wayland nest: clipboard request failed: {error:?}");
+            return;
+        }
+        // The client writes from its own thread of control; reading here
+        // would block the compositor it is waiting on.
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let read = std::fs::File::from(read)
+                .take(MAX_CLIPBOARD_BYTES)
+                .read_to_string(&mut text);
+            if read.is_ok() && !text.is_empty() {
+                let _ = events.try_send(Event::Clipboard(text));
+            }
+        });
     }
 
     fn flush_frames(&mut self) {
@@ -1057,6 +1093,7 @@ impl SelectionHandler for State {
         let Some(source) = source else {
             return;
         };
+        self.clipboard = None;
         let offered = source.mime_types();
         let Some(mime_type) = TEXT_MIME_TYPES
             .iter()
@@ -1064,31 +1101,9 @@ impl SelectionHandler for State {
         else {
             return;
         };
-        let (read, write) = match rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC) {
-            Ok(pipe) => pipe,
-            Err(error) => {
-                log::debug!("wayland nest: clipboard pipe failed: {error}");
-                return;
-            }
-        };
-        if let Err(error) =
-            request_data_device_client_selection(&seat, mime_type.to_string(), write)
-        {
-            log::debug!("wayland nest: clipboard request failed: {error:?}");
-            return;
-        }
-        // The client writes from its own thread of control; reading here
-        // would block the compositor it is waiting on.
-        let events = self.events.clone();
-        std::thread::spawn(move || {
-            let mut text = String::new();
-            let read = std::fs::File::from(read)
-                .take(MAX_CLIPBOARD_BYTES)
-                .read_to_string(&mut text);
-            if read.is_ok() && !text.is_empty() {
-                let _ = events.try_send(Event::Clipboard(text));
-            }
-        });
+        // smithay stores the new selection only after this returns, so it is
+        // read once the request is dispatched (see [`State::read_selection`]).
+        self.copied = Some((seat, *mime_type));
     }
 
     fn send_selection(
