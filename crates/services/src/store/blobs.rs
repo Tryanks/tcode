@@ -81,7 +81,7 @@ impl Blobs {
             dirs.insert(dir.to_path_buf());
         }
         for dir in &dirs {
-            flush(&File::open(dir)?)?;
+            flush_dir(dir)?;
         }
         // Apple drives keep what a plain fsync handed them in a volatile
         // cache: one F_FULLFSYNC (what `sync_all` issues there) commits every
@@ -180,6 +180,21 @@ impl Blobs {
     }
 }
 
+/// Hand a directory's entries to the drive.
+fn flush_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        flush(&File::open(dir)?)
+    }
+    // Opening a directory as a file is refused with access denied on
+    // Windows; its entries are committed with the metadata journal.
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
 /// Hand a file's data or a directory's entries to the drive.
 fn flush(file: &File) -> io::Result<()> {
     #[cfg(target_vendor = "apple")]
@@ -197,11 +212,6 @@ fn flush(file: &File) -> io::Result<()> {
     }
     #[cfg(not(unix))]
     {
-        // Windows cannot open a directory as a file; its entries are
-        // committed with the metadata journal.
-        if file.metadata()?.is_dir() {
-            return Ok(());
-        }
         file.sync_all()
     }
 }
