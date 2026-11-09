@@ -18561,6 +18561,42 @@ pub(crate) mod tests {
         assert_eq!(left(cx), expanded);
     }
 
+    /// On a phone too narrow for every pill of the strip, each pill keeps
+    /// the width its label needs and the strip scrolls; none narrows into
+    /// the next.
+    #[gpui::test]
+    fn the_phone_strip_scrolls_rather_than_narrowing_its_pills(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_crowded_thread(cx);
+        as_mobile(cx);
+        let pills = |cx: &mut VisualTestContext| {
+            (
+                cx.debug_bounds("agents-pill").expect("the agents pill"),
+                cx.debug_bounds("phone-pr-pill")
+                    .expect("the pull request pill"),
+            )
+        };
+        resize(cx, 899.);
+        draw_until(&shell, cx, &host, "phone-strip", None);
+        crate::test_frames::draw_settled(cx);
+        let (agents, pull_requests) = pills(cx);
+        resize(cx, 393.);
+        crate::test_frames::draw_settled(cx);
+        let (narrow_agents, narrow_pull_requests) = pills(cx);
+        assert_eq!(
+            narrow_agents.size.width, agents.size.width,
+            "the agents pill"
+        );
+        assert_eq!(
+            narrow_pull_requests.size.width, pull_requests.size.width,
+            "the pull request pill"
+        );
+        assert!(
+            narrow_agents.right() <= narrow_pull_requests.left(),
+            "{narrow_agents:?} runs into {narrow_pull_requests:?}"
+        );
+    }
+
     /// A tablet turning compact or wide moves its conversation from where
     /// one layout drew it to where the other does, rather than jumping.
     #[gpui::test]
