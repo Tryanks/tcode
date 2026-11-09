@@ -117,9 +117,12 @@ fn start(window: &Window, cx: &mut App) -> Result<Rc<Host>, String> {
             // GPUI drops its Wayland client and disconnects the display
             // before the app's webviews and this thread's locals are
             // destroyed. The presenter and the slots' targets live on that
-            // display, and gpui-fast's native surfaces panic when dropped
-            // after the client (a gap), so the process exits with the host
-            // and its slots leaked.
+            // display, and a slot's native surface cannot be dropped after
+            // the client: gpui-fast-linux 0.1.13's `WaylandNativeSurface::drop`
+            // (fast/composition/wayland.rs:362-367) calls
+            // `WaylandClientStatePtr::get_client`, which panics once the
+            // client is gone (linux/wayland/client.rs:584-588). So the
+            // process exits with the host and its slots leaked.
             std::mem::forget(host);
         }
         async {}
