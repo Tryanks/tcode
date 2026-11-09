@@ -11,7 +11,7 @@ async-channel = "2"
 calloop = "0.14"
 log = "0.4"
 memmap2 = "0.9"
-rustix = { version = "1", features = ["fs", "pipe"] }
+rustix = { version = "1", features = ["fs", "pipe", "process"] }
 smithay = { version = "0.7", default-features = false, features = ["wayland_frontend"] }
 # The same connection features GPUI's Wayland client uses, so the presenter
 # shares GPUI's libwayland connection instead of opening its own.

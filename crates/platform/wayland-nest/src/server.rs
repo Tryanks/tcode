@@ -7,7 +7,7 @@ use std::io::{self, Read as _, Write as _};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixListener;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -63,6 +63,9 @@ const TEXT_MIME_TYPES: [&str; 5] = [
     "STRING",
 ];
 
+/// The socket's name, before the process id.
+const SOCKET_PREFIX: &str = "tcode-nest-";
+
 /// Largest clipboard text read from the client.
 const MAX_CLIPBOARD_BYTES: u64 = 16 << 20;
 
@@ -110,7 +113,8 @@ impl Nest {
         let runtime = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::other("XDG_RUNTIME_DIR is not set"))?;
-        let socket = format!("tcode-nest-{}", std::process::id());
+        remove_stale_sockets(&runtime);
+        let socket = format!("{SOCKET_PREFIX}{}", std::process::id());
         let path = runtime.join(&socket);
         match std::fs::remove_file(&path) {
             Ok(()) => {}
@@ -190,6 +194,38 @@ impl Nest {
     fn send(&self, command: Command) {
         if self.commands.send(command).is_err() {
             log::debug!("wayland nest is not running");
+        }
+    }
+}
+
+/// Removes the sockets of this user's earlier runs whose process is gone. A
+/// socket is unlinked once its client connects, so only a run that ended
+/// before GTK connected leaves one behind.
+fn remove_stale_sockets(runtime: &Path) {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+    let Ok(entries) = std::fs::read_dir(runtime) else {
+        return;
+    };
+    let uid = rustix::process::getuid().as_raw();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix(SOCKET_PREFIX))
+            .and_then(|pid| pid.parse().ok())
+            .and_then(rustix::process::Pid::from_raw)
+        else {
+            continue;
+        };
+        let Ok(metadata) = entry.path().symlink_metadata() else {
+            continue;
+        };
+        let gone = matches!(
+            rustix::process::test_kill_process(pid),
+            Err(rustix::io::Errno::SRCH)
+        );
+        if metadata.file_type().is_socket() && metadata.uid() == uid && gone {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
