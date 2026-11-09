@@ -336,9 +336,14 @@ impl ChatView {
                         .size_full()
                         .items_center()
                         .gap(gap)
-                        .children(background)
-                        .children(agents)
-                        .children(pull_requests)
+                        // Each pill keeps the width its label needs; a strip
+                        // too narrow for them all scrolls instead.
+                        .children(
+                            [background, agents, pull_requests]
+                                .into_iter()
+                                .flatten()
+                                .map(|pill| div().flex_none().child(pill)),
+                        )
                         .overflow_x_scroll_area();
                     if compact {
                         pills
