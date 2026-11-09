@@ -33,6 +33,7 @@ pub struct NativeClientHost {
     image_picker: Option<Box<ImagePicker>>,
     file_picker: Option<Box<FilePicker>>,
     editor: Option<Box<EditorOpener>>,
+    machine_editor: Option<std::rc::Rc<dyn tcode_client::host::MachineEditor>>,
     multicast_lock: Option<Arc<MulticastLock>>,
     system_browser: Option<Arc<SystemBrowser>>,
     device: OnceLock<Result<DeviceIdentity, String>>,
@@ -52,6 +53,7 @@ impl NativeClientHost {
             image_picker: None,
             file_picker: None,
             editor: None,
+            machine_editor: None,
             multicast_lock: None,
             system_browser: None,
             device: OnceLock::new(),
@@ -171,6 +173,17 @@ impl NativeClientHost {
         open: impl Fn(&Path) -> Result<(), String> + 'static,
     ) -> Self {
         self.editor = Some(Box::new(open));
+        self
+    }
+
+    /// Supply the editor that opens paired machines' directories; see
+    /// [`ClientHost::machine_editor`]. Injected for the same reason as
+    /// [`Self::with_editor_opener`].
+    pub fn with_machine_editor(
+        mut self,
+        editor: impl tcode_client::host::MachineEditor + 'static,
+    ) -> Self {
+        self.machine_editor = Some(std::rc::Rc::new(editor));
         self
     }
 
@@ -376,6 +389,10 @@ impl ClientHost for NativeClientHost {
 
     fn open_in_editor(&self, path: &Path) -> Option<Result<(), String>> {
         self.editor.as_ref().map(|open| open(path))
+    }
+
+    fn machine_editor(&self) -> Option<std::rc::Rc<dyn tcode_client::host::MachineEditor>> {
+        self.machine_editor.clone()
     }
 
     fn connect(&self, host: &PairedHost) -> Transport {

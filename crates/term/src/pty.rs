@@ -107,14 +107,29 @@ impl PtyHandle {
         args: Vec<String>,
         shell_name: String,
     ) -> io::Result<Self> {
+        Self::spawn_with_environment(cwd, program, args, shell_name, Vec::new())
+    }
+
+    /// Spawn with `environment` set over the terminal's own variables.
+    pub(crate) fn spawn_with_environment(
+        cwd: impl AsRef<Path>,
+        program: String,
+        args: Vec<String>,
+        shell_name: String,
+        environment: Vec<(String, String)>,
+    ) -> io::Result<Self> {
         let cwd = cwd.as_ref().to_path_buf();
         let size = initial_window_size();
-        #[cfg(unix)]
-        let environment = Some(vec![
+        let environment: Vec<(String, String)> = [
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("COLORTERM".to_string(), "truecolor".to_string()),
             ("TERM_PROGRAM".to_string(), "tcode".to_string()),
-        ]);
+        ]
+        .into_iter()
+        .chain(environment)
+        .collect();
+        #[cfg(unix)]
+        let environment = Some(environment);
         #[cfg(unix)]
         let working_directory = Some(cwd.to_string_lossy().into_owned());
         #[cfg(unix)]
@@ -176,6 +191,7 @@ impl PtyHandle {
             &cwd,
             program,
             args,
+            environment,
             size,
             shared.clone(),
             notifications.clone(),

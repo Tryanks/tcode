@@ -22,6 +22,13 @@
 //! the service closing is a finished stream back; a reset closes both. A
 //! `connect` before hello is refused, and one connection holds at most
 //! [`MAX_TUNNELS`] tunnels at once.
+//!
+//! A bi stream opening with `{"type":"ssh"}` after hello carries one SSH
+//! connection to the machine's own SSH server, which runs in the host process
+//! and listens on no port. The machine answers `connected` before the first
+//! SSH byte, or `refused` when the device may not open one. These streams
+//! share the tunnel bound but never idle out: an editor leaves its connection
+//! quiet for long stretches and SSH keeps it alive itself.
 use std::{io, time::Duration};
 
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress};
@@ -40,8 +47,8 @@ pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_LINE: usize = tcode_protocol::MAX_LINE_BYTES;
 /// Bi streams one connection may hold open at once.
 pub const MAX_STREAMS: u32 = 64;
-/// Preview tunnels one connection may hold open at once, leaving streams for
-/// the main stream and for answering refusals.
+/// Preview tunnels and SSH connections one connection may hold open at once,
+/// leaving streams for the main stream and for answering refusals.
 pub const MAX_TUNNELS: usize = MAX_STREAMS as usize - 8;
 /// How long the machine dials a tunnel target before answering
 /// `connect_failed`.
@@ -111,6 +118,8 @@ pub enum ClientLine {
     },
     /// Open a Preview tunnel; see the module documentation.
     Connect { host: String, port: u16 },
+    /// Open an SSH connection to the machine; see the module documentation.
+    Ssh,
     Original {
         target: tcode_protocol::OriginalTarget,
     },
@@ -171,7 +180,8 @@ pub enum HostLine {
     HelloRejected {
         reason: HelloRejection,
     },
-    /// The tunnel target accepted the connection; tunnel bytes follow.
+    /// The tunnel target accepted the connection, or the SSH server took
+    /// the stream; its bytes follow.
     Connected,
     /// The tunnel target could not be reached; the stream ends here.
     ConnectFailed {

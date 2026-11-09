@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tcode_client::host::Transport;
+use tcode_client::host::{StreamTarget, Transport};
 use tcode_client::pairing::{PairInvite, PairedHost};
 use tcode_client::recovery::Wake;
 use tcode_client::{ConnectionFailure, ConnectionState};
@@ -1155,11 +1155,23 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     let refusal = recv_type(&client, "ack", Some(30));
     assert_eq!(refusal["content"]["result"]["Err"]["code"], "out_of_scope");
     let opener = client.current_host.as_ref().unwrap().tunnels().unwrap();
-    let refusal = tcode_traverse::block_on(opener.open("127.0.0.1", 1)).unwrap_err();
+    let refusal = tcode_traverse::block_on(opener.open(StreamTarget::Tcp {
+        host: "127.0.0.1".into(),
+        port: 1,
+    }))
+    .unwrap_err();
     assert!(
         refusal
             .to_string()
             .contains("this space does not allow Preview tunnels"),
+        "{refusal}"
+    );
+    let refusal = tcode_traverse::block_on(opener.open(StreamTarget::Ssh)).unwrap_err();
+    assert_eq!(refusal.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(
+        refusal
+            .to_string()
+            .contains("this space does not allow opening its projects in an editor"),
         "{refusal}"
     );
 

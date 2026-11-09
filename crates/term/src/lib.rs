@@ -41,6 +41,76 @@ pub use grid_emulator::GridEvent;
 #[cfg(feature = "pty")]
 use pty::{PtyEvent, PtyHandle};
 
+/// The user's shell as Tcode's terminals start it, as `(program, args)` for
+/// an interactive session.
+#[cfg(feature = "pty")]
+pub fn user_shell() -> (String, Vec<String>) {
+    pty::default_shell()
+}
+
+/// A program in a pseudoterminal whose bytes some other terminal renders,
+/// such as an SSH client's: no grid of its own.
+#[cfg(feature = "pty")]
+pub struct RawPty {
+    pty: PtyHandle,
+    events: async_channel::Receiver<PtyEvent>,
+}
+
+#[cfg(feature = "pty")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RawPtyEvent {
+    Output(Vec<u8>),
+    /// The program ended; no output follows.
+    Exited {
+        exit_code: Option<i32>,
+    },
+}
+
+#[cfg(feature = "pty")]
+impl RawPty {
+    /// Start `program` in `cwd` with `environment` over the terminal's own
+    /// variables.
+    pub fn spawn(
+        cwd: &Path,
+        program: String,
+        args: Vec<String>,
+        environment: Vec<(String, String)>,
+    ) -> io::Result<Self> {
+        let label = pty::shell_label(&program);
+        let pty = PtyHandle::spawn_with_environment(cwd, program, args, label, environment)?;
+        let events = pty.events();
+        Ok(Self { pty, events })
+    }
+
+    /// The next output or the exit; `None` once nothing more will come.
+    pub async fn next(&self) -> Option<RawPtyEvent> {
+        loop {
+            match self.events.recv().await.ok()? {
+                PtyEvent::Output(bytes) => return Some(RawPtyEvent::Output(bytes)),
+                PtyEvent::Exited { exit_code } => return Some(RawPtyEvent::Exited { exit_code }),
+                PtyEvent::ProcessInfoChanged { .. } => {}
+            }
+        }
+    }
+
+    pub fn write(&self, bytes: Vec<u8>) -> io::Result<()> {
+        self.pty.write_raw(bytes)
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16, width_px: u16, height_px: u16) -> io::Result<()> {
+        self.pty.resize(rio_vt::event::WindowSize {
+            cols,
+            rows,
+            width: width_px,
+            height: height_px,
+        })
+    }
+
+    pub fn kill(&self) -> io::Result<()> {
+        self.pty.kill()
+    }
+}
+
 #[cfg(any(feature = "pty", test))]
 const DEFAULT_COLS: usize = 80;
 #[cfg(any(feature = "pty", test))]

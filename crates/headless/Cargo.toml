@@ -22,5 +22,5 @@ tcode-core = { path = "../core" }
 tcode-protocol = { path = "../protocol" }
 tcode-runtime = { path = "../runtime" }
 tcode-services = { path = "../services" }
-tcode-traverse = { path = "../traverse", features = ["browser", "native"] }
+tcode-traverse = { path = "../traverse", features = ["browser", "native", "ssh"] }
 url = "2"

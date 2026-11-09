@@ -1,6 +1,6 @@
-//! One Preview tunnel on a `tcode/1` connection: the machine side dials and
-//! pumps, the device side opens and hands back a [`Tunnel`] whose halves are
-//! polled from whichever executor the browser bridge runs on.
+//! One tunnel on a `tcode/1` connection: for a Preview tunnel the machine
+//! side dials and pumps; the device side opens either kind and hands back a
+//! [`Tunnel`] whose halves are polled from whichever executor reads them.
 use std::{
     io,
     pin::Pin,
@@ -10,7 +10,7 @@ use std::{
 };
 
 use iroh::endpoint::{Connection, RecvStream, SendStream};
-use tcode_client::host::Tunnel;
+use tcode_client::host::{StreamTarget, Tunnel};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::wire::{self, ClientLine, HostLine, LineReader};
@@ -118,20 +118,17 @@ async fn pump<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
 }
 
-/// Open a tunnel to `host:port` on `connection`. Must run on the runtime.
-pub(crate) async fn open(connection: &Connection, host: &str, port: u16) -> io::Result<Tunnel> {
+/// Open a tunnel to `target` on `connection`. Must run on the runtime.
+pub(crate) async fn open(connection: &Connection, target: StreamTarget) -> io::Result<Tunnel> {
     let (mut send, recv) = connection
         .open_bi()
         .await
         .map_err(|error| io::Error::new(io::ErrorKind::NotConnected, error))?;
-    wire::write_line(
-        &mut send,
-        &ClientLine::Connect {
-            host: host.to_owned(),
-            port,
-        },
-    )
-    .await?;
+    let line = match target {
+        StreamTarget::Tcp { host, port } => ClientLine::Connect { host, port },
+        StreamTarget::Ssh => ClientLine::Ssh,
+    };
+    wire::write_line(&mut send, &line).await?;
     let mut reader = wire::reader(recv);
     let reply = tokio::time::timeout(
         wire::TUNNEL_CONNECT + wire::CONTROL_TIMEOUT,

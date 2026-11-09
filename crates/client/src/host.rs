@@ -67,9 +67,9 @@ impl LiveHost {
     }
 }
 
-/// One raw byte tunnel to a TCP service on the paired machine. Closing the
-/// write half tells the machine to shut down its write side to the service;
-/// end of stream on the read half means the service closed its side.
+/// One raw byte tunnel to a [`StreamTarget`] on the paired machine. Closing
+/// the write half tells the machine to shut down its write side to the
+/// target; end of stream on the read half means the target closed its side.
 pub struct Tunnel {
     pub read: Box<dyn AsyncRead + Send + Unpin>,
     pub write: Box<dyn AsyncWrite + Send + Unpin>,
@@ -83,11 +83,20 @@ impl std::fmt::Debug for Tunnel {
 
 pub type TunnelFuture = Pin<Box<dyn Future<Output = io::Result<Tunnel>> + Send>>;
 
-/// Opens tunnels to `host:port` as dialled from the paired machine, over the
+/// What a tunnel reaches on the paired machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamTarget {
+    /// A TCP service, dialled from the machine as any local program would.
+    Tcp { host: String, port: u16 },
+    /// The machine's own SSH server, for an editor's remote development.
+    Ssh,
+}
+
+/// Opens tunnels to a [`StreamTarget`] on the paired machine, over the
 /// attachment's current connection. Fails at once while the attachment is
 /// reconnecting; tunnels opened on an earlier connection end with it.
 pub trait TunnelOpener: Send + Sync {
-    fn open(&self, host: &str, port: u16) -> TunnelFuture;
+    fn open(&self, target: StreamTarget) -> TunnelFuture;
 }
 
 /// What a client says about itself when pairing and connecting; the host
@@ -338,6 +347,33 @@ pub trait ClientHost: 'static {
     fn open_in_editor(&self, _path: &std::path::Path) -> Option<Result<(), String>> {
         None
     }
+
+    /// The editor that opens paired machines' directories over this
+    /// client's connections to them; `None` where the client has none.
+    fn machine_editor(&self) -> Option<std::rc::Rc<dyn MachineEditor>> {
+        None
+    }
+}
+
+/// An editor whose own remote development reaches a paired machine through
+/// this client's connection to it.
+pub trait MachineEditor {
+    /// The editor settings file Tcode adds an entry per machine to.
+    fn settings_file(&self) -> Option<std::path::PathBuf>;
+
+    /// Open `target`. Called only once the user agreed to what this does,
+    /// Tcode's entry in [`Self::settings_file`] included.
+    fn open(&self, target: MachinePath) -> Result<(), String>;
+}
+
+/// A directory on a paired machine, as [`MachineEditor::open`] opens it.
+#[derive(Clone)]
+pub struct MachinePath {
+    pub host_id: String,
+    /// Absolute, as the machine writes it.
+    pub path: String,
+    /// The attachment's tunnels, which the editor's connection travels.
+    pub tunnels: std::sync::Arc<dyn TunnelOpener>,
 }
 
 #[cfg(test)]

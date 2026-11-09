@@ -316,6 +316,10 @@ pub use wire::{
 // Unreleased: spaces gain a policy (SpacePolicy: agents, approval, terminals,
 // git_remote, preview, computer_use, editor), carried by SpaceInfo, the Space
 // principal and the Space scope, and set by SpaceAction set_policy.
+//
+// Unreleased: a tcode/1 stream may open with {"type":"ssh"} after hello and
+// then carry an SSH connection to the machine (answered connected or refused;
+// a space member needs the policy's editor).
 pub const PROTOCOL_VERSION: u32 = 26;
 
 #[cfg(test)]
