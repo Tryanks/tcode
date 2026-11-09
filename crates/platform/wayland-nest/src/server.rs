@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io::{self, Read as _, Write as _};
+use std::ops::Range;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixListener;
 use std::panic::AssertUnwindSafe;
@@ -21,6 +22,7 @@ use smithay::input::pointer::{
 };
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel};
+use smithay::reexports::wayland_protocols::wp::text_input::zv3::server::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::backend::{
     ClientData, ClientId, DisconnectReason, ObjectId,
@@ -53,6 +55,8 @@ use smithay::{
 
 use crate::compose::{Canvas, Image};
 use crate::{Event, Frame, PointerEvent, ScrollSource, ViewId};
+
+mod text_input;
 
 /// Text clipboard types, most preferred first.
 const TEXT_MIME_TYPES: [&str; 5] = [
@@ -104,6 +108,11 @@ enum Command {
     Focus(Option<ViewId>),
     Presented(ViewId),
     Clipboard(String),
+    CommitText(String),
+    ComposeText {
+        text: String,
+        cursor: Option<(usize, usize)>,
+    },
 }
 
 impl Nest {
@@ -189,6 +198,20 @@ impl Nest {
     /// Offers `text` as the clipboard to the embedded client.
     pub fn set_clipboard(&self, text: String) {
         self.send(Command::Clipboard(text));
+    }
+
+    /// Inserts `text` into the focused view's text field, as an input method
+    /// commits it, ending any composition.
+    pub fn commit_text(&self, text: String) {
+        self.send(Command::CommitText(text));
+    }
+
+    /// Shows `text` as the focused text field's composition, with its cursor
+    /// at the byte range `cursor` of `text` (`None` hides the cursor). Empty
+    /// `text` ends the composition without inserting anything.
+    pub fn compose_text(&self, text: String, cursor: Option<Range<usize>>) {
+        let cursor = cursor.map(|cursor| (cursor.start, cursor.end));
+        self.send(Command::ComposeText { text, cursor });
     }
 
     fn send(&self, command: Command) {
@@ -394,6 +417,7 @@ struct State {
     requested: HashMap<ViewId, Size<i32, Logical>>,
     images: HashMap<ObjectId, (WlSurface, Image)>,
     keyboard_view: Option<ViewId>,
+    text_inputs: text_input::TextInputs,
     /// The clipboard text last exchanged in either direction.
     clipboard: Option<Arc<str>>,
     events: async_channel::Sender<Event>,
@@ -430,6 +454,7 @@ impl State {
         );
         output.set_preferred(mode);
         output.create_global::<Self>(&dh);
+        dh.create_global::<Self, ZwpTextInputManagerV3, _>(1, ());
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&dh, "seat0");
@@ -464,6 +489,7 @@ impl State {
             requested: HashMap::new(),
             images: HashMap::new(),
             keyboard_view: None,
+            text_inputs: text_input::TextInputs::default(),
             clipboard: None,
             events,
             epoch: Instant::now(),
@@ -518,6 +544,8 @@ impl State {
                     set_data_device_selection(&self.dh, &self.seat, mime_types, text);
                 }
             }
+            Command::CommitText(text) => self.commit_text(text),
+            Command::ComposeText { text, cursor } => self.compose_text(text, cursor),
             Command::Presented(view) => {
                 let time = self.time();
                 if let Some(callbacks) = self.views.get_mut(&view).and_then(|v| v.in_flight.take())
@@ -690,6 +718,16 @@ impl State {
         parent + popup.geometry.loc
     }
 
+    /// Where `surface` (the view's toplevel or one of its popups) has its
+    /// origin, in the view's coordinates.
+    fn surface_origin(&self, view: &View, surface: &WlSurface) -> Point<i32, Logical> {
+        let own = self
+            .window_geometry(surface)
+            .map(|geometry| geometry.loc)
+            .unwrap_or_default();
+        self.window_origin(view, surface) - own
+    }
+
     fn place_popup(
         &self,
         view: &View,
@@ -788,19 +826,14 @@ impl State {
                 .to_f64()
                 .contains(location)
             {
-                let own = self
-                    .window_geometry(surface)
-                    .map(|g| g.loc)
-                    .unwrap_or_default();
-                return Some((surface.clone(), (origin - own).to_f64()));
+                return Some((surface.clone(), self.surface_origin(view, surface).to_f64()));
             }
         }
         let toplevel = view.toplevel.wl_surface();
-        let own = self
-            .window_geometry(toplevel)
-            .map(|g| g.loc)
-            .unwrap_or_default();
-        Some((toplevel.clone(), Point::from((-own.x, -own.y)).to_f64()))
+        Some((
+            toplevel.clone(),
+            self.surface_origin(view, toplevel).to_f64(),
+        ))
     }
 
     fn pointer_event(&mut self, id: ViewId, event: PointerEvent) {
@@ -994,6 +1027,7 @@ impl SeatHandler for State {
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         let client = focused.and_then(|surface| self.dh.get_client(surface.id()).ok());
         set_data_device_focus(&self.dh, seat, client);
+        self.focus_text_input(focused);
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
