@@ -2,12 +2,14 @@
 //! the host instead of read from devices.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::io::{self, Read as _, Write as _};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixListener;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use calloop::channel::{self, Channel, Sender};
 use calloop::generic::Generic;
@@ -64,7 +66,19 @@ const TEXT_MIME_TYPES: [&str; 5] = [
 /// Largest clipboard text read from the client.
 const MAX_CLIPBOARD_BYTES: u64 = 16 << 20;
 
-/// A running nested compositor. Dropping it stops the compositor thread.
+/// How long the compositor waits after its event loop fails, so a failure
+/// that repeats does not spin.
+const ERROR_PAUSE: Duration = Duration::from_millis(50);
+
+/// Largest distance from a surface's origin, in either direction, that the
+/// nest takes from the client; sums of a few of these stay within `i32`.
+const MAX_COORDINATE: i32 = 1 << 20;
+
+/// A running nested compositor.
+///
+/// The compositor thread outlives this handle and serves its client for the
+/// life of the process: GDK exits the process when its display connection is
+/// lost, and the embedded client is GTK in this process.
 pub struct Nest {
     socket: String,
     commands: Sender<Command>,
@@ -112,7 +126,7 @@ impl Nest {
         std::thread::Builder::new()
             .name("wayland-nest".into())
             .spawn(move || {
-                let result = run(
+                let Err(error) = run(
                     listener,
                     path.clone(),
                     command_source,
@@ -120,10 +134,8 @@ impl Nest {
                     &ready_sender,
                 );
                 let _ = std::fs::remove_file(&path);
-                if let Err(error) = result {
-                    log::error!("wayland nest stopped: {error}");
-                    let _ = ready_sender.send(Err(error));
-                }
+                log::error!("wayland nest did not start: {error}");
+                let _ = ready_sender.send(Err(error));
             })?;
         ready
             .recv()
@@ -182,13 +194,14 @@ impl Nest {
     }
 }
 
+/// Runs the compositor; returns only if it cannot start.
 fn run(
     listener: UnixListener,
     path: PathBuf,
     commands: Channel<Command>,
     events: async_channel::Sender<Event>,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
-) -> io::Result<()> {
+) -> io::Result<Infallible> {
     let mut event_loop: EventLoop<State> = EventLoop::try_new().map_err(io::Error::other)?;
     let display: Display<State> = Display::new().map_err(io::Error::other)?;
     let mut state = State::new(display.handle(), events)?;
@@ -198,7 +211,22 @@ fn run(
             Generic::new(display, Interest::READ, Mode::Level),
             |_, display, state| {
                 // SAFETY: the display is only dropped with this source.
-                unsafe { display.get_mut().dispatch_clients(state)? };
+                let display = unsafe { display.get_mut() };
+                let mut dispatched = catch_panic(|| display.dispatch_clients(state));
+                // What the client sent after the request that panicked is
+                // already read from its socket, so readiness will not report
+                // it; it is dispatched from the client's buffer instead.
+                while dispatched.is_none()
+                    && let Some(client) = state.client.clone()
+                {
+                    dispatched =
+                        catch_panic(|| display.backend().dispatch_single_client(state, client));
+                }
+                if let Some(Err(error)) = dispatched
+                    && error.kind() != io::ErrorKind::WouldBlock
+                {
+                    log::warn!("wayland nest: dispatching the client failed: {error}");
+                }
                 Ok(PostAction::Continue)
             },
         )
@@ -206,38 +234,75 @@ fn run(
     handle
         .insert_source(
             Generic::new(listener, Interest::READ, Mode::Level),
-            move |_, listener, state| match listener.accept() {
-                Ok((stream, _)) => {
-                    stream.set_nonblocking(true)?;
+            move |_, listener, state| {
+                let stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) => {
+                        if error.kind() != io::ErrorKind::WouldBlock {
+                            log::warn!("wayland nest: accepting the client failed: {error}");
+                        }
+                        return Ok(PostAction::Continue);
+                    }
+                };
+                let inserted = stream.set_nonblocking(true).and_then(|()| {
                     state
                         .dh
-                        .insert_client(stream, Arc::new(ClientState::default()))?;
-                    let _ = std::fs::remove_file(&path);
-                    Ok(PostAction::Remove)
+                        .insert_client(stream, Arc::new(ClientState::default()))
+                });
+                match inserted {
+                    Ok(client) => {
+                        state.client = Some(client.id());
+                        let _ = std::fs::remove_file(&path);
+                        Ok(PostAction::Remove)
+                    }
+                    Err(error) => {
+                        log::warn!("wayland nest: adding the client failed: {error}");
+                        Ok(PostAction::Continue)
+                    }
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(PostAction::Continue),
-                Err(error) => Err(error),
             },
         )
         .map_err(|error| io::Error::other(error.error))?;
     handle
-        .insert_source(commands, |event, _, state| match event {
-            channel::Event::Msg(command) => state.handle(command),
-            channel::Event::Closed => state.running = false,
+        .insert_source(commands, |event, _, state| {
+            if let channel::Event::Msg(command) = event {
+                state.handle(command);
+            }
         })
         .map_err(|error| io::Error::other(error.error))?;
 
     let _ = ready.send(Ok(()));
-    while state.running {
-        event_loop
-            .dispatch(None, &mut state)
-            .map_err(io::Error::other)?;
-        state.flush_frames();
-        if let Err(error) = state.dh.flush_clients() {
-            log::debug!("wayland nest: flushing the client failed: {error}");
+    loop {
+        let turn = catch_panic(|| {
+            let dispatched = event_loop.dispatch(None, &mut state);
+            state.flush_frames();
+            if let Err(error) = state.dh.flush_clients() {
+                log::debug!("wayland nest: flushing the client failed: {error}");
+            }
+            dispatched
+        });
+        if let Some(Err(error)) = turn {
+            log::warn!("wayland nest: the event loop failed: {error}");
+            std::thread::sleep(ERROR_PAUSE);
         }
     }
-    Ok(())
+}
+
+/// Runs `f`, logging a panic instead of letting it end the compositor thread,
+/// which would drop the display (see [`Nest`]).
+fn catch_panic<T>(f: impl FnOnce() -> T) -> Option<T> {
+    match std::panic::catch_unwind(AssertUnwindSafe(f)) {
+        Ok(value) => Some(value),
+        Err(panic) => {
+            let message = panic
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic");
+            log::error!("wayland nest: a handler panicked: {message}");
+            None
+        }
+    }
 }
 
 #[derive(Default)]
@@ -274,6 +339,8 @@ struct View {
 
 struct State {
     dh: DisplayHandle,
+    /// The one client the socket accepted.
+    client: Option<ClientId>,
     compositor: CompositorState,
     xdg_shell: XdgShellState,
     shm: ShmState,
@@ -295,7 +362,6 @@ struct State {
     clipboard: Option<Arc<str>>,
     events: async_channel::Sender<Event>,
     epoch: Instant,
-    running: bool,
 }
 
 impl State {
@@ -346,6 +412,7 @@ impl State {
 
         Ok(Self {
             dh,
+            client: None,
             compositor,
             xdg_shell,
             shm,
@@ -364,7 +431,6 @@ impl State {
             clipboard: None,
             events,
             epoch: Instant::now(),
-            running: true,
         })
     }
 
@@ -459,9 +525,8 @@ impl State {
         while let Some(parent) = compositor::get_parent(&root) {
             root = parent;
         }
-        match self.view_of(&root) {
-            Some(id) => {
-                let view = self.views.get_mut(&id).expect("view_of returns live views");
+        match self.view_of(&root).and_then(|id| self.views.get_mut(&id)) {
+            Some(view) => {
                 view.callbacks.extend(callbacks);
                 view.dirty = true;
             }
@@ -563,11 +628,12 @@ impl State {
                 .current()
                 .geometry
         });
-        declared.or_else(|| {
-            self.images
-                .get(&surface.id())
-                .map(|(_, image)| Rectangle::new((0, 0).into(), (image.width, image.height).into()))
-        })
+        match declared {
+            Some(geometry) => Some(Rectangle::new(clamp_point(geometry.loc), geometry.size)),
+            None => self.images.get(&surface.id()).map(|(_, image)| {
+                Rectangle::new((0, 0).into(), (image.width, image.height).into())
+            }),
+        }
     }
 
     /// Where the window geometry of `surface` (the view's toplevel or one of
@@ -599,7 +665,8 @@ impl State {
             .map(|parent| self.window_origin(view, &parent))
             .unwrap_or_default();
         let bounds = Rectangle::new(Point::from((-parent.x, -parent.y)), self.view_size(view));
-        positioner.get_unconstrained_geometry(bounds)
+        let geometry = positioner.get_unconstrained_geometry(bounds);
+        Rectangle::new(clamp_point(geometry.loc), geometry.size)
     }
 
     fn flush_frames(&mut self) {
@@ -613,15 +680,19 @@ impl State {
             let Some(frame) = self.composite(id) else {
                 continue;
             };
-            let view = self.views.get_mut(&id).expect("ready views are live");
+            let Some(view) = self.views.get_mut(&id) else {
+                continue;
+            };
             view.dirty = false;
             view.in_flight = Some(std::mem::take(&mut view.callbacks));
+            // With no host to present it, the frame stays in flight and the
+            // client is not asked to draw again.
             if self
                 .events
                 .try_send(Event::Frame { view: id, frame })
                 .is_err()
             {
-                self.running = false;
+                log::debug!("wayland nest: no host to present frames");
             }
         }
         self.images.retain(|_, (surface, _)| surface.is_alive());
@@ -826,14 +897,24 @@ impl State {
 
 fn subsurface_offset(states: &SurfaceData) -> Point<i32, Logical> {
     if states.role == Some("subsurface") {
-        states
-            .cached_state
-            .get::<SubsurfaceCachedState>()
-            .current()
-            .location
+        clamp_point(
+            states
+                .cached_state
+                .get::<SubsurfaceCachedState>()
+                .current()
+                .location,
+        )
     } else {
         Point::from((0, 0))
     }
+}
+
+/// Bounds a position the client chose to [`MAX_COORDINATE`].
+fn clamp_point(point: Point<i32, Logical>) -> Point<i32, Logical> {
+    Point::from((
+        point.x.clamp(-MAX_COORDINATE, MAX_COORDINATE),
+        point.y.clamp(-MAX_COORDINATE, MAX_COORDINATE),
+    ))
 }
 
 /// Sets the pending configure of a view's toplevel. The tiled states keep GTK
@@ -998,17 +1079,21 @@ impl XdgShellHandler for State {
         let Some(parent) = surface.get_parent_surface() else {
             return;
         };
-        let Some(id) = self.view_of(&parent) else {
+        let Some((id, view)) = self
+            .view_of(&parent)
+            .and_then(|id| Some((id, self.views.get(&id)?)))
+        else {
             surface.with_pending_state(|state| state.geometry = positioner.get_geometry());
             return;
         };
-        let view = &self.views[&id];
         let geometry = self.place_popup(view, &surface, positioner);
         surface.with_pending_state(|state| {
             state.geometry = geometry;
             state.positioner = positioner;
         });
-        let view = self.views.get_mut(&id).expect("looked up above");
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
         view.popups.push(Popup {
             surface,
             geometry,
@@ -1032,15 +1117,20 @@ impl XdgShellHandler for State {
         positioner: PositionerState,
         token: u32,
     ) {
-        let Some(id) = self.view_of(surface.wl_surface()) else {
+        let Some((id, view)) = self
+            .view_of(surface.wl_surface())
+            .and_then(|id| Some((id, self.views.get(&id)?)))
+        else {
             return;
         };
-        let geometry = self.place_popup(&self.views[&id], &surface, positioner);
+        let geometry = self.place_popup(view, &surface, positioner);
         surface.with_pending_state(|state| {
             state.geometry = geometry;
             state.positioner = positioner;
         });
-        let view = self.views.get_mut(&id).expect("looked up above");
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
         if let Some(popup) = view.popups.iter_mut().find(|p| p.surface == surface) {
             popup.geometry = geometry;
         }
