@@ -5506,83 +5506,100 @@ pub(crate) mod tests {
         link.close();
     }
 
+    /// The threads list never says "no threads" before the host's baseline.
+    /// A host reached over a link is waited for behind a skeleton, which
+    /// fades out over the baseline; the host in this process answers within
+    /// moments, so its list stays empty until then and shows at once, with
+    /// no skeleton drawn at launch.
     #[gpui::test]
     fn threads_wait_for_baseline_before_rendering_empty(cx: &mut TestAppContext) {
         use gpui::{px, size};
         cx.update(crate::theme::init);
-        let (to_host, _outgoing) = async_channel::unbounded();
-        let (_incoming, from_host) = async_channel::unbounded();
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                tcode_client::HostLink::new(to_host, from_host),
-                super::WorkspaceAttachment::Remote {
-                    host_id: "test".into(),
-                    host_name: "Test".into(),
-                },
-                None,
-                None,
-                cx,
-            )
-        });
-        seed_full_scope(&store, &_incoming, Vec::new(), cx);
-        let window_state =
-            cx.new(|_| crate::window_state::WindowState::default().with_compact(true));
-        let (_sidebar, cx) = cx.add_window_view(|_, cx| {
-            crate::sidebar::SessionsSidebar::new(vec![store.clone()], window_state, cx)
-        });
-        cx.simulate_resize(size(px(393.), px(852.)));
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        assert!(
-            cx.debug_bounds("baseline-loading").is_some(),
-            "Threads must render a skeleton before Index arrives"
-        );
-        assert!(cx.debug_bounds("threads-empty").is_none());
-        store.update(cx, |store, cx| {
-            store.receive(
-                EventEnvelope {
-                    request_id: None,
-                    topic: Topic::Settings,
-                    event: ServerEvent::SettingsSnapshot(Settings::default()),
-                },
-                cx,
-            );
-            store.receive(
-                EventEnvelope {
-                    request_id: None,
-                    topic: Topic::Index,
-                    event: ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
-                        summary: Default::default(),
-                        sessions: vec![],
-                        projects: vec![],
-                    }),
-                },
-                cx,
-            );
-            cx.emit(super::StoreChange {
-                topic: super::TopicKind::Index,
+        for remote in [true, false] {
+            let (to_host, _outgoing) = async_channel::unbounded();
+            let (incoming, from_host) = async_channel::unbounded();
+            let store = cx.new(|cx| {
+                WorkspaceStore::new_attached(
+                    tcode_client::HostLink::new(to_host, from_host),
+                    if remote {
+                        super::WorkspaceAttachment::Remote {
+                            host_id: "test".into(),
+                            host_name: "Test".into(),
+                        }
+                    } else {
+                        super::WorkspaceAttachment::Local
+                    },
+                    None,
+                    None,
+                    cx,
+                )
             });
-            cx.notify();
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        assert!(
-            cx.debug_bounds("threads-empty").is_some(),
-            "the baseline replaces the skeleton, which fades out over it"
-        );
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            let _ = window.draw(cx);
-        });
-        assert!(cx.debug_bounds("baseline-loading").is_none());
-        assert!(
-            cx.debug_bounds("threads-empty").is_some(),
-            "An applied empty baseline must render the empty message"
-        );
+            seed_full_scope(&store, &incoming, Vec::new(), cx);
+            let window_state =
+                cx.new(|_| crate::window_state::WindowState::default().with_compact(true));
+            let (_sidebar, cx) = cx.add_window_view(|_, cx| {
+                crate::sidebar::SessionsSidebar::new(vec![store.clone()], window_state, cx)
+            });
+            cx.simulate_resize(size(px(393.), px(852.)));
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert_eq!(
+                cx.debug_bounds("baseline-loading").is_some(),
+                remote,
+                "a skeleton before Index arrives only for a host over a link"
+            );
+            assert!(cx.debug_bounds("threads-empty").is_none());
+            store.update(cx, |store, cx| {
+                store.receive(
+                    EventEnvelope {
+                        request_id: None,
+                        topic: Topic::Settings,
+                        event: ServerEvent::SettingsSnapshot(Settings::default()),
+                    },
+                    cx,
+                );
+                store.receive(
+                    EventEnvelope {
+                        request_id: None,
+                        topic: Topic::Index,
+                        event: ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                            summary: Default::default(),
+                            sessions: vec![],
+                            projects: vec![],
+                        }),
+                    },
+                    cx,
+                );
+                cx.emit(super::StoreChange {
+                    topic: super::TopicKind::Index,
+                });
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert!(
+                cx.debug_bounds("threads-empty").is_some(),
+                "the baseline replaces what waited for it"
+            );
+            assert_eq!(
+                cx.debug_bounds("baseline-loading").is_some(),
+                remote,
+                "only a skeleton that was drawn fades out over the baseline"
+            );
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+            assert!(cx.debug_bounds("baseline-loading").is_none());
+            assert!(
+                cx.debug_bounds("threads-empty").is_some(),
+                "An applied empty baseline must render the empty message"
+            );
+        }
     }
 
     #[gpui::test]

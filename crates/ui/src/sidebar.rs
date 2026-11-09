@@ -1555,6 +1555,17 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let loading = self.threads_loading(cx);
+        // The host in this process answers within moments of the window
+        // opening: a skeleton would be gone almost as soon as drawn, so the
+        // list stays as it was until that host answers, then shows at once.
+        if loading
+            && self
+                .hosts
+                .iter()
+                .any(|host| !host.store.read(cx).is_remote())
+        {
+            return div().flex_1().into_any_element();
+        }
         let skeleton = loading
             && self
                 .hosts
