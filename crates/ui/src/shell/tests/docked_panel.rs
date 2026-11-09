@@ -5,7 +5,11 @@
 use super::*;
 
 /// The side-by-side minimum: the panel's narrowest, and a pane's own beside it.
-const LEAST: f32 = crate::material::PANEL_CONTENT_MIN_WIDTH + PANE_MIN_WIDTH;
+/// The panel's narrowest holds its content and, where the window draws its
+/// own caption buttons, those buttons in its strip.
+const LEAST: f32 = crate::material::PANEL_CONTENT_MIN_WIDTH
+    + crate::window_caption::RIGHT_PANEL_CAPTION_WIDTH
+    + PANE_MIN_WIDTH;
 
 fn conversation(cx: &mut VisualTestContext) -> gpui::Bounds<Pixels> {
     cx.debug_bounds("pane-conversation")

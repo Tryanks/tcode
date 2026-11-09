@@ -19531,7 +19531,8 @@ pub(crate) mod tests {
                     }
                 });
                 let beside = px(width) - sidebar;
-                let panel_min = px(crate::material::PANEL_CONTENT_MIN_WIDTH);
+                let panel_min = px(crate::material::PANEL_CONTENT_MIN_WIDTH
+                    + crate::window_caption::RIGHT_PANEL_CAPTION_WIDTH);
                 let expected = if beside < panel_min + px(PANE_MIN_WIDTH) {
                     beside
                 } else {
