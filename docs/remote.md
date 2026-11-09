@@ -841,6 +841,51 @@ attachment's Preview.
 
 The browser client cannot override its browser's proxy.
 
+## Open in Zed on a machine
+
+On the desktop, **Open in Zed over Tcode (remote)** on a thread on another
+machine, or on one of its paths, opens it with Zed's own SSH remote
+development, carried by the desktop's existing connection to the machine: the
+machine needs no SSH server and no open port, and Zed installs and runs its
+remote server there as it does over any SSH connection. A space member sees
+the entry only when the space's policy allows the editor.
+
+The machine runs an SSH server inside Tcode for each such connection. It
+accepts the device without a password or key, because the connection is
+already the paired device's; commands run through the user's shell in the
+home directory (`$SHELL -c`; on Windows `%COMSPEC%`, normally cmd.exe, with
+`/c`, as Win32-OpenSSH does), SFTP is served, and port, X11 and agent
+forwarding are refused. Its host key lives in the machine's data directory.
+
+The entry first shows what it does; opening from there agrees to Tcode adding
+one `ssh_connections` entry per paired machine to Zed's `settings.json`,
+keeping everything else in the file, and **Don't show this again** skips the
+note on this device from then on. The entries point Zed's ssh at `ssh/config`
+in Tcode's data directory, whose `tcode-<id>` hosts run `tcode ssh-proxy`, so
+plain `ssh` never sees them. Each connection counts towards the 56 tunnels of
+an attachment but is not closed when idle.
+
+The proxy hands its bytes to the running Tcode, which admits a Zed only
+within a minute of Open in Zed for that machine; that Zed then keeps the
+machine until it quits. The proxy must be started by `ssh`, itself started
+directly by Zed's main process, which Tcode identifies by its code signature
+on macOS and Windows and by its installation on Linux. On macOS and Linux the
+ssh must also be Zed's ControlMaster connection (`-o ControlMaster=yes`), so
+ssh commands typed into Zed's terminal or run by its tasks are refused unless
+they imitate it; on Windows, where Zed opens a connection per command and
+its commands carry nothing distinctive, anything Zed starts as ssh directly
+is admitted (a shell in its terminal is not ssh, so its commands are
+refused). Anything refused gets a one-line reason that Zed shows. None of
+this stands between a user and their own programs: any program running as
+the same user could imitate Zed. On Windows the pipe's name includes the
+user's SID, and the proxy refuses a pipe served by another user.
+
+Zed's `ssh://` links name the folder by the link's path, which a Windows
+machine's Zed server cannot resolve as a drive path, so on a Windows machine
+Tcode opens only folders inside the home of the account Tcode runs as there,
+as `~/...`. Zed from Flatpak cannot use this: its ssh runs inside the sandbox,
+where Tcode's executable cannot run.
+
 ## Security
 
 ### What is encrypted, and what a relay sees
@@ -1018,8 +1063,8 @@ with **Pair again**; protocol mismatches stop with **Update the app**.
   externally, copy, type the value). Prepare projects and provider installations
   on the machine.
 - One machine holds at most 64 open streams per device connection, of which
-  56 may be Preview tunnels; a device that opens more is refused with **too
-  many tunnels** until one closes.
+  56 may be Preview tunnels or editor connections; a device that opens more is
+  refused with **too many tunnels** until one closes.
 - The Android arm64 APK is signed with the project's release key, so each
   release installs over the previous one. Android rejects an update signed with
   a different key: uninstall first when switching between a release and a

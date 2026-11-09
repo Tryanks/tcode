@@ -200,6 +200,266 @@ pub(crate) fn open_in_editor(path: &std::path::Path, cx: &App) -> Option<Result<
         .open_in_editor(path)
 }
 
+/// The Open in Zed entry a host's paths get.
+pub(crate) struct ZedEntry {
+    pub(crate) host: HostKey,
+    /// Its own wording for a machine reached over Tcode.
+    pub(crate) label: &'static str,
+}
+
+impl ZedEntry {
+    /// `None` where the space's policy does not allow the editor, or the
+    /// host is a machine and this client cannot reach one from Zed.
+    pub(crate) fn of(store: &WorkspaceStore, cx: &App) -> Option<Self> {
+        if !store.space_allows(|policy| policy.editor) {
+            return None;
+        }
+        let label = if !store.is_remote() {
+            "chat.open_zed"
+        } else if cx
+            .try_global::<ClientAttachment>()
+            .is_some_and(|attachment| attachment.host.machine_editor().is_some())
+        {
+            "chat.open_zed_remote"
+        } else {
+            return None;
+        };
+        Some(Self {
+            host: store.host_key(),
+            label,
+        })
+    }
+
+    /// The entry of the current pane's host; this client's own Zed where no
+    /// pane is over a host.
+    pub(crate) fn current(cx: &App) -> Option<Self> {
+        match crate::shell::current_store(cx) {
+            Some(store) => Self::of(store.read(cx), cx),
+            None => Some(Self {
+                host: HostKey::Local,
+                label: "chat.open_zed",
+            }),
+        }
+    }
+}
+
+/// Open `path` of `host` in Zed; `None` is the current pane's host.
+pub(crate) fn open_path_in_zed(
+    host: Option<&HostKey>,
+    path: &std::path::Path,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let store = match host {
+        Some(host) => crate::shell::store_of_host(host, cx),
+        None => crate::shell::current_store(cx),
+    };
+    match store {
+        Some(store) => open_host_path_in_zed(&store, path, window, cx),
+        None if matches!(host, None | Some(HostKey::Local)) => {
+            crate::widgets::menu::open_in_zed(path, window, cx)
+        }
+        None => {}
+    }
+}
+
+/// Open `path`, a directory of `store`'s host, in Zed: on this client
+/// directly when the host is the one in this process, otherwise on its
+/// machine over Tcode's connection to it, after a note on what that does
+/// which is also the user's agreement to Tcode's entry in Zed's settings.
+pub(crate) fn open_host_path_in_zed(
+    store: &Entity<WorkspaceStore>,
+    path: &std::path::Path,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if ZedEntry::of(store.read(cx), cx).is_none() {
+        return;
+    }
+    if !store.read(cx).is_remote() {
+        crate::widgets::menu::open_in_zed(path, window, cx);
+        return;
+    }
+    let Some(editor) = cx
+        .try_global::<ClientAttachment>()
+        .and_then(|attachment| attachment.host.machine_editor())
+    else {
+        return;
+    };
+    let Some((machine, tunnels)) = store.read(cx).machine_tunnels() else {
+        window.push_notification(
+            Notification::error(crate::tr!(
+                "editor.zed.pipe_not_connected",
+                machine = store.read(cx).host_title()
+            )),
+            cx,
+        );
+        return;
+    };
+    let path = path.to_string_lossy().into_owned();
+    if !windows_drive_path(&path) {
+        let target = tcode_client::host::MachinePath {
+            host_id: machine.host_id.clone(),
+            path,
+            tunnels,
+        };
+        confirm_and_open(editor, target, machine.name, window, cx);
+        return;
+    }
+    // Zed names the folder of an `ssh://` link by the link's path, which
+    // starts with `/`; a Windows machine's server cannot resolve
+    // `/C:/...`, but expands a leading `~` to its home.
+    let home = store.update(cx, |store, cx| store.browse_directories(String::new(), cx));
+    window
+        .spawn(cx, async move |cx| {
+            let relative = home
+                .await
+                .ok()
+                .and_then(|listing| listing.home)
+                .and_then(|home| home_relative(&path, &home.to_string_lossy()));
+            let _ = cx.update(|window, cx| match relative {
+                Some(path) => {
+                    let target = tcode_client::host::MachinePath {
+                        host_id: machine.host_id.clone(),
+                        path,
+                        tunnels,
+                    };
+                    confirm_and_open(editor, target, machine.name, window, cx);
+                }
+                None => window.push_notification(
+                    Notification::error(crate::tr!(
+                        "editor.zed.open_failed",
+                        error = crate::tr!("editor.zed.windows_outside_home")
+                    )),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+}
+
+/// Whether `path` is a Windows drive path, `C:\...` or `C:/...`.
+fn windows_drive_path(path: &str) -> bool {
+    matches!(path.as_bytes(), [drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic())
+}
+
+/// `path` under `home` as `~/...`, both Windows paths; `None` outside it.
+fn home_relative(path: &str, home: &str) -> Option<String> {
+    let normal = |path: &str| path.replace('/', "\\").trim_end_matches('\\').to_owned();
+    let (path, home) = (normal(path), normal(home));
+    let rest = path
+        .get(..home.len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case(&home))?;
+    let rest = &path[rest.len()..];
+    match rest.strip_prefix('\\') {
+        Some(rest) => Some(format!("~/{}", rest.replace('\\', "/"))),
+        None if rest.is_empty() => Some("~".to_owned()),
+        None => None,
+    }
+}
+
+/// Open `target` after the note on what reaching a machine from Zed does,
+/// unless this device asked not to see it again.
+fn confirm_and_open(
+    editor: Rc<dyn tcode_client::host::MachineEditor>,
+    target: tcode_client::host::MachinePath,
+    machine_name: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if crate::device::DevicePreferences::remote_zed_note_dismissed(cx) {
+        open_on_machine(editor.as_ref(), target, window, cx);
+        return;
+    }
+    let settings_file = editor.settings_file().map_or_else(
+        || "settings.json".to_owned(),
+        |path| path.display().to_string(),
+    );
+    let dismiss = Rc::new(std::cell::Cell::new(false));
+    window.open_dialog(cx, move |dialog, _, _| {
+        let checked = dismiss.get();
+        let toggle = dismiss.clone();
+        let confirm = dismiss.clone();
+        let editor = editor.clone();
+        let target = target.clone();
+        let machine_name = machine_name.clone();
+        let settings_file = settings_file.clone();
+        dialog
+            .close_button(false)
+            .title(crate::tr!("editor.zed.remote_title").into_owned())
+            .content(move |content, window, cx| {
+                let compact = crate::window_seam::window_is_compact(window, cx);
+                let line = |text: gpui::SharedString| div().text_secondary(compact, cx).child(text);
+                content.child(
+                    v_flex()
+                        .gap_3()
+                        .debug_selector(|| "remote-zed-note".into())
+                        .child(line(
+                            crate::tr!("editor.zed.remote_channel", machine = machine_name.clone())
+                                .into_owned()
+                                .into(),
+                        ))
+                        .child(line(
+                            crate::tr!("editor.zed.remote_server", machine = machine_name.clone())
+                                .into_owned()
+                                .into(),
+                        ))
+                        .child(line(
+                            crate::tr!("editor.zed.remote_only_zed").into_owned().into(),
+                        ))
+                        .child(line(
+                            crate::tr!("editor.zed.remote_settings", file = settings_file.clone())
+                                .into_owned()
+                                .into(),
+                        ))
+                        .child(
+                            crate::widgets::checkbox::Checkbox::new("remote-zed-note-dismiss")
+                                .label(crate::tr!("editor.zed.remote_dont_show"))
+                                .checked(checked)
+                                .on_click({
+                                    let toggle = toggle.clone();
+                                    move |checked: &bool, window, _| {
+                                        toggle.set(*checked);
+                                        window.refresh();
+                                    }
+                                }),
+                        ),
+                )
+            })
+            .footer(
+                crate::overlay::DialogActions::new()
+                    .child(
+                        Button::new("remote-zed-note-cancel")
+                            .label(crate::tr!("settings.cancel"))
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("remote-zed-note-open")
+                            .debug_selector(|| "remote-zed-note-open".into())
+                            .primary()
+                            .label(crate::tr!("editor.zed.remote_open"))
+                            .on_click(move |_, window, cx| {
+                                if confirm.get() {
+                                    crate::device::DevicePreferences::dismiss_remote_zed_note(cx);
+                                }
+                                window.close_dialog(cx);
+                                open_on_machine(editor.as_ref(), target.clone(), window, cx);
+                            }),
+                    ),
+            )
+    });
+}
+
+fn open_on_machine(
+    editor: &dyn tcode_client::host::MachineEditor,
+    target: tcode_client::host::MachinePath,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let opening = cx.foreground_executor().spawn(editor.open(target));
+    report("editor.zed.open_failed", opening, window, cx);
+}
+
 /// Tell the user why a change did not happen; a change that did shows itself.
 /// `failed` is the message key, given the error as `error`.
 fn report<T: 'static>(

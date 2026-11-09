@@ -1009,6 +1009,8 @@ impl ChatView {
                 .and_then(|id| self.workspace_store.read(cx).thread_meta(id))
                 .is_some_and(|meta| meta.worktree.is_none())
         };
+        let zed =
+            crate::remote::ZedEntry::of(self.workspace_store.read(cx), cx).map(|entry| entry.label);
         let title_menu = {
             let title = title.clone();
             let cwd = cwd.clone();
@@ -1122,19 +1124,21 @@ impl ChatView {
                         },
                         agents_cue_dot(agents_cue.flatten(), &motion, window, cx),
                         cwd.clone(),
+                        zed,
+                        self.workspace_store.read(cx).host_key(),
                     ),
                 ));
             }
             if swap.shows(0) {
                 let mut cue = agents_cue_dot(agents_cue.flatten(), &motion, window, cx);
-                let open = cwd.clone().and_then(|cwd| {
+                let open = cwd.clone().zip(zed).and_then(|(cwd, zed)| {
                     self.labelled_swap(
                         "open-labels",
                         labelled,
                         window,
                         cx,
                         move |this, labelled, cx| {
-                            Some(this.render_open_button(cwd.clone(), labelled, cx))
+                            Some(this.render_open_button(cwd.clone(), zed, labelled, cx))
                         },
                     )
                 });
@@ -1348,6 +1352,8 @@ impl ChatView {
         panels: HeaderPanels,
         agents_cue: Option<AnyElement>,
         cwd: Option<PathBuf>,
+        zed: Option<&'static str>,
+        host: crate::store::HostKey,
     ) -> AnyElement {
         use crate::widgets::menu::{CopyText, OpenPathInZed, RevealPath};
         let panes = self.pane_controls;
@@ -1396,11 +1402,16 @@ impl ChatView {
                         let menu = match &cwd {
                             Some(cwd) => menu
                                 .separator()
-                                .menu_with_icon(
-                                    crate::tr!("chat.open_zed").into_owned(),
-                                    IconName::ExternalLink,
-                                    Box::new(OpenPathInZed(cwd.clone())),
-                                )
+                                .when_some(zed, |menu, label| {
+                                    menu.menu_with_icon(
+                                        crate::tr!(label).into_owned(),
+                                        IconName::ExternalLink,
+                                        Box::new(OpenPathInZed {
+                                            path: cwd.clone(),
+                                            host: Some(host.clone()),
+                                        }),
+                                    )
+                                })
                                 .menu_with_icon(
                                     crate::tr!("chat.reveal_in_file_manager").into_owned(),
                                     IconName::FolderOpen,
@@ -1597,12 +1608,14 @@ impl ChatView {
     fn render_open_button(
         &self,
         cwd: PathBuf,
+        zed: &'static str,
         labelled: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let border = cx.theme().border;
         let main_cwd = cwd.clone();
         let menu_cwd = cwd;
+        let store = self.workspace_store.clone();
 
         let chevron = crate::material::overlay_popover("open-menu", cx)
             .anchor(Anchor::TopRight)
@@ -1616,6 +1629,7 @@ impl ChatView {
             )
             .content(move |_state, _window, cx| {
                 let zed_cwd = menu_cwd.clone();
+                let zed_store = store.clone();
                 let reveal_cwd = menu_cwd.clone();
                 let copy_cwd = menu_cwd.clone();
                 let popover = cx.entity();
@@ -1650,10 +1664,10 @@ impl ChatView {
                         menu_item(
                             "open-zed",
                             IconName::ExternalLink,
-                            crate::tr!("chat.open_zed").into_owned().into(),
+                            crate::tr!(zed).into_owned().into(),
                         )
                         .on_click(move |_, window, cx| {
-                            open_in_zed(&zed_cwd, window, cx);
+                            crate::remote::open_host_path_in_zed(&zed_store, &zed_cwd, window, cx);
                             p1.update(cx, |st, cx| st.dismiss(window, cx));
                         }),
                     )
@@ -1711,8 +1725,9 @@ impl ChatView {
                             main.tooltip(crate::tr!("chat.open"))
                         }
                     })
-                    .on_click(cx.listener(move |_, _, window, cx| {
-                        open_in_zed(&main_cwd, window, cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let store = this.workspace_store.clone();
+                        crate::remote::open_host_path_in_zed(&store, &main_cwd, window, cx);
                     })),
             )
             .child(div().w_px().h(px(16.)).bg(border))

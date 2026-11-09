@@ -8,10 +8,11 @@
 //! On a LAN a paired machine is found again without any service: it
 //! advertises DNS-SD and devices resolve it through [`lan`].
 //!
-//! Two optional layers share the runtime: `native` is the client host and
-//! the Preview adapters a native client shows a machine's pages through, and
+//! Three optional layers share the runtime: `native` is the client host and
+//! the Preview adapters a native client shows a machine's pages through,
 //! `browser` is the plain HTTP listener a headless machine serves the browser
-//! client from.
+//! client from, and `ssh` is the SSH server a machine runs for an editor's
+//! remote development on streams devices open.
 
 #[cfg(feature = "browser")]
 pub mod browser;
@@ -31,6 +32,8 @@ mod original;
 #[cfg(feature = "native")]
 pub mod preview;
 mod runtime;
+#[cfg(feature = "ssh")]
+mod ssh;
 mod tunnel;
 pub mod wire;
 

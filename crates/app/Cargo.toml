@@ -16,7 +16,7 @@ icon = ["../../assets/icons/app/tcode.icns"]
 tcode-client = { path = "../client" }
 tcode-services = { path = "../services" }
 tcode-protocol = { path = "../protocol" }
-tcode-traverse = { path = "../traverse", features = ["native"] }
+tcode-traverse = { path = "../traverse", features = ["native", "ssh"] }
 tcode-runtime = { path = "../runtime" }
 tcode-ui = { path = "../ui" }
 computer-use-mcp = { path = "../computer-use-mcp" }
@@ -27,6 +27,31 @@ log = "0.4"
 smol = "2"
 async-channel = "2"
 serde_json = "1"
+futures-lite = "2"
+jsonc-parser = { version = "0.34", features = ["cst"] }
+url = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [build-dependencies]
 embed-resource = "3.0.11"

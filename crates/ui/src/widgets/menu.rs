@@ -42,9 +42,16 @@ pub struct OpenUrl(pub String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_menu, no_json)]
 pub struct OpenPath(pub String);
+/// Open a path of `host` in Zed: on this client for the host in this
+/// process, on the host's machine over Tcode's connection otherwise.
+/// [`PopupMenu::path_items`] leaves `host` to the menu, which takes the
+/// current pane's.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_menu, no_json)]
-pub struct OpenPathInZed(pub String);
+pub struct OpenPathInZed {
+    pub path: String,
+    pub host: Option<crate::store::HostKey>,
+}
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_menu, no_json)]
 pub struct RevealPath(pub String);
@@ -116,7 +123,9 @@ impl PopupMenu {
     ) -> Entity<Self> {
         cx.new(|cx| {
             let menu = Self::new(cx);
-            builder(menu, window, cx)
+            let mut menu = builder(menu, window, cx);
+            menu.place_zed_items(cx);
+            menu
         })
     }
     pub fn menu(self, label: impl Into<SharedString>, action: Box<dyn Action>) -> Self {
@@ -208,6 +217,33 @@ impl PopupMenu {
         }
         self
     }
+    /// Give each Open in Zed item that names no host the current pane's:
+    /// a press anywhere in a pane makes it current before the menu it opens
+    /// is built. The item takes that host's wording, and goes where the host
+    /// offers no editor.
+    fn place_zed_items(&mut self, cx: &App) {
+        let entry = crate::remote::ZedEntry::current(cx);
+        self.items.retain_mut(|item| {
+            let MenuItem::Item { label, action, .. } = item else {
+                return true;
+            };
+            let Some(open) = action.as_any().downcast_ref::<OpenPathInZed>() else {
+                return true;
+            };
+            if open.host.is_some() {
+                return true;
+            }
+            let Some(entry) = &entry else {
+                return false;
+            };
+            *label = Some(crate::tr!(entry.label).into_owned().into());
+            *action = Box::new(OpenPathInZed {
+                path: open.path.clone(),
+                host: Some(entry.host.clone()),
+            });
+            true
+        });
+    }
     /// What a file path offers wherever one appears: open it, open it in
     /// Zed, reveal it, and copy it absolute or relative to `base_dir`.
     pub fn path_items(self, path: &str, base_dir: Option<&Path>) -> Self {
@@ -220,7 +256,10 @@ impl PopupMenu {
         )
         .menu(
             crate::tr!("chat.open_zed").into_owned(),
-            Box::new(OpenPathInZed(path.to_string())),
+            Box::new(OpenPathInZed {
+                path: path.to_string(),
+                host: None,
+            }),
         )
         .menu(
             crate::tr!("chat.reveal_in_file_manager").into_owned(),
@@ -389,7 +428,12 @@ impl Render for PopupMenu {
             .on_action(|action: &OpenUrl, _, cx| cx.open_url(&action.0))
             .on_action(|action: &OpenPath, _, cx| cx.open_with_system(Path::new(&action.0)))
             .on_action(|action: &OpenPathInZed, window, cx| {
-                open_in_zed(Path::new(&action.0), window, cx)
+                crate::remote::open_path_in_zed(
+                    action.host.as_ref(),
+                    Path::new(&action.path),
+                    window,
+                    cx,
+                )
             })
             .on_action(|action: &RevealPath, _, cx| cx.reveal_path(Path::new(&action.0)))
             .flex()

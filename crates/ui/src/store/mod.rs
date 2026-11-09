@@ -583,12 +583,24 @@ impl WorkspaceStore {
         if !self.is_remote() {
             return Ok(None);
         }
+        self.machine_tunnels()
+            .map(Some)
+            .ok_or_else(|| "remote preview requires a paired machine connection".into())
+    }
+
+    /// The paired machine this store is attached to and the tunnels its
+    /// transport opens to it; `None` for the host in this process or a
+    /// transport that carries no tunnels.
+    pub(crate) fn machine_tunnels(
+        &self,
+    ) -> Option<(
+        tcode_client::pairing::PairedHost,
+        std::sync::Arc<dyn tcode_client::host::TunnelOpener>,
+    )> {
         self.current_host
             .as_ref()
             .filter(|live| Some(live.snapshot().host_id.as_str()) == self.remote_host_id())
             .and_then(|live| Some((live.snapshot(), live.tunnels()?)))
-            .map(Some)
-            .ok_or_else(|| "remote preview requires a paired machine connection".into())
     }
 
     pub(crate) fn can_manage_host(&self) -> bool {
@@ -5104,7 +5116,10 @@ pub(crate) mod tests {
         client.remember_host(host.clone());
         struct NoTunnels;
         impl tcode_client::host::TunnelOpener for NoTunnels {
-            fn open(&self, _host: &str, _port: u16) -> tcode_client::host::TunnelFuture {
+            fn open(
+                &self,
+                _target: tcode_client::host::StreamTarget,
+            ) -> tcode_client::host::TunnelFuture {
                 Box::pin(async { Err(std::io::Error::from(std::io::ErrorKind::NotConnected)) })
             }
         }

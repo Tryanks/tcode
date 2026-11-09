@@ -25,7 +25,7 @@ use iroh::{
 use tcode_client::{
     ConnectionFailure, ConnectionState,
     heartbeat::{Heartbeat, LIVENESS_REPLY_MS, NATIVE_IDLE_MS, Tick},
-    host::{LiveHost, Transport, Tunnel, TunnelFuture, TunnelOpener},
+    host::{LiveHost, StreamTarget, Transport, Tunnel, TunnelFuture, TunnelOpener},
     outgoing::{Outgoing, OutgoingReceiver, subscription_key},
     pairing::{MAX_ADDRS, PairInvite, PairedHost},
     recovery::{Backoff, Wake},
@@ -660,7 +660,7 @@ pub fn pair_blocking(
     block_on(pair(invite, address, device))
 }
 
-/// Preview tunnels of one attachment: opened on whichever connection the
+/// Tunnels of one attachment: opened on whichever connection the
 /// main stream currently runs on, and none while it is reconnecting. The
 /// transport publishes it through `LiveHost::tunnels` on its `current_host`.
 #[derive(Clone, Default)]
@@ -675,9 +675,8 @@ impl AttachmentTunnels {
 }
 
 impl TunnelOpener for AttachmentTunnels {
-    fn open(&self, host: &str, port: u16) -> TunnelFuture {
+    fn open(&self, target: StreamTarget) -> TunnelFuture {
         let current = self.current.lock().unwrap().clone();
-        let host = host.to_owned();
         Box::pin(async move {
             let connection = current.ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotConnected, "not connected to the machine")
@@ -687,7 +686,7 @@ impl TunnelOpener for AttachmentTunnels {
             let (done, result) = async_channel::bounded::<io::Result<Tunnel>>(1);
             runtime().spawn(async move {
                 let _ = done
-                    .send(crate::tunnel::open(&connection, &host, port).await)
+                    .send(crate::tunnel::open(&connection, target).await)
                     .await;
             });
             result

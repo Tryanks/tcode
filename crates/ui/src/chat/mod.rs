@@ -50,7 +50,7 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::copy::CopiedMark;
-use crate::widgets::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, open_in_zed};
+use crate::widgets::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu};
 use crate::widgets::scrollbar::{Scrollbar, TRACK};
 use crate::widgets::tooltip::Tooltip;
 use crate::{

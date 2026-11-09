@@ -23,6 +23,7 @@ use tcode_ui::{assets, settings};
 use tcode_ui::overlay::{DialogActions, OverlayExt as _};
 use tcode_ui::widgets::button::{Button, ButtonVariants as _};
 
+mod editor;
 mod migration;
 mod preview_smoke;
 
@@ -627,6 +628,12 @@ impl MainWindow {
 }
 
 fn main() {
+    // ssh's ProxyCommand: a short-lived pipe that must not start anything
+    // else of the app, nor write to stderr beyond its one refusal line.
+    if std::env::args().nth(1).as_deref() == Some("ssh-proxy") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        std::process::exit(editor::proxy::run(&args));
+    }
     env_logger::init();
     tcode_services::process::raise_open_file_limit();
 
@@ -665,9 +672,11 @@ fn main() {
     // Launching an editor is process work this crate already owns the helpers
     // for, so it is injected rather than linked into the UI.
     let native_client = Rc::new(
-        NativeClientHost::new(data_dir.clone(), machine_name()).with_editor_opener(|path| {
-            tcode_services::desktop::open_in_zed(path).map_err(|error| error.to_string())
-        }),
+        NativeClientHost::new(data_dir.clone(), machine_name())
+            .with_editor_opener(|path| {
+                tcode_services::desktop::open_in_zed(path).map_err(|error| error.to_string())
+            })
+            .with_machine_editor(editor::ZedRemote::new(data_dir.clone())),
     );
 
     if let Some(index) = args.iter().position(|arg| arg == "--pair") {
