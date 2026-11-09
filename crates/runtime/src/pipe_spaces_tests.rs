@@ -1145,3 +1145,35 @@ fn a_reviewed_only_space_declines_what_its_members_turns_ask() {
     );
     host.finish();
 }
+
+/// A member's new thread starts on an agent and permission mode their space
+/// allows, not on the machine's defaults, so their first message goes.
+#[test]
+fn a_members_draft_starts_on_what_the_space_allows() {
+    let mut host = SpaceHost::new();
+    let member = host.member_under(
+        "one",
+        1,
+        SpacePolicy {
+            agents: SpaceAgents::Only(vec![AgentGrant {
+                profile_id: "shared-profile".into(),
+                models: ModelGrant::Only(vec!["team-model".into()]),
+                acp_agents: Vec::new(),
+            }]),
+            approval: SpaceApproval::ReviewedOnly,
+            ..SpacePolicy::new_space()
+        },
+    );
+    let project = host.a.clone();
+    let root = project.root.clone();
+    let draft = host.draft(member.clone(), project, root);
+    host.command(
+        member,
+        Command::SendTurn {
+            session_id: draft,
+            text: "hello".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    host.finish();
+}

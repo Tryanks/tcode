@@ -733,6 +733,40 @@ mod tests {
         }
     }
 
+    /// Where the remote is out of reach, nothing offered reaches it: a quick
+    /// action that would push or pull commits, or says why nothing can.
+    #[test]
+    fn local_controls_offer_nothing_that_reaches_the_remote() {
+        let clean = GitStatus {
+            has_working_tree_changes: false,
+            ..dirty_upstream()
+        };
+        for (label, status, action, hint) in [
+            (
+                "dirty tracked",
+                dirty_upstream(),
+                Some(GitAction::Commit),
+                None,
+            ),
+            (
+                "ahead",
+                GitStatus {
+                    ahead: 2,
+                    ..clean.clone()
+                },
+                None,
+                Some(GitHint::NoChanges),
+            ),
+        ] {
+            let (quick, items) = local_controls(&status, false);
+            assert_eq!((quick.action, quick.hint), (action, hint), "{label}");
+            assert!(
+                items.iter().all(|item| !item.action.remote()),
+                "{label}: {items:?}"
+            );
+        }
+    }
+
     #[test]
     fn repository_menu_offers_applicable_actions_and_explains_unavailable_ones() {
         let repo = GitStatus {

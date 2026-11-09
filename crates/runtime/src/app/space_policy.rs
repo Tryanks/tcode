@@ -289,34 +289,98 @@ impl AppState {
     ) -> Result<(), ProtocolError> {
         let class = agent::session_approval_class(meta.provider, &meta.option_selections);
         if !policy.allows_class(class)
-            && let Some(agent::OptionDescriptor::Select {
-                id,
-                options,
-                default_value,
-                recommended,
-                ..
-            }) = agent::permission_control(meta.provider)
+            && let Some(selection) = allowed_permission(policy, meta.provider)
         {
-            let allowed = |value: &str| {
-                agent::approval_class(meta.provider, &id, value)
-                    .is_some_and(|class| policy.allows_class(class))
-            };
-            let chosen = recommended
-                .into_iter()
-                .chain(default_value)
-                .chain(options.into_iter().map(|option| option.value))
-                .find(|value| allowed(value));
-            if let Some(value) = chosen {
-                meta.option_selections
-                    .retain(|selection| selection.id != id);
-                meta.option_selections.push(OptionSelection {
-                    id,
-                    value: serde_json::Value::String(value),
-                });
-            }
+            meta.option_selections
+                .retain(|chosen| chosen.id != selection.id);
+            meta.option_selections.push(selection);
         }
         self.setup_allowed(policy, meta)
     }
+
+    /// A draft a member started takes the machine's defaults, which the space
+    /// may not allow: move it to the first agent and model the space allows,
+    /// and to a permission mode it allows, so the member's first message can go.
+    pub(crate) fn fit_draft_to_space(&mut self, session_id: &str, cx: &mut HostCx) {
+        let Some(policy) = cx
+            .space
+            .as_deref()
+            .and_then(|space| self.space_policy(space))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(meta) = self.current_meta(session_id).cloned() else {
+            return;
+        };
+        if self.setup_allowed(&policy, &meta).is_ok() {
+            return;
+        }
+        let profile = meta
+            .profile_id
+            .as_deref()
+            .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider));
+        let model_allowed = policy
+            .agent(profile)
+            .is_some_and(|access| access.allows_model(self.effective_model(&meta).as_deref()));
+        if !model_allowed
+            && let Some(choice) = self.scoped_provider_choices(&policy).into_iter().next()
+        {
+            let model = choice
+                .models
+                .iter()
+                .find(|model| model.is_default)
+                .or(choice.models.first())
+                .map(|model| model.id.clone());
+            let builtin = choice
+                .profile_id
+                .as_deref()
+                .is_some_and(Settings::is_builtin_profile_id);
+            self.set_active_model(
+                session_id,
+                choice.provider,
+                model,
+                choice.profile_id.filter(|_| !builtin),
+                cx,
+            );
+        }
+        let Some(meta) = self.current_meta(session_id) else {
+            return;
+        };
+        let class = agent::session_approval_class(meta.provider, &meta.option_selections);
+        if !policy.allows_class(class)
+            && let Some(selection) = allowed_permission(&policy, meta.provider)
+        {
+            self.set_active_option(session_id, &selection.id, Some(selection.value), cx);
+        }
+    }
+}
+
+/// A value of `provider`'s permission control that `policy` allows: its
+/// recommended value, then its default, then the first it lists.
+fn allowed_permission(policy: &SpacePolicy, provider: ProviderKind) -> Option<OptionSelection> {
+    let agent::OptionDescriptor::Select {
+        id,
+        options,
+        default_value,
+        recommended,
+        ..
+    } = agent::permission_control(provider)?
+    else {
+        return None;
+    };
+    let value = recommended
+        .into_iter()
+        .chain(default_value)
+        .chain(options.into_iter().map(|option| option.value))
+        .find(|value| {
+            agent::approval_class(provider, &id, value)
+                .is_some_and(|class| policy.allows_class(class))
+        })?;
+    Some(OptionSelection {
+        id,
+        value: serde_json::Value::String(value),
+    })
 }
 
 fn approval_refusal(approval: SpaceApproval) -> &'static str {

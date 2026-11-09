@@ -1431,6 +1431,17 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
     let rewritten: Value =
         serde_json::from_slice(&std::fs::read(dir.0.join(HOST_FILE)).unwrap()).unwrap();
     assert_eq!(rewritten["v"], 3);
+    // A space stored before spaces had a policy keeps what its members could
+    // do then.
+    let mut spaced = persisted.clone();
+    spaced["spaces"] = json!([{"id":"s","name":"Shared","created_unix":1,"project_ids":["p"],
+        "secret":"AAAAAAAAAAAAAAAAAAAAAA","link_enabled":true,"link_failures":0}]);
+    std::fs::write(dir.0.join(HOST_FILE), serde_json::to_vec(&spaced).unwrap()).unwrap();
+    let spaced = HostIdentity::load_or_create(&dir.0, "Test Host").unwrap();
+    assert_eq!(
+        spaced.spaces[0].policy,
+        tcode_protocol::SpacePolicy::unrestricted()
+    );
     assert_eq!(persisted["devices"][0]["access"], json!({"type":"full"}));
     for access in [
         None,

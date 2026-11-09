@@ -51,16 +51,54 @@ Adding or removing a project, moving or removing a member, or deleting a space
 closes affected member connections. Devices reconnect with their current access;
 a removed member has to pair again.
 
+### Space permissions
+
+Each space has its own permissions, under **Permissions** in the space's
+dialog. They apply to every member of the space and to everything a member's
+turn does through Tcode, including the subagents and `tcode_control` calls it
+makes; the machine's own user is not bound by them.
+
+- **Agents members may use**: the account profiles members can run, each with
+  all its models or only the ones chosen, and for ACP the agents chosen. A
+  profile, model or agent added later is not included until the owner adds it.
+  A new space starts with none.
+- **Permission modes**: *Any mode*; *No unrestricted mode*, which takes away
+  modes that run everything without asking; or *Automatic review only*, which
+  allows only modes where the agent's harness reviews actions itself (Claude
+  Code's and Grok's Auto or Don't ask, Codex's Approve for me). Under automatic
+  review, what the harness still asks during a member's turn is declined at
+  once, and members answer no approval except leaving plan mode. pi, Cursor and
+  ACP agents run everything unasked or in modes Tcode cannot tell apart, so
+  they are unavailable under the last two settings. OpenCode's Normal mode
+  counts as asking a person.
+- **Terminals**, **Push, pull and pull requests**, **Preview this machine's
+  local services**, **Computer use in members' turns** and **Open in an
+  editor**: off in a new space.
+
+A member cannot pick a profile, model or permission mode the space does not
+allow, or send to a thread the machine's user switched to one. A message a
+member queued waits, marked in the queue, while the space does not allow the
+thread as it is, and goes once it does. Changing the permissions reconnects
+the members; a turn already running finishes under the permissions it started
+with.
+
+These permissions scope what Tcode offers; they are not isolation. A terminal
+or an editor gives a member a shell under the machine's account, from which a
+member can run any agent with any setting; the dialog says so on those
+switches. A space created before spaces had permissions keeps what its members
+could do then (every agent and mode, terminals and git) until its owner
+chooses agents.
+
 ### Member
 
 Pair with the space link by scanning or pasting it like any invitation. The
 connection banner shows **Space «X» · machine name**, and the window shows the
 space's machine alone, in place of the device's other machines. The sidebar
 contains only the space's projects and threads, with no **Add project**
-action. Members can create threads, send turns, and use terminals and git in
-those projects. They can archive threads, but cannot delete threads or
-projects, change host settings, providers, plugins or hosting, or use the
-preview tunnel. Settings
+action. Members can create threads and send turns in those projects, with
+what the space's permissions allow (see [Space permissions](#space-permissions)).
+They can archive threads, but cannot delete threads or projects, or change host
+settings, providers, plugins or hosting. Settings
 contains device-local pages and **Archived Threads**. Sidebar preferences and
 read state stay on the device.
 

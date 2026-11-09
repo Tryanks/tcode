@@ -242,4 +242,47 @@ mod tests {
         assert!(!services.contains_key(&first));
         assert_eq!(services[&second].0, "session-b");
     }
+
+    #[derive(Clone)]
+    struct Nothing;
+
+    impl ServerHandler for Nothing {}
+
+    /// A suspended scope's calls are refused at the door, its tokens kept for when it
+    /// resumes, and another scope's calls are not touched.
+    #[test]
+    fn a_suspended_scope_is_refused_until_it_resumes() {
+        let tokens = TokenRegistry::new(|_| {
+            StreamableHttpService::new(
+                || Ok(Nothing),
+                Arc::new(LocalSessionManager::default()),
+                Default::default(),
+            )
+        });
+        let member = tokens.register("member-turn");
+        let owner = tokens.register("owner-turn");
+        let status = |token: &str| {
+            let request = axum::http::Request::post("/tools")
+                .header(AUTHORIZATION, format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let services = tokens.services.clone();
+            let suspended = tokens.suspended.clone();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(handle_authenticated(services, suspended, request))
+                .status()
+        };
+        let admitted = |status: StatusCode| {
+            status != StatusCode::FORBIDDEN && status != StatusCode::UNAUTHORIZED
+        };
+        assert!(admitted(status(&member)));
+        tokens.suspend("member-turn");
+        assert_eq!(status(&member), StatusCode::FORBIDDEN);
+        assert!(admitted(status(&owner)));
+        tokens.resume("member-turn");
+        assert!(admitted(status(&member)));
+    }
 }

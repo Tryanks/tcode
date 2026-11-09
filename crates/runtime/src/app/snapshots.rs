@@ -939,7 +939,7 @@ impl AppState {
     }
 
     /// The profiles and models `policy` lets a space's members run.
-    fn scoped_provider_choices(
+    pub(super) fn scoped_provider_choices(
         &self,
         policy: &tcode_protocol::SpacePolicy,
     ) -> Vec<tcode_protocol::ScopedProviderChoice> {

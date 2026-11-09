@@ -1028,7 +1028,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             through,
         } => app.mark_session_read(&session_id, through, cx),
         Command::StartDraft { project_id, cwd } => {
-            response = CommandResponse::SessionId(Some(app.start_draft(project_id, cwd, cx)));
+            let id = app.start_draft(project_id, cwd, cx);
+            app.fit_draft_to_space(&id, cx);
+            response = CommandResponse::SessionId(Some(id));
         }
         Command::SetDraftWorkspace { session_id, mode } => {
             app.set_draft_workspace(&session_id, mode, cx)

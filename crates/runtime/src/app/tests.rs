@@ -4524,6 +4524,82 @@ fn child_native_approval_callback_and_respond_approval_preserve_options_and_scop
     });
 }
 
+/// A `tcode_control` call made during a member's turn stays inside the member's space and
+/// its policy, whatever the thread's grant reaches; the owner's own turn keeps the grant.
+#[test]
+fn control_calls_in_a_members_turn_stay_inside_the_space() {
+    use tcode_core::control::{ControlCategory, ControlGrant, ControlScope, ControlTier};
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-control-space");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (commands, receiver) = smol::channel::unbounded();
+    state.update(cx, |state, cx| {
+        let thread = |id: &str, project: &str| {
+            let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
+            meta.id = id.into();
+            meta.project_id = Some(project.into());
+            meta
+        };
+        let mut caller = live_session(ProviderKind::Codex, commands);
+        caller.meta.id = "caller".into();
+        caller.meta.project_id = Some("a".into());
+        caller.meta.control_grant = Some(ControlGrant {
+            scope: ControlScope::Host,
+            tiers: ControlTier::ALL.into_iter().collect(),
+            categories: ControlCategory::ALL.into_iter().collect(),
+        });
+        state.sessions.extend([
+            caller.meta.clone(),
+            thread("same", "a"),
+            thread("other", "b"),
+        ]);
+        state.residents.live.insert("caller".into(), caller);
+        state.observe_principal(&tcode_protocol::Principal::Space {
+            policy_revision: 1,
+            space_id: "s".into(),
+            space_name: "Shared".into(),
+            project_ids: vec!["a".into()],
+            device_id: "phone".into(),
+            device_name: "Phone".into(),
+            policy: tcode_protocol::SpacePolicy {
+                git_remote: false,
+                ..tcode_protocol::SpacePolicy::unrestricted()
+            },
+        });
+        let get = |id: &str| {
+            control_mcp::ControlOp::GetThread(control_mcp::GetThreadParams {
+                thread_id: id.into(),
+            })
+        };
+        let push = control_mcp::ControlOp::Git(control_mcp::GitParams {
+            thread_id: "same".into(),
+            op: control_mcp::GitOp::Push,
+            request_id: None,
+        });
+        let settings =
+            || control_mcp::ControlOp::GetSettings(control_mcp::GetSettingsParams { keys: None });
+        assert!(control_call(state, cx, "caller", get("other")).is_ok());
+        assert!(control_call(state, cx, "caller", settings()).is_ok());
+
+        // A member sends the turn the agent works in, as the pipe admits it.
+        cx.space = Some("s".into());
+        state.send_turn("caller", "go".into(), Vec::new(), cx);
+        cx.space = None;
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(SessionCommand::SendTurn { .. })
+        ));
+
+        assert!(control_call(state, cx, "caller", get("same")).is_ok());
+        let refused = control_call(state, cx, "caller", get("other")).unwrap_err();
+        assert!(refused.contains("outside"), "{refused}");
+        let refused = control_call(state, cx, "caller", push).unwrap_err();
+        assert!(refused.contains("pushing and pulling"), "{refused}");
+        let refused = control_call(state, cx, "caller", settings()).unwrap_err();
+        assert!(refused.contains("in this space"), "{refused}");
+    });
+}
+
 #[test]
 fn child_questions_reach_the_lead_and_respond_input_answers_them() {
     let cx = &mut TestAppContext::default();
