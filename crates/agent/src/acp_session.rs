@@ -1275,6 +1275,7 @@ async fn handle_command<D: Dialect>(
         | SessionCommand::StopBackgroundTask { .. }
         | SessionCommand::MoveToBackground { .. }
         | SessionCommand::MoveTo { .. }
+        | SessionCommand::RespondWorktree { .. }
         | SessionCommand::SetGoal { .. }
         | SessionCommand::ClearGoal
         | SessionCommand::ReadAccountUsage { .. } => {}

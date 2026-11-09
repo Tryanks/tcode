@@ -484,7 +484,8 @@ impl Activity {
             | EntryContent::RewindFailed { .. }
             | EntryContent::ContextWindowChanged { .. }
             | EntryContent::SettingsKept
-            | EntryContent::SessionMoved { .. } => {}
+            | EntryContent::SessionMoved { .. }
+            | EntryContent::Worktree { .. } => {}
         }
     }
 
@@ -1335,6 +1336,10 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
         EntryContent::SessionMoved { from, to } => (
             "session_moved",
             format!("{} → {}", from.display(), to.display()),
+        ),
+        EntryContent::Worktree { request, answer } => (
+            "worktree",
+            tcode_core::session::worktree_summary(request, answer),
         ),
         EntryContent::ControlAction(action) => (
             "control_action",

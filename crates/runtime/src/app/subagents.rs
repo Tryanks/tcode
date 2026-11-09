@@ -26,6 +26,31 @@ impl AppState {
             }
             return true;
         }
+        if let AgentEvent::SessionMoved {
+            from,
+            to,
+            parent_item_id: Some(parent_item_id),
+        } = event
+        {
+            if let Some(mirror_id) =
+                self.ensure_native_subagent_mirror(parent_session_id, parent_item_id, None, cx)
+            {
+                let meta = self.resident_mut(&mirror_id).map(|mirror| {
+                    mirror.meta.cwd = to.clone();
+                    mirror.meta.clone()
+                });
+                if let Some(meta) = meta {
+                    self.persist_meta(&meta, cx);
+                }
+                let moved = AgentEvent::SessionMoved {
+                    from: from.clone(),
+                    to: to.clone(),
+                    parent_item_id: None,
+                };
+                self.record_event(&mirror_id, &moved, cx);
+            }
+            return true;
+        }
         if let AgentEvent::Delta { item_id, .. } = event {
             let key = (parent_session_id.to_string(), item_id.clone());
             let Some(mirror_id) = self.native_subagent_streams.get(&key).cloned() else {

@@ -2089,6 +2089,12 @@ pub enum SessionCommand {
     MoveTo {
         cwd: PathBuf,
     },
+    /// Answer the harness's [`AgentEvent::WorktreeRequested`]; the adapter
+    /// confirms it with [`AgentEvent::WorktreeResolved`].
+    RespondWorktree {
+        request_id: String,
+        answer: WorktreeAnswer,
+    },
     /// Move the running call `item_id` into the background, on a harness
     /// whose [`Caps::background`] can: the call returns to the model and its
     /// work goes on ([`AgentEvent::ItemBackgrounded`]).
@@ -2528,14 +2534,32 @@ pub enum AgentEvent {
     /// background work. Never emitted by an adapter; the runtime persists it
     /// after the user message it describes.
     SettingsKept,
-    /// The thread moved from `from` to `to` and its native session went along
-    /// ([`Caps::session_move`]). The runtime records it when it moves the
-    /// thread; an adapter reports one its harness made, after a
-    /// [`SessionCommand::MoveTo`] or on its own, and the thread follows a move
-    /// to anywhere it is not.
+    /// The native session goes on in `to` instead of `from` ([`Caps::session_move`]).
+    /// The runtime records it when it moves the thread; an adapter reports one its
+    /// harness made, after a [`SessionCommand::MoveTo`] or on its own (Claude Code
+    /// entering or leaving a worktree), and the thread follows a move to anywhere
+    /// it is not. With `parent_item_id`, it is that native subagent (its Subagent
+    /// item) that works in `to`, and the session stays where it was.
     SessionMoved {
         from: PathBuf,
         to: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_item_id: Option<String>,
+    },
+    /// The harness waits for the host to create or remove a git worktree, as
+    /// Claude Code does through its `WorktreeCreate` and `WorktreeRemove` hooks
+    /// for every worktree it works in. Answered by
+    /// [`SessionCommand::RespondWorktree`]. Transient, like
+    /// [`Self::TurnAccepted`].
+    WorktreeRequested {
+        request_id: String,
+        request: WorktreeRequest,
+    },
+    /// The harness was given `answer` to its [`Self::WorktreeRequested`].
+    WorktreeResolved {
+        request_id: String,
+        request: WorktreeRequest,
+        answer: WorktreeAnswer,
     },
     /// Another thread's model acted on this thread through `tcode_control`. This is
     /// never emitted by an adapter; the runtime records it in the target thread.
@@ -3111,6 +3135,30 @@ pub enum ApprovalKind {
         item_id: String,
         markdown: String,
     },
+}
+
+/// What a harness asks of the host's worktrees ([`AgentEvent::WorktreeRequested`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorktreeRequest {
+    /// A git worktree called `name` of the checkout `cwd` is in, for the session
+    /// or one of its native subagents; `cwd` is the directory asking.
+    Create { cwd: PathBuf, name: String },
+    /// Remove the worktree at `path`, which an earlier `Create` was answered with.
+    Remove { path: PathBuf },
+}
+
+/// The host's answer to a [`WorktreeRequest`] ([`SessionCommand::RespondWorktree`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorktreeAnswer {
+    /// The worktree is at `path`: made for this request, or `reused` when the
+    /// session asked again for a name it was given this worktree for.
+    Ready { path: PathBuf, reused: bool },
+    /// The worktree was removed.
+    Removed,
+    /// Nothing was made or removed, for `error`.
+    Refused { error: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

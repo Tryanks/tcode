@@ -140,6 +140,14 @@ impl TimelineView {
                         &entry.id, from, to, cx,
                     ));
                 }
+                Segment::Worktree(entry) => {
+                    let EntryContent::Worktree { request, answer } = &entry.content else {
+                        unreachable!();
+                    };
+                    column = column.child(components::dividers::worktree_divider(
+                        &entry.id, request, answer, cx,
+                    ));
+                }
                 Segment::ControlAction(entry) => {
                     let EntryContent::ControlAction(action) = &entry.content else {
                         unreachable!();

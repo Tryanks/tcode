@@ -1235,7 +1235,9 @@ impl SessionActor for Actor {
                 json!({}),
                 PendingRequest::AccountUsage(reply),
             ),
-            SessionCommand::MoveToBackground { .. } => Ok(()),
+            SessionCommand::MoveToBackground { .. } | SessionCommand::RespondWorktree { .. } => {
+                Ok(())
+            }
             SessionCommand::MoveTo { cwd } => {
                 self.cwd = cwd.clone();
                 self.moved_to = Some(cwd);

@@ -77,6 +77,14 @@ pub struct WorktreeInfo {
     pub branch: String,
 }
 
+/// A worktree a thread owns away from its `cwd` ([`SessionMeta::other_worktrees`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnedWorktree {
+    pub path: PathBuf,
+    #[serde(flatten)]
+    pub info: WorktreeInfo,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SettledOverride {
@@ -174,6 +182,12 @@ pub struct SessionMeta {
     /// worktree instead of the project checkout. Absent = local checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeInfo>,
+    /// The other worktrees this thread owns: those Tcode created at the native
+    /// harness's request that `cwd` is not in now, and its own `worktree` while the
+    /// native session works elsewhere. Whichever of them `cwd` moves to becomes
+    /// `worktree`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_worktrees: Vec<OwnedWorktree>,
     #[serde(default)]
     pub resume_cursor: Option<ResumeCursor>,
     /// Where the next provider start must go on instead of resuming
@@ -314,6 +328,13 @@ impl<'a> WorktreeSharing<'a> {
             if let Some(worktree) = &meta.worktree {
                 Self::add_owner(sharing.branches.entry(&worktree.branch).or_default(), meta);
             }
+            for owned in &meta.other_worktrees {
+                Self::add_owner(sharing.paths.entry(owned.path.clone()).or_default(), meta);
+                Self::add_owner(
+                    sharing.branches.entry(&owned.info.branch).or_default(),
+                    meta,
+                );
+            }
         }
         sharing
     }
@@ -325,15 +346,31 @@ impl<'a> WorktreeSharing<'a> {
     }
 
     pub fn is_shared(&self, meta: &SessionMeta) -> bool {
-        let Some(worktree) = &meta.worktree else {
-            return false;
-        };
+        meta.worktree
+            .as_ref()
+            .is_some_and(|worktree| self.is_used_elsewhere(meta, &meta.cwd, &worktree.branch))
+    }
+
+    /// Whether a thread other than `owner` works in or owns the worktree at `path`
+    /// on `branch`.
+    pub fn is_used_elsewhere(&self, owner: &SessionMeta, path: &Path, branch: &str) -> bool {
         self.paths
-            .get(&meta.cwd)
+            .get(path)
             .into_iter()
-            .chain(self.branches.get(worktree.branch.as_str()))
+            .chain(self.branches.get(branch))
             .flatten()
-            .any(|other| meta.shares_worktree_with(other))
+            .any(|other| {
+                other.id != owner.id
+                    && (other.cwd.starts_with(path)
+                        || other
+                            .worktree
+                            .as_ref()
+                            .is_some_and(|worktree| worktree.branch == branch)
+                        || other
+                            .other_worktrees
+                            .iter()
+                            .any(|owned| owned.path == path || owned.info.branch == branch))
+            })
     }
 }
 
@@ -419,6 +456,7 @@ impl SessionMeta {
             pin_order: None,
             active_order: None,
             worktree: None,
+            other_worktrees: Vec::new(),
             resume_cursor: None,
             pending_fork: None,
             fork_origin: None,

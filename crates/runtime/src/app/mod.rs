@@ -250,6 +250,7 @@ mod dev_servers;
 mod disk_usage;
 mod events;
 mod git;
+mod harness_worktrees;
 mod history;
 mod original;
 mod storage_pass;

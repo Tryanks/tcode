@@ -43,6 +43,13 @@ impl AppState {
                 self.on_turn_accepted(session_id, *delivery_id, cx);
                 return;
             }
+            AgentEvent::WorktreeRequested {
+                request_id,
+                request,
+            } => {
+                self.on_worktree_request(session_id, request_id.clone(), request.clone(), cx);
+                return;
+            }
             AgentEvent::McpServersNotAttached => {
                 if let Some(resident) = self.resident_mut(session_id) {
                     resident.mcp_servers_attached = false;
@@ -467,6 +474,7 @@ impl AppState {
             | AgentEvent::ContextCompacted(_)
             | AgentEvent::ContextWindowChanged { .. }
             | AgentEvent::SettingsKept
+            | AgentEvent::WorktreeResolved { .. }
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::GoalUpdated { .. }
             | AgentEvent::ControlAction(_)

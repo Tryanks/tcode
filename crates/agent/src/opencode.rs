@@ -685,6 +685,7 @@ impl SessionActor for OpenCodeActor {
             SessionCommand::RetryTurn { .. }
             | SessionCommand::StopBackgroundTask { .. }
             | SessionCommand::MoveToBackground { .. }
+            | SessionCommand::RespondWorktree { .. }
             | SessionCommand::SetGoal { .. }
             | SessionCommand::ClearGoal
             | SessionCommand::ReadAccountUsage { .. }
@@ -1192,6 +1193,7 @@ impl OpenCodeActor {
                         .emit(AgentEvent::SessionMoved {
                             from: from.directory,
                             to: to.into(),
+                            parent_item_id: None,
                         })
                         .await;
                     self.refresh_commands().await;
