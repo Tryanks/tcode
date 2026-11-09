@@ -728,6 +728,12 @@ impl State {
         self.window_origin(view, surface) - own
     }
 
+    /// Places a popup inside the view, letting the positioner's constraint
+    /// adjustments flip, slide or shrink it to fit (GTK scrolls a shrunken
+    /// menu). A view is one frame, cropped by the host to where the view is
+    /// shown, so a popup reaching past it would be cut off; showing it beyond
+    /// the view would take a host surface of its own, with its own frames
+    /// and input.
     fn place_popup(
         &self,
         view: &View,
@@ -1030,6 +1036,9 @@ impl SeatHandler for State {
         self.focus_text_input(focused);
     }
 
+    /// GTK 3 sets its cursors as surfaces it draws, which name no shape; a
+    /// host running the client in its own process reads the cursor from the
+    /// toolkit instead.
     fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
 }
 
@@ -1103,6 +1112,9 @@ impl DataDeviceHandler for State {
     }
 }
 
+/// A drag the client starts is dropped on its own surfaces, which is all a
+/// page's drag and drop needs. Nothing is dragged between the view and the
+/// host's session: the nest has no part in the session's data device.
 impl ClientDndGrabHandler for State {}
 
 impl ServerDndGrabHandler for State {}

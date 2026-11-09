@@ -46,7 +46,11 @@ const GTK_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const GTK_WIND_DOWN: Duration = Duration::from_secs(5);
 /// The shortest time between two frames of one view. The nest's client draws
 /// its next frame when the last one is answered, and answering at once would
-/// let an animating page redraw as fast as it can.
+/// let an animating page redraw as fast as it can. The host compositor's
+/// frame callbacks would pace this better, but gpui-fast 0.1.13's
+/// `PlatformSurfaceAttachment` exposes none for a native surface, and a
+/// callback the presenter asked for on its own event queue would only be
+/// seen when something next dispatched that queue.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// GPUI's Wayland client turns axis values into deltas with these factors;
@@ -78,6 +82,8 @@ struct Host {
     quitting: Cell<bool>,
     /// Whether GTK's events are being dispatched (see [`pump_gtk`]).
     pumping: Cell<bool>,
+    /// GDK's cursors for the CSS names in [`CSS_CURSORS`].
+    cursors: Vec<(gdk::Cursor, CursorStyle)>,
 }
 
 thread_local! {
@@ -108,6 +114,7 @@ fn start(window: &Window, cx: &mut App) -> Result<Rc<Host>, String> {
         next_view: Cell::new(0),
         quitting: Cell::new(false),
         pumping: Cell::new(false),
+        cursors: css_cursors(),
     });
 
     let quitting = Rc::downgrade(&host);
@@ -160,6 +167,56 @@ fn start(window: &Window, cx: &mut App) -> Result<Rc<Host>, String> {
     })
     .detach();
     Ok(host)
+}
+
+/// The CSS cursors WebKitGTK sets by name that GPUI can show.
+///
+/// GTK 3 sets a cursor on Wayland as a surface it draws, never by name, so
+/// the nest cannot tell which one the page asked for. GDK 3's Wayland
+/// backend makes one cursor per name and hands it out again
+/// (`_gdk_wayland_display_get_cursor_for_name_with_scale`,
+/// gdk/wayland/gdkcursor-wayland.c), so the cursor WebKitGTK sets on its
+/// window is the very object made here from the same name. Any other cursor
+/// (an image the page supplies, or a name GPUI has no equivalent for) falls
+/// back to what WebKit's hit test reports.
+const CSS_CURSORS: &[(&str, CursorStyle)] = &[
+    ("default", CursorStyle::Arrow),
+    ("pointer", CursorStyle::PointingHand),
+    ("text", CursorStyle::IBeam),
+    ("vertical-text", CursorStyle::IBeamCursorForVerticalLayout),
+    ("crosshair", CursorStyle::Crosshair),
+    ("grab", CursorStyle::OpenHand),
+    ("grabbing", CursorStyle::ClosedHand),
+    ("not-allowed", CursorStyle::OperationNotAllowed),
+    ("no-drop", CursorStyle::OperationNotAllowed),
+    ("alias", CursorStyle::DragLink),
+    ("copy", CursorStyle::DragCopy),
+    ("context-menu", CursorStyle::ContextualMenu),
+    ("col-resize", CursorStyle::ResizeColumn),
+    ("row-resize", CursorStyle::ResizeRow),
+    ("ew-resize", CursorStyle::ResizeLeftRight),
+    ("e-resize", CursorStyle::ResizeRight),
+    ("w-resize", CursorStyle::ResizeLeft),
+    ("ns-resize", CursorStyle::ResizeUpDown),
+    ("n-resize", CursorStyle::ResizeUp),
+    ("s-resize", CursorStyle::ResizeDown),
+    ("nwse-resize", CursorStyle::ResizeUpLeftDownRight),
+    ("nw-resize", CursorStyle::ResizeUpLeftDownRight),
+    ("se-resize", CursorStyle::ResizeUpLeftDownRight),
+    ("nesw-resize", CursorStyle::ResizeUpRightDownLeft),
+    ("ne-resize", CursorStyle::ResizeUpRightDownLeft),
+    ("sw-resize", CursorStyle::ResizeUpRightDownLeft),
+];
+
+/// GDK's cursor for each of [`CSS_CURSORS`] its cursor theme has.
+fn css_cursors() -> Vec<(gdk::Cursor, CursorStyle)> {
+    let Some(display) = gdk::Display::default() else {
+        return Vec::new();
+    };
+    CSS_CURSORS
+        .iter()
+        .filter_map(|&(name, style)| Some((gdk::Cursor::from_name(&display, name)?, style)))
+        .collect()
 }
 
 /// Dispatches GTK's events while a preview exists, and for
@@ -294,6 +351,7 @@ pub(super) fn build(
         unanswered: Cell::new(false),
         answer_at: Cell::new(Instant::now()),
         cursor: Cell::new(CursorStyle::Arrow),
+        css_cursor: Cell::new(None),
         hovered: Cell::new(false),
         focus: view.focus_handle(cx),
         focused: Cell::new(false),
@@ -430,10 +488,38 @@ fn connect_webkit(webkit: &webkit2gtk::WebView, slot: &Rc<Slot>) {
             slot.refresh_window();
         }
     });
+    if let Some(window) = webkit.window() {
+        watch_cursor(&window, slot);
+    }
+    let realized = Rc::downgrade(slot);
+    webkit.connect_realize(move |webkit| {
+        if let (Some(slot), Some(window)) = (realized.upgrade(), webkit.window()) {
+            watch_cursor(&window, &slot);
+        }
+    });
     let destroyed: Weak<Slot> = Rc::downgrade(slot);
     webkit.connect_destroy(move |_| {
         if let Some(slot) = destroyed.upgrade() {
             slot.release();
+        }
+    });
+}
+
+/// Follows the cursor WebKit sets on its GDK window.
+fn watch_cursor(window: &gdk::Window, slot: &Rc<Slot>) {
+    let slot = Rc::downgrade(slot);
+    window.connect_notify_local(Some("cursor"), move |window, _| {
+        let (Some(slot), Some(host)) = (slot.upgrade(), current_host()) else {
+            return;
+        };
+        let style = window.cursor().and_then(|cursor| {
+            host.cursors
+                .iter()
+                .find(|(known, _)| *known == cursor)
+                .map(|&(_, style)| style)
+        });
+        if slot.css_cursor.replace(style) != style {
+            slot.refresh_window();
         }
     });
 }
@@ -501,7 +587,10 @@ struct Slot {
     /// A frame arrived while hidden; it is answered once the view shows.
     unanswered: Cell<bool>,
     answer_at: Cell<Instant>,
+    /// The cursor WebKit's hit test suggests.
     cursor: Cell<CursorStyle>,
+    /// The CSS cursor the page set, when GPUI has it (see [`CSS_CURSORS`]).
+    css_cursor: Cell<Option<CursorStyle>>,
     /// Whether the pointer is over the view's surface.
     hovered: Cell<bool>,
     focus: FocusHandle,
@@ -1041,7 +1130,8 @@ pub(super) fn element(view: Entity<WebView>, cx: &App) -> AnyElement {
                 },
                 move |_, _, window, cx| {
                     if painted.hovered.get() {
-                        window.set_window_cursor_style(painted.cursor.get());
+                        let cursor = painted.css_cursor.get().unwrap_or(painted.cursor.get());
+                        window.set_window_cursor_style(cursor);
                     }
                     window.handle_input(&painted.focus, PageInput(painted.clone()), cx);
                 },
