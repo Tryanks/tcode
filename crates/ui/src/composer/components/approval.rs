@@ -85,10 +85,17 @@ impl Composer {
                 .into_any_element()
         };
         let detail: AnyElement = match &request.kind {
-            ApprovalKind::ExecCommand { command, cwd, .. } => detail_area(
+            ApprovalKind::ExecCommand {
+                command,
+                cwd,
+                description,
+            } => detail_area(
                 v_flex()
                     .gap_1()
                     .child(div().text_code(cx).child(command.clone()))
+                    .when_some(description.clone(), |this, description| {
+                        this.child(div().text_secondary(self.compact, cx).child(description))
+                    })
                     .when_some(cwd.clone(), |this, cwd| {
                         this.child(
                             div()
@@ -220,13 +227,38 @@ impl Composer {
                         .child(crate::tr!("mobile.offline_action")),
                 )
             });
+        let blocked_path = request
+            .blocked_path
+            .clone()
+            .filter(|path| !request_names_path(request, path));
         let detail = crate::widgets::Collapsible::new(
             self.motion_id(format_args!("approval-detail-{}", request.id)),
             expanded,
         )
         .motion(&self.motion)
         .w_full()
-        .content(div().w_full().pb(gap).child(detail));
+        .content(
+            v_flex()
+                .w_full()
+                .gap_1()
+                .pb(gap)
+                .child(detail)
+                .when_some(request.reason.clone(), |this, reason| {
+                    this.child(
+                        div()
+                            .debug_selector(|| "approval-reason".into())
+                            .text_body(self.compact, cx)
+                            .child(reason),
+                    )
+                })
+                .when_some(blocked_path, |this, path| {
+                    this.child(
+                        div()
+                            .text_secondary(self.compact, cx)
+                            .child(crate::tr!("approval.blocked_path", path = path)),
+                    )
+                }),
+        );
 
         crate::material::card_raised(cx)
             .w_full()
@@ -345,6 +377,25 @@ impl Composer {
     }
 }
 
+/// Whether the card already shows `path`: in the harness's reason or in what
+/// the request asks to do.
+fn request_names_path(request: &ApprovalRequest, path: &str) -> bool {
+    request
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains(path))
+        || match &request.kind {
+            ApprovalKind::ExecCommand { command, .. } => command.contains(path),
+            ApprovalKind::FileChange { changes } => {
+                changes.iter().any(|change| change.path == path)
+            }
+            ApprovalKind::FileRead { detail } | ApprovalKind::ToolUse { detail, .. } => {
+                detail.contains(path)
+            }
+            ApprovalKind::Plan { .. } => false,
+        }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,20 +418,19 @@ mod tests {
         composer_with_request(
             cx,
             compact,
-            ApprovalKind::FileChange {
-                changes,
-                reason: None,
-            },
+            ApprovalKind::FileChange { changes },
+            None,
             Vec::new(),
         )
     }
 
-    /// A composer, phone or desktop, whose session awaits approval of `kind`
-    /// with `options`.
+    /// A composer, phone or desktop, whose session awaits approval of `kind`,
+    /// asked for `reason`, with `options`.
     fn composer_with_request(
         cx: &mut TestAppContext,
         compact: bool,
         kind: ApprovalKind,
+        reason: Option<String>,
         options: Vec<agent::ApprovalOption>,
     ) -> &mut VisualTestContext {
         cx.update(crate::theme::init);
@@ -399,6 +449,8 @@ mod tests {
                 parent_item_id: None,
                 turn_id: None,
                 kind,
+                reason,
+                blocked_path: None,
                 options,
             };
             state.provider_event_for_test(&id, agent::AgentEvent::ApprovalRequested(request), cx);
@@ -504,8 +556,9 @@ mod tests {
             ApprovalKind::ExecCommand {
                 command: "cargo test".into(),
                 cwd: None,
-                reason: None,
+                description: None,
             },
+            None,
             vec![agent::ApprovalOption {
                 id: "once".into(),
                 label: "Allow once".into(),
@@ -538,5 +591,23 @@ mod tests {
             cx.debug_bounds("approval-change-0").is_some(),
             "the request's detail is shown before anyone clicks its header"
         );
+    }
+
+    /// Why the harness asks is on the card, as the native dialog's consent
+    /// line is: under bypassPermissions it is the only clue to a prompt.
+    #[gpui::test]
+    fn a_request_says_why_the_harness_asks(cx: &mut TestAppContext) {
+        let cx = composer_with_request(
+            cx,
+            false,
+            ApprovalKind::ExecCommand {
+                command: "rm -rf $F/*".into(),
+                cwd: None,
+                description: Some("Clear the scratch directory".into()),
+            },
+            Some("Dangerous rm operation detected.".into()),
+            Vec::new(),
+        );
+        assert!(cx.debug_bounds("approval-reason").is_some());
     }
 }

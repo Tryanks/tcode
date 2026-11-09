@@ -231,7 +231,7 @@ impl LoginOutput {
     fn feed(&mut self, chunk: &[u8]) -> Vec<LoginEvent> {
         self.text.extend_from_slice(chunk);
         // Codex colors its output even into a pipe.
-        let text = strip_ansi(&String::from_utf8_lossy(&self.text));
+        let text = agent::strip_ansi(&String::from_utf8_lossy(&self.text));
         let mut events = Vec::new();
         let complete = text.rfind('\n').map_or("", |end| &text[..end]);
         if !self.url_seen
@@ -262,26 +262,6 @@ impl LoginOutput {
     }
 }
 
-/// Text without its terminal escape sequences (`ESC [ … letter`).
-fn strip_ansi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            if chars.next() == Some('[') {
-                for next in chars.by_ref() {
-                    if next.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        out.push(ch);
-    }
-    out
-}
-
 /// A device-authorization code on a line of its own: groups of uppercase
 /// letters and digits joined by hyphens, as `3JP6-MXLMX`.
 fn is_device_code(line: &str) -> bool {
@@ -298,7 +278,7 @@ fn is_device_code(line: &str) -> bool {
 /// The last non-empty line, without the code prompt that precedes it on the
 /// same line.
 fn last_line(output: &[u8]) -> Option<String> {
-    let text = strip_ansi(&String::from_utf8_lossy(output));
+    let text = agent::strip_ansi(&String::from_utf8_lossy(output));
     text.lines()
         .map(|line| match line.find(CODE_PROMPT) {
             Some(start) => line[start..].split_once('>').map_or("", |(_, rest)| rest),

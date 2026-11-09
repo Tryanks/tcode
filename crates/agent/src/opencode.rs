@@ -1273,11 +1273,18 @@ impl OpenCodeActor {
             self.reply_permission(request_id, "once", None).await;
             return;
         }
+        let kind = self.mapper.approval_kind(data);
         let request = ApprovalRequest {
             id: request_id.to_owned(),
             turn_id: self.mapper.active_turn.clone(),
             parent_item_id,
-            kind: self.mapper.approval_kind(data),
+            // A tool's message is already its detail.
+            reason: (!matches!(kind, ApprovalKind::ToolUse { .. }))
+                .then(|| data["message"].as_str())
+                .flatten()
+                .map(str::to_owned),
+            blocked_path: None,
+            kind,
             options: vec![
                 ApprovalOption {
                     id: "once".into(),
@@ -2152,7 +2159,7 @@ impl Mapper {
                 cwd: tool
                     .and_then(|tool| tool.input["workdir"].as_str())
                     .map(str::to_owned),
-                reason,
+                description: None,
             },
             "edit" => ApprovalKind::FileChange {
                 changes: match data.pointer("/metadata/files") {
@@ -2166,7 +2173,6 @@ impl Mapper {
                         })
                         .collect(),
                 },
-                reason,
             },
             "read" | "grep" | "glob" => ApprovalKind::FileRead {
                 detail: resources.join(", "),
@@ -3429,7 +3435,7 @@ cat > /dev/null
     fn permission_requests_offer_native_options_and_each_answer_reaches_the_asking_session() {
         const REQUEST: &str = "per_198adfe110010MaNqr8j5fFdKI";
         let reply = format!("POST /api/session/ses_root/permission/{REQUEST}/reply");
-        let asked = json!({"type": "approval_requested", "id": REQUEST, "turn_id": "evt_198adf559002Wm9xfuCNpOnQpw", "kind": {"kind": "exec_command", "command": "echo hi", "cwd": null, "reason": null}, "options": [
+        let asked = json!({"type": "approval_requested", "id": REQUEST, "turn_id": "evt_198adf559002Wm9xfuCNpOnQpw", "kind": {"kind": "exec_command", "command": "echo hi", "cwd": null}, "options": [
             {"id": "once", "label": "Allow once", "kind": "allow_once"},
             {"id": "always", "label": "Always allow", "kind": "allow_always"},
             {"id": "reject", "label": "Reject", "kind": "reject_once"},

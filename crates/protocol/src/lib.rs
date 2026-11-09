@@ -302,7 +302,9 @@ pub use wire::{
 //
 // Unreleased: the agent event stream gains session_moved and the timeline
 // the session_moved entry (from, to), a moved thread whose native session
-// went along.
+// went along. ApprovalRequest carries reason, why the harness asks a person,
+// which moves off the exec_command and file_change kinds, and blocked_path;
+// the exec_command kind carries description.
 pub const PROTOCOL_VERSION: u32 = 26;
 
 #[cfg(test)]

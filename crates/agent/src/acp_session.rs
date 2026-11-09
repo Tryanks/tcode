@@ -384,6 +384,8 @@ impl Session {
             turn_id,
             parent_item_id: None,
             kind,
+            reason: None,
+            blocked_path: None,
             options,
         }))
         .await;
@@ -2531,7 +2533,7 @@ fn approval_request(
                 ..Default::default()
             }),
             cwd: None,
-            reason: None,
+            description: None,
         },
         acp::ToolKind::Edit | acp::ToolKind::Delete | acp::ToolKind::Move => {
             let changes = file_changes(&ToolState {
@@ -2549,10 +2551,7 @@ fn approval_request(
                     detail: title,
                 }
             } else {
-                ApprovalKind::FileChange {
-                    changes,
-                    reason: None,
-                }
+                ApprovalKind::FileChange { changes }
             }
         }
         acp::ToolKind::Read | acp::ToolKind::Search | acp::ToolKind::Fetch => {
@@ -2570,6 +2569,8 @@ fn approval_request(
         parent_item_id: None,
         turn_id,
         kind: approval_kind,
+        reason: None,
+        blocked_path: None,
         options: options
             .iter()
             .map(|option| ApprovalOption {

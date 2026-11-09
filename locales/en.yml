@@ -1203,6 +1203,7 @@ approval:
   tool_requested: "Approval requested"
   plan_requested: "Plan approval requested"
   in_directory: "in %{cwd}"
+  blocked_path: "Blocked path: %{path}"
   pending: "PENDING APPROVAL"
   cancel_turn: "Cancel turn"
 diff:

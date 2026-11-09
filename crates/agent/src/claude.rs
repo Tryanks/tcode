@@ -3815,10 +3815,16 @@ impl Mapper {
             .unwrap_or("")
             .to_string();
         let input = request.get("input").cloned().unwrap_or_else(|| json!({}));
-        let reason = request
-            .get("description")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        // Claude Code's consent line; it may carry terminal escapes.
+        let text = |key: &str| {
+            request
+                .get(key)
+                .and_then(Value::as_str)
+                .map(crate::strip_ansi)
+                .filter(|text| !text.trim().is_empty())
+        };
+        let reason = text("decision_reason");
+        let blocked_path = text("blocked_path");
 
         if tool_name == "AskUserQuestion" {
             let questions_raw = input.get("questions").cloned().unwrap_or_else(|| json!([]));
@@ -3849,11 +3855,14 @@ impl Mapper {
                     .unwrap_or("")
                     .to_string(),
                 cwd: input.get("cwd").and_then(Value::as_str).map(str::to_string),
-                reason,
+                description: input
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .filter(|description| !description.trim().is_empty())
+                    .map(str::to_string),
             },
             ClaudeRequestType::FileChange => ApprovalKind::FileChange {
                 changes: file_changes(&tool_name, &input),
-                reason,
             },
             ClaudeRequestType::ToolUse => ApprovalKind::ToolUse {
                 name: tool_name.clone(),
@@ -3920,6 +3929,8 @@ impl Mapper {
             turn_id: self.current_turn_id.clone(),
             parent_item_id,
             kind,
+            reason,
+            blocked_path,
             options,
         })]
     }
@@ -3981,6 +3992,8 @@ impl Mapper {
             turn_id: self.current_turn_id.clone(),
             parent_item_id,
             kind: ApprovalKind::Plan { item_id, markdown },
+            reason: None,
+            blocked_path: None,
             options: vec![
                 ApprovalOption {
                     id: "allow".into(),
@@ -7003,6 +7016,37 @@ mod tests {
         }
     }
 
+    /// A safety check that bypassPermissions cannot skip still asks; the
+    /// request carries Claude Code's consent line, and the agent's own
+    /// description of the command stays beside it.
+    #[test]
+    fn a_permission_request_says_why_claude_code_asks() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        let events = feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"ctrl-rm","request":{"subtype":"can_use_tool","tool_name":"Bash","display_name":"Bash","input":{"command":"rm -rf $F/*","description":"Clear the scratch directory"},"description":"Clear the scratch directory","decision_reason":"Dangerous rm operation detected in `rm -rf $F/*`. The target '$F/*' is a shell variable expansion: when $F is unset or empty it becomes `/`, `/*` or a top-level path. This requires explicit approval and cannot be auto-allowed by permission rules.","decision_reason_type":"safetyCheck","classifier_approvable":false,"tool_use_id":"toolu_rm"}}"#,
+        );
+        let [AgentEvent::ApprovalRequested(request)] = events.as_slice() else {
+            panic!("expected one approval request, got {events:?}");
+        };
+        assert_eq!(
+            request.reason.as_deref(),
+            Some(
+                "Dangerous rm operation detected in `rm -rf $F/*`. The target '$F/*' is a shell variable expansion: when $F is unset or empty it becomes `/`, `/*` or a top-level path. This requires explicit approval and cannot be auto-allowed by permission rules."
+            )
+        );
+        assert_eq!(request.blocked_path, None);
+        assert_eq!(
+            request.kind,
+            ApprovalKind::ExecCommand {
+                command: "rm -rf $F/*".into(),
+                cwd: None,
+                description: Some("Clear the scratch directory".into()),
+            }
+        );
+    }
+
     #[test]
     fn approval_details_reach_native_permission_requests() {
         let mut m = Mapper::new();
@@ -7327,12 +7371,15 @@ mod tests {
                     assert_eq!(request.id, "221a98ab-3314-470d-89e0-0528a9e8d75f");
                     assert!(turn_id.is_some());
                     assert_eq!(request.turn_id, turn_id);
-                    let ApprovalKind::FileChange { changes, reason } = &request.kind else {
+                    let ApprovalKind::FileChange { changes } = &request.kind else {
                         panic!("expected Write approval, got {request:?}");
                     };
                     assert_eq!(changes.len(), 1);
                     assert_eq!(changes[0].path, "/private/tmp/probe-claude-py/hello.txt");
-                    assert_eq!(reason.as_deref(), Some("hello.txt"));
+                    assert_eq!(
+                        request.reason, None,
+                        "the frame says what the tool does, not why it asks"
+                    );
                     let response = m
                         .build_approval_response(
                             &request.id,
