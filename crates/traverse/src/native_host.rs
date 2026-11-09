@@ -298,6 +298,10 @@ impl ClientHost for NativeClientHost {
         self.hosts_changed();
     }
 
+    fn saved_hosts_changes(&self) -> Option<async_channel::Receiver<()>> {
+        Some(crate::hosts::watch(&self.data_dir))
+    }
+
     fn remember_host(&self, host: PairedHost) {
         if let Err(error) = crate::hosts::update_hosts(&self.data_dir, |hosts| {
             tcode_client::pairing::remember_host(hosts, host);
