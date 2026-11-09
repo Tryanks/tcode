@@ -105,6 +105,14 @@ impl GitAction {
     pub fn opens_commit_dialog(self) -> bool {
         matches!(self, GitAction::Commit | GitAction::CommitPush)
     }
+
+    /// Whether it reaches the remote, under the machine's own credentials.
+    pub fn remote(self) -> bool {
+        matches!(
+            self,
+            GitAction::CommitPush | GitAction::Push | GitAction::Pull | GitAction::PublishBranch
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +214,24 @@ pub struct MenuItem {
     pub action: GitAction,
     pub disabled: bool,
     pub hint: Option<GitHint>,
+}
+
+/// The quick action and menu for a checkout whose remote is out of reach, as
+/// in a space that does not allow it: no action that reaches the remote, and a
+/// quick action that would becomes committing, or why there is nothing to.
+pub fn local_controls(status: &GitStatus, is_busy: bool) -> (QuickAction, Vec<MenuItem>) {
+    let mut items = menu_items(status, is_busy);
+    items.retain(|item| !item.action.remote());
+    let mut quick = quick_action(status, is_busy);
+    if quick.label.remote() {
+        let can_commit = !is_busy && status.has_working_tree_changes && !status.detached;
+        quick = if can_commit {
+            QuickAction::run(GitAction::Commit)
+        } else {
+            QuickAction::hint(GitAction::Commit, commit_disabled_hint(status))
+        };
+    }
+    (quick, items)
 }
 
 /// Build the quick-action dropdown items for `status`. Offers the actions that

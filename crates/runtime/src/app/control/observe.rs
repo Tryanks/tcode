@@ -563,6 +563,10 @@ impl AppState {
                     .grant
                     .scope
                     .reaches(caller.project_id.as_deref(), Some(&project.id))
+                    && caller
+                        .space
+                        .as_ref()
+                        .is_none_or(|space| space.holds(Some(&project.id)))
             })
             .map(|project| {
                 let (mut active, mut settled, mut archived) = (0, 0, 0);
@@ -1163,7 +1167,7 @@ impl AppState {
 
     pub(super) fn op_list_providers(
         &mut self,
-        _caller: &Caller,
+        caller: &Caller,
         _params: ListProvidersParams,
         _cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
@@ -1218,6 +1222,12 @@ impl AppState {
                         .settings
                         .profiles_for_kind(kind)
                         .into_iter()
+                        .filter(|profile| {
+                            caller
+                                .space
+                                .as_ref()
+                                .is_none_or(|space| space.policy.agent(&profile.id).is_some())
+                        })
                         .map(|profile| ProfileRow {
                             display_name: self.profile_display_name(&profile.id),
                             enabled: profile.settings.enabled,
@@ -1250,6 +1260,7 @@ impl AppState {
                     },
                 }
             })
+            .filter(|row| caller.space.is_none() || !row.profiles.is_empty())
             .collect();
         Ok(serde_json::json!({ "providers": to_value(&providers)? }))
     }

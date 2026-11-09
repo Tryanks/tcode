@@ -38,6 +38,13 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // In a space that leaves approvals to the agent's harness, a member
+        // answers none: theirs are declined at once, and the owner's are the
+        // owner's.
+        let answerable = matches!(request.kind, ApprovalKind::Plan { .. })
+            || self.workspace_store.read(cx).space_allows(|policy| {
+                policy.approval != tcode_protocol::SpaceApproval::ReviewedOnly
+            });
         let summary = match &request.kind {
             ApprovalKind::ExecCommand { .. } => {
                 if self.compact {
@@ -308,55 +315,64 @@ impl Composer {
             )
             .child(div().h(gap))
             .child(detail)
-            .child({
-                let mut options = h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_2()
-                    .items_center()
-                    .flex_wrap();
-                for option in &request.options {
-                    let request_id = request.id.clone();
-                    let option_id = option.id.clone();
-                    let rejects = matches!(
-                        option.kind,
-                        ApprovalOptionKind::RejectOnce | ApprovalOptionKind::RejectAlways
-                    );
-                    let id = gpui::SharedString::from(format!("approval-option-{}", option.id));
-                    let button = Button::new(id.clone())
-                        .motion(&self.button_motion())
-                        .debug_selector(move || id.to_string())
-                        .chip()
-                        .touch(self.compact)
-                        .disabled(!self.interactive(cx) || pending)
-                        .label(option.label.clone())
-                        .when(rejects, |button| button.danger().outline())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.respond(
-                                request_id.clone(),
-                                ApprovalDecision::Option(option_id.clone()),
-                                cx,
-                            );
-                        }));
-                    options = options.child(button);
-                }
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .items_start()
-                    .child(options)
-                    .child(
-                        Button::new("approval-cancel")
+            .when(!answerable, |card| {
+                card.child(
+                    div()
+                        .text_secondary(self.compact, cx)
+                        .child(crate::tr!("approval.space_reviewed_only")),
+                )
+            })
+            .when(answerable, |card| {
+                card.child({
+                    let mut options = h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_2()
+                        .items_center()
+                        .flex_wrap();
+                    for option in &request.options {
+                        let request_id = request.id.clone();
+                        let option_id = option.id.clone();
+                        let rejects = matches!(
+                            option.kind,
+                            ApprovalOptionKind::RejectOnce | ApprovalOptionKind::RejectAlways
+                        );
+                        let id = gpui::SharedString::from(format!("approval-option-{}", option.id));
+                        let button = Button::new(id.clone())
                             .motion(&self.button_motion())
-                            .ghost()
+                            .debug_selector(move || id.to_string())
                             .chip()
                             .touch(self.compact)
                             .disabled(!self.interactive(cx) || pending)
-                            .label(crate::tr!("approval.cancel_turn"))
+                            .label(option.label.clone())
+                            .when(rejects, |button| button.danger().outline())
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);
-                            })),
-                    )
+                                this.respond(
+                                    request_id.clone(),
+                                    ApprovalDecision::Option(option_id.clone()),
+                                    cx,
+                                );
+                            }));
+                        options = options.child(button);
+                    }
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_start()
+                        .child(options)
+                        .child(
+                            Button::new("approval-cancel")
+                                .motion(&self.button_motion())
+                                .ghost()
+                                .chip()
+                                .touch(self.compact)
+                                .disabled(!self.interactive(cx) || pending)
+                                .label(crate::tr!("approval.cancel_turn"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);
+                                })),
+                        )
+                })
             })
             .into_any_element()
     }

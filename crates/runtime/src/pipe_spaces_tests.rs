@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use tcode_core::project::{Project, SessionMeta};
 use tcode_core::session::Author;
 use tcode_core::settings::{EnvVar, ProviderProfile, ProviderSettings, Settings};
-use tcode_protocol::{IndexSnapshot, Scope};
+use tcode_protocol::{
+    AgentGrant, IndexSnapshot, ModelGrant, Scope, SpaceAgents, SpaceApproval, SpacePolicy,
+};
 use tcode_services::settings::SettingsStore;
 use tcode_services::store::Mutation;
 
@@ -108,14 +110,44 @@ impl SpaceHost {
     }
 
     fn member(&self, device: &str) -> Principal {
+        self.member_under(device, 1, tcode_protocol::SpacePolicy::unrestricted())
+    }
+
+    /// A member of space A as the machine shows them after `revision`
+    /// changes to the space, under `policy`.
+    fn member_under(&self, device: &str, revision: u64, policy: SpacePolicy) -> Principal {
         Principal::Space {
-            policy_revision: 1,
+            policy_revision: revision,
             space_id: "space-a".into(),
             space_name: "Team A".into(),
             project_ids: vec![self.a.id.clone()],
             device_id: device.into(),
             device_name: format!("Member {device}"),
+            policy,
         }
+    }
+
+    /// Answer the provider's next `SendTurn` and start the turn it carries.
+    fn start_next_turn(&mut self, turn_id: &str) -> String {
+        let SessionCommand::SendTurn {
+            delivery_id, text, ..
+        } = crate::app::next_command_blocking(&self.provider.commands).unwrap()
+        else {
+            panic!("send command")
+        };
+        self.provider
+            .events
+            .send_blocking(AgentEvent::TurnAccepted { delivery_id })
+            .unwrap();
+        self.provider
+            .events
+            .send_blocking(AgentEvent::TurnStarted {
+                turn_id: turn_id.into(),
+            })
+            .unwrap();
+        let turn = turn_id.to_owned();
+        self.event(|event| matches!(&event.event, ServerEvent::SessionEvent(record) if matches!(&record.event, AgentEvent::TurnStarted { turn_id } if *turn_id == turn)));
+        text
     }
 
     fn recv(&mut self) -> HostMessage {
@@ -876,4 +908,240 @@ fn space_turns_keep_the_sending_author_through_provider_delivery_and_queueing() 
             })
         );
     }
+}
+
+fn refused_by_policy(reply: HostMessage) {
+    match reply {
+        HostMessage::Ack {
+            result: Err(error), ..
+        } => assert_eq!(error.code, "space_policy", "{error:?}"),
+        reply => panic!("expected the space's policy to refuse: {reply:?}"),
+    }
+}
+
+/// What a space's policy withholds is refused as a member asks for it, and
+/// the same request inside the policy goes through.
+#[test]
+fn space_policy_refuses_what_it_withholds() {
+    let mut host = SpaceHost::new();
+    host.subscribe(
+        Principal::Full,
+        Topic::SessionEvents {
+            session_id: "a".into(),
+        },
+    );
+    let policy = SpacePolicy {
+        agents: SpaceAgents::Only(vec![
+            AgentGrant {
+                profile_id: "codex".into(),
+                models: ModelGrant::Every,
+                acp_agents: Vec::new(),
+            },
+            AgentGrant {
+                profile_id: "shared-profile".into(),
+                models: ModelGrant::Only(vec!["team-model".into()]),
+                acp_agents: Vec::new(),
+            },
+        ]),
+        approval: SpaceApproval::NoUnrestricted,
+        ..SpacePolicy::new_space()
+    };
+    let member = host.member_under("one", 1, policy);
+    let model = |provider, model: &str, profile: Option<&str>| Command::SetActiveModel {
+        session_id: "a".into(),
+        provider,
+        model: Some(model.into()),
+        profile_id: profile.map(Into::into),
+    };
+    let permission = |value: &str| Command::SetActiveOption {
+        session_id: "a".into(),
+        id: "permissions".into(),
+        value: Some(value.into()),
+    };
+    for refused in [
+        model(ProviderKind::Codex, "other-model", Some("shared-profile")),
+        model(ProviderKind::ClaudeCode, "sonnet", None),
+        permission("full_access"),
+        Command::NewTerminal {
+            session_id: "a".into(),
+        },
+        Command::RunGitAction {
+            session_id: "a".into(),
+            action: tcode_core::git::GitAction::Push,
+            message: None,
+            included: None,
+            feature_branch: None,
+        },
+    ] {
+        refused_by_policy(host.request(member.clone(), ClientPayload::Command(refused)));
+    }
+    host.command(
+        member.clone(),
+        model(ProviderKind::Codex, "team-model", Some("shared-profile")),
+    );
+    host.command(member.clone(), permission("auto_review"));
+    // The machine's own user is not bound by it, and a member then cannot
+    // send on what the thread was switched to.
+    host.command(Principal::Full, permission("full_access"));
+    refused_by_policy(host.request(
+        member,
+        ClientPayload::Command(Command::SendTurn {
+            session_id: "a".into(),
+            text: "hello".into(),
+            attachment_paths: Vec::new(),
+        }),
+    ));
+    host.finish();
+}
+
+/// A member's queued message waits while the space's policy refuses the
+/// thread's setup, and goes as soon as the policy allows it again, without
+/// the member reconnecting.
+#[test]
+fn a_queued_message_waits_for_its_space_to_allow_the_thread() {
+    let mut host = SpaceHost::new();
+    host.subscribe(
+        Principal::Full,
+        Topic::SessionEvents {
+            session_id: "a".into(),
+        },
+    );
+    host.subscribe(
+        Principal::Full,
+        Topic::SessionStatus {
+            session_id: "a".into(),
+        },
+    );
+    let open = SpacePolicy::unrestricted();
+    let reviewed = SpacePolicy {
+        approval: SpaceApproval::ReviewedOnly,
+        ..SpacePolicy::unrestricted()
+    };
+    let send = |text: &str| Command::SendTurn {
+        session_id: "a".into(),
+        text: text.into(),
+        attachment_paths: Vec::new(),
+    };
+    host.command(host.member_under("one", 1, open.clone()), send("first"));
+    assert_eq!(host.start_next_turn("first"), "first");
+    host.command(host.member_under("two", 1, open.clone()), send("queued"));
+    // The owner narrows the space: the thread's default permission mode,
+    // which asks a person, is no longer one its members may run.
+    host.query(host.member_under("three", 2, reviewed), Query::Ping);
+    host.provider
+        .events
+        .send_blocking(AgentEvent::TurnCompleted {
+            turn_id: "first".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        })
+        .unwrap();
+    host.event(|event| {
+        matches!(&event.event, ServerEvent::SessionStatusReplaced(status)
+            if status.running_turn.is_none()
+                && status.queued_messages.len() == 1
+                && status.queued_messages[0].space_held)
+    });
+    assert!(
+        !std::iter::from_fn(|| host.provider.commands.try_recv().ok())
+            .any(|command| matches!(command, SessionCommand::SendTurn { .. })),
+        "a held message must not be sent"
+    );
+    host.query(host.member_under("three", 3, open), Query::Ping);
+    let SessionCommand::SendTurn { text, .. } =
+        crate::app::next_command_blocking(&host.provider.commands).unwrap()
+    else {
+        panic!("the held message goes once allowed")
+    };
+    assert!(text.contains("queued"), "{text}");
+    host.finish();
+}
+
+/// In a space that leaves approvals to the harness, what the harness still
+/// asks during a member's turn is declined at once with its own reject;
+/// leaving plan mode is left for a person.
+#[test]
+fn a_reviewed_only_space_declines_what_its_members_turns_ask() {
+    let mut host = SpaceHost::new();
+    host.subscribe(
+        Principal::Full,
+        Topic::SessionEvents {
+            session_id: "a".into(),
+        },
+    );
+    let member = host.member_under(
+        "one",
+        1,
+        SpacePolicy {
+            approval: SpaceApproval::ReviewedOnly,
+            ..SpacePolicy::unrestricted()
+        },
+    );
+    host.command(
+        member.clone(),
+        Command::SetActiveOption {
+            session_id: "a".into(),
+            id: "permissions".into(),
+            value: Some("auto_review".into()),
+        },
+    );
+    host.command(
+        member,
+        Command::SendTurn {
+            session_id: "a".into(),
+            text: "go".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    host.start_next_turn("turn");
+    let request = |id: &str, kind| {
+        AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+            id: id.into(),
+            turn_id: Some("turn".into()),
+            parent_item_id: None,
+            kind,
+            reason: None,
+            blocked_path: None,
+            options: vec![
+                agent::ApprovalOption {
+                    id: "allow".into(),
+                    label: "Allow".into(),
+                    kind: agent::ApprovalOptionKind::AllowOnce,
+                },
+                agent::ApprovalOption {
+                    id: "deny".into(),
+                    label: "Deny".into(),
+                    kind: agent::ApprovalOptionKind::RejectOnce,
+                },
+            ],
+        })
+    };
+    for event in [
+        request(
+            "plan",
+            agent::ApprovalKind::Plan {
+                item_id: "plan-item".into(),
+                markdown: "plan".into(),
+            },
+        ),
+        request(
+            "command",
+            agent::ApprovalKind::ExecCommand {
+                command: "rm -rf build".into(),
+                cwd: None,
+                description: None,
+            },
+        ),
+    ] {
+        host.provider.events.send_blocking(event).unwrap();
+    }
+    // Commands reach the provider in order: the first answer is the
+    // command's, so the plan's was never sent.
+    let answer = crate::app::next_command_blocking(&host.provider.commands).unwrap();
+    assert!(
+        matches!(&answer, SessionCommand::RespondApproval { request_id, decision: agent::ApprovalDecision::Option(option) }
+            if request_id == "command" && option == "deny"),
+        "{answer:?}"
+    );
+    host.finish();
 }

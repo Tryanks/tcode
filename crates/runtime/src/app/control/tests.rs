@@ -28,6 +28,7 @@ fn caller(project: &str, grant: ControlGrant) -> Caller {
         grant,
         subagent: false,
         ancestors: Vec::new(),
+        space: None,
     }
 }
 

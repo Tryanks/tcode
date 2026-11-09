@@ -401,6 +401,15 @@ impl Composer {
                             .child(countdown),
                     )
                 })
+                .when(message.space_held, |row| {
+                    row.child(
+                        div()
+                            .debug_selector(move || format!("queued-held-{id}"))
+                            .flex_none()
+                            .text_secondary(self.compact, cx)
+                            .child(crate::tr!("space_policy.queued_held")),
+                    )
+                })
                 .child(
                     Button::new(("queue-steer", id as usize))
                         .motion(&self.button_motion())

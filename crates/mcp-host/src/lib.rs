@@ -1,6 +1,6 @@
 //! Shared authenticated HTTP host for tcode's in-process MCP tool servers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -66,7 +66,8 @@ impl<Request> Broker<Request> {
 }
 
 pub struct TokenRegistry<Service> {
-    services: Arc<RwLock<HashMap<String, Service>>>,
+    services: Arc<RwLock<HashMap<String, (String, Service)>>>,
+    suspended: Arc<RwLock<HashSet<String>>>,
     create: Arc<dyn Fn(String) -> Service + Send + Sync>,
 }
 
@@ -74,6 +75,7 @@ impl<Service> Clone for TokenRegistry<Service> {
     fn clone(&self) -> Self {
         Self {
             services: self.services.clone(),
+            suspended: self.suspended.clone(),
             create: self.create.clone(),
         }
     }
@@ -83,6 +85,7 @@ impl<Service> TokenRegistry<Service> {
     pub fn new(create: impl Fn(String) -> Service + Send + Sync + 'static) -> Self {
         Self {
             services: Arc::new(RwLock::new(HashMap::new())),
+            suspended: Arc::new(RwLock::new(HashSet::new())),
             create: Arc::new(create),
         }
     }
@@ -97,12 +100,23 @@ impl<Service> TokenRegistry<Service> {
         self.services
             .write()
             .unwrap()
-            .insert(token.clone(), service);
+            .insert(token.clone(), (scope.to_string(), service));
         token
     }
 
     pub fn revoke(&self, token: &str) {
         self.services.write().unwrap().remove(token);
+    }
+
+    /// Refuse every call made with `scope`'s tokens until [`Self::resume`],
+    /// keeping them registered: the provider keeps the server and its tools,
+    /// and each call answers that it is not available now.
+    pub fn suspend(&self, scope: &str) {
+        self.suspended.write().unwrap().insert(scope.to_string());
+    }
+
+    pub fn resume(&self, scope: &str) {
+        self.suspended.write().unwrap().remove(scope);
     }
 }
 
@@ -116,13 +130,19 @@ where
     Handler: ServerHandler + Clone + Send + Sync + 'static,
 {
     let services = tokens.services.clone();
-    let handler =
-        move |request: axum::extract::Request| handle_authenticated(services.clone(), request);
+    let suspended = tokens.suspended.clone();
+    let handler = move |request: axum::extract::Request| {
+        handle_authenticated(services.clone(), suspended.clone(), request)
+    };
     Route(Router::new().route(path, any(handler)))
 }
 
+type Services<Handler> =
+    Arc<RwLock<HashMap<String, (String, StreamableHttpService<Handler, LocalSessionManager>)>>>;
+
 async fn handle_authenticated<Handler>(
-    services: Arc<RwLock<HashMap<String, StreamableHttpService<Handler, LocalSessionManager>>>>,
+    services: Services<Handler>,
+    suspended: Arc<RwLock<HashSet<String>>>,
     request: axum::extract::Request,
 ) -> Response
 where
@@ -134,9 +154,16 @@ where
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
     let service = token.and_then(|token| services.read().unwrap().get(token).cloned());
-    let Some(service) = service else {
+    let Some((scope, service)) = service else {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     };
+    if suspended.read().unwrap().contains(&scope) {
+        return (
+            StatusCode::FORBIDDEN,
+            "not available in this turn: the thread's space does not allow it",
+        )
+            .into_response();
+    }
     let response = service.handle(request).await;
     let (parts, body) = response.into_parts();
     Response::from_parts(parts, axum::body::Body::new(body))
@@ -209,10 +236,10 @@ mod tests {
         let first = registry.register("session-a");
         let second = registry.register("session-b");
         assert_ne!(first, second);
-        assert_eq!(registry.services.read().unwrap()[&first], "session-a");
+        assert_eq!(registry.services.read().unwrap()[&first].0, "session-a");
         registry.revoke(&first);
         let services = registry.services.read().unwrap();
         assert!(!services.contains_key(&first));
-        assert_eq!(services[&second], "session-b");
+        assert_eq!(services[&second].0, "session-b");
     }
 }

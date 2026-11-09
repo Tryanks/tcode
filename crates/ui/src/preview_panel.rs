@@ -739,7 +739,8 @@ impl PreviewPanel {
         // The host's dev servers, wherever this client is: a picked one
         // loads on the client rendering the page, through the Preview
         // tunnels when that is not the host.
-        let offer_ports = preview_backend() && self.store.read(cx).scope().is_full();
+        let offer_ports =
+            preview_backend() && self.store.read(cx).space_allows(|policy| policy.preview);
         // Compact: one toolbar row on the page inset, with 44pt touch targets.
         // Close is a right-panel affordance — the Panel page's Back leaves it —
         // so it is not drawn here at all.

@@ -1322,11 +1322,13 @@ fn command_key_is_optional_for_v3_and_preserved_for_v4() {
             project_ids: vec!["p".into()],
             device_id: "d".into(),
             device_name: "Phone".into(),
+            policy: SpacePolicy::unrestricted(),
         })
     );
     assert_eq!(
         serde_json::to_value(&scoped).unwrap()["principal"],
-        json!({"type":"space","content":{"policy_revision":0,"space_id":"s","space_name":"Shared","project_ids":["p"],"device_id":"d","device_name":"Phone"}})
+        json!({"type":"space","content":{"policy_revision":0,"space_id":"s","space_name":"Shared","project_ids":["p"],"device_id":"d","device_name":"Phone",
+            "policy":{"agents":{"type":"every"},"approval":"any","terminals":true,"git_remote":true,"preview":false,"computer_use":true,"editor":false}}})
     );
     let keyed = decode_client_line(r#"{"id":9,"key":"951925af-31f3-4f1c-a57b-dac199d82ad7","payload":{"type":"command","content":{"type":"cycle_project_sort"}}}"#).unwrap();
     assert_eq!(
@@ -1545,6 +1547,16 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
         link_enabled: true,
         link_dead: false,
         members: vec![state.devices[1].clone()],
+        policy: SpacePolicy {
+            agents: SpaceAgents::Only(vec![AgentGrant {
+                profile_id: "codex".into(),
+                models: ModelGrant::Only(vec!["gpt".into()]),
+                acp_agents: Vec::new(),
+            }]),
+            approval: SpaceApproval::ReviewedOnly,
+            editor: true,
+            ..SpacePolicy::new_space()
+        },
     });
     assert_eq!(
         serde_json::to_value(&state).unwrap(),
@@ -1567,7 +1579,9 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
             ],
             "spaces": [{"id":"s","name":"Shared","created_unix":3,"project_ids":["p"],
                 "link":"tcode://pair?v=2&id=abab&space=s","link_enabled":true,"link_dead":false,
-                "members":[{"id":"ef".repeat(32),"name":"Laptop","created_unix":2,"access":{"type":"space","content":{"space_id":"s"}}}]}],
+                "members":[{"id":"ef".repeat(32),"name":"Laptop","created_unix":2,"access":{"type":"space","content":{"space_id":"s"}}}],
+                "policy":{"agents":{"type":"only","content":[{"profile_id":"codex","models":{"type":"only","content":["gpt"]}}]},
+                    "approval":"reviewed_only","terminals":false,"git_remote":false,"preview":false,"computer_use":false,"editor":true}}],
             "traverse": [
                 {
                     "source": "official",
@@ -1917,8 +1931,10 @@ fn scope_subscriptions_and_provider_choices_have_literal_wire_contracts() {
                 options: vec![],
             }],
         }],
+        policy: SpacePolicy::new_space(),
     };
-    let scope_wire = json!({"type":"space","content":{"space_id":"s","space_name":"Shared","projects":[],"providers":[{"provider":"codex","profile_id":"codex","name":"Codex","models":[{"id":"model","display_name":"Model","is_default":true,"options":[]}]}]}});
+    let scope_wire = json!({"type":"space","content":{"space_id":"s","space_name":"Shared","projects":[],"providers":[{"provider":"codex","profile_id":"codex","name":"Codex","models":[{"id":"model","display_name":"Model","is_default":true,"options":[]}]}],
+        "policy":{"agents":{"type":"only","content":[]},"approval":"no_unrestricted","terminals":false,"git_remote":false,"preview":false,"computer_use":false,"editor":false}}});
     for (event, wire) in [
         (
             ServerEvent::ScopeSnapshot(Scope::Full),

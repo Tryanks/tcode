@@ -40,6 +40,8 @@ pub struct SpaceRecord {
     pub secret: String,
     pub link_enabled: bool,
     pub link_failures: u8,
+    #[serde(default = "tcode_protocol::SpacePolicy::unrestricted")]
+    pub policy: tcode_protocol::SpacePolicy,
 }
 
 /// `traverse.json`: this machine's key, name, allow list and pairing switch.

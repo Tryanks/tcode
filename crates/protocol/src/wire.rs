@@ -53,6 +53,8 @@ pub enum Principal {
         project_ids: Vec<String>,
         device_id: String,
         device_name: String,
+        #[serde(default = "crate::SpacePolicy::unrestricted")]
+        policy: crate::SpacePolicy,
     },
 }
 

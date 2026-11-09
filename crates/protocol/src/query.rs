@@ -517,6 +517,12 @@ pub enum SpaceAction {
         device_id: String,
         regenerate_link: bool,
     },
+    /// Replace what the space's members may do. Members reconnect under it;
+    /// a turn already running finishes under the policy it started with.
+    SetPolicy {
+        id: String,
+        policy: SpacePolicy,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -529,6 +535,158 @@ pub struct SpaceInfo {
     pub link_enabled: bool,
     pub link_dead: bool,
     pub members: Vec<HostedDevice>,
+    #[serde(default = "SpacePolicy::unrestricted")]
+    pub policy: SpacePolicy,
+}
+
+/// What a space's members may do with its projects beyond reading and
+/// writing their threads. Every turn a member sends, and everything that turn
+/// does through Tcode, runs under it. It scopes what Tcode offers; it is not
+/// isolation: a terminal or an editor gives a member a shell under the
+/// machine's account, from which none of it binds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpacePolicy {
+    pub agents: SpaceAgents,
+    pub approval: SpaceApproval,
+    /// Open, type into and restart terminals.
+    #[serde(default)]
+    pub terminals: bool,
+    /// Push, pull and publish branches, and work with pull requests, all
+    /// under the machine's own credentials.
+    #[serde(default)]
+    pub git_remote: bool,
+    /// Reach the machine's local services through Preview tunnels.
+    #[serde(default)]
+    pub preview: bool,
+    /// Let a member's turn operate the machine's desktop through computer use.
+    #[serde(default)]
+    pub computer_use: bool,
+    /// Open the space's projects in an editor over the machine's SSH channel.
+    #[serde(default)]
+    pub editor: bool,
+}
+
+impl SpacePolicy {
+    /// What a space allowed before spaces had a policy, which a space stored
+    /// without one keeps.
+    pub fn unrestricted() -> Self {
+        Self {
+            agents: SpaceAgents::Every,
+            approval: SpaceApproval::Any,
+            terminals: true,
+            git_remote: true,
+            preview: false,
+            computer_use: true,
+            editor: false,
+        }
+    }
+
+    /// A new space: no agent until the owner allows one, no unrestricted
+    /// approvals, and nothing beyond its threads.
+    pub fn new_space() -> Self {
+        Self {
+            agents: SpaceAgents::Only(Vec::new()),
+            approval: SpaceApproval::NoUnrestricted,
+            terminals: false,
+            git_remote: false,
+            preview: false,
+            computer_use: false,
+            editor: false,
+        }
+    }
+
+    /// The grant for `profile_id`, when members may run that profile at all.
+    pub fn agent(&self, profile_id: &str) -> Option<AgentAccess<'_>> {
+        match &self.agents {
+            SpaceAgents::Every => Some(AgentAccess::Every),
+            SpaceAgents::Only(grants) => grants
+                .iter()
+                .find(|grant| grant.profile_id == profile_id)
+                .map(AgentAccess::Granted),
+        }
+    }
+
+    /// Whether a turn may run under a permission value of `class`.
+    pub fn allows_class(&self, class: agent::ApprovalClass) -> bool {
+        match self.approval {
+            SpaceApproval::Any => true,
+            SpaceApproval::NoUnrestricted => class != agent::ApprovalClass::Unrestricted,
+            SpaceApproval::ReviewedOnly => class == agent::ApprovalClass::Reviewed,
+        }
+    }
+}
+
+/// The agents a space's members may run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum SpaceAgents {
+    /// Every enabled account profile and model, including ones added later.
+    Every,
+    /// Only these profiles; one added later is not among them.
+    Only(Vec<AgentGrant>),
+}
+
+/// One account profile a space's members may run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentGrant {
+    pub profile_id: String,
+    pub models: ModelGrant,
+    /// For the ACP profile, the registry ids of the agents members may run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acp_agents: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum ModelGrant {
+    /// Every model the profile offers, including ones it offers later.
+    Every,
+    Only(Vec<String>),
+}
+
+/// How a member's turn may settle what its harness would stop to ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceApproval {
+    /// Any permission value; members answer approvals themselves.
+    Any,
+    /// No value that lets everything run unasked; members answer approvals
+    /// themselves.
+    NoUnrestricted,
+    /// Only values under which the harness settles approvals itself. What it
+    /// still asks during a member's turn is declined at once, and members
+    /// answer no approval but leaving plan mode.
+    ReviewedOnly,
+}
+
+/// What [`SpacePolicy::agent`] found for one profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentAccess<'a> {
+    Every,
+    Granted(&'a AgentGrant),
+}
+
+impl AgentAccess<'_> {
+    pub fn allows_model(&self, model: Option<&str>) -> bool {
+        match self {
+            Self::Every => true,
+            Self::Granted(grant) => match &grant.models {
+                ModelGrant::Every => true,
+                ModelGrant::Only(models) => {
+                    model.is_some_and(|model| models.iter().any(|allowed| allowed == model))
+                }
+            },
+        }
+    }
+
+    pub fn allows_acp_agent(&self, agent: Option<&str>) -> bool {
+        match self {
+            Self::Every => true,
+            Self::Granted(grant) => {
+                agent.is_some_and(|agent| grant.acp_agents.iter().any(|allowed| allowed == agent))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

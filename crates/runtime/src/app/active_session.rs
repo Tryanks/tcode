@@ -14,6 +14,12 @@ pub struct QueuedMessage {
     pub id: u64,
     pub(super) delivery_key: Option<String>,
     pub author: Option<Author>,
+    /// The space a member sent it from, or whose turn a `tcode_control` call
+    /// sent it during.
+    pub(super) space: Option<String>,
+    /// Held because its space's policy refuses the thread's setup as it
+    /// stands ([`AppState::refresh_policy_holds`]).
+    pub(super) space_held: bool,
     pub origin: MessageOrigin,
     pub text: String,
     /// Provider-only context for the first turn after a relay. The canonical
@@ -201,6 +207,11 @@ pub struct ActiveSession {
     /// The entry remains in `queue` until acceptance; scheduled rows may precede it.
     pub(super) delivery_in_flight: Option<u64>,
     pub(super) pending_steers: Vec<PendingSteer>,
+    /// The space whose policy the latest turn runs under: the sender's space
+    /// for a person's message (`None` for the machine's own user), or what the
+    /// turn before had for one the host or an agent wrote. A member steering
+    /// a turn puts it under their space too.
+    pub(super) turn_space: Option<String>,
     pub(super) turn_in_flight: bool,
     /// The running turn's only input so far is a `tcode_control` watch callback. Such a turn
     /// fires no `turn_completed` or `idle` watch, so two threads watching each other cannot
@@ -249,6 +260,7 @@ pub(super) struct PendingSteer {
     pub(super) text: String,
     pub(super) attachments: Vec<Attachment>,
     pub(super) author: Option<Author>,
+    pub(super) space: Option<String>,
     pub(super) origin: Option<MessageOrigin>,
     pub(super) reports: Vec<ReportHandover>,
 }
@@ -303,6 +315,7 @@ impl ActiveSession {
             next_queue_id: 0,
             delivery_in_flight: None,
             pending_steers: Vec::new(),
+            turn_space: None,
             turn_in_flight: false,
             turn_woken_by_control: false,
             interrupt_requested: false,
@@ -531,9 +544,9 @@ impl ActiveSession {
             return None;
         }
         let now = SystemTime::now();
-        self.queue
-            .iter()
-            .find(|message| message.not_before.is_none_or(|time| time <= now))
+        self.queue.iter().find(|message| {
+            !message.space_held && message.not_before.is_none_or(|time| time <= now)
+        })
     }
 
     /// The id and text of the message that opens the fresh provider session of a moved
@@ -700,6 +713,8 @@ impl ActiveSession {
         self.queue.push(QueuedMessage {
             delivery_key: None,
             author: None,
+            space: None,
+            space_held: false,
             origin: MessageOrigin::Human,
             id,
             text,
@@ -721,6 +736,7 @@ impl ActiveSession {
         self.push_queued(steer.text, steer.attachments);
         if let Some(message) = self.queue.last_mut() {
             message.author = steer.author;
+            message.space = steer.space;
             message.origin = steer.origin.unwrap_or(MessageOrigin::Human);
             message.reports = steer.reports;
         }
@@ -763,6 +779,8 @@ impl ActiveSession {
         self.queue.push(QueuedMessage {
             delivery_key: None,
             author: None,
+            space: None,
+            space_held: false,
             origin: MessageOrigin::Agent,
             id,
             text,
@@ -787,6 +805,8 @@ impl ActiveSession {
         self.queue.push(QueuedMessage {
             delivery_key: None,
             author: None,
+            space: None,
+            space_held: false,
             origin: MessageOrigin::Server,
             id,
             text,
@@ -868,6 +888,10 @@ impl ActiveSession {
         }
         self.idle_since = None;
         self.delivery_in_flight = Some(send.id);
+        self.turn_space = match send.origin {
+            MessageOrigin::Human => send.space,
+            MessageOrigin::Agent | MessageOrigin::Server => send.space.or(self.turn_space.take()),
+        };
         Ok(true)
     }
 

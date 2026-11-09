@@ -77,6 +77,8 @@ pub struct ComposerState {
     pub pending_approval_count: usize,
     /// The plan decision the agent waits on, which a send answers in words.
     pub pending_plan: Option<agent::ApprovalRequest>,
+    /// The policy of the space this composer's workspace is a member of.
+    pub space_policy: Option<tcode_protocol::SpacePolicy>,
 }
 
 pub(crate) fn composer_state(
@@ -141,6 +143,7 @@ pub(crate) fn composer_state(
     });
 
     ComposerState {
+        space_policy: None,
         has_active_session: status.is_some(),
         terminal_contexts: status
             .map(|status| status.terminal_contexts.clone())

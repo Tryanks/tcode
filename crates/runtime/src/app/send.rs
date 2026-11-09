@@ -49,6 +49,7 @@ impl AppState {
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();
+            message.space = cx.space.clone();
             message.origin = cx.origin.unwrap_or(message.origin);
         }
         let should_start = matches!(active.runtime, Runtime::Idle)
@@ -127,10 +128,12 @@ impl AppState {
                 continue;
             };
             let author = std::mem::replace(&mut cx.author, message.author);
+            let space = std::mem::replace(&mut cx.space, message.space);
             let origin = cx.origin.replace(message.origin);
             let key = std::mem::replace(&mut cx.delivery_key, message.delivery_key);
             self.send_turn_assembled(&session_id, message.text, message.attachments, cx);
             cx.author = author;
+            cx.space = space;
             cx.origin = origin;
             cx.delivery_key = key;
         }
@@ -237,6 +240,7 @@ impl AppState {
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();
+            message.space = cx.space.clone();
             message.origin = cx.origin.unwrap_or(message.origin);
         }
         // The first message after a rewind goes ahead of the messages the
@@ -440,6 +444,7 @@ impl AppState {
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();
+            message.space = cx.space.clone();
             message.origin = cx.origin.unwrap_or(message.origin);
         }
         if let Some(message) = active.queue.last_mut() {
@@ -577,6 +582,7 @@ impl AppState {
         target_id: &str,
         cx: &mut HostCx,
     ) -> Result<bool, ()> {
+        self.refresh_policy_holds(target_id);
         let Some(active) = self.resident(target_id) else {
             return Ok(false);
         };
@@ -591,9 +597,14 @@ impl AppState {
         if !self.hand_off_conversation(target_id, cx) {
             return Ok(false);
         }
-        self.resident_mut(target_id)
+        let sent = self
+            .resident_mut(target_id)
             .ok_or(())?
-            .dispatch_next_pending()
+            .dispatch_next_pending()?;
+        if sent {
+            self.apply_turn_tools(target_id);
+        }
+        Ok(sent)
     }
 
     /// Finalize one submitted queue entry. Queue-id correlation makes duplicate
@@ -790,6 +801,7 @@ impl AppState {
                     text: text.clone(),
                     attachments: attachments.clone(),
                     author: cx.author.clone(),
+                    space: cx.space.clone(),
                     origin: cx.origin,
                     reports: Vec::new(),
                 };
@@ -816,11 +828,16 @@ impl AppState {
         };
         let request_id = steer.request_id.clone();
         let attachments = steer.attachments.clone();
+        let space = steer.space.clone();
         active.pending_steers.push(steer);
         if active
             .steer_now(request_id.clone(), wire_text, attachments)
             .is_ok()
         {
+            if space.is_some() {
+                active.turn_space = space;
+                self.apply_turn_tools(target_id);
+            }
             return true;
         }
         active.pending_steers.pop();
@@ -860,10 +877,12 @@ impl AppState {
         };
         let command_key = std::mem::replace(&mut cx.delivery_key, message.delivery_key);
         let author = std::mem::replace(&mut cx.author, message.author);
+        let space = std::mem::replace(&mut cx.space, message.space);
         let origin = cx.origin.replace(message.origin);
         self.steer_assembled(target_id, message.text, message.attachments, cx);
         cx.delivery_key = command_key;
         cx.author = author;
+        cx.space = space;
         cx.origin = origin;
         self.reschedule_scheduled_wake(cx);
     }

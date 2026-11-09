@@ -1119,6 +1119,7 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
         project_ids: vec!["project-a".into(), "project-b".into()],
         device_id: member.endpoint_id().to_string(),
         device_name: "Collaborator".into(),
+        policy: tcode_protocol::SpacePolicy::new_space(),
     };
     scoped_ping(&client, &host_rx, &host_tx, &principal, 1);
     let state = host.hosting(HostingAction::State).unwrap();
@@ -1158,7 +1159,7 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     assert!(
         refusal
             .to_string()
-            .contains("space members cannot open tunnels"),
+            .contains("this space does not allow Preview tunnels"),
         "{refusal}"
     );
 

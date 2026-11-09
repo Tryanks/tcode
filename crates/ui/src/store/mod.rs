@@ -219,6 +219,9 @@ impl WorkspaceScope {
 pub struct WorkspaceStore {
     host: HostLink,
     scope: WorkspaceScope,
+    /// What the space this workspace is a member of allows; `None` on a
+    /// full workspace, which may do everything.
+    space_policy: Option<tcode_protocol::SpacePolicy>,
     scoped_providers: Vec<ScopedProviderChoice>,
     attachment: WorkspaceAttachment,
     client_host: Option<Rc<dyn ClientHost>>,
@@ -439,6 +442,7 @@ impl WorkspaceStore {
         let mut store = Self {
             host: host.clone(),
             scope: WorkspaceScope::Full,
+            space_policy: None,
             scoped_providers: Vec::new(),
             attachment,
             client_host,
@@ -591,6 +595,17 @@ impl WorkspaceStore {
         self.scope.is_full() && self.baseline_topics.contains(&Topic::Scope)
     }
 
+    /// Whether this workspace may do what `allowed` asks of its space's
+    /// policy: always on a full workspace.
+    pub fn space_allows(&self, allowed: impl FnOnce(&tcode_protocol::SpacePolicy) -> bool) -> bool {
+        self.space_policy.as_ref().is_none_or(allowed)
+    }
+
+    /// The space policy this workspace works under, when it is a member's.
+    pub fn space_policy(&self) -> Option<&tcode_protocol::SpacePolicy> {
+        self.space_policy.as_ref()
+    }
+
     pub fn scope(&self) -> &WorkspaceScope {
         &self.scope
     }
@@ -701,6 +716,10 @@ impl WorkspaceStore {
         }
         self.baseline_topics.insert(Topic::Scope);
         self.scope = next;
+        self.space_policy = match scope {
+            Scope::Full => None,
+            Scope::Space { policy, .. } => Some(policy.clone()),
+        };
         match scope {
             Scope::Full if needs_baseline => {
                 for topic in [
@@ -2310,6 +2329,11 @@ impl WorkspaceStore {
         &self,
         session_id: &str,
     ) -> &[tcode_core::pull_request::ThreadPullRequestLink] {
+        // A member whose space keeps the remote out of reach works with no
+        // pull request: reading one goes through the machine's credentials.
+        if !self.space_allows(|policy| policy.git_remote) {
+            return &[];
+        }
         self.thread_meta(session_id)
             .map_or(&[], |meta| meta.pull_requests.as_slice())
     }
@@ -3259,7 +3283,9 @@ impl WorkspaceStore {
 
     /// The panels of `session_id`'s conversation, or of no thread.
     pub(crate) fn panel_state_for(&self, session_id: Option<&str>) -> PanelState {
-        snapshots::panel_state(self.thread_conversation_ui(session_id))
+        let mut state = snapshots::panel_state(self.thread_conversation_ui(session_id));
+        state.terminal_open &= self.space_allows(|policy| policy.terminals);
+        state
     }
 
     pub fn review_comments_for(&self, session_id: Option<&str>, cx: &App) -> Vec<ReviewComment> {
@@ -3675,11 +3701,13 @@ impl WorkspaceStore {
 
     /// The composer of `session_id`'s thread, or of no thread.
     pub fn composer_state_for(&self, session_id: Option<&str>, cx: &App) -> ComposerState {
-        snapshots::composer_state(
+        let mut state = snapshots::composer_state(
             self.thread_status(session_id, cx),
             &self.settings_replica,
             &self.providers_replica,
-        )
+        );
+        state.space_policy = self.space_policy.clone();
+        state
     }
 
     /// Puts `text` into the thread's composer after whatever is typed there; nothing is sent.
@@ -4158,9 +4186,14 @@ impl WorkspaceStore {
         cx: &App,
     ) -> Option<(QuickAction, Vec<MenuItem>)> {
         let git = self.thread_git(session_id, cx)?;
-        git.status
-            .as_ref()
-            .map(|status| (quick_action(status, git.busy), menu_items(status, git.busy)))
+        let remote = self.space_allows(|policy| policy.git_remote);
+        git.status.as_ref().map(|status| {
+            if remote {
+                (quick_action(status, git.busy), menu_items(status, git.busy))
+            } else {
+                tcode_core::git::local_controls(status, git.busy)
+            }
+        })
     }
 
     pub fn generate_commit_message_for(
@@ -4412,6 +4445,7 @@ pub(crate) mod tests {
                         options: Vec::new(),
                     }],
                 }],
+                policy: tcode_protocol::SpacePolicy::unrestricted(),
             }));
             let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let worker_scope = scope.clone();
@@ -4543,6 +4577,7 @@ pub(crate) mod tests {
                                         link_enabled: true,
                                         link_dead: false,
                                         members: vec![],
+                                        policy: tcode_protocol::SpacePolicy::unrestricted(),
                                     })
                                     .collect();
                                 HostMessage::QueryResult {
@@ -4810,6 +4845,7 @@ pub(crate) mod tests {
             space_name: "Moved".into(),
             projects: vec![project_at("other", std::path::Path::new("/other"))],
             providers: Vec::new(),
+            policy: tcode_protocol::SpacePolicy::unrestricted(),
         };
         workspace.update(cx, |store, _| {
             let state = tcode_client::ConnectionState::Reconnecting {
@@ -4934,6 +4970,7 @@ pub(crate) mod tests {
             space_name: "Current".into(),
             projects: vec![],
             providers: vec![],
+            policy: tcode_protocol::SpacePolicy::unrestricted(),
         };
         workspace.update(cx, |store, cx| {
             let state = tcode_client::ConnectionState::Reconnecting {

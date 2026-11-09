@@ -3668,6 +3668,7 @@ mod replica_tests {
             delivery_key: None,
             text: "Keep this queued until the host accepts the edit".into(),
             fire_at_unix_secs: Some(u64::MAX),
+            space_held: false,
         }];
         let topic = Topic::SessionStatus {
             session_id: status.session_id.clone(),
@@ -3762,6 +3763,7 @@ mod replica_tests {
                 delivery_key: None,
                 text: "Queued text".into(),
                 fire_at_unix_secs: None,
+                space_held: false,
             });
         replace(
             &incoming,
@@ -3809,6 +3811,7 @@ mod replica_tests {
                     delivery_key: None,
                     text: format!("Queued {id}"),
                     fire_at_unix_secs: None,
+                    space_held: false,
                 })
                 .collect::<Vec<_>>()
         };
@@ -3907,6 +3910,7 @@ mod replica_tests {
                 delivery_key: None,
                 text: format!("Queued {id}"),
                 fire_at_unix_secs: None,
+                space_held: false,
             })
             .collect();
         replace(
@@ -3983,6 +3987,7 @@ mod replica_tests {
                 delivery_key: None,
                 text: format!("Queued {id}"),
                 fire_at_unix_secs: None,
+                space_held: false,
             })
             .collect();
         replace(

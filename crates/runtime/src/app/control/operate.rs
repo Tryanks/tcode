@@ -379,6 +379,10 @@ impl AppState {
             meta.option_selections
                 .extend(self.initial_permission_selection(Some(&project.id), provider));
         }
+        if let Some(space) = &caller.space {
+            self.fit_to_policy(&space.policy, &mut meta)
+                .map_err(|error| format!("refused: {}", error.message))?;
+        }
         meta.started_by = Some(StartedBy {
             thread_id: caller.thread_id.clone(),
             request_id: params.request_id,

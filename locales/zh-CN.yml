@@ -1204,6 +1204,7 @@ approval:
   blocked_path: "被拦截的路径：%{path}"
   pending: "等待批准"
   cancel_turn: "取消本轮"
+  space_reviewed_only: "此共享空间由 agent 的执行环境自行处理批准；这一项只有本机的所有者能回应。"
 diff:
   binary: "二进制文件，不显示其内容。"
   empty_file: "空文件。"
@@ -1761,6 +1762,45 @@ spaces:
     hide_qr: "隐藏二维码"
     resume: "开启链接"
 
+space_policy:
+  permission_unavailable: "此共享空间不允许"
+  queued_held: "等待中：此共享空间不允许该线程当前的 agent、模型或权限模式"
+  acp_agents: "ACP agent"
+  agents:
+    title: "成员可使用的 agent"
+    every: "所有 agent 和模型，包括以后新增的。"
+    choose: "选择 agent"
+    none_available: "本机没有可允许的已启用 agent。"
+  models:
+    every: "所有模型"
+    some: "%{count} 个模型"
+  acp:
+    some: "%{count} 个 agent"
+  approval:
+    section: "批准"
+    title: "权限模式"
+    any: "任意模式"
+    no_unrestricted: "不允许无限制模式"
+    reviewed_only: "仅限自动审核"
+    any_description: "成员可以选择任意权限模式，并自行回应批准请求。"
+    no_unrestricted_description: "关闭不经询问就执行一切的模式；成员自行回应批准请求。"
+    reviewed_only_description: "只允许由 agent 执行环境自行审核操作的模式。成员发起的轮次中仍需询问的请求会被直接拒绝。"
+  reach:
+    title: "线程之外"
+  terminals:
+    title: "终端"
+    description: "终端是本机账户下的 shell：开启后，上面对 agent 和批准的限制都可能被绕过。"
+  git_remote:
+    title: "推送、拉取和拉取请求"
+    description: "使用本机自己的 git 和代码托管平台凭据。"
+  preview:
+    title: "预览本机的本地服务"
+  computer_use:
+    title: "成员轮次中的电脑操控"
+    description: "允许为成员工作的 agent 操控本机的桌面。"
+  editor:
+    title: "在编辑器中打开"
+    description: "编辑器的远程连接是本机账户下的 shell，不限于共享空间的项目：开启后，这里的其他限制都可能被绕过。"
 group:
   section: "主机组"
   intro: "主机组把你的多台主机连在一起，设备与其中任意一台配对后即可打开全部主机。"
