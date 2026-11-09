@@ -129,9 +129,17 @@ fn prompts(session: &ActiveSession) -> Vec<String> {
         .collect()
 }
 
-/// Run until the thread `id` is resident with its log loaded.
+/// Run until the thread `id` is resident with its log loaded. A thread opens
+/// with an empty timeline and its log is read and folded off the host, which
+/// parking does not wait for; a fork's log is never empty.
 fn settled(cx: &mut TestAppContext, id: &str) {
-    cx.run_until(|state| state.residents.live.contains_key(id));
+    cx.run_until(|state| {
+        state
+            .residents
+            .live
+            .get(id)
+            .is_some_and(|thread| !thread.timeline.entries.is_empty())
+    });
     cx.run_until_parked();
 }
 
