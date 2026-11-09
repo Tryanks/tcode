@@ -3633,7 +3633,11 @@ mod tests {
         );
         let name = cx.debug_bounds("harness-field-Name").unwrap();
         cx.simulate_click(name.center(), Modifiers::default());
-        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-a"
+        } else {
+            "ctrl-a"
+        });
         cx.simulate_input("Office");
         // Leaving the field by clicking elsewhere saves it too.
         let back = cx.debug_bounds("harness-back").unwrap();

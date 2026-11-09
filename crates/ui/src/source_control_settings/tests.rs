@@ -383,10 +383,15 @@ fn adding_a_platform_goes_on_to_connect_it(cx: &mut TestAppContext) {
     crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
     let remote = Remote::attach(reported(), cx);
     let cx = open_panel(&remote, false, cx);
+    let clear = if cfg!(target_os = "macos") {
+        "cmd-a backspace"
+    } else {
+        "ctrl-a backspace"
+    };
     remote.commands();
     click("source-control-add-host", &remote, cx);
     click("source-control-kind-forgejo", &remote, cx);
-    cx.simulate_keystrokes("cmd-a backspace");
+    cx.simulate_keystrokes(clear);
     cx.simulate_input("git.example.dev");
     click("source-control-add-confirm", &remote, cx);
     assert!(
@@ -394,7 +399,7 @@ fn adding_a_platform_goes_on_to_connect_it(cx: &mut TestAppContext) {
         "an address already listed is not added"
     );
     click("source-control-address", &remote, cx);
-    cx.simulate_keystrokes("cmd-a backspace");
+    cx.simulate_keystrokes(clear);
     cx.simulate_input("git.example.org");
     click("source-control-add-confirm", &remote, cx);
     assert_eq!(
