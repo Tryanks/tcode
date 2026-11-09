@@ -13493,6 +13493,49 @@ fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one()
 }
 
 #[test]
+fn manual_settle_waits_for_the_harness_background_work() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("settle-background-work");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (commands, received) = smol::channel::unbounded();
+    state.update(cx, |state, cx| {
+        let mut session = live_session(ProviderKind::ClaudeCode, commands);
+        session.meta.id = "shell".into();
+        state.sessions.push(session.meta.clone());
+        state.install_selected(session);
+        state.on_event("shell", AgentEvent::BackgroundTasksChanged { count: 1 }, cx);
+    });
+    let settle = || {
+        tcode_protocol::ClientPayload::Command(Command::SettleSession {
+            session_id: "shell".into(),
+        })
+    };
+    let denied = through_pipe(&state, cx, 1, settle());
+    assert!(denied.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack { id: 1, result: Err(error) } if error.code == "thread_busy"
+    )));
+    state.read(|state| assert!(!state.find_meta("shell").unwrap().is_settled()));
+    assert!(
+        received.try_recv().is_err(),
+        "a refused settle leaves the harness and its background work running"
+    );
+
+    state.update(cx, |state, cx| {
+        state.on_event("shell", AgentEvent::BackgroundTasksChanged { count: 0 }, cx)
+    });
+    let accepted = through_pipe(&state, cx, 2, settle());
+    assert!(accepted.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack {
+            id: 2,
+            result: Ok(_)
+        }
+    )));
+    state.read(|state| assert!(state.find_meta("shell").unwrap().is_settled()));
+}
+
+#[test]
 fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
     use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
     use tcode_protocol::AgentStatus;

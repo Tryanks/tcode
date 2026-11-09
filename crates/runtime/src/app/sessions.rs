@@ -1205,6 +1205,7 @@ impl AppState {
                 || session.turn_in_flight
                 || session.delivery_in_flight.is_some()
                 || session.timeline.turn_running
+                || session.background_task_count > 0
                 || !session.timeline.pending_approvals.is_empty()
                 || session
                     .timeline
