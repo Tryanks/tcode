@@ -207,10 +207,13 @@ mod platform {
     use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-        PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
-        PIPE_WAIT, WaitNamedPipeW,
+        GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, WaitNamedPipeW,
     };
-    use windows::Win32::System::Threading::{CreateEventW, GetCurrentProcess, OpenProcessToken};
+    use windows::Win32::System::Threading::{
+        CreateEventW, GetCurrentProcess, OpenProcess, OpenProcessToken,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     use windows::core::{PCWSTR, PWSTR};
 
     const BUFFER: u32 = 64 * 1024;
@@ -305,7 +308,9 @@ mod platform {
         Ok(unsafe { OwnedHandle::from_raw_handle(handle.0) })
     }
 
-    /// `\\.\pipe\tcode-ssh-<hash of the canonical data directory>`, NUL-terminated.
+    /// `\\.\pipe\tcode-ssh-<user SID>-<hash of the canonical data
+    /// directory>`, NUL-terminated. Another user can still create a pipe of
+    /// this name first; [`LocalStream::connect`] checks whose it is.
     fn pipe_name(data_dir: &Path) -> io::Result<Vec<u16>> {
         let directory = std::fs::canonicalize(data_dir)?;
         let directory = directory.to_string_lossy().to_lowercase();
@@ -316,7 +321,9 @@ mod platform {
             .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
                 (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
             });
-        Ok(format!(r"\\.\pipe\tcode-ssh-{hash:016x}")
+        // SAFETY: the pseudo handle needs no closing.
+        let user = user_sid(unsafe { GetCurrentProcess() })?;
+        Ok(format!(r"\\.\pipe\tcode-ssh-{user}-{hash:016x}")
             .encode_utf16()
             .chain([0])
             .collect())
@@ -334,37 +341,9 @@ mod platform {
         /// A protected DACL granting everything to this process's user and
         /// nothing to anyone else.
         fn current_user_only() -> io::Result<SecurityDescriptor> {
-            let mut token = HANDLE::default();
-            // SAFETY: the pseudo handle needs no closing; `token` is a valid out pointer.
-            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
-                .map_err(os_error)?;
-            // SAFETY: a fresh handle owned by nothing else.
-            let token = unsafe { OwnedHandle::from_raw_handle(token.0) };
-            let mut size = 0u32;
-            // SAFETY: a null buffer asks only for the size.
-            let _ = unsafe { GetTokenInformation(raw(&token), TokenUser, None, 0, &mut size) };
-            let mut buffer = vec![0u64; (size as usize).div_ceil(size_of::<u64>())];
-            // SAFETY: the buffer is `size` bytes or more, aligned for `TOKEN_USER`.
-            unsafe {
-                GetTokenInformation(
-                    raw(&token),
-                    TokenUser,
-                    Some(buffer.as_mut_ptr().cast()),
-                    size,
-                    &mut size,
-                )
-            }
-            .map_err(os_error)?;
-            // SAFETY: filled above with a `TOKEN_USER` and the SID it points into.
-            let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
-            let mut sid = PWSTR::null();
-            // SAFETY: the SID lives in `buffer`; `sid` is a valid out pointer.
-            unsafe { ConvertSidToStringSidW(user.User.Sid, &mut sid) }.map_err(os_error)?;
-            // SAFETY: a NUL-terminated string allocated by the call above.
-            let sid_text = unsafe { sid.to_string() };
-            // SAFETY: allocated with LocalAlloc by ConvertSidToStringSidW, freed once.
-            unsafe { LocalFree(Some(HLOCAL(sid.0.cast()))) };
-            let sddl: Vec<u16> = format!("D:P(A;;GA;;;{})", sid_text.map_err(io::Error::other)?)
+            // SAFETY: the pseudo handle needs no closing.
+            let sid_text = user_sid(unsafe { GetCurrentProcess() })?;
+            let sddl: Vec<u16> = format!("D:P(A;;GA;;;{sid_text})")
                 .encode_utf16()
                 .chain([0])
                 .collect();
@@ -381,6 +360,54 @@ mod platform {
             .map_err(os_error)?;
             Ok(SecurityDescriptor(descriptor))
         }
+    }
+
+    /// The SID, as text, of the user `process` runs as.
+    fn user_sid(process: HANDLE) -> io::Result<String> {
+        let mut token = HANDLE::default();
+        // SAFETY: `process` is open for query; `token` is a valid out pointer.
+        unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.map_err(os_error)?;
+        // SAFETY: a fresh handle owned by nothing else.
+        let token = unsafe { OwnedHandle::from_raw_handle(token.0) };
+        let mut size = 0u32;
+        // SAFETY: a null buffer asks only for the size.
+        let _ = unsafe { GetTokenInformation(raw(&token), TokenUser, None, 0, &mut size) };
+        let mut buffer = vec![0u64; (size as usize).div_ceil(size_of::<u64>())];
+        // SAFETY: the buffer is `size` bytes or more, aligned for `TOKEN_USER`.
+        unsafe {
+            GetTokenInformation(
+                raw(&token),
+                TokenUser,
+                Some(buffer.as_mut_ptr().cast()),
+                size,
+                &mut size,
+            )
+        }
+        .map_err(os_error)?;
+        // SAFETY: filled above with a `TOKEN_USER` and the SID it points into.
+        let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+        let mut sid = PWSTR::null();
+        // SAFETY: the SID lives in `buffer`; `sid` is a valid out pointer.
+        unsafe { ConvertSidToStringSidW(user.User.Sid, &mut sid) }.map_err(os_error)?;
+        // SAFETY: a NUL-terminated string allocated by the call above.
+        let text = unsafe { sid.to_string() };
+        // SAFETY: allocated with LocalAlloc by ConvertSidToStringSidW, freed once.
+        unsafe { LocalFree(Some(HLOCAL(sid.0.cast()))) };
+        text.map_err(io::Error::other)
+    }
+
+    /// Whether the process serving `pipe` runs as this process's user.
+    fn served_by_this_user(pipe: HANDLE) -> io::Result<bool> {
+        let mut pid = 0;
+        // SAFETY: `pipe` is an open client end; `pid` is a valid out pointer.
+        unsafe { GetNamedPipeServerProcessId(pipe, &mut pid) }.map_err(os_error)?;
+        // SAFETY: no preconditions.
+        let server = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+            .map_err(os_error)?;
+        // SAFETY: a fresh handle owned by nothing else.
+        let server = unsafe { OwnedHandle::from_raw_handle(server.0) };
+        // SAFETY: the pseudo handle needs no closing.
+        Ok(user_sid(raw(&server))? == user_sid(unsafe { GetCurrentProcess() })?)
     }
 
     impl Drop for SecurityDescriptor {
@@ -431,6 +458,14 @@ mod platform {
                     Ok(handle) => {
                         // SAFETY: a fresh handle owned by nothing else.
                         let handle = unsafe { OwnedHandle::from_raw_handle(handle.0) };
+                        // Anyone may create a pipe of this name before Tcode
+                        // does, and would then be the machine to ssh.
+                        if !served_by_this_user(raw(&handle)).unwrap_or(false) {
+                            return Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                "the pipe is served by another user",
+                            ));
+                        }
                         return Ok(LocalStream::new(handle, false));
                     }
                     Err(error)

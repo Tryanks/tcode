@@ -24,12 +24,6 @@ pub(super) enum TogglePanel {
     PullRequests,
 }
 
-/// Open the thread's directory, as its host writes it, in Zed: on this
-/// client, or on the thread's machine over Tcode's connection to it.
-#[derive(Action, Clone, Debug, PartialEq, Eq, Deserialize)]
-#[action(namespace = tcode_chat, no_json)]
-pub(super) struct OpenThreadInZed(pub String);
-
 /// Whether each panel the header toggles is showing; `None` for one this
 /// thread does not offer.
 #[derive(Clone, Copy)]
@@ -774,34 +768,6 @@ impl ChatView {
         }
     }
 
-    /// The label of the entry that opens this thread's directory in Zed,
-    /// when the thread may be opened there: its own wording for a machine
-    /// reached over Tcode, and none where the space's policy or this client
-    /// does not allow it.
-    fn zed_entry(&self, cx: &App) -> Option<&'static str> {
-        let store = self.workspace_store.read(cx);
-        if !store.space_allows(|policy| policy.editor) {
-            return None;
-        }
-        if !store.is_remote() {
-            return Some("chat.open_zed");
-        }
-        crate::remote::offers_machine_editor(cx).then_some("chat.open_zed_remote")
-    }
-
-    pub(super) fn on_open_thread_in_zed(
-        &mut self,
-        action: &OpenThreadInZed,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.zed_entry(cx).is_none() {
-            return;
-        }
-        let store = self.workspace_store.clone();
-        crate::remote::open_host_path_in_zed(&store, Path::new(&action.0), window, cx);
-    }
-
     pub(super) fn on_show_agent_tools(
         &mut self,
         _: &crate::pull_requests::ShowAgentTools,
@@ -1043,7 +1009,8 @@ impl ChatView {
                 .and_then(|id| self.workspace_store.read(cx).thread_meta(id))
                 .is_some_and(|meta| meta.worktree.is_none())
         };
-        let zed = self.zed_entry(cx);
+        let zed =
+            crate::remote::ZedEntry::of(self.workspace_store.read(cx), cx).map(|entry| entry.label);
         let title_menu = {
             let title = title.clone();
             let cwd = cwd.clone();
@@ -1079,30 +1046,7 @@ impl ChatView {
                         )
                     });
                 match &cwd {
-                    Some(cwd) => {
-                        use crate::widgets::menu::{CopyText, OpenPath, RevealPath};
-                        let cwd = cwd.to_string_lossy().into_owned();
-                        menu.separator()
-                            .menu(
-                                crate::tr!("chat.open").into_owned(),
-                                Box::new(OpenPath(cwd.clone())),
-                            )
-                            .when_some(zed, |menu, label| {
-                                menu.menu(
-                                    crate::tr!(label).into_owned(),
-                                    Box::new(OpenThreadInZed(cwd.clone())),
-                                )
-                            })
-                            .menu(
-                                crate::tr!("chat.reveal_in_file_manager").into_owned(),
-                                Box::new(RevealPath(cwd.clone())),
-                            )
-                            .separator()
-                            .menu(
-                                crate::tr!("chat.copy_path").into_owned(),
-                                Box::new(CopyText(cwd)),
-                            )
-                    }
+                    Some(cwd) => menu.separator().path_items(&cwd.to_string_lossy(), None),
                     None => menu,
                 }
             }
@@ -1181,6 +1125,7 @@ impl ChatView {
                         agents_cue_dot(agents_cue.flatten(), &motion, window, cx),
                         cwd.clone(),
                         zed,
+                        self.workspace_store.read(cx).host_key(),
                     ),
                 ));
             }
@@ -1408,8 +1353,9 @@ impl ChatView {
         agents_cue: Option<AnyElement>,
         cwd: Option<PathBuf>,
         zed: Option<&'static str>,
+        host: crate::store::HostKey,
     ) -> AnyElement {
-        use crate::widgets::menu::{CopyText, RevealPath};
+        use crate::widgets::menu::{CopyText, OpenPathInZed, RevealPath};
         let panes = self.pane_controls;
         let cwd = cwd.map(|cwd| cwd.to_string_lossy().into_owned());
         // The panels every thread has come first, so their rows keep their
@@ -1460,7 +1406,10 @@ impl ChatView {
                                     menu.menu_with_icon(
                                         crate::tr!(label).into_owned(),
                                         IconName::ExternalLink,
-                                        Box::new(OpenThreadInZed(cwd.clone())),
+                                        Box::new(OpenPathInZed {
+                                            path: cwd.clone(),
+                                            host: Some(host.clone()),
+                                        }),
                                     )
                                 })
                                 .menu_with_icon(

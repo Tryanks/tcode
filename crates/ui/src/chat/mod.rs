@@ -783,7 +783,6 @@ impl Render for ChatView {
             .on_action(cx.listener(Self::on_move_thread_dialog))
             .on_action(cx.listener(Self::on_revoke_self_settle))
             .on_action(cx.listener(Self::on_show_agent_tools))
-            .on_action(cx.listener(Self::on_open_thread_in_zed))
             .on_action(cx.listener(Self::on_toggle_panel));
 
         if self.held {

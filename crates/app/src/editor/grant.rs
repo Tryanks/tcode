@@ -1,32 +1,43 @@
-//! Who may use a machine's SSH pipe: only the Zed that Tcode launched for
-//! it. A connection to the pipe is traced back through its processes —
-//! `tcode ssh-proxy` started by `ssh` started directly by Zed's main process
-//! — and admitted for a machine only within the window that opens when the
-//! user asks Tcode to open the machine in Zed, after which that Zed alone is
-//! bound to the machine until it exits.
+//! Who may use a machine's SSH pipe: the Zed that Tcode launched for it.
+//!
+//! A connection to the pipe is traced back through its processes: `tcode
+//! ssh-proxy`, started by `ssh`, started directly by Zed's main process as
+//! the platform identifies Zed. Where Zed opens a machine through one
+//! ControlMaster connection (macOS and Linux), the ssh must also be such a
+//! master, which a command typed into Zed's terminal or run by its tasks is
+//! not unless it imitates one. On Windows Zed's own ssh commands carry
+//! nothing a command started directly by Zed would not. A connection is
+//! admitted for a machine only within the window that opens when the user
+//! asks Tcode to open the machine in Zed; that Zed then keeps the machine
+//! until it exits. Programs running as the same user can imitate any of
+//! this; the pipe does not stand between a user and their own programs.
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 /// How long after Open in Zed the launched Zed has to connect.
 pub(super) const WINDOW: Duration = Duration::from_secs(60);
 
-/// One process, as the operating system reports it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One process behind a connection, as the operating system reports it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Process {
-    pub(super) parent: Option<u32>,
-    pub(super) exe: Option<std::path::PathBuf>,
+    pub(super) pid: u32,
+    pub(super) exe: Option<PathBuf>,
+    /// `None` where the platform does not tell.
+    pub(super) args: Option<Vec<String>>,
     pub(super) started: Option<u64>,
+    /// Whether the platform identifies it as Zed's main process.
+    pub(super) zed: bool,
 }
 
-/// What the pipe asks the operating system about the processes behind a
-/// connection.
-pub(super) trait Processes {
-    fn process(&self, pid: u32) -> Option<Process>;
-    /// Whether `pid` is a Zed main process by the platform's code identity.
-    fn is_zed(&self, pid: u32) -> bool;
+/// The proxy that connected, its parent and its grandparent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Chain {
+    pub(super) proxy: Process,
+    pub(super) ssh: Process,
+    pub(super) zed: Process,
 }
 
 /// A process, by pid and start, so a later process reusing the pid is a
@@ -37,56 +48,82 @@ pub(super) struct ProcessKey {
     pub(super) started: Option<u64>,
 }
 
-impl ProcessKey {
-    pub(super) fn alive(&self, processes: &impl Processes) -> bool {
-        processes
-            .process(self.pid)
-            .is_some_and(|process| process.started == self.started)
-    }
-}
-
 /// Why a connection was turned away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Refusal {
-    /// The chain behind the connection is not Tcode's proxy under ssh under
-    /// Zed.
+    /// The chain behind the connection is not Tcode's proxy under Zed's ssh.
     NotZed,
     /// A Zed, but not the one Tcode opened this machine in.
     NotGranted,
 }
 
-/// The Zed behind the proxy process `proxy`: the proxy must be this Tcode
-/// executable, its parent `ssh`, and ssh's parent Zed's main process itself,
-/// so a shell in Zed's terminal, an agent, or anything else that runs ssh
-/// does not qualify.
+/// The Zed behind `chain`: the proxy is this Tcode executable, its parent
+/// is `ssh`, a ControlMaster invocation where `master_only`, and ssh's
+/// parent is Zed's main process itself.
 pub(super) fn zed_behind(
-    processes: &impl Processes,
-    proxy: u32,
+    chain: &Chain,
     own_exe: &Path,
+    master_only: bool,
 ) -> Result<ProcessKey, Refusal> {
-    let proxy = processes.process(proxy).ok_or(Refusal::NotZed)?;
-    if proxy.exe.as_deref() != Some(own_exe) {
+    if chain.proxy.exe.as_deref() != Some(own_exe) {
         return Err(Refusal::NotZed);
     }
-    let ssh_pid = proxy.parent.ok_or(Refusal::NotZed)?;
-    let ssh = processes.process(ssh_pid).ok_or(Refusal::NotZed)?;
-    let is_ssh = ssh
+    let is_ssh = chain
+        .ssh
         .exe
         .as_deref()
         .and_then(Path::file_stem)
         .is_some_and(|stem| stem.eq_ignore_ascii_case("ssh"));
-    if !is_ssh {
-        return Err(Refusal::NotZed);
-    }
-    let zed_pid = ssh.parent.ok_or(Refusal::NotZed)?;
-    let zed = processes.process(zed_pid).ok_or(Refusal::NotZed)?;
-    if !processes.is_zed(zed_pid) {
+    if !is_ssh || (master_only && !control_master(chain.ssh.args.as_deref())) || !chain.zed.zed {
         return Err(Refusal::NotZed);
     }
     Ok(ProcessKey {
-        pid: zed_pid,
-        started: zed.started,
+        pid: chain.zed.pid,
+        started: chain.zed.started,
     })
+}
+
+/// Whether ssh's arguments make it a ControlMaster, as Zed starts its
+/// connection: `-o ControlMaster=yes` among the options, which end at the
+/// destination as ssh's own parsing ends there.
+fn control_master(args: Option<&[String]>) -> bool {
+    /// ssh's options that take a value (ssh(1)).
+    const WITH_VALUE: &str = "BbcDEeFIiJLlmOoPpQRSWw";
+    let Some(args) = args else {
+        return false;
+    };
+    let mut words = args.iter().skip(1);
+    while let Some(word) = words.next() {
+        if word == "--" {
+            return false;
+        }
+        let Some(cluster) = word.strip_prefix('-').filter(|cluster| !cluster.is_empty()) else {
+            return false;
+        };
+        for (index, flag) in cluster.char_indices() {
+            if !WITH_VALUE.contains(flag) {
+                continue;
+            }
+            let inline = &cluster[index + flag.len_utf8()..];
+            let value = if inline.is_empty() {
+                words.next().map(String::as_str)
+            } else {
+                Some(inline)
+            };
+            if flag == 'o'
+                && value
+                    .and_then(|option| option.split_once(['=', ' ']))
+                    .is_some_and(|(key, value)| {
+                        key.eq_ignore_ascii_case("ControlMaster")
+                            && value.trim().eq_ignore_ascii_case("yes")
+                    })
+            {
+                return true;
+            }
+            break;
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -107,9 +144,9 @@ pub(super) struct Grants {
 impl Grants {
     /// The user chose Open in Zed for `machine`. A Zed already bound to it
     /// stays bound while it runs: that is the Zed the request goes to.
-    pub(super) fn open(&mut self, machine: &str, now: Instant, processes: &impl Processes) {
+    pub(super) fn open(&mut self, machine: &str, now: Instant, alive: impl Fn(ProcessKey) -> bool) {
         if let Some(Grant::Bound(zed)) = self.machines.get(machine)
-            && zed.alive(processes)
+            && alive(*zed)
         {
             return;
         }
@@ -127,11 +164,11 @@ impl Grants {
         machine: &str,
         zed: ProcessKey,
         now: Instant,
-        processes: &impl Processes,
+        alive: impl Fn(ProcessKey) -> bool,
     ) -> Result<(), Refusal> {
         match self.machines.get(machine).copied() {
             Some(Grant::Bound(bound)) if bound == zed => Ok(()),
-            Some(Grant::Bound(bound)) if bound.alive(processes) => Err(Refusal::NotGranted),
+            Some(Grant::Bound(bound)) if alive(bound) => Err(Refusal::NotGranted),
             Some(Grant::Open { until }) if now < until => {
                 self.machines.insert(machine.to_owned(), Grant::Bound(zed));
                 Ok(())
@@ -147,113 +184,150 @@ impl Grants {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    /// A process table: pid → (parent, executable, is Zed).
-    struct Table(Vec<(u32, u32, &'static str, bool)>);
-
-    impl Processes for Table {
-        fn process(&self, pid: u32) -> Option<Process> {
-            self.0
-                .iter()
-                .find(|(id, ..)| *id == pid)
-                .map(|(id, parent, exe, _)| Process {
-                    parent: Some(*parent),
-                    exe: Some(PathBuf::from(exe)),
-                    started: Some(u64::from(*id) * 10),
-                })
-        }
-
-        fn is_zed(&self, pid: u32) -> bool {
-            self.0.iter().any(|(id, .., zed)| *id == pid && *zed)
-        }
-    }
 
     const TCODE: &str = "/Applications/Tcode.app/Contents/MacOS/tcode";
     const ZED: &str = "/Applications/Zed.app/Contents/MacOS/zed";
 
+    fn process(pid: u32, exe: &str, args: &[&str], zed: bool) -> Process {
+        Process {
+            pid,
+            exe: Some(PathBuf::from(exe)),
+            args: Some(args.iter().map(|arg| (*arg).to_owned()).collect()),
+            started: Some(u64::from(pid) * 10),
+            zed,
+        }
+    }
+
+    fn chain(proxy: Process, ssh: Process, zed: Process) -> Chain {
+        Chain { proxy, ssh, zed }
+    }
+
     #[test]
-    fn only_ssh_started_by_zed_itself_reaches_a_machine_and_only_the_zed_tcode_opened() {
+    fn only_zeds_own_master_ssh_reaches_a_machine_and_only_the_zed_tcode_opened() {
         let tcode = Path::new(TCODE);
-        let table = Table(vec![
-            (1, 0, "/sbin/launchd", false),
-            // Zed's own ssh.
-            (100, 1, ZED, true),
-            (101, 100, "/usr/bin/ssh", false),
-            (102, 101, TCODE, false),
-            // ssh from a shell in Zed's terminal.
-            (110, 100, "/bin/zsh", false),
-            (111, 110, "/usr/bin/ssh", false),
-            (112, 111, TCODE, false),
-            // Something else posing as the proxy under Zed's ssh.
-            (120, 101, "/tmp/tcode", false),
-            // An impostor named zed that is not Zed by its signature.
-            (130, 1, "/tmp/Zed.app/Contents/MacOS/zed", false),
-            (131, 130, "/usr/bin/ssh", false),
-            (132, 131, TCODE, false),
-            // A second, genuine Zed.
-            (140, 1, ZED, true),
-            (141, 140, "/usr/bin/ssh", false),
-            (142, 141, TCODE, false),
-        ]);
-        let zed = zed_behind(&table, 102, tcode).unwrap();
-        assert_eq!(zed.pid, 100);
-        for proxy in [112, 120, 132, 999] {
+        let proxy = process(102, TCODE, &[TCODE, "ssh-proxy", "m"], false);
+        let zed = process(100, ZED, &[ZED], true);
+        // As Zed starts its connection (crates/remote/src/transport/ssh.rs,
+        // MasterProcess::new).
+        let master = process(
+            101,
+            "/usr/bin/ssh",
+            &[
+                "ssh",
+                "-F",
+                "/data/ssh/config",
+                "-N",
+                "-o",
+                "ControlPersist=no",
+                "-o",
+                "ControlMaster=yes",
+                "-o",
+                "ControlPath=/tmp/zed-ssh-session/ssh.sock",
+                "--",
+                "tcode-m",
+            ],
+            false,
+        );
+        let own = chain(proxy.clone(), master.clone(), zed.clone());
+        assert_eq!(zed_behind(&own, tcode, true).map(|key| key.pid), Ok(100));
+
+        let typed = process(
+            111,
+            "/usr/bin/ssh",
+            &[
+                "ssh",
+                "-F",
+                "/data/ssh/config",
+                "tcode-m",
+                "-oControlMaster=yes",
+            ],
+            false,
+        );
+        let refused = [
+            // `exec ssh tcode-m` in Zed's terminal: Zed's child, no master.
+            chain(proxy.clone(), typed.clone(), zed.clone()),
+            // Something else posing as the proxy.
+            chain(
+                process(120, "/tmp/tcode", &["/tmp/tcode"], false),
+                master.clone(),
+                zed.clone(),
+            ),
+            // A master started by anything but Zed.
+            chain(
+                proxy.clone(),
+                master.clone(),
+                process(130, "/tmp/Zed.app/Contents/MacOS/zed", &[], false),
+            ),
+            // Not ssh.
+            chain(
+                proxy.clone(),
+                process(140, "/bin/zsh", &["zsh"], false),
+                zed.clone(),
+            ),
+        ];
+        for chain in &refused {
             assert_eq!(
-                zed_behind(&table, proxy, tcode),
+                zed_behind(chain, tcode, true),
                 Err(Refusal::NotZed),
-                "{proxy}"
+                "{chain:?}"
             );
         }
+        assert_eq!(
+            zed_behind(&chain(proxy.clone(), typed, zed.clone()), tcode, false).map(|key| key.pid),
+            Ok(100),
+            "where Zed has no master, ssh started directly by Zed is all there is to check"
+        );
 
+        let first = zed_behind(&own, tcode, true).unwrap();
+        let second = ProcessKey {
+            pid: 200,
+            started: Some(2000),
+        };
+        let running = |key: ProcessKey| key == first || key == second;
         let mut grants = Grants::default();
         let now = Instant::now();
         assert_eq!(
-            grants.admit("m", zed, now, &table),
+            grants.admit("m", first, now, running),
             Err(Refusal::NotGranted),
             "no Open in Zed yet"
         );
-        grants.open("m", now, &table);
+        grants.open("m", now, running);
         assert_eq!(
-            grants.admit("other", zed, now, &table),
+            grants.admit("other", first, now, running),
             Err(Refusal::NotGranted),
             "the window is per machine"
         );
-        assert_eq!(grants.admit("m", zed, now, &table), Ok(()));
-        let second = zed_behind(&table, 142, tcode).unwrap();
+        assert_eq!(grants.admit("m", first, now, running), Ok(()));
         assert_eq!(
-            grants.admit("m", second, now, &table),
+            grants.admit("m", second, now, running),
             Err(Refusal::NotGranted),
             "the first Zed took the machine"
         );
-        grants.open("m", now, &table);
+        grants.open("m", now, running);
         assert_eq!(
-            grants.admit("m", second, now, &table),
+            grants.admit("m", second, now, running),
             Err(Refusal::NotGranted),
             "opening again keeps the running Zed bound"
         );
         assert_eq!(
-            grants.admit("m", zed, now + WINDOW * 10, &table),
+            grants.admit("m", first, now + WINDOW * 10, running),
             Ok(()),
             "the bound Zed stays admitted after the window"
         );
 
-        // The bound Zed exits; a late connection after the window finds
-        // nothing, and the next Open in Zed lets the other Zed take it.
-        let without_first = Table(table.0.iter().copied().filter(|p| p.0 != 100).collect());
+        // The bound Zed exits; a late connection finds nothing, and the
+        // next Open in Zed lets the other Zed take the machine.
+        let only_second = |key: ProcessKey| key == second;
+        let later = now + WINDOW * 2;
         assert_eq!(
-            grants.admit("m", second, now + WINDOW * 2, &without_first),
+            grants.admit("m", second, later, only_second),
             Err(Refusal::NotGranted)
         );
-        grants.open("m", now + WINDOW * 2, &without_first);
+        grants.open("m", later, only_second);
+        assert_eq!(grants.admit("m", second, later, only_second), Ok(()));
+        grants.open("x", later, only_second);
         assert_eq!(
-            grants.admit("m", second, now + WINDOW * 2, &without_first),
-            Ok(())
-        );
-        let later = now + WINDOW * 4;
-        grants.open("x", later, &without_first);
-        assert_eq!(
-            grants.admit("x", second, later + WINDOW, &without_first),
+            grants.admit("x", second, later + WINDOW, only_second),
             Err(Refusal::NotGranted),
             "the window closes after a minute"
         );

@@ -2,8 +2,8 @@
 //! development reaches the machine through this app's iroh connection to
 //! it: Zed's ssh runs `tcode ssh-proxy`, which hands its bytes to this app
 //! over a local endpoint, and the app carries them on an `ssh` stream to the
-//! machine's SSH server. Only the Zed this app launched for a machine may
-//! use the pipe (see [`grant`]).
+//! machine's SSH server. The pipe admits the Zed this app launched for a
+//! machine, as far as [`grant`] can tell it apart.
 
 mod endpoint;
 mod grant;
@@ -20,26 +20,43 @@ use std::{
 };
 
 use futures_lite::{AsyncReadExt as _, AsyncWriteExt as _};
-use tcode_client::host::{MachineEditor, MachinePath, StreamTarget, Tunnel, TunnelOpener};
+use tcode_client::host::{
+    HostFuture, MachineEditor, MachinePath, StreamTarget, Tunnel, TunnelOpener,
+};
 
 /// The longest machine id line the proxy may send.
 const MAX_REQUEST: usize = 256;
 
-/// The operating system's view of processes, for [`grant`].
-struct System;
+/// Whether Zed reaches a machine through one ControlMaster connection,
+/// which every other ssh command of its reuses (crates/remote's
+/// `MasterProcess`); on Windows each command is a connection of its own.
+const ZED_USES_A_MASTER: bool = cfg!(unix);
 
-impl grant::Processes for System {
-    fn process(&self, pid: u32) -> Option<grant::Process> {
-        process::process(pid).map(|info| grant::Process {
-            parent: info.parent,
-            exe: info.exe,
-            started: info.started,
-        })
-    }
+/// The proxy `pid`, its parent and its grandparent, as the system reports
+/// them.
+fn chain(pid: u32) -> Option<grant::Chain> {
+    let read = |pid: u32, zed: bool| {
+        let info = process::process(pid)?;
+        Some((
+            grant::Process {
+                pid,
+                exe: info.exe,
+                args: info.args,
+                started: info.started,
+                zed: zed && process::is_zed(pid),
+            },
+            info.parent,
+        ))
+    };
+    let (proxy, ssh) = read(pid, false)?;
+    let (ssh, zed) = read(ssh?, false)?;
+    let (zed, _) = read(zed?, true)?;
+    Some(grant::Chain { proxy, ssh, zed })
+}
 
-    fn is_zed(&self, pid: u32) -> bool {
-        process::is_zed(pid)
-    }
+/// Whether the process `key` names still runs.
+fn alive(key: grant::ProcessKey) -> bool {
+    process::process(key.pid).is_some_and(|info| info.started == key.started)
 }
 
 /// The desktop's side of Open in Zed for paired machines.
@@ -102,27 +119,45 @@ impl MachineEditor for ZedRemote {
         zed_config::zed_settings_path()
     }
 
-    /// Tcode's ssh config and Zed's settings entry in place, the machine's
-    /// grant window open, then `zed ssh://…`.
-    fn open(&self, target: MachinePath) -> Result<(), String> {
+    /// Tcode's ssh config and Zed's settings entries in place for every
+    /// paired machine, the machine's grant window open, then `zed ssh://…`.
+    fn open(&self, target: MachinePath) -> HostFuture<'static, Result<(), String>> {
+        let prepared = self.prepare(&target);
+        Box::pin(async move {
+            let (cli, url, settings_changed) = prepared?;
+            if settings_changed {
+                // A running Zed picks up a changed settings.json by watching
+                // the file and reloading it; an `ssh://` request it handles
+                // before that reload would not find the entry's args. Only
+                // the first open after a machine is paired changes them.
+                smol::Timer::after(Duration::from_secs(1)).await;
+            }
+            tcode_services::desktop::open_in_zed_with(&cli, &url).map_err(|error| error.to_string())
+        })
+    }
+}
+
+impl ZedRemote {
+    fn prepare(&self, target: &MachinePath) -> Result<(PathBuf, String, bool), String> {
         let inner = &self.0;
+        let cli = tcode_services::desktop::zed_cli()
+            .ok_or_else(|| tcode_ui::tr!("errors.zed_cli_missing").into_owned())?;
         self.listen()?;
         let exe = process::current_exe()
             .or_else(|| std::env::current_exe().ok())
             .ok_or_else(|| "Tcode could not find its own executable".to_owned())?;
         let hosts = tcode_traverse::hosts::load_hosts(&inner.data_dir).unwrap_or_default();
-        let mut machines: Vec<String> = hosts.iter().map(|host| host.host_id.clone()).collect();
-        if !machines.contains(&target.host_id) {
-            machines.push(target.host_id.clone());
-        }
-        zed_config::write_ssh_config(&inner.data_dir, &exe, &machines)
-            .map_err(|error| error.to_string())?;
-        let alias = zed_config::alias(&target.host_id);
-        let nickname = hosts
+        let mut machines: Vec<(String, String)> = hosts
             .iter()
-            .find(|host| host.host_id == target.host_id)
-            .map_or_else(|| alias.clone(), |host| host.name.clone());
-        let settings_changed = update_zed_settings(&inner.data_dir, &alias, &nickname)?;
+            .map(|host| (host.host_id.clone(), host.name.clone()))
+            .collect();
+        if !machines.iter().any(|(id, _)| *id == target.host_id) {
+            machines.push((target.host_id.clone(), zed_config::alias(&target.host_id)));
+        }
+        let ids: Vec<String> = machines.iter().map(|(id, _)| id.clone()).collect();
+        zed_config::write_ssh_config(&inner.data_dir, &exe, &ids)
+            .map_err(|error| error.to_string())?;
+        let settings_changed = update_zed_settings(&inner.data_dir, &machines)?;
         inner
             .links
             .lock()
@@ -132,39 +167,17 @@ impl MachineEditor for ZedRemote {
             .grants
             .lock()
             .unwrap()
-            .open(&target.host_id, Instant::now(), &System);
-        let url = machine_url(&alias, &target.path)?;
-        if !settings_changed {
-            return tcode_services::desktop::open_url_in_zed(&url).map_err(|error| {
-                match error.kind() {
-                    std::io::ErrorKind::NotFound => {
-                        tcode_ui::tr!("errors.zed_cli_missing").into_owned()
-                    }
-                    _ => error.to_string(),
-                }
-            });
-        }
-        // A running Zed reads its settings again on its own once the file
-        // changes; asked to connect before then it would not know the
-        // entry yet.
-        std::thread::Builder::new()
-            .name("tcode-open-zed".into())
-            .spawn(move || {
-                std::thread::sleep(Duration::from_secs(1));
-                if let Err(error) = tcode_services::desktop::open_url_in_zed(&url) {
-                    log::error!("could not start Zed: {error}");
-                }
-            })
-            .map_err(|error| error.to_string())?;
-        Ok(())
+            .open(&target.host_id, Instant::now(), alive);
+        let url = machine_url(&zed_config::alias(&target.host_id), &target.path)?;
+        Ok((cli, url, settings_changed))
     }
 }
 
-/// Add or refresh Zed's settings entry for `alias`; whether the file changed.
+/// Add or refresh Zed's settings entry for each of `machines`, `(id,
+/// name)`; whether the file changed.
 fn update_zed_settings(
     data_dir: &std::path::Path,
-    alias: &str,
-    nickname: &str,
+    machines: &[(String, String)],
 ) -> Result<bool, String> {
     let path = zed_config::zed_settings_path()
         .ok_or_else(|| "Tcode could not find Zed's settings".to_owned())?;
@@ -174,9 +187,16 @@ fn update_zed_settings(
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
     let config = zed_config::ssh_config_path(data_dir);
-    let Some(updated) = zed_config::with_connection(&current, alias, nickname, &config)
-        .map_err(|error| format!("{}: {error}", path.display()))?
-    else {
+    let mut updated = None;
+    for (id, name) in machines {
+        let text: &str = updated.as_deref().unwrap_or(&current);
+        if let Some(next) = zed_config::with_connection(text, &zed_config::alias(id), name, &config)
+            .map_err(|error| format!("{}: {error}", path.display()))?
+        {
+            updated = Some(next);
+        }
+    }
+    let Some(updated) = updated else {
         return Ok(false);
     };
     if let Some(directory) = path.parent() {
@@ -242,12 +262,13 @@ fn admit(inner: &Inner, machine: &str, stream: &endpoint::LocalStream) -> Result
     };
     let pid = stream.peer_pid().map_err(|error| error.to_string())?;
     let own_exe = process::current_exe().ok_or_else(|| refused(grant::Refusal::NotZed))?;
-    let zed = grant::zed_behind(&System, pid, &own_exe).map_err(refused)?;
+    let chain = chain(pid).ok_or_else(|| refused(grant::Refusal::NotZed))?;
+    let zed = grant::zed_behind(&chain, &own_exe, ZED_USES_A_MASTER).map_err(refused)?;
     inner
         .grants
         .lock()
         .unwrap()
-        .admit(machine, zed, Instant::now(), &System)
+        .admit(machine, zed, Instant::now(), alive)
         .map_err(refused)?;
     let not_connected =
         || tcode_ui::tr!("editor.zed.pipe_not_connected", machine = name.as_str()).into_owned();

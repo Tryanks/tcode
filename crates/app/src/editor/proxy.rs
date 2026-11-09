@@ -37,6 +37,10 @@ pub(crate) fn run(args: &[String]) -> i32 {
     };
     let mut stream = match LocalStream::connect(&data_dir) {
         Ok(stream) => stream,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("{}", tcode_ui::tr!("editor.zed.proxy_not_ours"));
+            return 255;
+        }
         Err(_) => {
             eprintln!("{}", tcode_ui::tr!("editor.zed.proxy_no_app"));
             return 255;

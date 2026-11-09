@@ -1,5 +1,5 @@
 //! What the operating system says about a process: its parent, executable,
-//! start time, and whether it is Zed.
+//! arguments, start time, and whether it is Zed.
 
 use std::path::PathBuf;
 
@@ -9,6 +9,8 @@ pub(crate) struct ProcessInfo {
     /// Opaque start-time token, equal for the same process and different for
     /// a later process reusing the pid.
     pub(crate) started: Option<u64>,
+    /// Its command line, where the platform tells it (not on Windows).
+    pub(crate) args: Option<Vec<String>>,
 }
 
 /// `None` when the process no longer exists.
@@ -76,7 +78,60 @@ mod platform {
             parent: Some(info.pbi_ppid),
             exe: executable(pid),
             started: Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec),
+            args: arguments(pid),
         })
+    }
+
+    /// `KERN_PROCARGS2`: `argc`, the executable path, padding, then `argc`
+    /// NUL-terminated arguments.
+    fn arguments(pid: c_int) -> Option<Vec<String>> {
+        let mut name = [libc::CTL_KERN, libc::KERN_ARGMAX];
+        let mut max: c_int = 0;
+        let mut size = size_of::<c_int>();
+        // SAFETY: `max` is `size` bytes.
+        if unsafe {
+            libc::sysctl(
+                name.as_mut_ptr(),
+                2,
+                (&raw mut max).cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        } != 0
+        {
+            return None;
+        }
+        let mut buffer = vec![0u8; usize::try_from(max).ok()?];
+        let mut size = buffer.len();
+        let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+        // SAFETY: `buffer` is `size` bytes.
+        if unsafe {
+            libc::sysctl(
+                name.as_mut_ptr(),
+                3,
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        } != 0
+        {
+            return None;
+        }
+        buffer.truncate(size);
+        let count = usize::try_from(i32::from_ne_bytes(buffer.get(..4)?.try_into().ok()?)).ok()?;
+        let mut rest = buffer.get(4..)?;
+        let path_end = rest.iter().position(|&byte| byte == 0)?;
+        rest = &rest[path_end..];
+        let start = rest.iter().position(|&byte| byte != 0)?;
+        Some(
+            rest[start..]
+                .split(|&byte| byte == 0)
+                .take(count)
+                .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                .collect(),
+        )
     }
 
     fn executable(pid: c_int) -> Option<PathBuf> {
@@ -134,9 +189,12 @@ mod platform {
 #[cfg(target_os = "linux")]
 mod platform {
     //! Linux has no platform code-signing identity, so Zed's installation
-    //! layout — `<prefix>/libexec/zed-editor` beside `<prefix>/bin/zed`, as
-    //! the official tarball and most packages install it — stands in for one,
-    //! provided nobody but root or this user can change the executable.
+    //! layout stands in for one, provided nobody but root or this user can
+    //! change the executable: `<prefix>/libexec/zed-editor` beside
+    //! `<prefix>/bin/zed`, as the official tarball (`~/.local/zed.app`) and
+    //! most packages install it, or `<prefix>/lib/zed/zed-editor` beside
+    //! `<prefix>/bin/zeditor` or `<prefix>/bin/zed`, as Arch and other
+    //! distributions do.
     use super::*;
     use std::fs;
     use std::os::unix::fs::MetadataExt;
@@ -153,6 +211,12 @@ mod platform {
             parent: fields.get(1).and_then(|field| field.parse().ok()),
             exe: fs::read_link(format!("/proc/{pid}/exe")).ok(),
             started: fields.get(19).and_then(|field| field.parse().ok()),
+            args: fs::read(format!("/proc/{pid}/cmdline")).ok().map(|line| {
+                line.split(|&byte| byte == 0)
+                    .filter(|arg| !arg.is_empty())
+                    .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                    .collect()
+            }),
         })
     }
 
@@ -168,21 +232,38 @@ mod platform {
         else {
             return false;
         };
-        let Some(libexec) = exe.parent() else {
-            return false;
-        };
-        let Some(prefix) = libexec.parent() else {
-            return false;
-        };
-        if exe.file_name().is_none_or(|name| name != "zed-editor")
-            || libexec.file_name().is_none_or(|name| name != "libexec")
-            || !prefix.join("bin").join("zed").is_file()
-        {
+        if !installed(&exe) {
             return false;
         }
         fs::metadata(&exe).is_ok_and(|metadata| {
             (metadata.uid() == 0 || metadata.uid() == uid) && metadata.mode() & 0o022 == 0
         })
+    }
+
+    fn installed(exe: &std::path::Path) -> bool {
+        if exe.file_name().is_none_or(|name| name != "zed-editor") {
+            return false;
+        }
+        let Some(directory) = exe.parent() else {
+            return false;
+        };
+        let launcher = |prefix: &std::path::Path, names: &[&str]| {
+            names
+                .iter()
+                .any(|name| prefix.join("bin").join(name).is_file())
+        };
+        if directory.file_name().is_some_and(|name| name == "libexec") {
+            return directory
+                .parent()
+                .is_some_and(|prefix| launcher(prefix, &["zed"]));
+        }
+        directory.file_name().is_some_and(|name| name == "zed")
+            && directory.parent().is_some_and(|lib| {
+                lib.file_name().is_some_and(|name| name == "lib")
+                    && lib
+                        .parent()
+                        .is_some_and(|prefix| launcher(prefix, &["zeditor", "zed"]))
+            })
     }
 
     /// Whether the process's real and effective uids are `uid`.
@@ -229,7 +310,9 @@ mod platform {
     };
     use windows::core::{PCWSTR, PWSTR};
 
-    /// The organization in the certificate Zed Industries signs Zed with.
+    /// The organization in the certificate Zed Industries signs Zed with, as
+    /// the official v1.27.0 Windows release carries it (`O=Zed Industries
+    /// Inc`, issued by Microsoft ID Verified CS).
     const ZED_SIGNER: &str = "Zed Industries Inc";
 
     pub(super) fn process(pid: u32) -> Option<ProcessInfo> {
@@ -239,6 +322,7 @@ mod platform {
             parent: Some(parent),
             exe,
             started,
+            args: None,
         })
     }
 
@@ -299,11 +383,20 @@ mod platform {
         Some((exe, started))
     }
 
+    /// The editor is `Zed.exe` at the root of its installation; the same
+    /// signer also signs the CLI (`bin\Zed.exe`) and the updater.
     pub(super) fn is_zed(pid: u32) -> bool {
-        process(pid)
-            .and_then(|process| process.exe)
-            .and_then(|exe| signer_organization(&exe))
-            .is_some_and(|organization| organization == ZED_SIGNER)
+        let Some(exe) = process(pid).and_then(|process| process.exe) else {
+            return false;
+        };
+        let editor = exe
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("Zed.exe"))
+            && exe
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|directory| !directory.eq_ignore_ascii_case("bin"));
+        editor && signer_organization(&exe).is_some_and(|organization| organization == ZED_SIGNER)
     }
 
     /// The organization of the certificate that signed `exe`, when its

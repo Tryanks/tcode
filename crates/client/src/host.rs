@@ -361,9 +361,10 @@ pub trait MachineEditor {
     /// The editor settings file Tcode adds an entry per machine to.
     fn settings_file(&self) -> Option<std::path::PathBuf>;
 
-    /// Open `target`. Called only once the user agreed to what this does,
-    /// Tcode's entry in [`Self::settings_file`] included.
-    fn open(&self, target: MachinePath) -> Result<(), String>;
+    /// Open `target`, resolving once the editor was asked to or with why it
+    /// could not be. Called only once the user agreed to what this does,
+    /// Tcode's entries in [`Self::settings_file`] included.
+    fn open(&self, target: MachinePath) -> HostFuture<'static, Result<(), String>>;
 }
 
 /// A directory on a paired machine, as [`MachineEditor::open`] opens it.
