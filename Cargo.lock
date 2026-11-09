@@ -13055,6 +13055,7 @@ dependencies = [
  "smithay",
  "wayland-backend",
  "wayland-client",
+ "wayland-protocols",
  "wayland-sys",
 ]
 
