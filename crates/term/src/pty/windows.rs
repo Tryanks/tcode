@@ -8,6 +8,7 @@ pub(super) fn spawn(
     cwd: &Path,
     program: String,
     args: Vec<String>,
+    environment: Vec<(String, String)>,
     size: WindowSize,
     shared: Arc<Mutex<Shared>>,
     notifications: async_channel::Sender<PtyEvent>,
@@ -30,9 +31,9 @@ pub(super) fn spawn(
     let mut command = CommandBuilder::new(program);
     command.args(args);
     command.cwd(cwd);
-    command.env("TERM", "xterm-256color");
-    command.env("COLORTERM", "truecolor");
-    command.env("TERM_PROGRAM", "tcode");
+    for (name, value) in environment {
+        command.env(name, value);
+    }
     let mut reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
     let mut writer = pair.master.take_writer().map_err(io::Error::other)?;
     let mut child = pair

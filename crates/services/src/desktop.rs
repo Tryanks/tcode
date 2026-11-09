@@ -12,6 +12,18 @@ pub fn open_in_zed(cwd: &Path) -> io::Result<()> {
     open_with_candidates(ZED_CLI_CANDIDATES, cwd)
 }
 
+/// The Zed CLI on PATH, under whichever name this install uses.
+pub fn zed_cli() -> Option<std::path::PathBuf> {
+    ZED_CLI_CANDIDATES
+        .iter()
+        .find_map(|name| agent::find_on_path(name))
+}
+
+/// Have the Zed CLI at `cli` open `target`, such as `ssh://host/path`.
+pub fn open_in_zed_with(cli: &Path, target: &str) -> io::Result<()> {
+    crate::process::command(cli).arg(target).spawn().map(drop)
+}
+
 fn open_with_candidates(candidates: &[&str], cwd: &Path) -> io::Result<()> {
     let mut not_found = None;
     for cmd in candidates {

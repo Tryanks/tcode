@@ -14,7 +14,7 @@ use std::{
 
 use futures_lite::io::AsyncWriteExt as _;
 use tcode_client::{
-    host::{Tunnel, TunnelOpener},
+    host::{StreamTarget, Tunnel, TunnelOpener},
     pairing::PairedHost,
 };
 use tokio::{
@@ -58,7 +58,11 @@ impl PreviewConnection {
 
     /// Open a tunnel to `host:port`, wording a failure for the panel.
     async fn tunnel(&self, host: &str, port: u16) -> io::Result<Tunnel> {
-        self.tunnels.open(host, port).await.map_err(|error| {
+        let target = StreamTarget::Tcp {
+            host: host.to_owned(),
+            port,
+        };
+        self.tunnels.open(target).await.map_err(|error| {
             let message = match error.kind() {
                 io::ErrorKind::NotConnected => format!("Not connected to {}", self.host.name),
                 io::ErrorKind::ConnectionRefused => format!(

@@ -156,6 +156,10 @@ struct Shared {
     hosting_changed: Arc<tokio::sync::Notify>,
     /// See [`TraverseHost::hosting_events`].
     hosting_listeners: Mutex<Vec<async_channel::Sender<HostingState>>>,
+    /// The SSH server `ssh` streams reach, set up on the first one that
+    /// finds it can be.
+    #[cfg(feature = "ssh")]
+    ssh: Mutex<Option<crate::ssh::Server>>,
 }
 
 pub struct TraverseHost {
@@ -279,6 +283,8 @@ impl TraverseHost {
                 group_wake: Arc::new(tokio::sync::Notify::new()),
                 hosting_changed: Arc::new(tokio::sync::Notify::new()),
                 hosting_listeners: Mutex::new(Vec::new()),
+                #[cfg(feature = "ssh")]
+                ssh: Mutex::new(None),
             });
             shared.observe_spaces(&shared.state.lock().unwrap());
             // A fetched manifest is applied to the running endpoint, whether
@@ -2581,7 +2587,7 @@ struct StreamTask {
 }
 
 /// One of the connection's [`wire::MAX_TUNNELS`] tunnel slots, held while a
-/// tunnel is served.
+/// tunnel or an SSH connection is served.
 struct TunnelSlot(Arc<AtomicUsize>);
 
 impl TunnelSlot {
@@ -2601,6 +2607,21 @@ impl Drop for TunnelSlot {
 }
 
 impl StreamTask {
+    /// Whether this connection's device may open a stream its space's
+    /// policy gates with `allowed`; a full device always may.
+    fn admit(
+        &self,
+        allowed: impl FnOnce(&tcode_protocol::SpacePolicy) -> bool,
+        refused: &'static str,
+    ) -> Result<(), &'static str> {
+        match &*self.principal.lock().unwrap() {
+            None => Err("hello required"),
+            Some(Principal::Full) => Ok(()),
+            Some(Principal::Space { policy, .. }) if allowed(policy) => Ok(()),
+            Some(Principal::Space { .. }) => Err(refused),
+        }
+    }
+
     async fn run(&self, mut send: SendStream, mut reader: LineReader) -> io::Result<()> {
         let first = match wire::read_control::<ClientLine>(&mut reader).await {
             Ok(first) => first,
@@ -2656,16 +2677,11 @@ impl StreamTask {
                 self.bridge(send, reader, principal).await
             }
             ClientLine::Connect { host, port } => {
-                if !self.hello_done.load(Ordering::Acquire) {
-                    return refuse(send, "hello required").await;
-                }
-                let allowed = match &*self.principal.lock().unwrap() {
-                    Some(Principal::Full) => true,
-                    Some(Principal::Space { policy, .. }) => policy.preview,
-                    None => false,
-                };
-                if !allowed {
-                    return refuse(send, "this space does not allow Preview tunnels").await;
+                if let Err(reason) = self.admit(
+                    |policy| policy.preview,
+                    "this space does not allow Preview tunnels",
+                ) {
+                    return refuse(send, reason).await;
                 }
                 if !wire::valid_tunnel_target(&host, port) {
                     return refuse(send, "invalid tunnel target").await;
@@ -2674,6 +2690,40 @@ impl StreamTask {
                     return refuse(send, "too many tunnels").await;
                 };
                 crate::tunnel::serve(send, reader, &host, port).await
+            }
+            ClientLine::Ssh => {
+                if let Err(reason) = self.admit(
+                    |policy| policy.editor,
+                    "this space does not allow opening its projects in an editor",
+                ) {
+                    return refuse(send, reason).await;
+                }
+                let Some(_slot) = TunnelSlot::take(&self.tunnels) else {
+                    return refuse(send, "too many tunnels").await;
+                };
+                #[cfg(feature = "ssh")]
+                {
+                    let server = {
+                        let mut server = self.shared.ssh.lock().unwrap();
+                        match &*server {
+                            Some(loaded) => Ok(loaded.clone()),
+                            None => crate::ssh::Server::load(&self.shared.data_dir)
+                                .inspect(|loaded| *server = Some(loaded.clone())),
+                        }
+                    };
+                    match server {
+                        Ok(server) => server.serve(send, reader).await,
+                        Err(error) => {
+                            log::error!("the SSH server did not start: {error}");
+                            refuse(send, "this machine could not start its SSH server").await
+                        }
+                    }
+                }
+                #[cfg(not(feature = "ssh"))]
+                {
+                    drop(reader);
+                    refuse(send, "this machine does not serve SSH").await
+                }
             }
             ClientLine::Original { target } => {
                 let principal = self.principal.lock().unwrap().clone();

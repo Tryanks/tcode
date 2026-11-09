@@ -24,6 +24,17 @@ browser = [
     "dep:pbkdf2",
     "dep:sha2",
 ]
+# The SSH server a machine runs on each admitted `ssh` stream, for an
+# editor's own remote development. Hosts only.
+ssh = [
+    "dep:russh",
+    "dep:russh-sftp",
+    "dep:tcode-services",
+    "dep:term",
+    "dep:libc",
+    "tokio/process",
+    "tokio/fs",
+]
 
 [dependencies]
 tcode-client = { path = "../client" }
@@ -38,11 +49,16 @@ iroh = { version = "1.2", default-features = false, features = ["metrics", "port
 log = "0.4"
 mdns-sd = { version = "0.21", default-features = false, features = ["logging"] }
 pbkdf2 = { version = "0.13", optional = true }
+russh = { version = "0.65", default-features = false, features = ["ring"], optional = true }
+# 3.x needs a newer wasm-bindgen-futures than the one crates/web pins.
+russh-sftp = { version = "2.4", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { version = "0.11", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "net", "sync"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
+tcode-services = { path = "../services", optional = true }
+term = { path = "../term", optional = true }
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -69,4 +85,4 @@ agent = { path = "../agent" }
 base64 = "0.23"
 env_logger = "0.11"
 # Tests cover every layer, whichever features the consumer picks.
-tcode-traverse = { path = ".", features = ["browser", "native"] }
+tcode-traverse = { path = ".", features = ["browser", "native", "ssh"] }

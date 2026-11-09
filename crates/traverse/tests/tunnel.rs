@@ -1,6 +1,7 @@
-//! Preview tunnels between two in-process endpoints over loopback: bytes,
+//! Tunnels between two in-process endpoints over loopback: Preview's bytes,
 //! half-close, dial failures, the hello rule, the per-connection bound and
-//! fail-fast while reconnecting.
+//! fail-fast while reconnecting, and the machine's SSH server on an `ssh`
+//! stream.
 use std::{
     io::{self, Read as _, Write as _},
     net::{TcpListener, TcpStream},
@@ -11,7 +12,7 @@ use std::{
 use futures_lite::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tcode_client::{
     ConnectionState,
-    host::{Transport, Tunnel, TunnelOpener},
+    host::{StreamTarget, Transport, Tunnel, TunnelOpener},
     pairing::PairedHost,
 };
 use tcode_traverse::{
@@ -142,7 +143,10 @@ fn wait_reconnecting(transport: &Transport) {
 }
 
 fn open(device: &Device, host: &str, port: u16) -> io::Result<Tunnel> {
-    tcode_traverse::block_on(device.tunnels.open(host, port))
+    tcode_traverse::block_on(device.tunnels.open(StreamTarget::Tcp {
+        host: host.to_owned(),
+        port,
+    }))
 }
 
 fn read_all(tunnel: &mut Tunnel) -> Vec<u8> {
@@ -335,4 +339,145 @@ fn a_connect_before_hello_is_refused_and_tunnels_per_connection_are_bounded() {
         }
     };
     drop(reopened);
+}
+
+/// A tunnel as the tokio streams russh speaks over.
+struct TokioTunnel(Tunnel);
+
+impl tokio::io::AsyncRead for TokioTunnel {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let read = std::task::ready!(futures_lite::AsyncRead::poll_read(
+            std::pin::Pin::new(&mut self.get_mut().0.read),
+            cx,
+            buf.initialize_unfilled(),
+        ))?;
+        buf.advance(read);
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl tokio::io::AsyncWrite for TokioTunnel {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        futures_lite::AsyncWrite::poll_write(
+            std::pin::Pin::new(&mut self.get_mut().0.write),
+            cx,
+            buf,
+        )
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        futures_lite::AsyncWrite::poll_flush(std::pin::Pin::new(&mut self.get_mut().0.write), cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        futures_lite::AsyncWrite::poll_close(std::pin::Pin::new(&mut self.get_mut().0.write), cx)
+    }
+}
+
+/// An SSH client that trusts the machine's key: the iroh connection
+/// already authenticated it.
+struct TrustingClient;
+
+impl russh::client::Handler for TrustingClient {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        _key: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+}
+
+#[test]
+fn an_ssh_stream_runs_commands_through_the_machine_shell_and_takes_sftp_writes() {
+    let machine = Machine::start();
+    let device = attach(&machine);
+    let tunnel = tcode_traverse::block_on(device.tunnels.open(StreamTarget::Ssh)).unwrap();
+    let files = TestDir::new("sftp");
+    let uploaded = files.0.join("uploaded.bin");
+    let (stdout, stderr, exit_status) = tcode_traverse::block_on(async {
+        let mut ssh = russh::client::connect_stream(
+            std::sync::Arc::new(russh::client::Config::default()),
+            TokioTunnel(tunnel),
+            TrustingClient,
+        )
+        .await
+        .unwrap();
+        assert!(ssh.authenticate_none("anyone").await.unwrap().success());
+
+        // Words every shell the machine may have (sh, zsh, cmd.exe) reads
+        // alike.
+        let mut exec = ssh.channel_open_session().await.unwrap();
+        exec.exec(true, "echo hello && echo oops 1>&2 && exit 3")
+            .await
+            .unwrap();
+        let (mut stdout, mut stderr, mut exit_status) = (Vec::new(), Vec::new(), None);
+        while let Some(message) = exec.wait().await {
+            match message {
+                russh::ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+                russh::ChannelMsg::ExtendedData { data, ext: 1 } => stderr.extend_from_slice(&data),
+                russh::ChannelMsg::ExitStatus {
+                    exit_status: status,
+                } => exit_status = Some(status),
+                _ => {}
+            }
+        }
+
+        // A session that asks for a terminal runs in one.
+        #[cfg(unix)]
+        {
+            let mut pty = ssh.channel_open_session().await.unwrap();
+            pty.request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
+                .await
+                .unwrap();
+            pty.exec(true, "tty").await.unwrap();
+            let mut output = Vec::new();
+            while let Some(message) = pty.wait().await {
+                if let russh::ChannelMsg::Data { data } = message {
+                    output.extend_from_slice(&data);
+                }
+            }
+            let output = String::from_utf8_lossy(&output);
+            assert!(output.trim().starts_with("/dev/"), "{output}");
+        }
+
+        let sftp_channel = ssh.channel_open_session().await.unwrap();
+        sftp_channel.request_subsystem(true, "sftp").await.unwrap();
+        let sftp = russh_sftp::client::SftpSession::new(sftp_channel.into_stream())
+            .await
+            .unwrap();
+        let mut file = sftp
+            .create(uploaded.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut file, b"zed-remote-server\0\xff")
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::shutdown(&mut file).await.unwrap();
+        drop(file);
+        sftp.close().await.unwrap();
+        (stdout, stderr, exit_status)
+    });
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hello");
+    assert_eq!(String::from_utf8_lossy(&stderr).trim(), "oops");
+    assert_eq!(exit_status, Some(3));
+    assert_eq!(
+        std::fs::read(&uploaded).unwrap(),
+        b"zed-remote-server\0\xff"
+    );
 }
