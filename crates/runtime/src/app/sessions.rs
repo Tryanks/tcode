@@ -489,28 +489,49 @@ impl AppState {
     }
 
     /// Move a thread into `project_id`, its conversation continuing in `cwd` (the project
-    /// root when absent). A provider's native session belongs to the directory it ran in —
-    /// Claude Code keeps its sessions per directory and cannot resume one from another — so
-    /// the move clears the resume cursor and the next turn starts a fresh provider session
-    /// there, handed the conversation so far by the relay owner
-    /// ([`Self::hand_off_conversation`]). The Tcode transcript stays as it is.
+    /// root when absent), a directory the project owns ([`project_directory`]). A provider's
+    /// native session belongs to the directory it ran in — Claude Code keeps its sessions per
+    /// directory and cannot resume one from another — so the move clears the resume cursor
+    /// and the next turn starts a fresh provider session there, handed the conversation so
+    /// far by the relay owner ([`Self::hand_off_conversation`]). The Tcode transcript stays
+    /// as it is.
     pub fn move_session(
-        &mut self,
-        session_id: &str,
-        project_id: &str,
+        &self,
+        session_id: String,
+        project_id: String,
         cwd: Option<PathBuf>,
-        cx: &mut HostCx,
-    ) -> Result<(), ProtocolError> {
-        self.move_session_by(session_id, project_id, cwd, false, cx)
+        cx: &HostCx,
+    ) -> HostTask<Result<(), ProtocolError>> {
+        let root = self
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .map(|project| project.root.clone());
+        let host = cx.clone();
+        cx.spawn_background(async move {
+            let root = root.ok_or_else(unknown_project)?;
+            let cwd = host.unblock(move || project_directory(&root, cwd)).await?;
+            host.enqueue_and_wait(move |app, cx| {
+                app.move_session_by(&session_id, &project_id, cwd, false, cx)
+            })
+            .await
+            .unwrap_or_else(|()| {
+                Err(ProtocolError {
+                    code: "transport_closed".into(),
+                    message: "Host stopped before moving the thread.".into(),
+                })
+            })
+        })
     }
 
-    /// [`Self::move_session`]; `by_own_turn` when the thread's own running turn asked for the
-    /// move, which keeps that turn: its provider leaves the old directory when it ends.
+    /// [`Self::move_session`] into `cwd`, a directory the project owns; `by_own_turn` when
+    /// the thread's own running turn asked for the move, which keeps that turn: its provider
+    /// leaves the old directory when it ends.
     pub(super) fn move_session_by(
         &mut self,
         session_id: &str,
         project_id: &str,
-        cwd: Option<PathBuf>,
+        cwd: PathBuf,
         by_own_turn: bool,
         cx: &mut HostCx,
     ) -> Result<(), ProtocolError> {
@@ -528,10 +549,7 @@ impl AppState {
             ));
         };
         let Some(project) = self.projects.iter().find(|p| p.id == project_id).cloned() else {
-            return Err(error(
-                "unknown_project",
-                "This project is no longer available.".into(),
-            ));
+            return Err(unknown_project());
         };
         if meta.archived_at.is_some() {
             return Err(error(
@@ -560,30 +578,6 @@ impl AppState {
                 "worktree_session",
                 "This thread runs in its own worktree; move the worktree's branch instead.".into(),
             ));
-        }
-        let cwd = match cwd {
-            None => project.root.clone(),
-            Some(cwd) if cwd.is_relative() => project.root.join(cwd),
-            Some(cwd) => cwd,
-        };
-        match directory_within(&project.root, &cwd) {
-            None => {
-                return Err(error(
-                    "invalid_cwd",
-                    format!("{} is not a directory on this host.", cwd.display()),
-                ));
-            }
-            Some(false) => {
-                return Err(error(
-                    "cwd_outside_project",
-                    format!(
-                        "{} is not inside {}.",
-                        cwd.display(),
-                        project.root.display()
-                    ),
-                ));
-            }
-            Some(true) => {}
         }
         if meta.project_id.as_deref() == Some(project_id) && meta.cwd == cwd {
             return Ok(());
@@ -1827,14 +1821,15 @@ impl AppState {
         }
     }
 
-    /// Kick off background worktree creation for a draft's first send, then send
-    /// the queued text once it is ready. Sets the "Preparing worktree…" state.
+    /// Kick off background creation of a draft's worktree from `base`, the branch or
+    /// commit picked in the composer, for its first send, then send the queued text once
+    /// it is ready. Sets the "Preparing worktree…" state.
     pub(super) fn begin_worktree_prep(
         &mut self,
         target_id: &str,
         text: String,
         attachments: Vec<Attachment>,
-        _base: String,
+        base: String,
         cx: &mut HostCx,
     ) {
         let Some(active) = self.resident_mut(target_id) else {
@@ -1853,7 +1848,9 @@ impl AppState {
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let result = host_cx
-                .unblock(move || provision(&root_for_task, &session_id_for_task, &data_dir))
+                .unblock(move || {
+                    provision(&root_for_task, &session_id_for_task, Some(&base), &data_dir)
+                })
                 .await;
             host_cx.enqueue(move |state, cx| {
                 if state
@@ -2442,6 +2439,40 @@ pub(super) fn fork_refusal(availability: ForkAvailability) -> Option<&'static st
             Some("Wait for the running turn to finish before forking this conversation.")
         }
         ForkAvailability::Available => None,
+    }
+}
+
+fn unknown_project() -> ProtocolError {
+    ProtocolError {
+        code: "unknown_project".into(),
+        message: "This project is no longer available.".into(),
+    }
+}
+
+/// Where a thread of the project at `root` may work: `cwd` (the root when absent, relative
+/// to it when relative) when it is a directory inside the root or inside any worktree of
+/// the root's repository. Asks git about the worktrees, so it runs off the host thread.
+fn project_directory(root: &Path, cwd: Option<PathBuf>) -> Result<PathBuf, ProtocolError> {
+    let cwd = match cwd {
+        None => root.to_path_buf(),
+        Some(cwd) if cwd.is_relative() => root.join(cwd),
+        Some(cwd) => cwd,
+    };
+    match directory_within(root, &cwd) {
+        None => Err(ProtocolError {
+            code: "invalid_cwd".into(),
+            message: format!("{} is not a directory on this host.", cwd.display()),
+        }),
+        Some(true) => Ok(cwd),
+        Some(false) if within_repository_worktree(root, &cwd) => Ok(cwd),
+        Some(false) => Err(ProtocolError {
+            code: "cwd_outside_project".into(),
+            message: format!(
+                "{} is not inside {} or a worktree of its repository.",
+                cwd.display(),
+                root.display()
+            ),
+        }),
     }
 }
 
