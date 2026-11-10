@@ -206,6 +206,7 @@ rewind:
     files: "对话已回退，但代码恢复失败：%{reason}"
   failed: "回退失败：%{reason}"
   undo_failed: "撤销回退失败：%{reason}"
+  reason_detail: "%{reason}（%{detail}）"
   reason:
     turn_running: "有轮次正在运行。"
     busy: "%{harness} 还有未处理的输入。"

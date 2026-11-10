@@ -754,8 +754,14 @@ impl TimelineView {
     ) -> AnyElement {
         let store = self.workspace_store.read(cx);
         let harness = store.harness_name_for(self.session_id.as_deref(), cx);
-        let EntryContent::Rewound(rewound) = &entry.content else {
-            return components::dividers::rewind_divider(entry, &harness, cx);
+        let rewound = match &entry.content {
+            EntryContent::Rewound(rewound) => rewound,
+            EntryContent::RewindFailed { mode, failure } => {
+                return components::dividers::rewind_failed_divider(
+                    &entry.id, *mode, failure, &harness, cx,
+                );
+            }
+            _ => unreachable!("a rewind segment holds a rewind entry"),
         };
         let status = store
             .session_status_for(self.session_id.as_deref(), cx)
@@ -810,7 +816,8 @@ impl TimelineView {
             let _ = this.update(cx, |timeline, cx| timeline.toggle_expanded(turn, &key, cx));
         });
         components::rewind::rewound_divider(
-            entry,
+            &entry.id,
+            rewound,
             expanded,
             on_toggle,
             undo,

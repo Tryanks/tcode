@@ -206,6 +206,7 @@ rewind:
     files: "会話は巻き戻しましたが、ファイルの復元に失敗しました：%{reason}"
   failed: "巻き戻しに失敗しました：%{reason}"
   undo_failed: "巻き戻しの取り消しに失敗しました：%{reason}"
+  reason_detail: "%{reason}（%{detail}）"
   reason:
     turn_running: "ターンの実行中です。"
     busy: "%{harness} にまだ処理されていない入力があります。"

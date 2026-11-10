@@ -12,7 +12,7 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::{Radio, RadioGroup, h_flex, v_flex};
-use tcode_core::session::{EntryContent, Rewound, TimelineEntry};
+use tcode_core::session::{EntryContent, Rewound};
 
 use crate::scroll::ScrollableElement as _;
 use crate::sizing::Sizable as _;
@@ -37,6 +37,9 @@ pub(crate) enum PreviewState {
     Checking,
     Ready(RewindPreview),
     Refused(RewindFailure),
+    /// The question did not reach the Harness, or its answer did not come
+    /// back: the client's error.
+    Failed(String),
 }
 
 impl PreviewState {
@@ -45,7 +48,7 @@ impl PreviewState {
         match self {
             Self::Ready(preview) => preview.files.files.is_empty() && preview.conflicts.is_empty(),
             Self::Refused(failure) => failure.reason == RewindFailureReason::NothingToRestore,
-            Self::Checking => false,
+            Self::Checking | Self::Failed(_) => false,
         }
     }
 }
@@ -389,10 +392,15 @@ fn preview_block(
             .child(
                 crate::tr!(
                     "rewind.preview.unavailable",
-                    reason = super::dividers::rewind_reason(failure.reason, harness)
+                    reason = super::dividers::rewind_reason(failure, harness)
                 )
                 .into_owned(),
             )
+            .into_any_element(),
+        PreviewState::Failed(error) => div()
+            .text_token(xs)
+            .text_color(cx.theme().warning)
+            .child(crate::tr!("rewind.preview.unavailable", reason = error).into_owned())
             .into_any_element(),
         PreviewState::Ready(preview) => {
             let files = &preview.files;
@@ -528,7 +536,8 @@ pub(crate) enum DividerUndo {
 /// back (only what Tcode's own log kept; nothing is sent to the Harness),
 /// and the Harness's undo while it lasts.
 pub(crate) fn rewound_divider(
-    entry: &TimelineEntry,
+    key: &str,
+    rewound: &Rewound,
     expanded: bool,
     on_toggle: Handler,
     undo: Option<DividerUndo>,
@@ -536,10 +545,7 @@ pub(crate) fn rewound_divider(
     motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
-    let EntryContent::Rewound(rewound) = &entry.content else {
-        return super::dividers::rewind_divider(entry, &harness, cx);
-    };
-    let key = entry.id.clone();
+    let key = key.to_owned();
     let label = super::dividers::rewound_label(rewound, &harness);
     let tint = if rewound.incomplete.is_some() {
         cx.theme().warning
@@ -548,7 +554,7 @@ pub(crate) fn rewound_divider(
     };
     let removable = !rewound.removed.is_empty();
     let branch = rewound.later_history == LaterHistory::Branch;
-    let rewound = Arc::new((**rewound).clone());
+    let rewound = Arc::new(rewound.clone());
     let motion = motion.clone();
     crate::motion::Sampled::new(move |window, cx| {
         let label_element = if removable {

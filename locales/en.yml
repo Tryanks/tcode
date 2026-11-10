@@ -206,6 +206,7 @@ rewind:
     files: "The conversation was rewound, but restoring files failed: %{reason}"
   failed: "Rewind failed: %{reason}"
   undo_failed: "Undoing the rewind failed: %{reason}"
+  reason_detail: "%{reason} (%{detail})"
   reason:
     turn_running: "a turn is running."
     busy: "%{harness} still has input waiting."
