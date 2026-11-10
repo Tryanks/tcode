@@ -1063,8 +1063,10 @@ impl AppState {
     }
 
     pub fn git_status_snapshot(&self, session_id: &str) -> GitStatusStatus {
+        let read = self.git_status.get(session_id);
         GitStatusStatus {
-            status: self.git_status.get(session_id).cloned(),
+            status: read.and_then(|read| read.as_ref().ok()).cloned(),
+            error: read.and_then(|read| read.as_ref().err()).cloned(),
             busy: self.git_busy.contains(session_id),
         }
     }

@@ -447,10 +447,11 @@ pub struct AppState {
     /// Live provider approvals for every resident session. This is the sole
     /// host-side authority; persisted timeline approvals remain client state.
     approvals: Revisioned<HashMap<String, Vec<agent::ApprovalRequest>>>,
-    /// Background-computed git state of the active session's cwd, driving the
-    /// adaptive header quick-action button (`None` until the first refresh /
-    /// with no active session). See [`AppState::refresh_git_status`].
-    pub git_status: HashMap<String, GitStatus>,
+    /// Background-computed git state of the active session's cwd, or git's
+    /// error reading it, driving the adaptive header quick-action button
+    /// (absent until the first refresh / with no active session). See
+    /// [`AppState::refresh_git_status`].
+    pub git_status: HashMap<String, Result<GitStatus, String>>,
     /// A git quick-action (commit/push/pull/…) is currently running, so the
     /// button is disabled with an in-progress hint.
     pub git_busy: HashSet<String>,

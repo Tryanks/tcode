@@ -649,6 +649,9 @@ pub struct AcpMarketplaceItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct GitStatusStatus {
     pub status: Option<GitStatus>,
+    /// git's own error when it could not read the status; `status` is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub busy: bool,
 }
 

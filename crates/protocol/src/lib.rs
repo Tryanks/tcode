@@ -318,7 +318,7 @@ pub use wire::{
 // QueryResponse::ExternalHistory carries an ExternalHistory {dirs,
 // unreadable}, and SessionContentHits a SessionContentHits {hits, unreadable}.
 // tcode/group/1 no longer has the full rejection. RuntimeError gains
-// file_unreadable.
+// file_unreadable. GitStatusStatus carries git's error.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

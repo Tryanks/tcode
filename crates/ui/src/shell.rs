@@ -17295,6 +17295,7 @@ pub(crate) mod tests {
                 },
                 ServerEvent::GitStatusReplaced(tcode_protocol::GitStatusStatus {
                     status: Some(git),
+                    error: None,
                     busy: false,
                 }),
             ),

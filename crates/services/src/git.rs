@@ -467,9 +467,11 @@ pub fn is_git_repo(cwd: &Path) -> bool {
     run_git(cwd, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|out| out.trim() == "true")
 }
 
-pub fn read_status(cwd: &Path) -> GitStatus {
+/// The repository state of `cwd`; the default outside a repository, and git's
+/// own error when it cannot read the status or the changed lines.
+pub fn read_status(cwd: &Path) -> Result<GitStatus, String> {
     if !is_git_repo(cwd) {
-        return GitStatus::default();
+        return Ok(GitStatus::default());
     }
     // `-z` prints paths unquoted; `status.relativePaths=false` makes them
     // relative to the repository root, as `--no-relative` does for numstat.
@@ -483,9 +485,8 @@ pub fn read_status(cwd: &Path) -> GitStatus {
             "--branch",
             "-z",
         ],
-    )
-    .unwrap_or_default();
-    let numstat = read_numstat(cwd);
+    )?;
+    let numstat = read_numstat(cwd)?;
     let checkout = crate::forge::Checkout::new(cwd);
     let has_origin_remote = checkout.remotes().iter().any(|(name, _)| name == "origin");
     let default_branch = run_git(cwd, &["symbolic-ref", "refs/remotes/origin/HEAD"])
@@ -505,20 +506,18 @@ pub fn read_status(cwd: &Path) -> GitStatus {
     );
     status.github_repository = crate::github::repository::resolve(&checkout)
         .map(|repository| format!("{}/{}", repository.owner, repository.name));
-    status
+    Ok(status)
 }
 
-fn read_numstat(cwd: &Path) -> Vec<(String, u32, u32)> {
+fn read_numstat(cwd: &Path) -> Result<Vec<(String, u32, u32)>, String> {
     let mut out = Vec::new();
     for args in [
         ["diff", "--numstat", "--no-relative", "-z"].as_slice(),
         ["diff", "--cached", "--numstat", "--no-relative", "-z"].as_slice(),
     ] {
-        if let Ok(text) = run_git(cwd, args) {
-            parse_numstat(&text, &mut out);
-        }
+        parse_numstat(&run_git(cwd, args)?, &mut out);
     }
-    out
+    Ok(out)
 }
 
 /// Rows of `git diff --numstat -z`, in the format git-diff(1) gives for it: a
@@ -549,7 +548,10 @@ fn parse_numstat(text: &str, out: &mut Vec<(String, u32, u32)>) {
     }
 }
 
-pub fn commit_diff_context(cwd: &Path, included: Option<&[String]>) -> (String, String) {
+pub fn commit_diff_context(
+    cwd: &Path,
+    included: Option<&[String]>,
+) -> Result<(String, String), String> {
     let has_head = run_git(cwd, &["rev-parse", "--verify", "HEAD"]).is_ok();
     let pathspec = match included {
         Some(paths) if !paths.is_empty() => {
@@ -568,12 +570,12 @@ pub fn commit_diff_context(cwd: &Path, included: Option<&[String]>) -> (String, 
     }
     stat_args.extend_from_slice(&pathspec);
     patch_args.extend_from_slice(&pathspec);
-    let mut stat = run_git(cwd, &stat_args).unwrap_or_default();
+    let mut stat = run_git(cwd, &stat_args)?;
     if stat.trim().is_empty() {
-        stat = run_git(cwd, &["status", "--short"]).unwrap_or_default();
+        stat = run_git(cwd, &["status", "--short"])?;
     }
-    let patch = run_git(cwd, &patch_args).unwrap_or_default();
-    (stat, patch)
+    let patch = run_git(cwd, &patch_args)?;
+    Ok((stat, patch))
 }
 
 pub fn run_claude_headless(
@@ -867,7 +869,7 @@ mod tests {
         run(&root, &["add", "sub/é \"q\".txt"]);
         run(&root, &["mv", "tracked.txt", "moved.txt"]);
 
-        let status = read_status(&subdirectory);
+        let status = read_status(&subdirectory).unwrap();
 
         let entry = |path: &str, insertions, deletions| GitFileEntry {
             path: path.into(),
@@ -898,6 +900,7 @@ mod tests {
         )
         .unwrap();
         let remaining: Vec<String> = read_status(&subdirectory)
+            .unwrap()
             .changed_files
             .into_iter()
             .map(|file| file.path)
@@ -936,16 +939,29 @@ mod tests {
         std::fs::write(root.join("tracked.txt"), "ahead\n").unwrap();
         run(&root, &["commit", "-am", "ahead"]);
 
-        let status = read_status(&root);
+        let status = read_status(&root).unwrap();
         assert!(status.has_origin_remote && status.has_upstream);
         assert_eq!((status.ahead, status.behind), (1, 0));
         assert_eq!(status.branch.as_deref(), Some("main"));
         assert!(!status.is_default_branch);
 
         run(&root, &["remote", "set-head", "origin", "main"]);
-        assert!(read_status(&root).is_default_branch);
+        assert!(read_status(&root).unwrap().is_default_branch);
         run(&root, &["checkout", "-b", "feature"]);
-        assert!(!read_status(&root).is_default_branch);
+        assert!(!read_status(&root).unwrap().is_default_branch);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// A repository whose status git cannot read is git's error, not a clean tree.
+    #[test]
+    fn a_status_git_cannot_read_is_its_error() {
+        let (temp, root) = scratch_repo("tcode-status-unreadable-test");
+        std::fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+        std::fs::write(root.join(".git/index"), b"not an index").unwrap();
+
+        assert!(read_status(&root).is_err());
+        assert!(commit_diff_context(&root, None).is_err());
 
         let _ = std::fs::remove_dir_all(temp);
     }

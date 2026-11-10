@@ -41,6 +41,9 @@ struct WorktreeFacts {
     base: Option<String>,
     /// Uncommitted changes right now; `None` outside a git repository or when not read.
     dirty: Option<bool>,
+    /// git's own error when it could not read whether there are any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -413,16 +416,29 @@ fn worktree_facts(meta: &SessionMeta) -> WorktreeFacts {
         branch: meta.worktree.as_ref().map(|w| w.branch.clone()),
         base: meta.worktree.as_ref().map(|w| w.base.clone()),
         dirty: None,
+        git_error: None,
     }
 }
 
 /// Live uncommitted changes in `cwd`, from the owner of the GitStatus topic.
-fn dirty_state(cwd: &Path) -> Option<bool> {
-    let status = tcode_services::git::read_status(cwd);
-    status.is_repo.then_some(status.has_working_tree_changes)
+fn dirty_state(cwd: &Path) -> Result<Option<bool>, String> {
+    let status = tcode_services::git::read_status(cwd)?;
+    Ok(status.is_repo.then_some(status.has_working_tree_changes))
 }
 
-fn dirty_states(cwds: impl IntoIterator<Item = PathBuf>) -> HashMap<PathBuf, Option<bool>> {
+impl WorktreeFacts {
+    fn read_dirty(&mut self, states: &HashMap<PathBuf, Result<Option<bool>, String>>) {
+        match states.get(&self.cwd) {
+            Some(Ok(dirty)) => self.dirty = *dirty,
+            Some(Err(error)) => self.git_error = Some(error.clone()),
+            None => {}
+        }
+    }
+}
+
+fn dirty_states(
+    cwds: impl IntoIterator<Item = PathBuf>,
+) -> HashMap<PathBuf, Result<Option<bool>, String>> {
     let mut states = HashMap::new();
     for cwd in cwds {
         if let std::collections::hash_map::Entry::Vacant(entry) = states.entry(cwd) {
@@ -790,7 +806,7 @@ impl AppState {
                     .filter_map(|row| row.worktree.as_ref().map(|w| w.cwd.clone())),
             );
             for worktree in threads.iter_mut().filter_map(|row| row.worktree.as_mut()) {
-                worktree.dirty = dirty.get(&worktree.cwd).copied().flatten();
+                worktree.read_dirty(&dirty);
             }
             to_value(&ThreadPage {
                 threads,
@@ -1055,14 +1071,11 @@ impl AppState {
         Answer::Later(cx.unblock(move || {
             let cwd = answer.cwd.clone();
             match params.what {
-                GitWhat::Status => {
-                    let status = tcode_services::git::read_status(&cwd);
-                    if status.is_repo {
-                        answer.status = Some(status);
-                    } else {
-                        answer.error = Some("not a git repository".into());
-                    }
-                }
+                GitWhat::Status => match tcode_services::git::read_status(&cwd) {
+                    Ok(status) if status.is_repo => answer.status = Some(status),
+                    Ok(_) => answer.error = Some("not a git repository".into()),
+                    Err(error) => answer.error = Some(error),
+                },
                 GitWhat::Branches => {
                     answer.branches = Some(tcode_services::git::list_git_branches(&cwd));
                     answer.current_branch = tcode_services::git::read_git_branch(&cwd);
@@ -1452,12 +1465,12 @@ impl AppState {
                 .iter_mut()
                 .filter_map(|candidate| candidate.thread.worktree.as_mut())
             {
-                worktree.dirty = dirty.get(&worktree.cwd).copied().flatten();
+                worktree.read_dirty(&dirty);
             }
             let unattributed_dirty_worktrees = projects
                 .iter()
                 .filter(|(_, root)| {
-                    dirty.get(root).copied().flatten() == Some(true) && !thread_cwds.contains(root)
+                    matches!(dirty.get(root), Some(Ok(Some(true)))) && !thread_cwds.contains(root)
                 })
                 .map(|(project_id, root)| UnattributedWorktree {
                     project_id: project_id.clone(),

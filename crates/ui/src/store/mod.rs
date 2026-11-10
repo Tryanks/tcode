@@ -407,6 +407,8 @@ pub(crate) struct CommitDialogState {
     pub files: Vec<GitFileEntry>,
     pub branch: Option<String>,
     pub on_default_branch: bool,
+    /// git's own error when it could not read the status.
+    pub error: Option<String>,
 }
 
 fn protocol_io_error(message: impl Into<String>) -> std::io::Error {
@@ -3183,15 +3185,15 @@ impl WorkspaceStore {
         session_id: Option<&str>,
         cx: &App,
     ) -> CommitDialogState {
-        let status = self
-            .thread_git(session_id, cx)
-            .and_then(|git| git.status.as_ref());
+        let git = self.thread_git(session_id, cx);
+        let status = git.and_then(|git| git.status.as_ref());
         CommitDialogState {
             files: status
                 .map(|status| status.changed_files.clone())
                 .unwrap_or_default(),
             branch: status.and_then(|status| status.branch.clone()),
             on_default_branch: status.is_some_and(|status| status.is_default_branch),
+            error: git.and_then(|git| git.error.clone()),
         }
     }
 
@@ -4224,6 +4226,11 @@ impl WorkspaceStore {
                 tcode_core::git::local_controls(status, git.busy)
             }
         })
+    }
+
+    /// git's own error when it could not read the thread's status.
+    pub fn chat_git_error_for(&self, session_id: Option<&str>, cx: &App) -> Option<String> {
+        self.thread_git(session_id, cx)?.error.clone()
     }
 
     pub fn generate_commit_message_for(
