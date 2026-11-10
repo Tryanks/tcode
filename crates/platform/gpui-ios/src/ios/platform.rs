@@ -5,10 +5,10 @@ use anyhow::{Result, anyhow};
 use futures::channel::oneshot;
 use gpui::{
     Action, ActivityGuard, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, ClipboardItem,
-    CursorStyle, DummyKeyboardMapper, ForegroundExecutor, GestureTuning, Keymap, Menu, MenuItem,
-    OperatingSystem, PathPromptOptions, Platform, PlatformDisplay, PlatformGestures, PlatformInfo,
-    PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTarget, PlatformTextSystem,
-    PlatformWindow, PowerMode, Task, ThermalState, WindowAppearance, WindowParams,
+    CursorStyle, DummyKeyboardMapper, ForegroundExecutor, Keymap, Menu, MenuItem, OperatingSystem,
+    PathPromptOptions, Platform, PlatformDisplay, PlatformInfo, PlatformKeyboardLayout,
+    PlatformKeyboardMapper, PlatformTarget, PlatformTextSystem, PlatformWindow, PowerMode, Task,
+    ThermalState, WindowAppearance, WindowParams,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -16,7 +16,6 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
-    time::Duration,
 };
 
 pub(crate) struct IosPlatform {
@@ -131,17 +130,6 @@ impl IosPlatform {
 }
 
 struct IosKeyboardLayout;
-
-struct IosGestures;
-
-impl PlatformGestures for IosGestures {
-    fn tuning(&self) -> GestureTuning {
-        GestureTuning {
-            long_press_duration: Duration::from_millis(450),
-            ..GestureTuning::default()
-        }
-    }
-}
 
 impl PlatformKeyboardLayout for IosKeyboardLayout {
     fn id(&self) -> &str {
@@ -299,10 +287,6 @@ impl Platform for IosPlatform {
 
     fn on_memory_warning(&self, callback: Box<dyn FnMut()>) {
         self.state.borrow_mut().on_memory_warning = Some(callback);
-    }
-
-    fn gestures(&self) -> Option<Rc<dyn PlatformGestures>> {
-        Some(Rc::new(IosGestures))
     }
 
     fn set_menus(&self, _menus: Vec<Menu>, _keymap: &Keymap) {}
