@@ -1445,11 +1445,10 @@ impl PiMapper {
         if delta.is_empty() {
             return Vec::new();
         }
-        let index = crate::json_u64(event.get("contentIndex")).unwrap_or(0);
-        let message_id = match &self.streaming_assistant {
-            Some(id) => id.clone(),
-            None => self.assistant_id(message.get("message").unwrap_or(&Value::Null)),
+        let Some(message_id) = &self.streaming_assistant else {
+            return Vec::new();
         };
+        let index = crate::json_u64(event.get("contentIndex")).unwrap_or(0);
         vec![AgentEvent::Delta {
             item_id: format!("{message_id}:{index}"),
             kind,
@@ -1494,8 +1493,13 @@ impl PiMapper {
                 })]
             }
             Some("assistant") => {
+                if message.get("stopReason").and_then(Value::as_str) == Some("error") {
+                    self.failed = true;
+                }
+                let Some(id) = self.assistant_id(message) else {
+                    return Vec::new();
+                };
                 let mut events = Vec::new();
-                let id = self.assistant_id(message);
                 if let Some(content) = message.get("content").and_then(Value::as_array) {
                     for (index, block) in content.iter().enumerate() {
                         let item = match block.get("type").and_then(Value::as_str) {
@@ -1537,9 +1541,6 @@ impl PiMapper {
                     self.turn_usage.get_or_insert_default().merge(usage);
                     events.push(AgentEvent::TokenUsage(usage));
                 }
-                if message.get("stopReason").and_then(Value::as_str) == Some("error") {
-                    self.failed = true;
-                }
                 events
             }
             _ => Vec::new(),
@@ -1565,14 +1566,10 @@ impl PiMapper {
         id.clone()
     }
 
-    /// Resolves a completed or reconciled assistant message to the id its
-    /// deltas streamed under, naming it here if `message_start` was missed.
-    fn assistant_id(&mut self, message: &Value) -> String {
+    /// The id the `message_start` of a completed assistant message named.
+    fn assistant_id(&self, message: &Value) -> Option<String> {
         let timestamp = crate::json_u64(message.get("timestamp")).unwrap_or(0);
-        match self.assistant_ids.get(&timestamp) {
-            Some((id, _)) => id.clone(),
-            None => self.allocate_assistant_id(message),
-        }
+        self.assistant_ids.get(&timestamp).map(|(id, _)| id.clone())
     }
 
     fn tool_event(
@@ -2491,8 +2488,16 @@ mod tests {
         let mut mapper = PiMapper::new();
         mapper.on_message(&json!({"type":"agent_start"}));
         mapper.on_message(&json!({
+            "type":"message_start",
+            "message":{"role":"assistant","content":[],"stopReason":"pending","timestamp":1785400000000_u64}
+        }));
+        mapper.on_message(&json!({
             "type":"message_end",
             "message":{"role":"assistant","responseId":"one","usage":{"input":10,"output":2,"totalTokens":12},"timestamp":1785400000000_u64}
+        }));
+        mapper.on_message(&json!({
+            "type":"message_start",
+            "message":{"role":"assistant","content":[],"stopReason":"pending","timestamp":1785400000001_u64}
         }));
         mapper.on_message(&json!({
             "type":"message_end",
