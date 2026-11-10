@@ -11617,16 +11617,19 @@ fn the_storage_pass_drops_superseded_diffs_of_every_stored_thread() {
         );
     }
     drop(state);
-    let logged = captured_log().len();
+    // A restart finds every thread passed and leaves each as it was.
     let cx = &mut TestAppContext::default();
     let restarted = cx.new_entity(TestClientState::new((*store).clone()));
+    assert!(store.threads_to_compact().unwrap().is_empty());
     restarted.update(cx, |state, cx| state.start_storage_pass(cx));
     cx.run_until(|state| state.storage_pass.is_none());
-    assert!(
-        captured_log()[logged..]
-            .iter()
-            .any(|line| line.text == "storage pass complete: no work")
-    );
+    for id in ["cold", "open"] {
+        assert_eq!(
+            String::from_utf8(store.read_event_log(id).unwrap()).unwrap(),
+            passed,
+            "{id}"
+        );
+    }
 }
 
 /// A full device subscribed to the storage migration hears nothing while no
