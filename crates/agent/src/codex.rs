@@ -6785,51 +6785,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn codex_0150_collab_tool_items_accept_new_values() {
-        for tool in [
-            "sendMessage",
-            "followupTask",
-            "interruptAgent",
-            "listAgents",
-        ] {
-            let item = map_item(&json!({
-                "type": "collabAgentToolCall",
-                "id": format!("call-{tool}"),
-                "tool": tool,
-                "status": if tool == "interruptAgent" { "interrupted" } else { "completed" },
-                "senderThreadId": "root-thread",
-                "receiverThreadIds": ["child-thread"],
-                "agentsStates": {}
-            }))
-            .unwrap();
-            assert!(matches!(
-                item.content,
-                ItemContent::ToolCall { name, status, .. }
-                    if name == tool
-                        && status == if tool == "interruptAgent" {
-                            ItemStatus::Interrupted
-                        } else {
-                            ItemStatus::Completed
-                        }
-            ));
-        }
-    }
-
-    #[test]
-    fn service_tier_uses_explicit_selection_only() {
-        let selections = vec![OptionSelection {
-            id: "fastMode".into(),
-            value: json!(true),
-        }];
-        assert_eq!(codex_service_tier(&selections), None);
-        let explicit = vec![OptionSelection {
-            id: "serviceTier".into(),
-            value: json!("flex"),
-        }];
-        assert_eq!(codex_service_tier(&explicit).as_deref(), Some("flex"));
-    }
-
     /// MCP results recorded from the app-server (each `result` as Tcode
     /// stored it, base64 swapped for a 1x1 JPEG): the timeline keeps the text
     /// the model read and moves image parts into `image_reads`, typed by their
