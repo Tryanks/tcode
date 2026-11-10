@@ -4229,26 +4229,16 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         let (title, detail, progress) = content;
-        let has_action = action.is_some();
+        let autohide = action.is_none()
+            && matches!(
+                kind,
+                ToastKind::Success | ToastKind::Info | ToastKind::Warning
+            );
         window.push_notification(
-            crate::toast::notification(id, kind, title, detail.map(Into::into), action, progress),
+            crate::toast::notification(id, kind, title, detail.map(Into::into), action, progress)
+                .autohide(autohide),
             cx,
         );
-
-        let delay = match kind {
-            ToastKind::Success | ToastKind::Info => Some(Duration::from_secs(4)),
-            ToastKind::Warning => Some(Duration::from_secs(6)),
-            ToastKind::Error | ToastKind::Loading => None,
-        };
-        if let Some(delay) = delay.filter(|_| !has_action) {
-            cx.spawn_in(window, async move |this, cx| {
-                cx.background_executor().timer(delay).await;
-                _ = this.update_in(cx, |_, window, cx| {
-                    window.remove_notification1::<RuntimeToastNotification>(id as usize, cx);
-                });
-            })
-            .detach();
-        }
     }
 
     fn on_open_source_control(
