@@ -70,13 +70,17 @@ impl QueuedMessage {
     /// skill invocation applied). The recorded user
     /// message keeps `text` verbatim, so an image-only bubble renders as just
     /// its thumbnails.
-    pub(super) fn wire_text(&self, provider_commands: &[ProviderCommand]) -> String {
+    pub(super) fn wire_text(
+        &self,
+        provider: ProviderKind,
+        provider_commands: &[ProviderCommand],
+    ) -> String {
         let text = if let Some(transcript) = &self.relay_transcript {
             assemble_relay_prompt(transcript, &self.text)
         } else {
             self.text.clone()
         };
-        let text = wire_text_with_placeholder(text, &self.attachments);
+        let text = wire_text_with_placeholder(text, &self.attachments, provider);
         native_skill_invocation(text, provider_commands)
     }
 }
@@ -109,11 +113,22 @@ pub(super) fn native_skill_invocation(
     format!("/{rest}")
 }
 
-/// Providers require non-empty turn text: an image-only message uses a
-/// synthetic placeholder on the wire while the transcript records the user's
-/// empty text plus the attachments.
-pub(super) fn wire_text_with_placeholder(text: String, attachments: &[Attachment]) -> String {
-    if text.trim().is_empty() && !attachments.is_empty() {
+/// The text of a turn as `provider` is sent it. Claude Code 2.1.322 drops a
+/// blank text block before calling the API, and OpenCode 2.2.7 an empty text
+/// part, so an image-only message goes to them as the user wrote it. For the
+/// others a placeholder stands in for the empty text, and the transcript keeps
+/// the user's: Codex's adapter sends the empty `input_text` its own client
+/// never sends, and the Responses API's answer to one is unknown; pi passes an
+/// empty text part to its OpenAI Responses, Google and Mistral providers; an
+/// ACP agent, Cursor and Grok among them, maps the empty block to whatever
+/// model API it uses.
+pub(super) fn wire_text_with_placeholder(
+    text: String,
+    attachments: &[Attachment],
+    provider: ProviderKind,
+) -> String {
+    let as_written = matches!(provider, ProviderKind::ClaudeCode | ProviderKind::OpenCode);
+    if !as_written && text.trim().is_empty() && !attachments.is_empty() {
         tcode_core::attachments::IMAGE_ONLY_MESSAGE.to_string()
     } else {
         text
@@ -877,7 +892,7 @@ impl ActiveSession {
                 .map_err(|_| ())?;
             self.live_cwd = self.meta.cwd.clone();
         }
-        let text = send.wire_text(&self.provider_commands);
+        let text = send.wire_text(self.meta.provider, &self.provider_commands);
         commands
             .try_send(SessionCommand::SendTurn {
                 delivery_id: send.id,

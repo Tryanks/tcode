@@ -5393,7 +5393,11 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
         };
         assert_eq!(
             prompt.as_deref(),
-            Some(active.queue[0].wire_text(&[]).as_str())
+            Some(
+                active.queue[0]
+                    .wire_text(active.meta.provider, &[])
+                    .as_str()
+            )
         );
     });
 }
@@ -6864,6 +6868,23 @@ fn image_only_message_gets_placeholder_on_the_wire_only() {
     let recorded = active.accept_turn_delivery(delivery_id).unwrap();
     assert_eq!(recorded.text, "");
     assert_eq!(attachment_paths(&recorded.attachments), vec!["/tmp/a.png"]);
+}
+
+/// Claude Code and OpenCode drop the empty text part themselves, so an
+/// image-only message reaches them as the user wrote it.
+#[test]
+fn image_only_message_goes_as_written_to_harnesses_that_drop_empty_text() {
+    let attachment = Attachment {
+        media_type: "image/png".into(),
+        data_base64: "AAAA".into(),
+        source_path: None,
+    };
+    for provider in [ProviderKind::ClaudeCode, ProviderKind::OpenCode] {
+        assert_eq!(
+            wire_text_with_placeholder(String::new(), std::slice::from_ref(&attachment), provider),
+            ""
+        );
+    }
 }
 
 #[test]
