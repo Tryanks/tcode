@@ -44,8 +44,6 @@ const READ_TTL: Duration = Duration::from_secs(60);
 /// Text at a commit never changes; the bound is only on how long it holds memory.
 const TEXT_TTL: Duration = Duration::from_secs(600);
 const FILE_BYTES: usize = 1024 * 1024;
-/// Issue comments whose reactions a conversation read asks for, one request each.
-const REACTION_READS: usize = 100;
 const ANONYMOUS: &str = "anonymous";
 
 type Slot = (Instant, PullRequestReadResponse);
@@ -281,7 +279,7 @@ impl Forgejo {
             || permissions["admin"].as_bool() == Some(true);
         let archived = repository["archived"].as_bool() == Some(true);
         let signed_in = viewing.is_some() && !archived;
-        // Reactions are one read per comment here; the newest comments are the ones read.
+        // Reactions are one read per comment here.
         let reacted = |path: String| -> Result<Vec<Value>, ForgeError> {
             Ok(pull
                 .get(&path, "Reactions")?
@@ -292,8 +290,6 @@ impl Forgejo {
         let pr_reactions = reacted(format!("issues/{}/reactions", key.number))?;
         let reaction_ids: Vec<u64> = issue_comments
             .iter()
-            .rev()
-            .take(REACTION_READS)
             .filter_map(|comment| comment["id"].as_u64())
             .collect();
         let comment_reactions: HashMap<u64, Vec<Value>> = std::thread::scope(|scope| {
