@@ -42,9 +42,6 @@ const MIN_THUMB: Pixels = px(48.);
 const THUMB: Pixels = px(6.);
 const THUMB_ACTIVE: Pixels = px(8.);
 const THUMB_INSET: Pixels = px(4.);
-/// How long the scrollbar takes to fade in, to fade out, and to widen its
-/// thumb; the theme hands the same to gpui-base's scrollbar.
-pub(crate) const MOTION: Duration = Duration::from_millis(200);
 /// How often a drag redraws the view at most.
 const DRAG_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 120);
 
