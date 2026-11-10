@@ -2360,6 +2360,7 @@ mod tests {
             .push(entry("assistant", assistant("Done.")));
 
         let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
         });
@@ -2813,6 +2814,7 @@ mod tests {
         });
 
         let window_state = cx.new(|_| WindowState::default());
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
@@ -3076,6 +3078,7 @@ This begins after the hard break."#;
         });
         let window_state = cx.new(|_| WindowState::default());
 
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 workspace_store.clone(),
@@ -3580,6 +3583,7 @@ This begins after the hard break."#;
                 .unwrap();
             let (workspace_store, window_state, session_id, _driver) =
                 seed_chat_with_history_on(cx, timeline, false, Some(ProviderKind::OpenCode));
+            cx.update(|cx| cx.set_reduce_motion(true));
             let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
             });

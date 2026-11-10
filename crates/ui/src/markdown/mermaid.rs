@@ -1306,6 +1306,7 @@ mod tests {
 
     #[gpui::test]
     fn the_whole_source_is_drawn_when_the_fence_closes_or_the_reply_ends(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
         let statements = "flowchart TD\n    A --> B\n    B --> C\n";
         let partial = "    C --> D[Archive";
         let whole_height = |text: &str, cx: &mut TestAppContext| {

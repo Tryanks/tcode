@@ -538,6 +538,7 @@ mod tests {
 
     fn open(cx: &mut TestAppContext) -> (TwoThreads, Entity<Panes>, &mut VisualTestContext) {
         let threads = seed_two_threads(cx, turns());
+        cx.update(|cx| cx.set_reduce_motion(true));
         let store = threads.store.clone();
         let window_state = cx.new(|_| WindowState::default());
         let (panes, cx) = cx.add_window_view(|window, cx| Panes {

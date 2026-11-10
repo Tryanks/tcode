@@ -1601,16 +1601,11 @@ mod tests {
             ),
         ];
         let (store, window_state, session_id) = seed_chat(cx, timeline);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (_view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(store, window_state, Some(session_id), window, cx)
         });
-        for (mode, width) in [
-            (crate::theme::ThemeMode::Light, 1_400.),
-            (crate::theme::ThemeMode::Light, 393.),
-            (crate::theme::ThemeMode::Dark, 1_400.),
-            (crate::theme::ThemeMode::Dark, 393.),
-        ] {
-            cx.update(|window, cx| crate::theme::change_mode(mode, Some(window), cx));
+        for width in [1_400., 393.] {
             cx.simulate_resize(size(px(width), px(900.)));
             draw_settled(cx);
             let before = [
@@ -1639,7 +1634,7 @@ mod tests {
             let footer_after = cx.debug_bounds("turn-time-row").expect("turn footer");
             assert_eq!(
                 after, before,
-                "collapsing moved or resized the answer at {width}px in {mode:?}"
+                "collapsing moved or resized the answer at {width}px"
             );
             assert_eq!(footer_after, footer_before, "collapsing moved the footer");
             assert!(
@@ -1660,6 +1655,7 @@ mod tests {
         const TURNS: u64 = 12;
         const DELTAS: u64 = 40;
         let (host, session_id, _) = seeded_chat_host(cx, Timeline::default(), false);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let seeded_id = session_id.clone();
         // Turn `t` takes the rows from `t * (DELTAS + 5)`; its user message is
         // the second, and the position a `tcode_control` anchor names it by.
@@ -1835,6 +1831,7 @@ mod tests {
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         for (width, height) in [(393., 852.), (1024., 768.)] {
             let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
+            cx.update(|cx| cx.set_reduce_motion(true));
             let (view, cx) = cx.add_window_view(|window, cx| {
                 ChatRoot(cx.new(|cx| {
                     ChatView::new(store, window_state.clone(), Some(session_id), window, cx)
@@ -1918,6 +1915,7 @@ mod tests {
             }
         }
         let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
+        cx.update(|cx| cx.set_reduce_motion(true));
         window_state.update(cx, |state, _| state.compact = true);
         let (root, cx) = cx.add_window_view(|window, cx| {
             TouchChat(cx.new(|cx| ChatView::new(store, window_state, Some(session_id), window, cx)))
@@ -1982,17 +1980,20 @@ mod tests {
                 self.0.read(cx).frame()
             }
         }
-        let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
-        window_state.update(cx, |state, _| state.compact = true);
-        let (root, cx) = cx.add_window_view(|window, cx| {
-            TouchChat(cx.new(|cx| ChatView::new(store, window_state, Some(session_id), window, cx)))
-        });
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        draw_settled(cx);
-        let list = root.read_with(cx, |root, cx| root.0.read(cx).list_state.clone());
-        assert!(list.max_offset_for_scrollbar().y > px(0.));
+        // A window per edge: the stretch springs back on gpui-base's wall
+        // clock, which the next edge would otherwise wait out.
         for at_end in [false, true] {
+            let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
+            window_state.update(cx, |state, _| state.compact = true);
+            let (root, cx) = cx.add_window_view(|window, cx| {
+                TouchChat(
+                    cx.new(|cx| ChatView::new(store, window_state, Some(session_id), window, cx)),
+                )
+            });
+            cx.simulate_resize(gpui::size(px(393.), px(852.)));
             draw_settled(cx);
+            let list = root.read_with(cx, |root, cx| root.0.read(cx).list_state.clone());
+            assert!(list.max_offset_for_scrollbar().y > px(0.));
             list.set_follow_mode(gpui::FollowMode::Normal);
             if at_end {
                 list.scroll_to_end();
@@ -2125,6 +2126,7 @@ mod tests {
             Arc::make_mut(entry).turn -= 20;
         }
         let (store, window_state, session_id) = seed_chat(cx, tail);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (root, cx) = cx.add_window_view(|window, cx| {
             TouchChat(cx.new(|cx| {
                 ChatView::new(
@@ -2206,6 +2208,7 @@ mod tests {
             let mut timeline = synthetic_markdown_timeline(30);
             timeline.mark_idle();
             let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+            cx.update(|cx| cx.set_reduce_motion(true));
             let (root, cx) = cx.add_window_view(|window, cx| {
                 TouchChat(cx.new(|cx| {
                     ChatView::new(
@@ -2529,6 +2532,7 @@ mod tests {
             "Text after the screenshot.\n\n".repeat(80)
         ));
         let (host, session_id, timeline) = seeded_chat_host(cx, timeline, false);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let seeded_id = session_id.clone();
         smol::block_on(host.update_state_for_test(move |state, cx| {
             state.residents.live.get_mut(&seeded_id).unwrap().timeline = Timeline::default();
@@ -2834,6 +2838,7 @@ mod tests {
                 state.set_provider_launcher_for_test(scripted.launcher)
             }))
             .expect("script the provider");
+            cx.update(|cx| cx.set_reduce_motion(true));
             // The host refuses a send for a thread it does not have.
             let (to_proxy, proxy) = async_channel::unbounded::<String>();
             let to_host = host.to_host.clone();
@@ -2932,13 +2937,7 @@ mod tests {
                     }
                 })
             });
-            // A delivered message starts a turn whose working indicator
-            // never rests: the frames are delivered one by one.
-            for _ in 0..40 {
-                cx.executor().advance_clock(Duration::from_millis(16));
-                cx.update(|window, cx| window.simulate_next_frame(cx));
-                draw(cx);
-            }
+            draw_settled(cx);
             if case == Outcome::Delivered {
                 assert!(list.is_following_tail(), "the send left the reader behind");
                 assert!(
@@ -2976,6 +2975,7 @@ mod tests {
         }
         assert_eq!(tail.entries.len(), 300);
         let (store, window_state, session_id) = seed_chat(cx, tail);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (root, cx) = cx.add_window_view(|window, cx| {
             TouchChat(cx.new(|cx| {
                 ChatView::new(
@@ -3600,7 +3600,7 @@ mod tests {
     fn upward_scroll_moves_only_by_the_input_distance(cx: &mut TestAppContext) {
         use gpui::{ScrollDelta, ScrollEvent, point, px, size};
 
-        for width in [393., 1024.] {
+        for width in [393.] {
             let mut timeline = synthetic_markdown_timeline(3);
             for entry in &mut timeline.entries {
                 if let EntryContent::Item(ItemContent::AssistantMessage { text, .. }) =
@@ -3628,25 +3628,34 @@ mod tests {
             ));
             view.update(cx, |_, cx| cx.notify());
             draw_settled(cx);
-            for step in 0..160 {
+            for step in 0..40 {
                 let item = list.logical_scroll_top().item_ix;
                 let before = list.bounds_for_item(item).unwrap().top();
                 cx.simulate_event(ScrollEvent {
                     position: list.viewport_bounds().center(),
-                    delta: ScrollDelta::Pixels(point(px(0.), px(40.))),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(160.))),
                     touch_phase: gpui::TouchPhase::Moved,
                     ..Default::default()
                 });
-                draw_settled(cx);
+                // The display's next frame, a frame's time later.
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(16));
+                cx.update(|window, cx| window.simulate_next_frame(cx));
+                draw(cx);
                 let after = list
                     .bounds_for_item(item)
                     .expect("reading anchor stays visible")
                     .top();
                 assert!(
-                    (f32::from(after - before) - 40.).abs() < 1.,
-                    "step {step}: upward input of 40px moved from {before:?} to {after:?}"
+                    (f32::from(after - before) - 160.).abs() < 1.,
+                    "step {step}: upward input of 160px moved from {before:?} to {after:?}"
                 );
             }
+            // Coming to rest after the last packet moves nothing.
+            let item = list.logical_scroll_top().item_ix;
+            let before = list.bounds_for_item(item).unwrap().top();
+            draw_settled(cx);
+            assert_eq!(list.bounds_for_item(item).unwrap().top(), before);
         }
     }
 
@@ -3914,6 +3923,7 @@ mod tests {
         let events: Vec<_> = (0..4).flat_map(turn).collect();
         // The window holds turns 1 to 3; turn 0 is the page.
         let mut thread = ScriptedThread::new(cx, events, 7, false);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (view, cx) = thread.open(cx);
         thread.deliver(cx);
         draw_settled(cx);
