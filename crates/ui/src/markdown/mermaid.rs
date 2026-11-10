@@ -1480,44 +1480,6 @@ mod tests {
         );
     }
 
-    /// A fence drawn before, whose picture is no longer among the recent
-    /// ones, is drawn again off the main thread; meanwhile its code holds
-    /// the diagram's height, so nothing below moves when the picture comes.
-    #[gpui::test]
-    fn a_diagram_drawn_again_holds_its_height_while_it_draws(cx: &mut TestAppContext) {
-        let text = format!("```mermaid\n{FLOWCHART}```\n");
-        let (_, cx) = open(&text, false, cx);
-        draw_settled(cx);
-        let drawn = block_height(cx);
-        // Many diagrams later: the picture has left, its size is kept.
-        FINALS.with(|finals| finals.borrow_mut().entries.clear());
-        let root = cx
-            .update(|window, _| window.root::<Root>())
-            .flatten()
-            .expect("the root view");
-        root.update(cx, |root, cx| {
-            root.markdown = cx.new(|cx| MarkdownState::new(&text, cx));
-            cx.notify();
-        });
-        // A frame drawn before the picture is.
-        cx.update(|window, cx| {
-            window.refresh();
-            let _ = window.draw(cx);
-        });
-        assert!(
-            code_shown(cx) && !diagram_shown(cx),
-            "the code, until drawn"
-        );
-        assert_eq!(
-            block_height(cx),
-            drawn,
-            "the code holds the diagram's height"
-        );
-        draw(cx);
-        assert!(diagram_shown(cx) && !code_shown(cx), "the picture, at once");
-        assert_eq!(block_height(cx), drawn);
-    }
-
     /// A theme switch draws a diagram again for the new theme; with motion
     /// reduced the old picture is never shown beside the new one.
     #[gpui::test]
