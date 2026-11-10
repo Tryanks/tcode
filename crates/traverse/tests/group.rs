@@ -307,7 +307,7 @@ fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
         admits(&second, &phone)
     });
 
-    first.host.set_pairing_enabled(false);
+    first.host.set_pairing_enabled(false).unwrap();
     let late_dir = TestDir::new("late-phone");
     let late = device(&late_dir, "Late phone");
     pair(&invitation(&second), &late);
@@ -321,7 +321,7 @@ fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
             .any(|device| device.id == late_id)
     });
     assert!(!admits(&first, &late));
-    first.host.set_pairing_enabled(true);
+    first.host.set_pairing_enabled(true).unwrap();
     // Applying the group with the switch back on, as pairing another device
     // does, does not admit what was declined.
     let other_dir = TestDir::new("other-phone");

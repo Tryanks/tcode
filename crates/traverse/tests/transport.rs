@@ -244,7 +244,7 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
     assert!(host.pairing_enabled());
     std::fs::remove_dir(&blocker).unwrap();
 
-    host.set_pairing_enabled(false);
+    host.set_pairing_enabled(false).unwrap();
     let minted = host.new_invitation();
     assert_eq!(pair(&minted.invite, &other), Err(PairError::Disabled));
     host.shutdown();
@@ -334,14 +334,14 @@ fn invitation_changes_are_reported_in_order() {
     assert_eq!(events.recv_blocking().unwrap(), Some(third.clone()));
     pair(&third.invite, &phone).unwrap();
     assert_eq!(events.recv_blocking().unwrap(), None, "used");
-    host.set_pairing_enabled(false);
+    host.set_pairing_enabled(false).unwrap();
     assert!(events.try_recv().is_err(), "nothing to withdraw");
-    host.set_pairing_enabled(true);
+    host.set_pairing_enabled(true).unwrap();
     let late = host.invitation_events();
     let fourth = host.new_invitation();
     assert_eq!(events.recv_blocking().unwrap(), Some(fourth.clone()));
     assert_eq!(late.recv_blocking().unwrap(), Some(fourth));
-    host.set_pairing_enabled(false);
+    host.set_pairing_enabled(false).unwrap();
     assert_eq!(events.recv_blocking().unwrap(), None, "pairing off");
     assert_eq!(late.recv_blocking().unwrap(), None);
     assert!(events.try_recv().is_err());
@@ -835,7 +835,7 @@ fn a_restarted_machine_rejoins_and_delivers_writes_buffered_while_it_was_down() 
     });
     let endpoint_id = host.endpoint_id();
 
-    host.set_pairing_enabled(false);
+    host.set_pairing_enabled(false).unwrap();
     host.shutdown();
     wait_state(&client, |state| {
         link.set_connection_state(state.clone());
@@ -1107,9 +1107,9 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     assert!(host.space_link_url(&id).is_none());
     assert_eq!(pair(&invite, &other), Err(PairError::SpaceUnavailable));
     host.set_space_link_enabled(&id, true).unwrap();
-    host.set_pairing_enabled(false);
+    host.set_pairing_enabled(false).unwrap();
     assert_eq!(pair(&invite, &other), Err(PairError::Disabled));
-    host.set_pairing_enabled(true);
+    host.set_pairing_enabled(true).unwrap();
     let one_shot = host.new_invitation();
     let wrong = PairInvite {
         secret: "AAAAAAAAAAAAAAAAAAAAAA".into(),
