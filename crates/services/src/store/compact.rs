@@ -3,8 +3,7 @@
 //! repeats. A snapshot row keeps its position without its diffs; superseded
 //! deltas leave the log, except the one that created its item's entry, which
 //! stays with its text emptied. Both are decided by the fold
-//! ([`TurnSnapshots`], [`ItemStreams`]) and, for a whole thread, checked by
-//! folding the thread with and without them.
+//! ([`TurnSnapshots`], [`ItemStreams`]).
 //!
 //! An append a resident fold followed drops what it supersedes in its own
 //! transaction; every other thread is marked and passed in the background, a
@@ -16,7 +15,7 @@ use std::io;
 
 use agent::{AgentEvent, ItemContent};
 use tcode_core::session::{
-    ItemStreams, StoredEvent, SupersededStream, Timeline, TurnSnapshots, drop_turn_diffs,
+    ItemStreams, SupersededStream, Timeline, TurnSnapshots, drop_turn_diffs,
 };
 use turso::Connection;
 
@@ -69,10 +68,6 @@ pub(super) struct Decisions {
 }
 
 impl Decisions {
-    pub(super) fn is_empty(&self) -> bool {
-        self.delete.is_empty() && self.empty.is_empty() && self.drop_diffs.is_empty()
-    }
-
     /// The canonical bytes the row at `position` is kept as, or `None` when
     /// it leaves the log.
     pub(super) fn apply(&self, position: u64, line: Vec<u8>) -> io::Result<Option<Vec<u8>>> {
@@ -95,7 +90,6 @@ pub(super) struct Planner {
     fold: Timeline,
     snapshots: TurnSnapshots<u64>,
     streams: ItemStreams<u64>,
-    records: Vec<(u64, StoredEvent)>,
     groups: Vec<SupersededStream<u64>>,
     /// Rows naming blobs: the bare form a decision is made on is not all
     /// they hold, so a stream with one keeps all of its deltas.
@@ -132,15 +126,12 @@ impl Planner {
                     &stored.event,
                     position,
                 ));
-                self.records.push((position, stored));
             }
             Ok(None) => {}
             Err(_) => self.undecodable = Some(position),
         }
     }
 
-    /// The decisions, kept only if folding the thread with them applied
-    /// gives the fold of the thread as it is.
     pub(super) fn finish(self) -> Plan {
         if let Some(position) = self.undecodable {
             return Plan::Undecodable(position);
@@ -160,30 +151,6 @@ impl Planner {
             }
             decisions.delete.extend(group.delete);
             decisions.empty.extend(group.empty);
-        }
-        if decisions.is_empty() {
-            return Plan::Decided(decisions);
-        }
-        let mut reduced = Timeline::default();
-        for (position, record) in &self.records {
-            if decisions.delete.contains(position) {
-                continue;
-            }
-            let mut record = record.clone();
-            if decisions.empty.contains(position) {
-                empty_delta(&mut record.event);
-            }
-            if decisions.drop_diffs.contains(position) {
-                drop_turn_diffs(&mut record.event);
-            }
-            reduced.apply_stored(&record);
-        }
-        if reduced != self.fold {
-            log::warn!(
-                "a thread's fold changes without its superseded rows; keeping them (first row {:?})",
-                self.records.first().map(|(position, _)| position)
-            );
-            return Plan::Decided(Decisions::default());
         }
         Plan::Decided(decisions)
     }
@@ -224,9 +191,6 @@ pub(super) fn rewrite(
     .map_err(invalid_data)?;
     if line.ends_with(b"\n") {
         rewritten.push(b'\n');
-    }
-    if !matches!(decode_row(&rewritten), Ok(Some(read)) if read.stored == stored) {
-        return Err(invalid_data("a rewritten row does not read back as itself"));
     }
     Ok(Some(rewritten))
 }
