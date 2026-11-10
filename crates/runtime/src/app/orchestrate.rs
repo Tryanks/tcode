@@ -981,30 +981,15 @@ pub(super) fn resolve_child_worktree(
     cwd: PathBuf,
     child_id: &str,
     data_dir: &Path,
-) -> (PathBuf, Option<WorktreeInfo>, Option<String>) {
-    match provision(&cwd, child_id, None, data_dir) {
-        Ok(created) => {
-            let info = WorktreeInfo {
-                root_project_path: cwd,
-                base: created.base,
-                branch: created.branch,
-            };
-            (created.path, Some(info), None)
-        }
-        Err(ProvisionError::NotRepositoryRoot { path }) => {
-            let warning = format!(
-                "worktree isolation unavailable: {} is not a Git repository root; using the plain cwd",
-                path.display()
-            );
-            log::warn!("subagent worktree: {warning}");
-            (cwd, None, Some(warning))
-        }
-        Err(error) => {
-            let warning = format!("worktree isolation failed ({error}); using the plain cwd");
-            log::warn!("subagent worktree: {warning}");
-            (cwd, None, Some(warning))
-        }
-    }
+) -> Result<(PathBuf, WorktreeInfo), String> {
+    let created = provision(&cwd, child_id, None, data_dir)
+        .map_err(|error| format!("worktree isolation failed: {error}"))?;
+    let info = WorktreeInfo {
+        root_project_path: cwd,
+        base: created.base,
+        branch: created.branch,
+    };
+    Ok((created.path, info))
 }
 
 pub(super) fn final_assistant_message(timeline: &Timeline) -> String {
