@@ -406,7 +406,6 @@ impl AppState {
                 .worktree
                 .as_ref()
                 .map(|worktree| worktree.branch.clone()),
-            warning: None,
         })
     }
 
@@ -441,7 +440,6 @@ impl AppState {
                 .worktree
                 .as_ref()
                 .map(|worktree| worktree.branch.clone()),
-            warning: None,
         };
         let id = if meta.is_dispatched() {
             self.install_subagent(meta, message, attachments, cx)
