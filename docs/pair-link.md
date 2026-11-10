@@ -72,9 +72,9 @@ Everything the link does not carry is learned elsewhere:
 
 ### When the first connection does not establish
 
-If no path opens within the connect budget (20 s; iroh gives up sooner when
-it has no address to try at all), the device has not yet sent the secret, so
-the invitation is still valid. The device then asks for the
+If iroh ends the dial without opening a path (at once when it has no
+address to try at all), the device has not yet sent the secret, so the
+invitation is still valid. The device then asks for the
 machine's IP address, dials `<address>:<port>` together with the original
 hints, and retries the same invitation. This covers a LAN where
 multicast is blocked and there is no internet: the user reads the address

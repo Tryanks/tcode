@@ -684,7 +684,7 @@ disappeared are removed, new ones added, lookup services rebuilt.
 | Source | Machine | Devices | The service sees |
 | --- | --- | --- | --- |
 | **Official** (default) | Uses the manifest bundled with Tcode, refreshed from the repository. At the time of writing it lists n0's public relays (`*.relay.n0.iroh.link`, regions `na-east`, `na-west`, `eu`, `ap`, QUIC port 7842) and n0's pkarr relay (`https://dns.iroh.link/pkarr`). These are n0's infrastructure: n0 states that the public relays are rate-limited and offer no uptime guarantee, and that the lookup service is fine for production when its performance is acceptable. | A device with a machine on the official service uses the same relay list for its own home relay and the same lookup service to resolve machines. There is no device-side switch. | Relays see machine and device ids, the encrypted connection and its volume. The lookup service stores, per machine id, the machine's signed record: its relay URL only, republished every five minutes; direct addresses are filtered out before publication and are exchanged over the encrypted connection instead. Anyone who knows a machine id can read that record. Devices publish nothing. |
-| **Self-hosted** | Fetches `<base>/relays.json` from your instance and uses its relays and pkarr store. With nothing cached yet, hosting waits for one fetch; if the instance is unreachable it starts anyway without that instance's relays and lookup — the LAN and the other enabled sources still work, and with no other source the invitation names no relay — and applies the manifest to the running endpoint once a background refresh (every five minutes) fetches it. It never falls back to the official service. | A device takes the base URL from the invitation, fetches the same manifest, and adds that instance's relays and lookup to what its other machines brought. Until that manifest loads the device has no relay and no resolver for that instance, only the saved addresses and the LAN lookup. Its home relay is chosen among all of them; a device whose machines are all self-hosted never contacts the official service. | Your instance sees what the official one would. The official service is not used for this machine; it sees the device's end only if the device also has a machine on it. |
+| **Self-hosted** | Fetches `<base>/relays.json` from your instance and uses its relays and pkarr store. With nothing cached yet, hosting waits for one fetch; if the instance is unreachable it starts anyway without that instance's relays and lookup — the LAN and the other enabled sources still work, and with no other source the invitation names no relay — and applies the manifest to the running endpoint once a background refresh (once an hour) fetches it. It never falls back to the official service. | A device takes the base URL from the invitation, fetches the same manifest, and adds that instance's relays and lookup to what its other machines brought. Until that manifest loads the device has no relay and no resolver for that instance, only the saved addresses and the LAN lookup. Its home relay is chosen among all of them; a device whose machines are all self-hosted never contacts the official service. | Your instance sees what the official one would. The official service is not used for this machine; it sees the device's end only if the device also has a machine on it. |
 | **All off** | No relay and no lookup service: the endpoint publishes nothing beyond its LAN advertisement and dials nothing but direct addresses. The invitation names no relay (`Relay: none (LAN only)`). | The device finds the machine through the LAN lookup, or at the IP address typed when nothing found it, and dials the addresses it learned on later connections. This machine brings no relay to the device's endpoint; with no other machine on a service, the device has none. | Nothing about this machine. |
 
 A device that connected successfully saves how it reached the machine —
@@ -697,9 +697,9 @@ without any service; see [Finding the machine again](#finding-the-machine-again)
 
 - **The manifest cannot be fetched.** The official mode keeps the cached copy
   (`traverse-manifest-official.json` in the data directory) or the bundled one;
-  a fetched manifest stays fresh for one hour, and after a failure the next
-  attempt waits five minutes, so an offline machine does not pay a network
-  timeout on every check. A bundled manifest newer than the cache wins. A
+  a manifest is fetched again once the copy in effect is an hour old, and a
+  failed fetch is tried again an hour later, so an offline machine does not
+  pay a network timeout on every check. A bundled manifest newer than the cache wins. A
   self-hosted machine keeps its cached copy; with no cache it hosts without
   a relay until the manifest arrives, see the table.
 - **No route to a relay.** The machine still hosts; the invitation names no
@@ -970,13 +970,13 @@ list in memory and writes it back.
 | **That is not a Tcode invitation link** | The pasted text is not a complete `tcode://pair?v=3&…` link (see [The invitation link](pair-link.md)). A link from an older Tcode is not accepted either. Copy the link again from the machine or scan the QR. |
 | **The machine rejected this invitation** | The invitation expired (five minutes), was already used, was replaced by a newer one, or five wrong secrets invalidated it. Create **New invitation** on the machine or restart `serve`; get a separate invitation for each device. |
 | **This machine is not accepting new devices** | Turn on **Accept new devices** on the machine (desktop **Settings → Remote**, or the logged-in browser of a headless machine). |
-| Pairing asks for **Machine's IP address** | No path to the machine opened within 20 seconds: not through its relay, its Traverse lookup or the LAN lookup. The invitation is still valid. Check that Tcode is running, that the two are on the same network or the machine has a relay (`Relay:` in the `serve` output), and that the machine's UDP port is not blocked on the LAN; then type the machine's IP address in that field (see [When nothing finds the machine](#when-nothing-finds-the-machine)). |
+| Pairing asks for **Machine's IP address** | The dial found no path to the machine: not through its relay, its Traverse lookup or the LAN lookup. The invitation is still valid. Check that Tcode is running, that the two are on the same network or the machine has a relay (`Relay:` in the `serve` output), and that the machine's UDP port is not blocked on the LAN; then type the machine's IP address in that field (see [When nothing finds the machine](#when-nothing-finds-the-machine)). |
 | **Reconnecting to ‹machine›… (attempt N)** stays up | The device keeps trying the saved relay and addresses with growing delays, and on every attempt looks for the machine on its own network (see [Finding the machine again](#finding-the-machine-again)). If the machine moved to another network with Traverse off and the device did not move with it, pair again with a new invitation. Direct paths need UDP between the two ends; a relayed connection reaches the relay over HTTPS (TCP), so it still works where UDP is blocked, as long as the machine publishes to a relay. |
 | **Access rejected · Pair again** | The machine no longer lists this device (removed, or the machine's data directory was replaced). Pair again with a new invitation if access is intended. |
 | **Protocol mismatch · Update the app** | The machine and the device run different protocol versions. Update both. |
 | **Connected … · Relay** when both are on the same LAN | Hole punching has not found a direct path yet, or the LAN blocks UDP between the two. The path can switch to **Direct** while connected; the machine's fixed UDP port (`47420`) allowed through its firewall helps. |
 | `tcode-headless pair` says there is no valid invitation | The last one was used or expired, or `serve` is not running. Create a new invitation from the logged-in browser's **Settings → Remote**, or restart `serve`. |
-| A self-hosted machine hosts with `Relay: none (LAN only)` | The instance's `relays.json` could not be fetched and nothing is cached; the machine is reachable on the LAN only until a background refresh (every five minutes) gets the manifest. Check the URL, the instance and its certificate; Tcode does not fall back to the official service. |
+| A self-hosted machine hosts with `Relay: none (LAN only)` | The instance's `relays.json` could not be fetched and nothing is cached; the machine is reachable on the LAN only until a background refresh (once an hour) gets the manifest. Check the URL, the instance and its certificate; Tcode does not fall back to the official service. |
 | Browser password is wrong or forgotten | After five wrong attempts, wait five minutes. To reset it, stop the host and use `set-password`; add `--revoke-tokens` if logged-in browsers should lose access. |
 | Browser page unreachable from another device | The listener binds `127.0.0.1:47420` by default. Start `serve --browser-listen 0.0.0.0:47420` and open the machine's LAN address; `serve` refuses that bind until a password is set. |
 | Browser shows **Protocol mismatch** | The page in the tab is from another build than the running `tcode-headless`. Reload the page. |
@@ -995,25 +995,24 @@ at least 30 s resets backoff; a quick handshake followed by another disconnect
 does not. A network change reported by the device ends the current wait
 early and tries again at once.
 
-A connection attempt has 20 seconds to find a path and complete the handshake.
-Once connected, both ends keep every path alive with QUIC keep-alives (iroh
-sends one on each path every 5 seconds) and drop a connection with no packets
-for 30 seconds; that is what notices a dead link. On top of that the device
-sends an application ping after 60 seconds without a message from the machine,
-which proves the machine's host still answers, and reconnects if nothing
-arrives within another 20 seconds. Browsers send the
-application ping after 15 seconds of silence with the same 20-second reply
-budget; browser timers may be delayed in background tabs, and making the page
-visible or coming online wakes reconnection.
+A connection attempt ends when iroh ends it: when its lookups find nothing
+reachable, or when the handshake goes silent for the idle limit below. Once
+connected, both ends keep the connection alive with QUIC keep-alives every 10
+seconds and drop it after 30 seconds without a packet; that is what notices a
+dead native link. A browser page cannot see WebSocket pings: the listener
+pings every 10 seconds and ends a socket that leaves two unanswered, and the
+page sends an application ping after 15 seconds of silence and reconnects if
+nothing answers within 20 seconds. Browser timers may be delayed in
+background tabs, and making the page visible or coming online wakes
+reconnection.
 
-Native foreground cancels pending backoff. Once the app has been in the
-background for 10 s its link is parked: the connection closes and nothing
-dials, pings or backs off until the app returns, since that return reconnects
-outright anyway and replays subscriptions from applied cursors. After a shorter
-absence the return probes once with the application ping. Foreground and Active
-from the same return do not issue duplicate probes. A change of the device's own
-addresses, as iroh's network monitor sees it, probes every live connection at
-once, so a stale link does not wait for the idle timer. Android has no such
+Native foreground cancels pending backoff. When the app goes to the
+background its link is parked: the connection closes and nothing dials or
+backs off until the app returns, since that return reconnects outright anyway
+and replays subscriptions from applied cursors. Foreground and Active from the
+same return reconnect once. A change of the device's own addresses, as iroh's
+network monitor sees it, cuts a pending backoff short; a live connection
+follows the change on its own, since iroh moves its paths. Android has no such
 monitor for native code: there the system's default-network callback (another
 network, a change of transport, validation or addresses, not a signal-strength
 update) and a resume that finds a different network than the callback last
@@ -1106,7 +1105,7 @@ replace the currently selected conversation.
 Reads and writes have separate lifetimes. A transport-reported disconnect fails
 in-flight queries immediately with `disconnected`; the workspace refreshes its
 baseline during Syncing. A read issued without a connection fails the same way.
-While connected, a query without a result for 15 seconds fails with `timeout`.
+While connected, a query waits for its result.
 
 Retained commands use a client-generated UUID v4 key. They remain in an ordered
 outbox until Ack, including across reconnects, attachment changes and client
@@ -1134,12 +1133,11 @@ window. Exactly-once redelivery applies within that window. Keys are scoped by
 the authenticated device id on the machine, never by a prefix the client
 supplies, so one device's cache cannot be shared with or spoofed by another.
 
-If a connected retained command has no Ack for 30 seconds, the client logs a
-stalled acknowledgement and forces reconnect. The pending command remains in the
-outbox. The request deadlines and liveness constants live together in
-`crates/client/src/heartbeat.rs`: native idle probe at 60 seconds, browser idle
-probe at 15 seconds, a 20-second liveness reply budget, a 15-second query
-timeout and the 30-second command timeout.
+A command waits for its Ack for as long as the connection is up; the
+transport, not the command, decides that the link is lost. Losing it fails a
+command that is not retained and leaves a retained one in the outbox for
+redelivery. The browser's liveness constants are in
+`crates/client/src/heartbeat.rs`.
 
 A pending user message is muted with **Sending…**, or **Waiting for connection…**
 when the workspace is reconnecting or syncing. It becomes normal only after Ack.
@@ -1203,8 +1201,8 @@ device is not on needs a new invitation.
 An invitation names no address ([The invitation link](pair-link.md)): a first
 pairing reaches the machine through its relay, its Traverse lookup or the
 DNS-SD browse above. Where none of them works — a LAN that blocks multicast
-and has no internet, say — the first attempt opens no path within 20 seconds
-and the pairing page asks for the machine's IP address instead of reporting
+and has no internet, say — the first attempt ends without a path and the
+pairing page asks for the machine's IP address instead of reporting
 the transport's cause. The secret has not been sent, so the invitation is
 still valid. Read the address off the machine (`Addresses:` in the
 `tcode-headless serve` output, or the machine's network settings) and type
