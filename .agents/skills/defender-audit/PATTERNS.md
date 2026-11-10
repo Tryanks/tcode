@@ -119,6 +119,27 @@ entries in other areas.
   against the real Claude Code (`--interrupt-after`), which still reported
   the turn interrupted.
 
+## Families beyond the defence
+
+Named by the maintainer, not yet inventoried:
+
+> Test functions that sleep for seconds or even tens of seconds, single test
+> cases that run for minutes in GitHub Actions, races that deadlock and never
+> stop: too many to list. And what is bad is not limited to the kinds named
+> so far. — the maintainer
+
+What is known without an inventory:
+
+- 156 `thread::sleep` / `Timer::after` sites across `crates`, among them
+  5, 10, 20, 30 and 60 second waits in `crates/runtime/src/app/tests.rs`,
+  `crates/ui/src/store`, `crates/agent/src/cursor/tests.rs` and
+  `crates/agent/src/grok.rs`.
+- `.config/nextest.toml` says of itself that the slowest passing tests on CI
+  take under three minutes, and kills a test at five so that one hung test
+  does not hold the job: a kill timer standing in for tests that end.
+- Tests whose final assertion depends on when a random kill lands
+  (`tests-runtime-b` #149, #152) are candidates for Principle 10.
+
 ## Kept, and why
 
 - **Stream end without `SessionClosed`** (`fc80e498b`; #75, #104, #161):
