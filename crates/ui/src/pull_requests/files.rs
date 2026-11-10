@@ -880,7 +880,7 @@ impl PullRequestView {
                 .into_iter()
                 .filter(|path| self.viewed_state(path) == Viewed::Marked)
                 .count();
-            let total = files.changed_files.max(files.files.len() as u64);
+            let total = files.changed_files;
             let unknown = files
                 .files
                 .iter()

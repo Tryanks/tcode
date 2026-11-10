@@ -1301,7 +1301,7 @@ impl PullRequestView {
         } else {
             cx.theme().primary
         };
-        let count = thread.total_comments.max(thread.comments.len() as u64);
+        let count = thread.total_comments;
         let id = thread.id.clone();
         let thread_for_files = thread.clone();
         let current = thread.anchor.is_some() && !thread.outdated;
