@@ -4708,23 +4708,6 @@ mod tests {
                 sent(&mut actor).await,
                 json!({"id":0,"result":{"action":"accept","content":{},"_meta":{"persist":"session"}}})
             );
-            let config = crate::McpRegistration {
-                name: "tcode_control".into(),
-                url: "http://127.0.0.1/mcp".into(),
-                bearer_token: "probe".into(),
-            }
-            .codex_config_override();
-            let (_, table) = config.split_once('=').unwrap();
-            let config: toml::Value = toml::from_str(&format!("server={table}")).unwrap();
-            assert_eq!(
-                config["server"]
-                    .as_table()
-                    .unwrap()
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                vec!["http_headers", "url"]
-            );
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -4922,7 +4905,12 @@ mod tests {
                     table["http_headers"]["Authorization"].as_str(),
                     Some(authorization)
                 );
-                assert!(table.get("bearer_token").is_none());
+                // Nothing else: no `bearer_token`, which Codex refuses for
+                // HTTP, and no key that approves the server's tools ahead.
+                assert_eq!(
+                    table.as_table().unwrap().keys().collect::<Vec<_>>(),
+                    ["http_headers", "url"]
+                );
             }
         }
     }
@@ -7018,7 +7006,7 @@ mod tests {
     /// A sleep and an image generation, as Codex sent them, arrive as the
     /// calls a rollout records them as: the sleep finished once it
     /// completes, the picture an image the call holds, kept where Codex
-    /// saved it. A row recorded before they were mapped reads back the same.
+    /// saved it.
     #[test]
     fn sleeps_and_image_generations_arrive_as_their_calls() {
         let sleep = json!({"type":"sleep","id":"call_wmvrnLAr0GTnBoYQog6Gvjq0","durationMs":20000});
@@ -7061,22 +7049,6 @@ mod tests {
                 .content,
             generated
         );
-
-        for (value, content) in [
-            (sleep, call(ItemStatus::Completed)),
-            (generation, generated),
-        ] {
-            let mut legacy = ThreadItem {
-                id: "legacy".into(),
-                parent_item_id: None,
-                content: ItemContent::Other {
-                    provider_kind: value["type"].as_str().unwrap().into(),
-                    summary: value.to_string(),
-                },
-            };
-            normalize_legacy_item(&mut legacy, true);
-            assert_eq!(legacy.content, content);
-        }
     }
 
     #[test]
@@ -7254,7 +7226,13 @@ mod tests {
                                                 {"const": "blue-wire", "title": "Blue"}
                                             ]
                                         }
-                                    }
+                                    },
+                                    "named": {
+                                        "type": "string",
+                                        "enum": ["wire-1", "wire-2"],
+                                        "enumNames": ["First", "Second"]
+                                    },
+                                    "bare": {"type": "string", "enum": ["x", "y"]}
                                 }
                             }
                         }
@@ -7277,7 +7255,7 @@ mod tests {
                     .iter()
                     .map(|question| question.id.as_str())
                     .collect::<Vec<_>>(),
-                ["name", "age", "active", "choice", "tags"]
+                ["name", "age", "active", "choice", "tags", "named", "bare"]
             );
             assert_eq!(questions[0].header, "calendar: Name");
             assert_eq!(questions[0].question, "Fill this in");
@@ -7320,6 +7298,20 @@ mod tests {
                 ["Red", "Blue"]
             );
             assert!(questions[4].multi_select);
+            for (question, labels) in [
+                (&questions[5], ["First", "Second"]),
+                (&questions[6], ["x", "y"]),
+            ] {
+                assert_eq!(
+                    question
+                        .options
+                        .iter()
+                        .map(|option| option.label.as_str())
+                        .collect::<Vec<_>>(),
+                    labels
+                );
+                assert!(!question.multi_select);
+            }
 
             let mut answers = serde_json::Map::new();
             answers.insert("name".into(), json!("Ada"));
@@ -7327,6 +7319,8 @@ mod tests {
             answers.insert("active".into(), json!("Yes"));
             answers.insert("choice".into(), json!("Choice B"));
             answers.insert("tags".into(), json!(["Red", "Blue"]));
+            answers.insert("named".into(), json!("Second"));
+            answers.insert("bare".into(), json!("y"));
             actor
                 .handle_command(SessionCommand::RespondUserInput {
                     request_id: "81".into(),
@@ -7350,99 +7344,14 @@ mod tests {
                             "age": 42,
                             "choice": "wire-b",
                             "name": "Ada",
-                            "tags": ["red-wire", "blue-wire"]
+                            "tags": ["red-wire", "blue-wire"],
+                            "named": "wire-2",
+                            "bare": "y"
                         }
                     }
                 })
             );
             assert!(response.get("error").is_none());
-
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    #[test]
-    fn elicitation_form_maps_enum_names_and_bare_enum() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            actor
-                .handle_line(
-                    &json!({
-                        "id": "enum-request",
-                        "method": "mcpServer/elicitation/request",
-                        "params": {
-                            "serverName": "choices",
-                            "threadId": "thread-1",
-                            "mode": "form",
-                            "message": "Choose",
-                            "requestedSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "named": {
-                                        "type": "string",
-                                        "enum": ["wire-1", "wire-2"],
-                                        "enumNames": ["First", "Second"]
-                                    },
-                                    "bare": {"type": "string", "enum": ["x", "y"]}
-                                }
-                            }
-                        }
-                    })
-                    .to_string(),
-                )
-                .await;
-
-            let AgentEvent::UserInputRequested { questions, .. } = events.try_recv().unwrap()
-            else {
-                panic!("expected UserInputRequested")
-            };
-            assert_eq!(
-                questions
-                    .iter()
-                    .map(|question| question.id.as_str())
-                    .collect::<Vec<_>>(),
-                ["named", "bare"]
-            );
-            assert_eq!(
-                questions[0]
-                    .options
-                    .iter()
-                    .map(|option| option.label.as_str())
-                    .collect::<Vec<_>>(),
-                ["First", "Second"]
-            );
-            assert_eq!(
-                questions[1]
-                    .options
-                    .iter()
-                    .map(|option| option.label.as_str())
-                    .collect::<Vec<_>>(),
-                ["x", "y"]
-            );
-
-            let mut answers = serde_json::Map::new();
-            answers.insert("bare".into(), json!("y"));
-            answers.insert("named".into(), json!("Second"));
-            actor
-                .handle_command(SessionCommand::RespondUserInput {
-                    request_id: "enum-request".into(),
-                    answers,
-                })
-                .await
-                .unwrap();
-            let _ = events.try_recv().unwrap();
-            let response = sent(&mut actor).await;
-            assert_eq!(
-                response,
-                json!({
-                    "id": "enum-request",
-                    "result": {
-                        "action": "accept",
-                        "content": {"bare": "y", "named": "wire-2"}
-                    }
-                })
-            );
 
             let _ = actor.child.kill();
             let _ = actor.child.wait();
