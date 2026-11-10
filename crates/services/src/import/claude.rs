@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::{ConvertedEntry, ConvertedThread, file_modified_ms, timestamp_ms};
 
-pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<ConvertedThread>, String> {
+pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread, String> {
     let file =
         File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
     let fallback_ts = file_modified_ms(path);
@@ -165,13 +165,13 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
         }
     }
     let created_ms = first_ts.unwrap_or(fallback_ts);
-    Ok(Some(ConvertedThread {
+    Ok(ConvertedThread {
         external_id: external_id.to_string(),
         created_ms,
         updated_ms: last_ts.unwrap_or(created_ms),
         first_user,
         entries,
-    }))
+    })
 }
 
 fn should_skip(value: &Value) -> bool {

@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::{ConvertedEntry, ConvertedThread, file_modified_ms, timestamp_ms};
 
-pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<ConvertedThread>, String> {
+pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread, String> {
     let file =
         File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
     let fallback_ts = file_modified_ms(path);
@@ -28,9 +28,6 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
             "{} does not start with session_meta",
             path.display()
         ));
-    }
-    if meta.pointer("/payload/originator").and_then(Value::as_str) == Some("tcode") {
-        return Ok(None);
     }
 
     let first_meta_ts = meta
@@ -310,13 +307,13 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
             *status = ItemStatus::Interrupted;
         }
     }
-    Ok(Some(ConvertedThread {
+    Ok(ConvertedThread {
         external_id: external_id.to_string(),
         created_ms,
         updated_ms,
         first_user,
         entries,
-    }))
+    })
 }
 
 fn push_item(

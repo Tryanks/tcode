@@ -124,8 +124,7 @@ pub fn import_thread(
         }
     };
     let converted = match converted {
-        Ok(Some(converted)) => converted,
-        Ok(None) => return ImportOutcome::SkippedEmpty,
+        Ok(converted) => converted,
         Err(err) => return ImportOutcome::Failed(err),
     };
     if converted.item_count() == 0 {
