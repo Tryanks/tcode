@@ -622,11 +622,8 @@ fn provider_backend(provider: ProviderKind, backend: &str) -> bool {
         (provider, repository),
         (ProviderKind::ClaudeCode, "anthropics/claude-code")
             | (ProviderKind::Codex, "openai/codex")
-            | (ProviderKind::Pi, "earendil-works/pi" | "badlogic/pi-mono")
-            | (
-                ProviderKind::OpenCode,
-                "anomalyco/opencode" | "sst/opencode"
-            )
+            | (ProviderKind::Pi, "earendil-works/pi")
+            | (ProviderKind::OpenCode, "anomalyco/opencode")
     )
 }
 
@@ -789,9 +786,7 @@ struct Package {
 }
 
 fn recognized_package(provider: ProviderKind, name: &str) -> bool {
-    name == npm_package(provider)
-        || (provider == ProviderKind::OpenCode && name == "opencode-ai")
-        || (provider == ProviderKind::Pi && name == "@mariozechner/pi-coding-agent")
+    !name.is_empty() && name == npm_package(provider)
 }
 
 /// A node_modules component alone proves nothing. The owning manifest must
@@ -1040,17 +1035,10 @@ async fn javascript_windows(context: &Context<'_>) -> Option<Installation> {
         return None;
     }
     let wrapper = context.probe.read(&context.canonical)?;
-    let candidates: &[&str] = match context.provider {
-        ProviderKind::ClaudeCode => &["@anthropic-ai/claude-code"],
-        ProviderKind::Codex => &["@openai/codex"],
-        ProviderKind::Pi => &[
-            "@earendil-works/pi-coding-agent",
-            "@mariozechner/pi-coding-agent",
-        ],
-        ProviderKind::OpenCode => &["opencode-ai", "@opencode/cli"],
-        ProviderKind::Grok => &["@xai-official/grok"],
-        ProviderKind::Cursor | ProviderKind::Acp => return None,
-    };
+    let name = npm_package(context.provider);
+    if name.is_empty() {
+        return None;
+    }
     for (manager, source, args, bin_args) in [
         (
             "pnpm",
@@ -1089,52 +1077,50 @@ async fn javascript_windows(context: &Context<'_>) -> Option<Installation> {
         if !context.same(context.canonical.parent()?, &bin) {
             continue;
         }
-        for name in candidates {
-            let package_root = root.join(name);
-            let Some(json) = context.probe.read(&package_root.join("package.json")) else {
-                continue;
-            };
-            let Ok(manifest) = serde_json::from_str::<Value>(&json) else {
-                continue;
-            };
-            if manifest.get("name").and_then(Value::as_str) != Some(name) {
-                continue;
-            }
-            let Some(declared) = manifest.get("bin").and_then(|bin| {
-                bin.as_str().or_else(|| {
-                    bin.get(binary_name(context.provider))
-                        .and_then(Value::as_str)
-                })
-            }) else {
-                continue;
-            };
-            let target = package_root.join(declared);
-            if context.probe.canonical(&target).is_none() {
-                continue;
-            }
-            let Some(relative) = windows_relative(&bin, &target) else {
-                continue;
-            };
-            // A wrapper that merely mentions the bin could run anything.
-            if !agent::CmdShim::parse(&wrapper).is_some_and(|shim| shim.target == relative) {
-                continue;
-            }
-            let package = Package {
-                name: (*name).to_string(),
-                root: package_root,
-            };
-            if let Some(installation) = javascript_plan(
-                context,
-                source,
-                query.program.clone(),
-                &root,
-                &package,
-                true,
-            )
-            .await
-            {
-                return Some(installation);
-            }
+        let package_root = root.join(name);
+        let Some(json) = context.probe.read(&package_root.join("package.json")) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<Value>(&json) else {
+            continue;
+        };
+        if manifest.get("name").and_then(Value::as_str) != Some(name) {
+            continue;
+        }
+        let Some(declared) = manifest.get("bin").and_then(|bin| {
+            bin.as_str().or_else(|| {
+                bin.get(binary_name(context.provider))
+                    .and_then(Value::as_str)
+            })
+        }) else {
+            continue;
+        };
+        let target = package_root.join(declared);
+        if context.probe.canonical(&target).is_none() {
+            continue;
+        }
+        let Some(relative) = windows_relative(&bin, &target) else {
+            continue;
+        };
+        // A wrapper that merely mentions the bin could run anything.
+        if !agent::CmdShim::parse(&wrapper).is_some_and(|shim| shim.target == relative) {
+            continue;
+        }
+        let package = Package {
+            name: name.to_string(),
+            root: package_root,
+        };
+        if let Some(installation) = javascript_plan(
+            context,
+            source,
+            query.program.clone(),
+            &root,
+            &package,
+            true,
+        )
+        .await
+        {
+            return Some(installation);
         }
     }
     None
