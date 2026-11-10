@@ -706,8 +706,11 @@ async fn run_actor<D: Dialect>(
                 let client = client.clone();
                 async move |args: acp::RequestPermissionRequest, responder, connection| {
                     let client = client.clone();
+                    let cancellation = responder.cancellation();
                     connection.spawn(async move {
-                        responder.respond_with_result(client.request_permission(args).await)
+                        let withdrawn = async move { cancellation.cancelled().await };
+                        responder
+                            .respond_with_result(client.request_permission(args, withdrawn).await)
                     })?;
                     Ok(())
                 }
@@ -1283,11 +1286,7 @@ async fn cancel_pending(state: &Arc<Mutex<State>>, events: &Sender<AgentEvent>) 
     let (approvals, inputs): (Vec<_>, Vec<_>) = {
         let mut state = state.lock_recover();
         (
-            state
-                .approvals
-                .drain()
-                .map(|(_, responder)| responder)
-                .collect(),
+            state.approvals.drain().collect(),
             state
                 .inputs
                 .drain()
@@ -1295,8 +1294,14 @@ async fn cancel_pending(state: &Arc<Mutex<State>>, events: &Sender<AgentEvent>) 
                 .collect(),
         )
     };
-    for responder in approvals {
+    for (request_id, responder) in approvals {
         let _ = responder.send(ApprovalDecision::Cancel).await;
+        let _ = events
+            .send(AgentEvent::ApprovalResolved {
+                request_id,
+                decision: ApprovalDecision::Cancel,
+            })
+            .await;
     }
     for request_id in inputs {
         let _ = events
@@ -2566,9 +2571,12 @@ impl Client {
         }
     }
 
+    /// `withdrawn` completes when the agent sends `$/cancel_request` for this
+    /// request.
     async fn request_permission(
         &self,
         args: acp::RequestPermissionRequest,
+        withdrawn: impl Future<Output = ()>,
     ) -> Result<acp::RequestPermissionResponse, acp::Error> {
         let (request_id, turn) = {
             let mut state = self.state.lock_recover();
@@ -2602,8 +2610,32 @@ impl Client {
             .send(AgentEvent::ApprovalRequested(request))
             .await;
 
-        let decision = decided.recv().await.unwrap_or(ApprovalDecision::Cancel);
-        self.state.lock_recover().approvals.remove(&request_id);
+        let decision = future::or(
+            async { Some(decided.recv().await.unwrap_or(ApprovalDecision::Cancel)) },
+            async {
+                withdrawn.await;
+                None
+            },
+        )
+        .await;
+        let open = self
+            .state
+            .lock_recover()
+            .approvals
+            .remove(&request_id)
+            .is_some();
+        let Some(decision) = decision else {
+            if open {
+                let _ = self
+                    .events
+                    .send(AgentEvent::ApprovalResolved {
+                        request_id,
+                        decision: ApprovalDecision::Cancel,
+                    })
+                    .await;
+            }
+            return Err(acp::Error::request_cancelled());
+        };
         let outcome = match approval_outcome(&decision, &options) {
             Some(outcome) => outcome,
             None => {
@@ -3523,6 +3555,87 @@ mod tests {
             approval_outcome(&ApprovalDecision::Cancel, &approval.options),
             Some(acp::RequestPermissionOutcome::Cancelled)
         ));
+    }
+
+    /// A permission request ends without the user in the two ways ACP
+    /// (schema 1.5.0) has: Tcode answers `cancelled` on an interrupt, as
+    /// `session/cancel` requires, and the agent withdraws it with
+    /// `$/cancel_request`. Either way it is reported resolved.
+    #[test]
+    fn a_permission_request_ended_without_the_user_is_reported_resolved() {
+        smol::block_on(async {
+            let (events, received) = smol::channel::unbounded();
+            let client = Client {
+                events,
+                state: Arc::new(Mutex::new(State::new(PathBuf::from("/workspace")))),
+            };
+            let request = || {
+                acp::RequestPermissionRequest::new(
+                    "session-1",
+                    acp::ToolCallUpdate::new(
+                        "call-1",
+                        acp::ToolCallUpdateFields::new().title("Run cargo test"),
+                    ),
+                    vec![
+                        acp::PermissionOption::new(
+                            "allow-once",
+                            "Allow",
+                            acp::PermissionOptionKind::AllowOnce,
+                        ),
+                        acp::PermissionOption::new(
+                            "reject-once",
+                            "Reject",
+                            acp::PermissionOptionKind::RejectOnce,
+                        ),
+                    ],
+                )
+            };
+            let asked = async || {
+                let AgentEvent::ApprovalRequested(request) = received.recv().await.unwrap() else {
+                    panic!("expected ApprovalRequested")
+                };
+                request.id
+            };
+
+            let (answer, id) = future::zip(
+                client.request_permission(request(), future::pending()),
+                async {
+                    let id = asked().await;
+                    cancel_pending(&client.state, &client.events).await;
+                    id
+                },
+            )
+            .await;
+            assert!(matches!(
+                answer.unwrap().outcome,
+                acp::RequestPermissionOutcome::Cancelled
+            ));
+            assert!(matches!(
+                received.try_recv().unwrap(),
+                AgentEvent::ApprovalResolved { request_id, decision: ApprovalDecision::Cancel }
+                    if request_id == id
+            ));
+
+            let (withdraw, withdrawal) = smol::channel::bounded::<()>(1);
+            let (answer, id) = future::zip(
+                client.request_permission(request(), async move {
+                    let _ = withdrawal.recv().await;
+                }),
+                async {
+                    let id = asked().await;
+                    withdraw.send(()).await.unwrap();
+                    id
+                },
+            )
+            .await;
+            assert!(answer.is_err());
+            assert!(matches!(
+                received.try_recv().unwrap(),
+                AgentEvent::ApprovalResolved { request_id, decision: ApprovalDecision::Cancel }
+                    if request_id == id
+            ));
+            assert!(client.state.lock_recover().approvals.is_empty());
+        });
     }
 
     #[test]
