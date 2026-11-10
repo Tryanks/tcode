@@ -314,7 +314,7 @@ jobs:
     timeout-minutes: 30
     env:
       RUSTFLAGS: -D warnings
-      CARGO_NDK_PLATFORM: 26
+      CARGO_NDK_PLATFORM: 30
     steps:
       - uses: actions/checkout@v7
 
