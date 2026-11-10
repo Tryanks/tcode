@@ -1920,7 +1920,8 @@ pub enum UserInputDelivery {
     Blocking,
     /// The agent keeps working on the turn and reads the answer when it is
     /// delivered (Codex `request_user_input_async`). The request stays open
-    /// until answered or the turn ends; the composer stays usable meanwhile.
+    /// until the provider reports it resolved; the composer stays usable
+    /// meanwhile.
     Async,
 }
 
@@ -2551,22 +2552,28 @@ pub enum AgentEvent {
         kind: DeltaKind,
         text: String,
     },
+    /// A turn ending does not settle it; [`AgentEvent::ApprovalResolved`] does.
     ApprovalRequested(ApprovalRequest),
+    /// A pending approval has been settled: the user's decision, or
+    /// [`ApprovalDecision::Cancel`] when it ended without one (the harness
+    /// withdrew it, or an interrupt cancelled it).
     ApprovalResolved {
         request_id: String,
         decision: ApprovalDecision,
     },
     /// The agent is asking the user one or more structured questions.
     /// `delivery` says whether it waits for the matching
-    /// [`SessionCommand::RespondUserInput`] or keeps working meanwhile.
+    /// [`SessionCommand::RespondUserInput`] or keeps working meanwhile. A turn
+    /// ending does not settle it; [`AgentEvent::UserInputResolved`] does.
     UserInputRequested {
         request_id: String,
         questions: Vec<UserInputQuestion>,
         #[serde(default, skip_serializing_if = "UserInputDelivery::is_blocking")]
         delivery: UserInputDelivery,
     },
-    /// A pending user-input request has been settled (answered, or cancelled on
-    /// teardown — in which case `answers` is empty).
+    /// A pending user-input request has been settled: answered, or ended
+    /// without an answer (the harness withdrew it, an interrupt or teardown
+    /// cancelled it), in which case `answers` is empty.
     UserInputResolved {
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,

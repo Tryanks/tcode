@@ -10917,7 +10917,7 @@ fn status_carries_the_running_turn_while_in_flight_and_open_requests_while_live(
     );
 
     // A background subagent keeps running, and asking, after the turn that
-    // spawned it ends; the turn's own requests end with it.
+    // spawned it ends.
     let approval = |id: &str, parent_item_id: Option<&str>| agent::ApprovalRequest {
         id: id.into(),
         turn_id: None,
@@ -10931,12 +10931,11 @@ fn status_carries_the_running_turn_while_in_flight_and_open_requests_while_live(
         blocked_path: None,
         options: Vec::new(),
     };
-    for request in [
-        approval("own", None),
-        approval("subagent-during-turn", Some("toolu_agent")),
-    ] {
-        state.on_event(&id, AgentEvent::ApprovalRequested(request), &mut cx);
-    }
+    state.on_event(
+        &id,
+        AgentEvent::ApprovalRequested(approval("subagent-during-turn", Some("toolu_agent"))),
+        &mut cx,
+    );
     state.on_event(
         &id,
         AgentEvent::TurnCompleted {
@@ -10962,7 +10961,6 @@ fn status_carries_the_running_turn_while_in_flight_and_open_requests_while_live(
     };
     let status = state.session_status_snapshot(&id).unwrap();
     assert_eq!(status.running_turn, None);
-    assert_eq!(status.pending_user_input, None);
     assert_eq!(
         pending(&state),
         ["subagent-during-turn", "subagent-between-turns"]
