@@ -2325,13 +2325,11 @@ impl AppShell {
         if std::mem::replace(&mut link.stamped, true) {
             return;
         }
-        if let Some(client) = cx.try_global::<crate::remote::ClientAttachment>() {
-            // The timestamp mutation must share the transport's persistence
-            // transaction so it cannot restore a pre-migration address.
-            client
-                .host()
-                .stamp_connected(&host.host_id, crate::time::now_secs(cx));
-        }
+        // The timestamp mutation must share the transport's persistence
+        // transaction so it cannot restore a pre-migration address.
+        cx.global::<crate::remote::ClientAttachment>()
+            .host()
+            .stamp_connected(&host.host_id, crate::time::now_secs(cx));
     }
 
     /// The first full-scope host whose settings arrive gives each device
@@ -6805,6 +6803,13 @@ pub(crate) mod tests {
             outbox: None,
         });
         let setup_client = client.clone();
+        cx.update(|cx| {
+            cx.set_global(crate::remote::ClientAttachment::new(
+                setup_client.clone(),
+                false,
+                request_host,
+            ))
+        });
         let window = cx.open_window(size(px(width), px(852.)), move |window, cx| {
             let state = cx.new(|_| WindowState::default());
             AppShell::new(
