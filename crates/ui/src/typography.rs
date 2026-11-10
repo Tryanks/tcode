@@ -9,7 +9,7 @@
 //! nowhere else.
 
 use crate::theme::ActiveTheme as _;
-use gpui::{App, Styled};
+use gpui::{App, Hsla, Pixels, SharedString, Styled, Window};
 use gpui_base::TextStyleToken;
 
 pub trait TextRole: Styled + Sized {
@@ -79,3 +79,42 @@ pub trait TextRole: Styled + Sized {
 }
 
 impl<T: Styled> TextRole for T {}
+
+/// How far below the centre of its line box a line of `text`, in `family` at
+/// `size`, paints its baseline: (ascent - descent) / 2 of the metrics shaping
+/// finds, which take the largest over the fonts the line is drawn in. So it
+/// depends on the platform's fonts and the locale's CJK fallback (on Linux,
+/// Noto Sans CJK's ascent is taller than the monospace's), and is measured
+/// rather than assumed.
+///
+/// A row of text in different sizes or fonts cannot be lined up with
+/// `items_baseline`: gpui-fast's measured text leaves hand taffy a size and no
+/// baseline, and taffy then takes a box's bottom edge for its baseline. The
+/// row centres its lines instead and moves one onto another's baseline by the
+/// difference of this between them, until gpui-fast reports text baselines.
+pub(crate) fn baseline_below_centre(
+    text: SharedString,
+    family: SharedString,
+    size: Pixels,
+    window: &Window,
+) -> Pixels {
+    let run = gpui::TextRun {
+        len: text.len(),
+        font: gpui::Font {
+            family,
+            fallbacks: crate::i18n::cjk_font_fallbacks(),
+            ..Default::default()
+        },
+        color: Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window.text_system().shape_line(text, size, &[run], None);
+    // Glyphs have no vertical subpixel variants, so a baseline is painted on
+    // a whole device pixel, as layout puts a box's offset on one: rounded
+    // likewise, the difference of two of these moves a line exactly onto
+    // another's baseline instead of a pixel short of it.
+    let scale = window.scale_factor();
+    ((line.ascent - line.descent) / 2. * scale).round() / scale
+}
