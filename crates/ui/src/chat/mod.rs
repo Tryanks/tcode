@@ -212,6 +212,9 @@ pub struct ChatView {
     /// The host the header names beside the title: the window's panes show
     /// threads of several hosts.
     named_host: Option<gpui::SharedString>,
+    /// Which of the new-thread page's slogans it shows, picked as the page
+    /// comes in and kept while it stays, whatever its project; `None` off it.
+    slogan_seed: Option<u64>,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
@@ -483,6 +486,7 @@ impl ChatView {
             composer_drawn: false,
             title_recedes: false,
             named_host: None,
+            slogan_seed: None,
             scene_at: cx.background_executor().now(),
             window_state,
             composer_layout: (compact, px(0.)),
@@ -739,6 +743,11 @@ impl Render for ChatView {
             (None, false) => SURFACE_EMPTY,
             (Some(_), false) => SURFACE_THREAD,
         };
+        // Off any thread the new-thread page is left; coming back to it
+        // picks its slogan anew.
+        if surface == SURFACE_EMPTY {
+            self.slogan_seed = None;
+        }
         // What the view was bound to shows once it can be drawn at rest;
         // until then nothing does, and the skeleton only once that has
         // taken longer than a glance.
@@ -1152,6 +1161,16 @@ impl ChatView {
         }
 
         let delivery_inset = gpui::rems(1.).to_pixels(window.rem_size());
+        // A fresh draft on the desktop is the new-thread page: where it
+        // starts and the composer in the middle of the body.
+        let new_page = is_draft
+            && !compact
+            && !self.is_side()
+            && delivery_rows.is_empty()
+            && self.timeline.read(cx).rows.is_empty();
+        if !new_page {
+            self.slogan_seed = None;
+        }
         // The agent's card is laid out after the rail, over it, as the two
         // give way to each other in the slot.
         let side_slot = rail::Slots {
@@ -1187,31 +1206,8 @@ impl ChatView {
                     timeline.on_open_file_diff(action, window, cx)
                 })
             }))
-            .child(
-                div()
-                    .id("timeline")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .child(self.timeline.clone())
-                    .children(phone_strip),
-            )
-            .child(
-                v_flex()
-                    .w_full()
-                    .max_h(px(200.))
-                    .id("pending-deliveries")
-                    .items_center()
-                    .overflow_y_scroll()
-                    .px(delivery_inset)
-                    .pr(delivery_inset + shift)
-                    .gap_2()
-                    .children(delivery_rows),
-            )
-            .child(
-                div()
+            .map(|main| {
+                let composer = div()
                     .id("chat-composer")
                     .debug_selector(|| "chat-composer".into())
                     .w_full()
@@ -1222,8 +1218,49 @@ impl ChatView {
                     .capture_any_mouse_down(
                         cx.listener(|this, _, _, cx| this.dismiss_highlight(cx)),
                     )
-                    .child(composer),
-            )
+                    .child(composer);
+                if new_page {
+                    // The timeline stays drawn, out of sight, so it still
+                    // tells the view when the thread is ready.
+                    return main
+                        .child(
+                            div()
+                                .absolute()
+                                .size_0()
+                                .overflow_hidden()
+                                .child(self.timeline.clone()),
+                        )
+                        .child(self.render_new_thread_page(
+                            composer.into_any_element(),
+                            shift,
+                            cx,
+                        ));
+                }
+                main.child(
+                    div()
+                        .id("timeline")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .child(self.timeline.clone())
+                        .children(phone_strip),
+                )
+                .child(
+                    v_flex()
+                        .w_full()
+                        .max_h(px(200.))
+                        .id("pending-deliveries")
+                        .items_center()
+                        .overflow_y_scroll()
+                        .px(delivery_inset)
+                        .pr(delivery_inset + shift)
+                        .gap_2()
+                        .children(delivery_rows),
+                )
+                .child(composer)
+            })
             .child(self.rail.clone())
             .child(side_slot);
         let main = self.cover_with_side(main.into_any_element(), side);

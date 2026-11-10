@@ -192,6 +192,14 @@ impl Destination {
 }
 
 /// Window-global UI state owned by the GPUI layer.
+/// Where the project picker was opened from: a host's project, or its quick
+/// threads when `project_id` is `None`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PickerFrom {
+    pub host: HostKey,
+    pub project_id: Option<String>,
+}
+
 pub struct WindowState {
     /// The layout the window calls for. Derived from the build and the
     /// viewport by [`crate::window_seam::window_is_compact`] and never
@@ -210,6 +218,9 @@ pub struct WindowState {
     /// the search pill wants the keyboard; the mobile "+" button lists
     /// projects to tap and must not raise it.
     pub palette_focuses_query: bool,
+    /// The palette lists only where a new thread can start, with this place
+    /// marked as the current one; `None` lists everything.
+    pub palette_picker: Option<PickerFrom>,
     pub quit_prompt_epoch: u64,
     pub quit_prompt_open: bool,
     pub pending_settings_section: Option<String>,
@@ -226,6 +237,7 @@ impl Default for WindowState {
             palette_open: false,
             palette_leaving: false,
             palette_focuses_query: true,
+            palette_picker: None,
             quit_prompt_epoch: 0,
             quit_prompt_open: false,
             pending_settings_section: None,
@@ -448,7 +460,15 @@ impl WindowState {
         self.show_palette(false, cx);
     }
 
+    /// Open the palette as the picker of where a new thread starts: the
+    /// projects of every host and their quick threads, `from` marked.
+    pub fn open_project_picker(&mut self, from: PickerFrom, cx: &mut Context<Self>) {
+        self.show_palette(true, cx);
+        self.palette_picker = Some(from);
+    }
+
     fn show_palette(&mut self, focuses_query: bool, cx: &mut Context<Self>) {
+        self.palette_picker = None;
         self.palette_open = true;
         self.palette_leaving = false;
         self.palette_focuses_query = focuses_query;

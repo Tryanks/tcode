@@ -37,7 +37,7 @@ use crate::provider_card::profile_glyph;
 use crate::settings::ThemeMode;
 use crate::store::{HostKey, StoreChange, ThreadKey, TopicKind, WorkspaceStore};
 use crate::time::{humanize_ago, now_secs};
-use crate::window_state::WindowState;
+use crate::window_state::{PickerFrom, WindowState};
 
 /// How long a surface drawn here takes to appear, and to leave.
 const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
@@ -135,6 +135,10 @@ struct Item {
     /// last-activity time (right side).
     provider: Option<(ProviderKind, Option<String>)>,
     updated_at: Option<u64>,
+    /// The project picker's rows: the host the place is on, named after it.
+    host_name: Option<String>,
+    /// The project picker's row for where it was opened from.
+    current: bool,
     action: Action,
 }
 
@@ -188,6 +192,8 @@ pub struct CommandPalette {
     /// the host opens it on mount, and a palette reopened while it leaves is
     /// still mounted, so it opens itself.
     opened: bool,
+    /// The project picker's next listing selects where it was opened from.
+    select_current: bool,
     _search_tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
     /// The card's move between the centred card and the bottom sheet when
@@ -236,6 +242,7 @@ impl CommandPalette {
             hits_arrived: Vec::new(),
             list_scroll: Default::default(),
             opened: false,
+            select_current: false,
             _search_tasks: Vec::new(),
             _subscriptions: subscriptions,
         }
@@ -307,6 +314,9 @@ impl CommandPalette {
         self.content_hits.clear();
         self.invalidate_results(true, cx);
         self.opened = true;
+        // The project picker opens on where it was opened from, once its
+        // rows are listed: the shell opens the palette as it renders.
+        self.select_current = self.window_state.read(cx).palette_picker.is_some();
     }
 
     #[cfg(test)]
@@ -390,7 +400,10 @@ impl CommandPalette {
         let mut items = Vec::new();
         for group in self.groups(window, cx) {
             let start = rows.len();
-            rows.push(Row::Caption(group.label));
+            // The project picker's one list goes uncaptioned.
+            if !group.label.is_empty() {
+                rows.push(Row::Caption(group.label));
+            }
             for item in group.items {
                 rows.push(Row::Item(items.len()));
                 items.push(item);
@@ -426,6 +439,9 @@ impl CommandPalette {
     /// restricts results to Actions.
     fn groups(&self, window: &Window, cx: &Context<Self>) -> Vec<Group> {
         let raw = self.query.read(cx).value().to_string();
+        if let Some(from) = self.window_state.read(cx).palette_picker.clone() {
+            return vec![self.picker_group(raw.trim(), &from, cx)];
+        }
         let actions_only = raw.trim_start().starts_with('>');
         // Strip the `>` prefix so the remainder still fuzzy-matches action labels.
         let query = if actions_only {
@@ -456,6 +472,8 @@ impl CommandPalette {
                         subtitle: None,
                         provider: None,
                         updated_at: None,
+                        host_name: None,
+                        current: false,
                         action,
                     },
                 ));
@@ -717,6 +735,8 @@ impl CommandPalette {
                                 subtitle: Some(crate::project_icon::label(&group.project)),
                                 provider: Some((meta.provider, meta.profile_id.clone())),
                                 updated_at: Some(meta.updated_at),
+                                host_name: None,
+                                current: false,
                                 action: Action::OpenThread {
                                     thread: store.thread_key(&meta.id),
                                     turn: None,
@@ -760,6 +780,8 @@ impl CommandPalette {
                         subtitle: Some(hit.snippet.clone()),
                         provider: meta.map(|meta| (meta.provider, meta.profile_id.clone())),
                         updated_at: meta.map(|meta| meta.updated_at),
+                        host_name: None,
+                        current: false,
                         action: Action::OpenThread {
                             thread: store.thread_key(&hit.session_id),
                             turn: Some(hit.turn),
@@ -778,6 +800,88 @@ impl CommandPalette {
             });
         }
         groups
+    }
+
+    /// The project picker's one list: every host's projects and its quick
+    /// threads alike, most recently active first, not grouped by host.
+    fn picker_group(&self, query: &str, from: &PickerFrom, cx: &Context<Self>) -> Group {
+        let several = crate::shell::several_hosts(cx);
+        let mut items: Vec<Item> = Vec::new();
+        for host in &self.hosts {
+            let store = host.store.read(cx);
+            if !store.scope().is_full() || (several && crate::sidebar::host_down(store)) {
+                continue;
+            }
+            let key = store.host_key();
+            let host_name = store.host_title().to_string();
+            let groups = store.grouped_sessions();
+            let mut quick_seen = false;
+            let mut push =
+                |label: String, project_id: Option<String>, last: Option<u64>, action| {
+                    // Over several hosts a host's name lists its places too.
+                    let matches = fuzzy_score(query, &label).is_some()
+                        || (several
+                            && !query.is_empty()
+                            && host_name.to_lowercase().starts_with(&query.to_lowercase()));
+                    if !matches {
+                        return;
+                    }
+                    items.push(Item {
+                        icon: IconName::Folder,
+                        label,
+                        subtitle: None,
+                        provider: None,
+                        updated_at: last,
+                        host_name: Some(host_name.clone()),
+                        current: from.host == key && from.project_id == project_id,
+                        action,
+                    });
+                };
+            for group in &groups {
+                let last = group.sessions.first().map(|meta| meta.updated_at);
+                if group.project.quick_chat {
+                    if !std::mem::replace(&mut quick_seen, true) {
+                        push(
+                            crate::project_icon::label(&group.project),
+                            None,
+                            last,
+                            Action::QuickChat(key.clone()),
+                        );
+                    }
+                } else {
+                    push(
+                        group.project.name.clone(),
+                        Some(group.project.id.clone()),
+                        last,
+                        Action::NewThread {
+                            host: key.clone(),
+                            cwd: group.project.root.clone(),
+                            project_id: group.project.id.clone(),
+                        },
+                    );
+                }
+            }
+            // A host with no quick thread yet still offers to start one.
+            if !quick_seen {
+                push(
+                    crate::tr!("sidebar.quick_chat").into_owned(),
+                    None,
+                    None,
+                    Action::QuickChat(key.clone()),
+                );
+            }
+        }
+        // Most recent first; what was never active after, by name.
+        items.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+        });
+        Group {
+            label: String::new(),
+            items,
+            hits_of: None,
+        }
     }
 
     fn activate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -946,6 +1050,9 @@ impl CommandPalette {
         let item = &items[index];
         let store = item.action.host().and_then(|host| self.store_of(host, cx));
         let is_sel = index == self.selected;
+        if let Some(host_name) = item.host_name.clone() {
+            return self.render_picker_row(index, item, host_name, store, compact, cx);
+        }
         let action = item.action.clone();
         let key = match &item.action {
             Action::Pane(action) => {
@@ -1062,14 +1169,130 @@ impl CommandPalette {
     }
 }
 
+impl CommandPalette {
+    /// A row of the project picker: the place's icon and name, the host it is
+    /// on, when it was last active, and a check on where the picker was
+    /// opened from.
+    fn render_picker_row(
+        &self,
+        index: usize,
+        item: &Item,
+        host_name: String,
+        store: Option<Entity<WorkspaceStore>>,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let is_sel = index == self.selected;
+        let action = item.action.clone();
+        // A quick thread's artwork is its glyph, whether or not the host has
+        // its project yet.
+        let icon = match (&item.action, &store) {
+            (Action::NewThread { project_id, .. }, Some(store)) => {
+                let store = store.read(cx);
+                store
+                    .project(project_id)
+                    .map(|project| crate::project_icon::artwork(store.image_host(), project, 16.))
+            }
+            _ => None,
+        }
+        .unwrap_or_else(|| match item.action {
+            Action::QuickChat(_) => Icon::empty()
+                .path("icons/message-square.svg")
+                .size(px(16.))
+                .flex_none()
+                .into_any_element(),
+            _ => Icon::new(IconName::Folder).into_any_element(),
+        });
+        let row = crate::material::selectable_row(
+            h_flex().id(("palette-row", index)),
+            is_sel,
+            compact,
+            cx,
+        );
+        div()
+            .pb_1()
+            .child(
+                row.debug_selector({
+                    let action = action.clone();
+                    let hosts = self.hosts.len();
+                    move || match &action {
+                        Action::NewThread {
+                            host, project_id, ..
+                        } => format!(
+                            "picker-project-{}",
+                            crate::sidebar::named(hosts, host, project_id)
+                        ),
+                        Action::QuickChat(_) => "picker-quick".into(),
+                        _ => format!("palette-row-{index}"),
+                    }
+                })
+                .role(Role::ListBoxOption)
+                .aria_label(format!("{} · {host_name}", item.label))
+                .aria_selected(is_sel)
+                .when(is_sel, |row| row.aria_active_descendant())
+                .flex_none()
+                .w_full()
+                .gap_2()
+                .cursor_pointer()
+                .child(icon)
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_2()
+                        .items_baseline()
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .max_w(gpui::relative(0.7))
+                                .overflow_hidden()
+                                .text_body(compact, cx)
+                                .when(item.current, |name| {
+                                    name.font_weight(gpui::FontWeight::MEDIUM)
+                                })
+                                .child(crate::widgets::fade_text(item.label.clone())),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink(1.)
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_secondary(compact, cx)
+                                .child(crate::widgets::fade_text(host_name)),
+                        ),
+                )
+                .when_some(item.updated_at, |row, at| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .text_secondary(compact, cx)
+                            .child(humanize_ago(now_secs().saturating_sub(at))),
+                    )
+                })
+                .child(div().flex_none().w(px(16.)).when(item.current, |mark| {
+                    mark.debug_selector(|| "picker-current".into()).child(
+                        Icon::new(IconName::Check)
+                            .size(px(14.))
+                            .text_color(cx.theme().primary),
+                    )
+                }))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.activate(action.clone(), window, cx);
+                })),
+            )
+            .into_any_element()
+    }
+}
+
 impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (compact, open, focus_query) = {
+        let (compact, open, focus_query, picker) = {
             let state = self.window_state.read(cx);
             (
                 state.compact,
                 state.palette_open,
                 state.palette_focuses_query,
+                state.palette_picker.is_some(),
             )
         };
         if !open {
@@ -1097,6 +1320,12 @@ impl Render for CommandPalette {
         }
         let exiting = !open;
         let results = self.results(window, cx);
+        if std::mem::take(&mut self.select_current)
+            && let Some(selected) = results.items.iter().position(|item| item.current)
+        {
+            self.selected = selected;
+            self.list_state.scroll_to_reveal_item(selected);
+        }
         // Rows are keyed by their index.
         for row in self.arrived.settle(window, cx) {
             let row = row as usize;
@@ -1144,7 +1373,11 @@ impl Render for CommandPalette {
                     .id("palette-list")
                     .debug_selector(|| "palette-list".into())
                     .role(Role::ListBox)
-                    .aria_label(crate::tr!("palette.results"))
+                    .aria_label(if picker {
+                        crate::tr!("palette.projects_results")
+                    } else {
+                        crate::tr!("palette.results")
+                    })
                     .flex_1()
                     .min_h_0()
                     .relative()
@@ -1177,12 +1410,14 @@ impl Render for CommandPalette {
                         )
                         .size_full(),
                     )
-                    // material::selectable_row_two_line's height, which it
-                    // does not expose, and the row's bottom gap.
+                    // The rows' height and their bottom gap.
                     .child(crate::scroll::list_height_hint(
                         &self.list_state,
-                        px(crate::material::selectable_row_two_line_height(compact))
-                            + cx.theme().tokens.spacing.xs,
+                        px(if picker {
+                            crate::material::selectable_row_height(compact)
+                        } else {
+                            crate::material::selectable_row_two_line_height(compact)
+                        }) + cx.theme().tokens.spacing.xs,
                     )),
             )
             .into_any_element()
@@ -1223,7 +1458,11 @@ impl Render for CommandPalette {
                 .child(
                     div().flex_1().child(
                         Input::new(&self.query)
-                            .placeholder(crate::tr!("palette.placeholder"))
+                            .placeholder(if picker {
+                                crate::tr!("palette.projects_placeholder")
+                            } else {
+                                crate::tr!("palette.placeholder")
+                            })
                             .appearance(false),
                     ),
                 ),
@@ -1237,7 +1476,12 @@ impl Render for CommandPalette {
                     .text_secondary(false, cx)
                     .child(crate::tr!("palette.navigate"))
                     .child(crate::tr!("palette.select"))
-                    .child(crate::tr!("palette.close")),
+                    .child(crate::tr!("palette.close"))
+                    .when(picker, |footer| {
+                        footer
+                            .child(div().flex_1())
+                            .child(crate::tr!("palette.recent_first"))
+                    }),
             )
         });
 
@@ -1538,6 +1782,140 @@ mod tests {
         driver.shutdown(cx, &workspace_store, &host);
         drop(workspace_store);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The project picker is one list over the host's projects and its
+    /// quick threads alike, most recently active first and the never active
+    /// last; it opens on where it was opened from, and Enter there starts a
+    /// draft in the place selected.
+    #[gpui::test]
+    fn the_project_picker_lists_places_by_activity_and_starts_the_chosen_one(
+        cx: &mut TestAppContext,
+    ) {
+        use tcode_protocol::{EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic};
+        cx.update(crate::theme::init);
+        let (to_host, requests) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let project = |id: &str, quick: bool| {
+            let mut project = tcode_core::project::Project::from_root(format!("/{id}").into());
+            project.id = id.into();
+            project.name = id.into();
+            project.quick_chat = quick;
+            project
+        };
+        let thread = |id: &str, project: &str, at: u64| {
+            let mut meta =
+                crate::store::tests::thread(std::path::Path::new("/"), id, project, None);
+            meta.updated_at = at;
+            meta
+        };
+        let index = |event| {
+            tcode_protocol::encode_line(&HostMessage::Event(EventEnvelope {
+                request_id: None,
+                topic: Topic::Index,
+                event,
+            }))
+            .unwrap()
+        };
+        incoming
+            .try_send(index(ServerEvent::IndexSnapshot(IndexSnapshot {
+                summary: Default::default(),
+                sessions: vec![
+                    thread("a", "alpha", 100),
+                    thread("g", "gamma", 200),
+                    thread("q", "scratch", 300),
+                ],
+                projects: vec![
+                    project("alpha", false),
+                    project("beta", false),
+                    project("gamma", false),
+                    project("scratch", true),
+                ],
+            })))
+            .unwrap();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|delay| executor.timer(delay))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        let palette_store = store.clone();
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            PaletteHarness::new(palette_store.clone(), window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        while requests.try_recv().is_ok() {}
+        let (palette, window_state) = cx.update(|_, cx| {
+            let harness = harness.read(cx);
+            (harness.palette.clone(), harness.window_state.clone())
+        });
+        window_state.update(cx, |state, cx| {
+            state.open_project_picker(
+                crate::window_state::PickerFrom {
+                    host: HostKey::Local,
+                    project_id: Some("alpha".into()),
+                },
+                cx,
+            )
+        });
+        draw(cx);
+
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                let results = palette.results(window, cx);
+                let listed: Vec<_> = results
+                    .items
+                    .iter()
+                    .map(|item| (item.label.as_str(), item.current))
+                    .collect();
+                assert_eq!(
+                    listed,
+                    [
+                        (crate::tr!("sidebar.quick_chat").as_ref(), false),
+                        ("gamma", false),
+                        ("alpha", true),
+                        ("beta", false),
+                    ]
+                );
+                assert!(
+                    results.rows.iter().all(|row| matches!(row, Row::Item(_))),
+                    "the picker's list is not grouped"
+                );
+                assert_eq!(palette.selected, 2, "it opens on where it was opened from");
+            });
+        });
+
+        dispatch_palette_key(&palette, cx, "up");
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| palette.activate_selected(window, cx))
+        });
+        cx.run_until_parked();
+        let started = std::iter::from_fn(|| requests.try_recv().ok())
+            .filter_map(|line| tcode_protocol::decode_client_line(&line).ok())
+            .find_map(|request| match request.payload {
+                tcode_protocol::ClientPayload::Command(tcode_protocol::Command::StartDraft {
+                    project_id,
+                    ..
+                }) => Some(project_id),
+                _ => None,
+            });
+        assert_eq!(started.as_deref(), Some("gamma"));
+        assert!(!window_state.read_with(cx, |state, _| state.palette_open));
     }
 
     #[gpui::test]
