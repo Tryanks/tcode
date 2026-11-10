@@ -43,7 +43,7 @@ three:
 | **cuts short** | ends or fails it for being slow | a timeout, a deadline, a watchdog |
 | **refuses** | will not do what the source allows | a path outside the cwd, a compact during a turn, a check repeated behind the boundary that already made it |
 | **invents** | adds what no source said | a second spelling of a wire field, a made-up turn id, a branch for a state the code cannot reach, a capability the harness does not have |
-| **stands in** | speaks for the source in a test | a shell script written to answer as `claude` or `codex` would, a fake server returning what the test expects, a wire line typed by hand and called a fixture, a mock that implements the behaviour asserted |
+| **stands in** | speaks for the source in a test | a shell script written to answer as `claude` or `codex` would, a fake server returning what the test expects, wire data in a shape no schema or source of the harness backs, a mock that implements the behaviour asserted |
 
 And by the source it distrusts, which is where to look:
 
@@ -61,13 +61,13 @@ And by the source it distrusts, which is where to look:
 - **the user's patience**: a failure kept from them, an output shortened for
   them;
 - **the real harness, in tests**: every `#!/bin/sh` written by a test, every
-  `Fake`, `Stub` or stand-in type, every fixture with no record of the run
-  that produced it.
+  `Fake`, `Stub` or stand-in type, every fixture that does not say where its
+  shape comes from.
 
 A stand-in proves what Tcode believes the harness does. The harness speaks
-for itself in a **recorded fixture** (its real output, with the provenance of
-the run) and in a **probe** against the real CLI (CONTRIBUTING's **Verifying
-real behaviour**). A file that only has to exist, or a scripted provider at
+for itself in its own schema, types, documentation and source, which give a
+fixture its shape, and in a **probe** against the real CLI (CONTRIBUTING's
+**Verifying real behaviour**). A file that only has to exist, or a scripted provider at
 Tcode's own `AgentEvent` boundary, imitates no harness and is not one.
 
 Not a defence: reporting a real failure as it happened; a branch the
@@ -84,10 +84,15 @@ test spawns anything that imitates the harness:
    by a pure function production itself calls; the test asserts its return
    value. No exec is injected to inspect them: an injection parameter is a
    production seam only the test uses.
-2. **What Tcode understands.** The harness's real output, as a recorded
-   fixture with the provenance of the run, goes into the parser or mapper,
-   and the test asserts the events. Output typed by hand is a stand-in in the
-   form of data.
+2. **What Tcode understands.** A fixture goes into the parser or mapper and
+   the test asserts the events. The fixture's **shape** is the harness's:
+   taken from its schema, types, documentation or source, and the fixture
+   says which (harness version, file). Its **content** is invented. Captured
+   output of a real run is never committed: it carries paths, account data
+   and conversation content, and this repository is public; recordings
+   already in it held the maintainer's home directory and the names of other
+   projects. A shape with nothing of the harness behind it is a stand-in in
+   the form of data.
 3. **The conversation.** Handshake order, request and response pairing, and
    cancellation are the actor's state machine: feed it lines, read the
    requests it emits. No process.
@@ -235,7 +240,7 @@ Inventory and rewrite are separate rounds with the maintainer between them.
   compatibility layer or setting. A failure that must now be reported goes out
   through a path that already exists.
 - **Read one shape.** A wire field is read as the harness sends it, confirmed
-  from a recorded fixture and the harness's own source or documentation.
+  from the harness's own schema, source or documentation.
   An event missing a field the harness always sends is not guessed at.
 - **Leave contracts alone inside a lane.** A change to `AgentEvent`,
   `SessionCommand`, `crates/protocol` or the locale files is reported as
@@ -243,8 +248,8 @@ Inventory and rewrite are separate rounds with the maintainer between them.
 - **Tests follow CONTRIBUTING.** A test asserting a removed defence is deleted
   with it; an assertion is never rewritten to the new output.
 - **Prove with the source.** A behaviour the rewrite makes true is shown by a
-  recorded fixture replayed through the adapter or by a probe against the
-  real harness, run and reported. Where neither can reach it, say so in the
+  fixture in the harness's own shape put through the adapter, or by a probe
+  against the real harness, run and reported. Where neither can reach it, say so in the
   pull request; write no stand-in to fill the gap.
 
 ## Dispatch
