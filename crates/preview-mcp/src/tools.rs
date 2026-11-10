@@ -133,9 +133,9 @@ pub struct WaitForParams {
     /// Substring that must appear in the current URL.
     #[serde(default)]
     pub url_includes: Option<String>,
-    /// Maximum wait in milliseconds (default 15000, clamped to 1000..=60000).
+    /// Maximum wait in milliseconds (default 15000, at most 60000).
     #[serde(default)]
-    pub timeout_ms: Option<i64>,
+    pub timeout_ms: Option<u64>,
 }
 
 fn resize_op(params: ResizeParams) -> Result<PreviewOp, String> {
@@ -322,7 +322,8 @@ impl PreviewTools {
         if params.selector.is_none() && params.text.is_none() && params.url_includes.is_none() {
             return tool_error("preview_wait_for requires selector, text, or urlIncludes");
         }
-        let timeout_ms = params.timeout_ms.unwrap_or(15_000).clamp(1_000, 60_000) as u64;
+        // The host gives a client 60 seconds to answer any preview request.
+        let timeout_ms = params.timeout_ms.unwrap_or(15_000).min(60_000);
         self.run(PreviewOp::WaitFor {
             selector: params.selector,
             text: params.text,
