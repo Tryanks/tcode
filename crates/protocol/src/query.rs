@@ -326,7 +326,8 @@ pub struct GitDiffResult {
     pub truncated: bool,
     pub error: Option<String>,
     pub branches: Vec<String>,
-    pub default_base: Option<String>,
+    /// What a branch diff was read against: the base asked for, else the default branch.
+    pub base: Option<String>,
 }
 
 /// The folders inside one host directory. Clients return paths unchanged:

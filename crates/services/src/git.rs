@@ -239,11 +239,13 @@ fn git_branches(cwd: &Path) -> (Vec<String>, Option<String>) {
     {
         branches.push(origin.clone());
     }
-    let default = ["main", "master"]
-        .into_iter()
-        .find(|candidate| branches.iter().any(|branch| branch == candidate))
-        .map(str::to_string)
-        .or(origin_default)
+    let default = origin_default
+        .or_else(|| {
+            ["main", "master"]
+                .into_iter()
+                .find(|candidate| branches.iter().any(|branch| branch == candidate))
+                .map(str::to_string)
+        })
         .or_else(|| branches.first().cloned());
     (branches, default)
 }
@@ -256,10 +258,16 @@ pub fn load_git_diff(
 ) -> GitDiffResult {
     let (branches, default_base) = git_branches(cwd);
     let mut base_revision = None;
+    let mut used_base = None;
     let args = match scope {
         GitDiffScope::WorkingTree => working_tree_diff_args(ignore_whitespace),
         GitDiffScope::Branch => {
-            let base = base.or(default_base.as_deref()).unwrap_or("HEAD");
+            // Without a base, in a checkout with no branch to default to, the diff is HEAD's.
+            let base = used_base.insert(
+                base.map(str::to_owned)
+                    .or(default_base)
+                    .unwrap_or_else(|| "HEAD".into()),
+            );
             let merge_base = match git_output(cwd, &merge_base_args(base)) {
                 Ok(output) if output.status.success() => {
                     String::from_utf8_lossy(&output.stdout).trim().to_string()
@@ -268,7 +276,7 @@ pub fn load_git_diff(
                     return GitDiffResult {
                         error: Some(String::from_utf8_lossy(&output.stderr).trim().to_string()),
                         branches,
-                        default_base,
+                        base: used_base,
                         ..GitDiffResult::default()
                     };
                 }
@@ -276,7 +284,7 @@ pub fn load_git_diff(
                     return GitDiffResult {
                         error: Some(error),
                         branches,
-                        default_base,
+                        base: used_base,
                         ..GitDiffResult::default()
                     };
                 }
@@ -292,7 +300,7 @@ pub fn load_git_diff(
             return GitDiffResult {
                 error: Some(String::from_utf8_lossy(&output.stderr).trim().to_string()),
                 branches,
-                default_base,
+                base: used_base,
                 ..GitDiffResult::default()
             };
         }
@@ -300,7 +308,7 @@ pub fn load_git_diff(
             return GitDiffResult {
                 error: Some(error),
                 branches,
-                default_base,
+                base: used_base,
                 ..GitDiffResult::default()
             };
         }
@@ -347,7 +355,7 @@ pub fn load_git_diff(
         truncated,
         error: None,
         branches,
-        default_base,
+        base: used_base,
     }
 }
 
@@ -940,6 +948,34 @@ mod tests {
         assert!(read_status(&root).unwrap().is_default_branch);
         run(&root, &["checkout", "-b", "feature"]);
         assert!(!read_status(&root).unwrap().is_default_branch);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// A branch diff asked for without a base is read against the branch `origin/HEAD` names,
+    /// though a `main` exists, and says which base it used.
+    #[test]
+    fn a_branch_diff_defaults_to_the_base_origin_head_names() {
+        let (temp, root) = scratch_repo("tcode-diff-default-base-test");
+        let remote = temp.join("remote.git");
+        run(
+            &temp,
+            &["init", "--bare", "-b", "main", remote.to_str().unwrap()],
+        );
+        run(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        run(&root, &["checkout", "-b", "develop"]);
+        run(&root, &["push", "-u", "origin", "main", "develop"]);
+        run(&root, &["remote", "set-head", "origin", "develop"]);
+        run(&root, &["checkout", "-b", "feature"]);
+
+        let diff = load_git_diff(&root, GitDiffScope::Branch, None, false);
+        assert_eq!(diff.error, None);
+        assert_eq!(diff.base.as_deref(), Some("origin/develop"));
+        let asked = load_git_diff(&root, GitDiffScope::Branch, Some("main"), false);
+        assert_eq!(asked.base.as_deref(), Some("main"));
 
         let _ = std::fs::remove_dir_all(temp);
     }
