@@ -87,7 +87,6 @@ const CODEX_ROLLOUT: &str = r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"s
 fn a_codex_rollout_imports_as_codex_recorded_it() {
     let rollout = Transcript::new(CODEX_ROLLOUT);
     let thread = codex::convert(&rollout.0, "codex:example").unwrap();
-    assert_eq!(thread.first_user.as_deref(), Some("List the files"));
     assert_eq!(
         shown(thread),
         [
@@ -137,13 +136,18 @@ fn a_codex_rollout_imports_as_codex_recorded_it() {
 /// `compact_boundary`. A slash command is the user text that CLI builds for
 /// it (`<command-message>`, `<command-name>`, `<command-args>`), a prompt
 /// command's expansion and a local command's caveat are meta lines, and a
-/// local command's output is a `<local-command-stdout>` user text.
+/// local command's output is a `<local-command-stdout>` user text. Titles
+/// are `ai-title` and `custom-title` records (`{type, aiTitle | customTitle,
+/// sessionId}`) that CLI appends as they change.
 const CLAUDE_TRANSCRIPT: &str = r#"{"type":"user","message":{"role":"user","content":"Context the CLI adds for itself."},"isMeta":true,"uuid":"00000000-0000-4000-8000-000000000011","parentUuid":null,"isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:05.000Z"}
 {"type":"user","message":{"role":"user","content":"Read the readme"},"uuid":"00000000-0000-4000-8000-000000000012","parentUuid":"00000000-0000-4000-8000-000000000011","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:06.000Z"}
 {"type":"assistant","message":{"id":"msg_example_1","type":"message","role":"assistant","model":"claude-example","content":[{"type":"thinking","thinking":"Reading it.","signature":"c2lnbmF0dXJl"},{"type":"tool_use","id":"toolu_read","name":"Read","input":{"file_path":"/work/example/README.md"}}]},"uuid":"00000000-0000-4000-8000-000000000013","parentUuid":"00000000-0000-4000-8000-000000000012","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:07.000Z"}
 {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_read","content":"Example readme"}]},"uuid":"00000000-0000-4000-8000-000000000014","parentUuid":"00000000-0000-4000-8000-000000000013","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:08.000Z"}
 {"type":"assistant","message":{"id":"msg_example_2","type":"message","role":"assistant","model":"claude-example","content":[{"type":"tool_use","id":"toolu_make","name":"Bash","input":{"command":"make"}}]},"uuid":"00000000-0000-4000-8000-000000000015","parentUuid":"00000000-0000-4000-8000-000000000014","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:09.000Z"}
 {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_make","content":"make: no targets","is_error":true}]},"uuid":"00000000-0000-4000-8000-000000000016","parentUuid":"00000000-0000-4000-8000-000000000015","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:10.000Z"}
+{"type":"ai-title","aiTitle":"Read and build the example","sessionId":"00000000-0000-4000-8000-000000000010"}
+{"type":"custom-title","customTitle":"Readme review","sessionId":"00000000-0000-4000-8000-000000000010"}
+{"type":"ai-title","aiTitle":"Review the example","sessionId":"00000000-0000-4000-8000-000000000010"}
 {"type":"system","subtype":"compact_boundary","content":"Conversation compacted","uuid":"00000000-0000-4000-8000-000000000017","parentUuid":null,"isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:11.000Z"}
 {"type":"assistant","message":{"id":"msg_example_3","type":"message","role":"assistant","model":"claude-example","content":[{"type":"text","text":"Done."}]},"uuid":"00000000-0000-4000-8000-000000000018","parentUuid":"00000000-0000-4000-8000-000000000017","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:12.000Z"}
 {"type":"user","message":{"role":"user","content":"<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>src</command-args>"},"uuid":"00000000-0000-4000-8000-000000000019","parentUuid":"00000000-0000-4000-8000-000000000018","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:13.000Z"}
@@ -159,12 +163,13 @@ const CLAUDE_TRANSCRIPT: &str = r#"{"type":"user","message":{"role":"user","cont
 /// result is an error, a call never answered is interrupted, a compaction is
 /// marked where it happened, and a slash
 /// command shows as the command line the user typed, a local one with its
-/// output.
+/// output. The thread is named as that CLI names it: a custom title before
+/// a generated one.
 #[test]
 fn a_claude_transcript_imports_as_claude_recorded_it() {
     let transcript = Transcript::new(CLAUDE_TRANSCRIPT);
     let thread = claude::convert(&transcript.0, "claude:example").unwrap();
-    assert_eq!(thread.first_user.as_deref(), Some("Read the readme"));
+    assert_eq!(thread.title.as_deref(), Some("Readme review"));
     assert_eq!(
         shown(thread),
         [

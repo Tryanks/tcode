@@ -17,7 +17,8 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
     let mut parsed_lines = 0_usize;
     let mut first_ts = None;
     let mut last_ts = None;
-    let mut first_user = None;
+    // The last record of each kind wins; an empty one clears it.
+    let mut titles = HashMap::<&str, Option<String>>::new();
     let mut next_id = 0_u64;
 
     for line in BufReader::new(file).lines() {
@@ -44,11 +45,6 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                     match block {
                         UserBlock::Text(text) => {
                             for content in user_text(text) {
-                                if first_user.is_none()
-                                    && let ItemContent::UserMessage { text, .. } = &content
-                                {
-                                    first_user = Some(text.clone());
-                                }
                                 next_id += 1;
                                 entries.push(ConvertedEntry::Item {
                                     ts,
@@ -147,6 +143,19 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
             {
                 entries.push(ConvertedEntry::Compacted { ts });
             }
+            Some(kind @ ("agent-name" | "custom-title" | "ai-title")) => {
+                let (kind, field) = match kind {
+                    "agent-name" => ("agent-name", "agentName"),
+                    "custom-title" => ("custom-title", "customTitle"),
+                    _ => ("ai-title", "aiTitle"),
+                };
+                let title = value
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .filter(|title| !title.is_empty())
+                    .map(str::to_string);
+                titles.insert(kind, title);
+            }
             _ => {}
         }
     }
@@ -165,11 +174,16 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
         }
     }
     let created_ms = first_ts.unwrap_or(fallback_ts);
+    // Claude Code 2.1.322 names a session by its agent name, else its
+    // custom title, else its generated title, before any prompt.
+    let title = ["agent-name", "custom-title", "ai-title"]
+        .into_iter()
+        .find_map(|kind| titles.remove(kind).flatten());
     Ok(ConvertedThread {
         external_id: external_id.to_string(),
         created_ms,
         updated_ms: last_ts.unwrap_or(created_ms),
-        first_user,
+        title,
         entries,
     })
 }

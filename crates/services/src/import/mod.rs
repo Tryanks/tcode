@@ -76,7 +76,8 @@ struct ConvertedThread {
     external_id: String,
     created_ms: u64,
     updated_ms: u64,
-    first_user: Option<String>,
+    /// The name the source tool itself gives the thread.
+    title: Option<String>,
     entries: Vec<ConvertedEntry>,
 }
 
@@ -147,30 +148,32 @@ pub fn import_thread(
         )
     };
 
+    let user_messages = || {
+        converted.entries.iter().filter_map(|entry| match entry {
+            ConvertedEntry::Item {
+                item:
+                    ThreadItem {
+                        content: agent::ItemContent::UserMessage { text, .. },
+                        ..
+                    },
+                ..
+            } => Some(text.as_str()),
+            _ => None,
+        })
+    };
     // Harness-injected user messages (`<task-notification>`, `<system-reminder>`,
     // …) make terrible titles: prefer the first human-looking message.
-    let title_user = converted
-        .entries
-        .iter()
-        .find_map(|entry| match entry {
-            ConvertedEntry::Item { item, .. } => match &item.content {
-                agent::ItemContent::UserMessage { text, .. }
-                    if !text.trim_start().starts_with('<') =>
-                {
-                    Some(text.clone())
-                }
-                _ => None,
-            },
-            ConvertedEntry::Compacted { .. } => None,
-        })
-        .or(converted.first_user.clone());
+    let title_user = user_messages()
+        .find(|text| !text.trim_start().starts_with('<'))
+        .or_else(|| user_messages().next());
 
     let mut meta = SessionMeta::new(provider, project.root.clone(), None);
     meta.project_id = Some(project.id.clone());
     meta.title = thread
         .title_hint
         .clone()
-        .or_else(|| title_user.as_deref().map(title_from_text))
+        .or_else(|| converted.title.clone())
+        .or_else(|| title_user.map(title_from_text))
         .unwrap_or_else(|| format!("Imported {} thread", thread.source.display_name()));
     meta.created_at = converted.created_ms / 1000;
     meta.updated_at = converted.updated_ms / 1000;

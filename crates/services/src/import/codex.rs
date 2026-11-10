@@ -36,7 +36,6 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
         .unwrap_or(fallback_ts);
     let created_ms = first_meta_ts;
     let mut updated_ms = first_meta_ts;
-    let mut first_user = None;
     let mut entries = Vec::new();
     let mut pending = HashMap::<String, usize>::new();
     let mut next_id = 0_u64;
@@ -75,7 +74,6 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                 continue;
                             }
                             let content = if role == Some("user") {
-                                first_user.get_or_insert_with(|| text.clone());
                                 ItemContent::UserMessage {
                                     text,
                                     context_len: None,
@@ -291,7 +289,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
         external_id: external_id.to_string(),
         created_ms,
         updated_ms,
-        first_user,
+        title: None,
         entries,
     })
 }
