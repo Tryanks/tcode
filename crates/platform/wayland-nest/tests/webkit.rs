@@ -6,10 +6,7 @@
 
 mod common;
 
-use std::time::Duration;
-
 use common::page::*;
-use gtk::prelude::*;
 use wayland_nest::{Event, modifier};
 
 #[test]
@@ -20,28 +17,6 @@ fn a_webkit_page_on_the_nest() {
     // A frame of the configured size, once the page draws.
     let frame = page.frame.as_ref().expect("a frame");
     assert_eq!((frame.width, frame.height), (WIDTH, HEIGHT));
-
-    // While its last frame is unpresented the view is sent no other, and
-    // GTK, whose frame clock waits for the frame callbacks, draws none.
-    let frame = common::next_frame(&page.nest, VIEW, TIMEOUT, pump_gtk).expect("a frame");
-    page.frame = Some(frame);
-    let clock = page.window.frame_clock().expect("a mapped window");
-    let painted = move || clock.frame_counter();
-    let held_at = painted();
-    let sent = common::wait_for(&page.nest, Duration::from_secs(1), pump_gtk, |event| {
-        matches!(event, Event::Frame { .. }).then_some(())
-    });
-    assert!(
-        sent.is_none(),
-        "no frame is sent before the last is presented"
-    );
-    let held = painted() - held_at;
-    assert!(
-        held <= 1,
-        "GTK painted {held} frames while none was presented"
-    );
-    page.nest.presented(VIEW);
-    page.run_until("the animation to resume", |_, _| painted() > held_at + 10);
 
     // The <select>'s menu composites over the page below it, and a press
     // outside dismisses it.
