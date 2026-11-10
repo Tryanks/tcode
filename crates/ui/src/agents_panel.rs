@@ -1357,14 +1357,11 @@ impl Entries {
             .text_secondary(compact, cx)
             .when_some(row.provider, |line, provider| {
                 line.child(
-                    match provider {
-                        ProviderKind::Acp => Icon::empty().path("icons/box.svg"),
-                        kind => crate::provider_card::profile_glyph(
-                            self.store.read(cx),
-                            kind,
-                            row.profile_id.as_deref(),
-                        ),
-                    }
+                    crate::provider_card::profile_glyph(
+                        self.store.read(cx),
+                        provider,
+                        row.profile_id.as_deref(),
+                    )
                     .flex_none(),
                 )
             })

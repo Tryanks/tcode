@@ -70,6 +70,13 @@ impl HarnessId {
         }
     }
 
+    pub(crate) fn kind(&self) -> ProviderKind {
+        match self {
+            Self::Native(kind) => *kind,
+            Self::Acp(_) => ProviderKind::Acp,
+        }
+    }
+
     pub(crate) fn of(description: &HarnessDescription) -> Self {
         match &description.acp_agent_id {
             Some(id) => Self::Acp(id.clone()),
@@ -301,10 +308,7 @@ impl HarnessDialog {
     }
 
     fn kind(&self) -> ProviderKind {
-        match self.harness {
-            HarnessId::Native(kind) => kind,
-            HarnessId::Acp(_) => ProviderKind::Acp,
-        }
+        self.harness.kind()
     }
 
     fn builtin_id(&self) -> &'static str {
@@ -1155,10 +1159,7 @@ impl HarnessDialog {
                 .as_ref()
                 .and_then(|snapshot| snapshot.binary.clone()),
         };
-        let glyph = match &self.harness {
-            HarnessId::Native(kind) => crate::provider_card::provider_glyph(*kind),
-            HarnessId::Acp(_) => Icon::empty().path("icons/box.svg"),
-        };
+        let glyph = crate::provider_card::provider_glyph(self.kind());
         h_flex()
             .w_full()
             .min_w_0()

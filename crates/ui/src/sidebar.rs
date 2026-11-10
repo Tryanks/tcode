@@ -3855,10 +3855,7 @@ impl SessionsSidebar {
         right_padding: f32,
     ) -> Option<gpui::Div> {
         let color: gpui::Hsla = gpui::rgb(store.provider_color(meta)?).into();
-        let glyph = match meta.provider {
-            agent::ProviderKind::Acp => Icon::empty().path("icons/box.svg"),
-            kind => crate::provider_card::provider_glyph(kind),
-        };
+        let glyph = crate::provider_card::provider_glyph(meta.provider);
         let size = px(row_height - PROVIDER_MARK_INSET);
         let id = name.to_owned();
         Some(
