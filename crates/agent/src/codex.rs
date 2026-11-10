@@ -640,7 +640,11 @@ enum PendingRequest {
     /// [`SessionCommand::ReadAccountUsage`]: the result goes to its asker.
     AccountUsage(Sender<Result<Value, String>>),
     BackgroundTerminalList,
-    BackgroundTerminalStop,
+    /// `thread/backgroundTerminals/terminate` or `clean`; either way the list
+    /// is read again.
+    BackgroundTerminalStop {
+        method: &'static str,
+    },
 }
 
 struct PendingApproval {
@@ -1122,7 +1126,11 @@ impl SessionActor for Actor {
                         json!({ "threadId": thread_id }),
                     ),
                 };
-                self.request(method, params, PendingRequest::BackgroundTerminalStop)
+                self.request(
+                    method,
+                    params,
+                    PendingRequest::BackgroundTerminalStop { method },
+                )
             }
             SessionCommand::SetOption { id, value } => {
                 if id == "permissions" {
@@ -2147,6 +2155,8 @@ impl Actor {
                 .await;
         } else if let Some(id) = value.get("id").and_then(Value::as_i64) {
             let pending = self.pending_requests.remove(&id);
+            let reread_background_terminals =
+                matches!(pending, Some(PendingRequest::BackgroundTerminalStop { .. }));
             if let Some(PendingRequest::AccountUsage(reply)) = &pending {
                 let result = match value.get("error") {
                     Some(error) => Err(describe_rpc_error(error)),
@@ -2168,13 +2178,6 @@ impl Actor {
                     Some(result) => self.on_background_terminals(result).await,
                     None => log::debug!("Codex background terminals unavailable: {value}"),
                 }
-                return;
-            }
-            if let Some(PendingRequest::BackgroundTerminalStop) = &pending {
-                if value.get("error").is_some() {
-                    log::warn!("Codex background terminal stop failed: {value}");
-                }
-                let _ = self.read_background_terminals();
                 return;
             }
             if let Some(PendingRequest::GoalSnapshot) = &pending {
@@ -2271,6 +2274,9 @@ impl Actor {
                     }
                     _ => {}
                 }
+            }
+            if reread_background_terminals {
+                let _ = self.read_background_terminals();
             }
         }
     }
@@ -3518,7 +3524,7 @@ fn pending_name(request: Option<&PendingRequest>) -> &'static str {
     match request {
         Some(PendingRequest::TurnStart { .. }) => "turn/start",
         Some(PendingRequest::BackgroundTerminalList) => "thread/backgroundTerminals/list",
-        Some(PendingRequest::BackgroundTerminalStop) => "thread/backgroundTerminals/stop",
+        Some(PendingRequest::BackgroundTerminalStop { method }) => method,
         Some(PendingRequest::Interrupt) => "turn/interrupt",
         Some(PendingRequest::Steer { .. }) => "turn/steer",
         Some(PendingRequest::SubagentMetadata { .. }) => "thread/read",
@@ -6171,6 +6177,20 @@ mod tests {
             let clean = next_request(&mut actor).await;
             assert_eq!(clean["method"], "thread/backgroundTerminals/clean");
             assert_eq!(clean["params"], json!({"threadId": "thread-1"}));
+            let refusal =
+                json!({"id": clean["id"], "error": {"code": -32600, "message": "no such thread"}});
+            actor.handle_line(&refusal.to_string()).await;
+            assert!(
+                matches!(
+                    events.try_recv(),
+                    Ok(AgentEvent::Error { message, fatal: false })
+                        if message.contains("thread/backgroundTerminals/clean")
+                            && message.contains("no such thread")
+                ),
+                "a refused stop says why"
+            );
+            let list = next_request(&mut actor).await;
+            assert_eq!(list["method"], "thread/backgroundTerminals/list");
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
