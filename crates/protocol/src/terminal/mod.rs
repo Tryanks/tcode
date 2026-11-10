@@ -321,14 +321,11 @@ impl TerminalFrame {
         self.cursor = delta.cursor;
         self.lines_evicted = delta.lines_evicted;
         let styles = remap_styles(&mut self.styles, &delta.styles);
-        let scrolled = usize::from(delta.scrolled).min(self.visible.len());
-        self.visible.drain(..scrolled);
+        self.visible.drain(..usize::from(delta.scrolled));
         self.visible
             .resize_with(usize::from(delta.rows), Default::default);
         for update in &delta.rows_replaced {
-            if let Some(row) = self.visible.get_mut(usize::from(update.index)) {
-                *row = restyle_row(update.row.clone(), &styles);
-            }
+            self.visible[usize::from(update.index)] = restyle_row(update.row.clone(), &styles);
         }
         match &delta.history {
             Some(TerminalHistoryUpdate::Appended(rows)) => {
@@ -357,12 +354,9 @@ impl TerminalFrame {
         }
     }
 
-    /// The style a cell resolves to, or the default for an out-of-range index.
+    /// The style a cell resolves to.
     pub fn style(&self, cell: &TerminalCell) -> TerminalStyle {
-        self.styles
-            .get(usize::from(cell.style))
-            .copied()
-            .unwrap_or_default()
+        self.styles[usize::from(cell.style)]
     }
 }
 
@@ -388,10 +382,7 @@ fn remap_styles(table: &mut Vec<TerminalStyle>, local: &[TerminalStyle]) -> Vec<
 
 fn restyle_row(mut row: TerminalRow, styles: &[u16]) -> TerminalRow {
     for cell in &mut row.cells {
-        cell.style = styles
-            .get(usize::from(cell.style))
-            .copied()
-            .unwrap_or_default();
+        cell.style = styles[usize::from(cell.style)];
     }
     row
 }
