@@ -8,6 +8,7 @@ voice = ["dep:block2", "dep:objc2", "dep:objc2-foundation", "dep:objc2-av-founda
 
 [dependencies]
 tcode-protocol = { path = "../protocol", default-features = false }
+tcode-core = { path = "../core", default-features = false }
 async-channel = "2"
 base64 = "0.23"
 log = "0.4"

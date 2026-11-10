@@ -8497,12 +8497,8 @@ mod tests {
         cx.simulate_click(toggle.center(), gpui::Modifiers::default());
         draw(cx);
         assert_eq!(
-            device()
-                .load_preferences()
-                .unwrap()
-                .sidebar_layout
-                .as_deref(),
-            Some("grouped"),
+            device().load_preferences().unwrap().sidebar_layout,
+            Some(SidebarLayout::Grouped),
             "the actual header action persists this device's choice"
         );
         // The list the new layout brings folds its rows in; the reader

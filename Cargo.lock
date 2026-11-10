@@ -12178,6 +12178,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
+ "tcode-core",
  "tcode-protocol",
  "url",
  "uuid",

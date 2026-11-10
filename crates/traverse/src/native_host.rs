@@ -260,36 +260,15 @@ impl ClientHost for NativeClientHost {
         self.platform.clone()
     }
 
+    /// The whole record: a value of the wrong kind, or one this build does
+    /// not know, makes it unreadable. Keys it has no field for are left to
+    /// whoever wrote them.
     fn load_preferences(&self) -> Result<ClientPreferences, FileFailure> {
-        let prefs = self.prefs()?;
-        let value = |key: &str| prefs.get(key).and_then(|v| v.as_str()).map(str::to_owned);
-        Ok(ClientPreferences {
-            appearance: value("appearance"),
-            language: value("language"),
-            device_name: value("device_name"),
-            navigation: prefs
-                .get("navigation")
-                .filter(|value| !value.is_null())
-                .cloned(),
-            remote_attachment_limit_mib: prefs
-                .get("remote_attachment_limit_mib")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|limit| u32::try_from(limit).ok()),
-            right_panel_width: prefs
-                .get("right_panel_width")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|width| u32::try_from(width).ok()),
-            sidebar_collapsed: prefs
-                .get("sidebar_collapsed")
-                .and_then(serde_json::Value::as_bool),
-            sidebar_layout: value("sidebar_layout"),
-            workspace: prefs
-                .get("workspace")
-                .and_then(|value| serde_json::from_value(value.clone()).ok()),
-        })
+        serde_json::from_value(self.prefs()?).map_err(|error| FileFailure::new(PREFS_FILE, error))
     }
 
     fn save_preferences(&self, preferences: &ClientPreferences) -> Result<(), FileFailure> {
+        self.load_preferences()?;
         self.update_prefs(|prefs| {
             prefs["appearance"] = serde_json::json!(preferences.appearance);
             prefs["language"] = serde_json::json!(preferences.language);
@@ -695,6 +674,8 @@ impl tcode_client::outbox::Storage for FileOutbox {
 #[cfg(test)]
 mod tests {
 
+    use tcode_core::settings::{SidebarLayout, ThemeMode};
+
     use super::*;
 
     const MACHINE_ID: &str = "09e5c592f3234ef329634a0baa6bfe06193be6b64801121d84242af1d27dbecf";
@@ -835,13 +816,62 @@ mod tests {
         assert_eq!(unreadable.file, "mobile.json");
         assert_eq!(
             host.save_preferences(&ClientPreferences {
-                appearance: Some("light".into()),
+                appearance: Some(ThemeMode::Light),
                 ..Default::default()
             }),
             Err(unreadable)
         );
         host.set_last_host_id(Some(MACHINE_ID));
         assert_eq!(fs::read(dir.0.join("mobile.json")).unwrap(), damaged);
+    }
+
+    /// Every appearance and sidebar layout a release wrote to mobile.json is
+    /// read: v0.1.51 wrote "light", "dark" or null, v0.4.0 also "system"
+    /// and the layouts "flat" and "grouped". A value this build does not
+    /// know, or one of the wrong kind, makes the record unreadable, and a
+    /// save neither replaces nor nulls it.
+    #[test]
+    fn preferences_releases_wrote_are_read_and_others_are_kept_unread() {
+        for (written, appearance, layout) in [
+            (r#"{"appearance": null, "language": null}"#, None, None),
+            (r#"{"appearance": "light"}"#, Some(ThemeMode::Light), None),
+            (r#"{"appearance": "dark"}"#, Some(ThemeMode::Dark), None),
+            (
+                r#"{"appearance": "system", "sidebar_layout": "flat"}"#,
+                Some(ThemeMode::System),
+                Some(SidebarLayout::Flat),
+            ),
+            (
+                r#"{"sidebar_layout": "grouped"}"#,
+                None,
+                Some(SidebarLayout::Grouped),
+            ),
+        ] {
+            let dir = TestDir::new();
+            fs::write(dir.0.join("mobile.json"), written).unwrap();
+            let read = NativeClientHost::new(dir.0.clone(), "phone")
+                .load_preferences()
+                .unwrap();
+            assert_eq!((read.appearance, read.sidebar_layout), (appearance, layout));
+        }
+        for unknown in [
+            r#"{"appearance": "sepia", "language": "ja"}"#,
+            r#"{"sidebar_layout": "tree"}"#,
+            r#"{"right_panel_width": "wide"}"#,
+        ] {
+            let dir = TestDir::new();
+            fs::write(dir.0.join("mobile.json"), unknown).unwrap();
+            let host = NativeClientHost::new(dir.0.clone(), "phone");
+            assert_eq!(host.load_preferences().unwrap_err().file, "mobile.json");
+            assert!(
+                host.save_preferences(&ClientPreferences::default())
+                    .is_err()
+            );
+            assert_eq!(
+                fs::read_to_string(dir.0.join("mobile.json")).unwrap(),
+                unknown
+            );
+        }
     }
 
     /// A hosts.json this build cannot read is reported, not shown as no
@@ -890,7 +920,7 @@ mod tests {
         assert_eq!(
             host.load_preferences().unwrap(),
             ClientPreferences {
-                appearance: Some("dark".into()),
+                appearance: Some(ThemeMode::Dark),
                 language: Some("zh-CN".into()),
                 device_name: Some("My phone".into()),
                 ..Default::default()
@@ -909,14 +939,14 @@ mod tests {
         assert_eq!(identity["name"], "My phone");
         assert_eq!(identity["platform"], "Android 15");
         host.save_preferences(&ClientPreferences {
-            appearance: Some("light".into()),
+            appearance: Some(ThemeMode::Light),
             language: None,
             device_name: Some("Renamed".into()),
             navigation: Some(serde_json::json!({"history": ["hosts", "threads"]})),
             remote_attachment_limit_mib: Some(4),
             right_panel_width: Some(480),
             sidebar_collapsed: Some(true),
-            sidebar_layout: Some("grouped".into()),
+            sidebar_layout: Some(SidebarLayout::Grouped),
             workspace: Some(tcode_client::host::WorkspacePreference {
                 hosts: vec![
                     tcode_client::host::WorkspaceHost {
@@ -960,8 +990,8 @@ mod tests {
             Some(true)
         );
         assert_eq!(
-            host.load_preferences().unwrap().sidebar_layout.as_deref(),
-            Some("grouped")
+            host.load_preferences().unwrap().sidebar_layout,
+            Some(SidebarLayout::Grouped)
         );
         assert_eq!(
             saved["workspace"],

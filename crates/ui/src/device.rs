@@ -115,18 +115,14 @@ impl DevicePreferences {
         });
         if unset {
             Self::update(cx, |saved| {
-                saved
-                    .appearance
-                    .get_or_insert_with(|| theme_key(host.theme_mode).to_owned());
+                saved.appearance.get_or_insert(host.theme_mode);
                 saved
                     .language
                     .get_or_insert_with(|| host.language.clone().unwrap_or("system".into()));
                 saved
                     .sidebar_collapsed
                     .get_or_insert(host.sidebar_collapsed);
-                saved
-                    .sidebar_layout
-                    .get_or_insert_with(|| layout_key(host.sidebar_layout).to_owned());
+                saved.sidebar_layout.get_or_insert(host.sidebar_layout);
             });
         }
         unset
@@ -134,12 +130,7 @@ impl DevicePreferences {
 
     /// The theme this device chose, `None` before it chose one.
     pub(crate) fn appearance(cx: &App) -> Option<ThemeMode> {
-        match Self::saved(cx)?.appearance.as_deref()? {
-            "system" => Some(ThemeMode::System),
-            "light" => Some(ThemeMode::Light),
-            "dark" => Some(ThemeMode::Dark),
-            _ => None,
-        }
+        Self::saved(cx)?.appearance
     }
 
     pub(crate) fn theme(cx: &App) -> ThemeMode {
@@ -147,9 +138,7 @@ impl DevicePreferences {
     }
 
     pub(crate) fn set_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
-        Self::update(cx, |saved| {
-            saved.appearance = Some(theme_key(mode).to_owned())
-        });
+        Self::update(cx, |saved| saved.appearance = Some(mode));
         crate::settings_page::apply_theme(mode, window, cx);
     }
 
@@ -178,16 +167,13 @@ impl DevicePreferences {
     }
 
     pub(crate) fn sidebar_layout(cx: &App) -> SidebarLayout {
-        match Self::saved(cx).and_then(|saved| saved.sidebar_layout.as_deref()) {
-            Some("grouped") => SidebarLayout::Grouped,
-            _ => SidebarLayout::Flat,
-        }
+        Self::saved(cx)
+            .and_then(|saved| saved.sidebar_layout)
+            .unwrap_or_default()
     }
 
     pub(crate) fn set_sidebar_layout(layout: SidebarLayout, cx: &mut App) {
-        Self::update(cx, |saved| {
-            saved.sidebar_layout = Some(layout_key(layout).to_owned())
-        });
+        Self::update(cx, |saved| saved.sidebar_layout = Some(layout));
     }
 
     /// The workspace as this device arranged it, `None` before it did.
@@ -336,7 +322,7 @@ impl DevicePreferences {
     pub(crate) fn restore_defaults(window: &mut Window, cx: &mut App) {
         Self::update(cx, |saved| {
             *saved = ClientPreferences {
-                appearance: Some(theme_key(ThemeMode::System).to_owned()),
+                appearance: Some(ThemeMode::System),
                 language: Some("system".into()),
                 navigation: saved.navigation.take(),
                 sidebar_collapsed: saved.sidebar_collapsed,
@@ -357,19 +343,4 @@ pub(crate) fn language(preferences: &ClientPreferences) -> Option<&str> {
         .language
         .as_deref()
         .filter(|language| *language != "system")
-}
-
-fn theme_key(mode: ThemeMode) -> &'static str {
-    match mode {
-        ThemeMode::System => "system",
-        ThemeMode::Light => "light",
-        ThemeMode::Dark => "dark",
-    }
-}
-
-fn layout_key(layout: SidebarLayout) -> &'static str {
-    match layout {
-        SidebarLayout::Flat => "flat",
-        SidebarLayout::Grouped => "grouped",
-    }
 }

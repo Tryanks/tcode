@@ -155,9 +155,11 @@ impl std::fmt::Display for FileFailure {
 }
 
 /// Preferences which belong to the client and are never sent to the host.
+/// A record holding a value this build does not know cannot be read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientPreferences {
-    pub appearance: Option<String>,
+    pub appearance: Option<tcode_core::settings::ThemeMode>,
+    /// A language code, or `"system"` for the system's.
     pub language: Option<String>,
     pub device_name: Option<String>,
     /// Opaque, client-local UI restoration state. The shell owns its schema.
@@ -175,9 +177,8 @@ pub struct ClientPreferences {
     pub right_panel_width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_collapsed: Option<bool>,
-    /// `"flat"` or `"grouped"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sidebar_layout: Option<String>,
+    pub sidebar_layout: Option<tcode_core::settings::SidebarLayout>,
     /// `None` until this device first arranges its workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<WorkspacePreference>,

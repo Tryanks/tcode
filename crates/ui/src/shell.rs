@@ -9342,8 +9342,8 @@ pub(crate) mod tests {
             Some(navigation)
         );
         assert_eq!(
-            client.load_preferences().unwrap().appearance.as_deref(),
-            Some("light")
+            client.load_preferences().unwrap().appearance,
+            Some(tcode_core::settings::ThemeMode::Light)
         );
     }
 
@@ -14766,17 +14766,17 @@ pub(crate) mod tests {
         let persisted = saved().load_preferences().unwrap();
         assert_eq!(
             (
-                persisted.appearance.as_deref(),
+                persisted.appearance,
                 persisted.language.as_deref(),
                 persisted.sidebar_collapsed,
-                persisted.sidebar_layout.as_deref(),
+                persisted.sidebar_layout,
                 persisted.device_name.as_deref(),
             ),
             (
-                Some("dark"),
+                Some(ThemeMode::Dark),
                 Some(crate::LANGUAGE_JAPANESE),
                 Some(true),
-                Some("grouped"),
+                Some(SidebarLayout::Grouped),
                 Some("Old phone"),
             )
         );
