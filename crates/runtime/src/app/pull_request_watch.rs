@@ -645,9 +645,12 @@ impl AppState {
                         || uuid::Uuid::new_v4().to_string(),
                         |pending| pending.id.clone(),
                     ),
-                    text: current.pending_wake.as_ref().map_or_else(
-                        || text.clone(),
-                        |pending| format!("{}\n\n{text}", pending.text),
+                    text: wake_text(
+                        current
+                            .pending_wake
+                            .as_ref()
+                            .map(|pending| pending.text.as_str()),
+                        &text,
                     ),
                     last,
                 };
@@ -750,24 +753,21 @@ impl AppState {
         };
         let watch = link.watch.as_mut().unwrap();
         let pending = watch.pending_wake.as_mut().unwrap();
-        let remainder = if pending.text == text {
-            let last = pending.last;
-            watch.pending_wake = None;
-            if last {
-                link.watch = None;
+        let remainder = match accepted(&pending.text, text) {
+            Accepted::All => {
+                let last = pending.last;
+                watch.pending_wake = None;
+                if last {
+                    link.watch = None;
+                }
+                None
             }
-            None
-        } else if let Some(rest) = pending
-            .text
-            .strip_prefix(text)
-            .and_then(|rest| rest.strip_prefix("\n\n"))
-        {
-            // Catch-up can append news while the provider is accepting an older delivery.
-            pending.text = rest.to_owned();
-            pending.id = uuid::Uuid::new_v4().to_string();
-            Some(pending.clone())
-        } else {
-            return;
+            Accepted::Rest(rest) => {
+                pending.text = rest.to_owned();
+                pending.id = uuid::Uuid::new_v4().to_string();
+                Some(pending.clone())
+            }
+            Accepted::Other => return,
         };
         self.save_pull_request_meta(meta, cx);
         if let Some(pending) = remainder {
@@ -973,6 +973,36 @@ impl AppState {
     }
 }
 
+/// A wake's text once `news` joins what is still undelivered.
+fn wake_text(undelivered: Option<&str>, news: &str) -> String {
+    match undelivered {
+        Some(undelivered) => format!("{undelivered}\n\n{news}"),
+        None => news.to_owned(),
+    }
+}
+
+/// What the provider took of a pending wake.
+enum Accepted<'a> {
+    All,
+    /// News joined the wake while the provider was taking an older delivery of it.
+    Rest(&'a str),
+    /// A delivery of some other text.
+    Other,
+}
+
+fn accepted<'a>(pending: &'a str, delivered: &str) -> Accepted<'a> {
+    if pending == delivered {
+        return Accepted::All;
+    }
+    match pending
+        .strip_prefix(delivered)
+        .and_then(|rest| rest.strip_prefix("\n\n"))
+    {
+        Some(rest) => Accepted::Rest(rest),
+        None => Accepted::Other,
+    }
+}
+
 fn clear_watches(meta: &mut SessionMeta) -> bool {
     let mut cleared = false;
     for link in &mut meta.pull_requests {
@@ -982,4 +1012,124 @@ fn clear_watches(meta: &mut SessionMeta) -> bool {
         log::info!("pull request watches ended: {}", meta.id);
     }
     cleared
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group(snapshot: &str) -> Group {
+        Group {
+            key: (
+                None,
+                PullRequestKey::new("example.com", "sample/project", 1),
+            ),
+            targets: vec![Target {
+                thread: "thread".into(),
+                started_at: "watch".into(),
+                url: "https://example.com/sample/project/pull/1".into(),
+            }],
+            snapshot: snapshot.into(),
+        }
+    }
+
+    fn fingerprint(status: &str, remarks: &str) -> Fingerprint {
+        Fingerprint {
+            status: status.into(),
+            remarks: remarks.into(),
+        }
+    }
+
+    /// The last read of `group("snapshot")` with `fingerprint("status", "remarks")`.
+    fn read(at: Instant) -> LastRead {
+        LastRead {
+            at,
+            snapshot: "snapshot".into(),
+            checks_running: false,
+            remarks_complete: true,
+            watches: HashSet::from([("thread".into(), "watch".into())]),
+            status: Some("status".into()),
+            remarks: Some("remarks".into()),
+        }
+    }
+
+    fn reads(plan: Plan) -> (bool, bool, bool) {
+        (plan.detail, plan.activity, plan.reread_tails)
+    }
+
+    /// Which reads one pass makes of a watched pull request, from what the host's fingerprint
+    /// or the sync snapshot says moved since the last read.
+    #[test]
+    fn a_pass_reads_what_the_host_says_moved() {
+        let then = Instant::now();
+        let soon = then + Duration::from_secs(1);
+        let unchanged = fingerprint("status", "remarks");
+        let full = (true, true, false);
+        let nothing = (false, false, false);
+
+        assert_eq!(reads(plan(&group("snapshot"), None, None, soon)), full);
+        let mut other_watch = read(then);
+        other_watch.watches = HashSet::from([("thread".into(), "earlier".into())]);
+        assert_eq!(
+            reads(plan(
+                &group("snapshot"),
+                Some(&other_watch),
+                Some(&unchanged),
+                soon
+            )),
+            full,
+            "a watch started since the last read takes its own first look"
+        );
+
+        let last = read(then);
+        let pass = |fingerprint: &Fingerprint, last: &LastRead, now| {
+            reads(plan(&group("snapshot"), Some(last), Some(fingerprint), now))
+        };
+        assert_eq!(pass(&unchanged, &last, soon), nothing);
+        assert_eq!(
+            pass(&fingerprint("status", "more remarks"), &last, soon),
+            full
+        );
+        assert_eq!(
+            pass(&fingerprint("moved", "remarks"), &last, soon),
+            (true, false, false)
+        );
+        let mut running = read(then);
+        running.checks_running = true;
+        assert_eq!(
+            pass(&unchanged, &running, soon),
+            (true, false, false),
+            "a check still running is read every pass"
+        );
+        let mut incomplete = read(then);
+        incomplete.remarks_complete = false;
+        assert_eq!(pass(&unchanged, &incomplete, soon), full);
+        assert_eq!(
+            pass(&unchanged, &last, then + FINGERPRINT_REREAD),
+            (true, true, true),
+            "edits inside review threads, which the fingerprint misses, are read in time"
+        );
+
+        let quiet = |snapshot, now| reads(plan(&group(snapshot), Some(&last), None, now));
+        assert_eq!(quiet("snapshot", soon), nothing);
+        assert_eq!(quiet("moved", soon), full);
+        assert_eq!(quiet("snapshot", then + QUIET_REREAD), full);
+    }
+
+    /// News that joins a wake while the provider takes an older delivery of it is delivered
+    /// next, once; a delivery of other text leaves the wake alone.
+    #[test]
+    fn news_joined_to_a_wake_in_delivery_is_delivered_next() {
+        let first = wake_text(None, "#1 failed a check");
+        let joined = wake_text(Some(&first), "#1 has a new comment");
+        assert!(matches!(
+            accepted(&joined, &first),
+            Accepted::Rest("#1 has a new comment")
+        ));
+        assert!(matches!(accepted(&joined, &joined), Accepted::All));
+        assert!(matches!(
+            accepted(&joined, "#1 has a new comment"),
+            Accepted::Other
+        ));
+    }
 }
