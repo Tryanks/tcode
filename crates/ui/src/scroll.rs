@@ -374,6 +374,10 @@ enum Rows {
 /// [`ScrollableElement::overflow_y_scroll_area`], keeps its position while it
 /// stays rendered, and without a definite height shrinks to its rows up to its
 /// maximum height. Row gaps belong to the rows.
+///
+/// Gap: gpui-base's `VirtualList` takes every row's size before it lays the
+/// rows out; measured rows here get theirs only as they come into view, which
+/// GPUI's `list` does and gpui-base has no counterpart for.
 #[derive(IntoElement)]
 pub(crate) struct VirtualList {
     id: ElementId,
