@@ -408,7 +408,6 @@ impl PreviewTools {
     /// Route one op through the broker and map its reply into a tool result.
     /// A call the harness cancels drops its request, and the host forgets it.
     async fn run(&self, ct: &CancellationToken, op: PreviewOp) -> CallToolResult {
-        log::info!("preview-mcp: tool invoked: {op:?}");
         let reply = ct.run_until_cancelled(self.broker.invoke(|reply| crate::BrokerRequest {
             session_id: self.session_id.clone(),
             op,
