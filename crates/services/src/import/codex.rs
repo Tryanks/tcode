@@ -247,23 +247,21 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                     }
                     "local_shell_call" => {
                         let command = payload
-                            .get("command")
-                            .map(readable_output)
-                            .unwrap_or_default();
+                            .pointer("/action/command")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ");
                         push_item(
                             &mut entries,
                             ts,
                             &mut next_id,
                             ItemContent::CommandExecution {
                                 command,
-                                output: payload
-                                    .get("output")
-                                    .map(readable_output)
-                                    .unwrap_or_default(),
-                                exit_code: payload
-                                    .get("exit_code")
-                                    .and_then(Value::as_i64)
-                                    .and_then(|code| i32::try_from(code).ok()),
+                                output: String::new(),
+                                exit_code: None,
                                 status: ItemStatus::Completed,
                             },
                             payload.get("id").and_then(Value::as_str),

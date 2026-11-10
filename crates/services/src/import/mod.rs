@@ -3,6 +3,8 @@
 mod claude;
 mod codex;
 mod scan;
+#[cfg(test)]
+mod tests;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
