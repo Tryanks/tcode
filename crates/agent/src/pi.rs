@@ -1398,21 +1398,16 @@ impl PiMapper {
             Some("thinking_delta") => DeltaKind::ReasoningText,
             Some("toolcall_end") => {
                 let tool = event.get("toolCall").unwrap_or(&Value::Null);
-                let id = tool
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("pi-tool")
-                    .to_owned();
+                let Some(id) = tool.get("id").and_then(Value::as_str) else {
+                    return Vec::new();
+                };
+                let id = id.to_owned();
                 let name = tool
                     .get("name")
                     .and_then(Value::as_str)
                     .unwrap_or("tool")
                     .to_owned();
-                let input = tool
-                    .get("arguments")
-                    .or_else(|| tool.get("input"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
+                let input = tool.get("arguments").cloned().unwrap_or(Value::Null);
                 let tool = PiTool {
                     name,
                     input,
@@ -1432,7 +1427,6 @@ impl PiMapper {
                 return vec![AgentEvent::Error {
                     message: event
                         .get("error")
-                        .or_else(|| event.get("message"))
                         .and_then(Value::as_str)
                         .unwrap_or("pi assistant stream failed")
                         .to_owned(),
@@ -1514,7 +1508,6 @@ impl PiMapper {
                             Some("thinking") => Some(ItemContent::Reasoning {
                                 text: block
                                     .get("thinking")
-                                    .or_else(|| block.get("text"))
                                     .and_then(Value::as_str)
                                     .unwrap_or("")
                                     .to_owned(),
@@ -1578,11 +1571,10 @@ impl PiMapper {
         status: ItemStatus,
         has_result: bool,
     ) -> Vec<AgentEvent> {
-        let id = event
-            .get("toolCallId")
-            .and_then(Value::as_str)
-            .unwrap_or("pi-tool")
-            .to_owned();
+        let Some(id) = event.get("toolCallId").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let id = id.to_owned();
         let event_name = event.get("toolName").and_then(Value::as_str);
         let event_input = event.get("args").filter(|value| !value.is_null()).cloned();
         let result = if event.get("type").and_then(Value::as_str) == Some("tool_execution_update") {
@@ -2003,13 +1995,8 @@ fn ensure_success(message: &Value) -> Result<(), AgentError> {
 fn response_error(message: &Value) -> String {
     message
         .get("error")
-        .and_then(|error| {
-            error
-                .as_str()
-                .map(str::to_owned)
-                .or_else(|| error.get("message")?.as_str().map(str::to_owned))
-        })
-        .or_else(|| message.get("message")?.as_str().map(str::to_owned))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
         .unwrap_or_else(|| {
             format!(
                 "pi rejected {}",
