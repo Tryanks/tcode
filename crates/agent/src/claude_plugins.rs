@@ -195,30 +195,30 @@ fn succeeded(output: CliOutput) -> Result<String, AgentError> {
 
 /// Mutations print one JSON result on the last stdout line; command-source
 /// installs print the command and its mode as human text before it.
-fn last_json_line(stdout: &str) -> Result<(Value, String), AgentError> {
+fn last_json_line(stdout: &str) -> Option<(Value, String)> {
     let mut lines: Vec<&str> = stdout
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect();
-    let last = lines
-        .pop()
-        .ok_or_else(|| AgentError::Protocol("`claude plugin` printed no result".into()))?;
-    let value = serde_json::from_str::<Value>(last.trim())
+    let value = serde_json::from_str::<Value>(lines.pop()?.trim())
         .ok()
-        .filter(Value::is_object)
-        .ok_or_else(|| {
-            AgentError::Protocol(format!(
-                "`claude plugin` did not end with a JSON result: {last}"
-            ))
-        })?;
-    Ok((value, lines.join("\n")))
+        .filter(Value::is_object)?;
+    Some((value, lines.join("\n")))
 }
 
 fn json_outcome(output: &CliOutput) -> Result<PluginOpOutcome, AgentError> {
     let (result, preamble) = match last_json_line(&output.stdout) {
-        Ok(parsed) => parsed,
-        Err(error) if output.success => return Err(error),
-        Err(_) => {
+        Some(parsed) => parsed,
+        None if output.success => {
+            let stdout = output.stdout.trim();
+            return Ok(PluginOpOutcome::Done {
+                diagnostics: (!stdout.is_empty())
+                    .then(|| ("message".to_string(), stdout.to_string()))
+                    .into_iter()
+                    .collect(),
+            });
+        }
+        None => {
             let text = [output.stderr.trim(), output.stdout.trim()]
                 .into_iter()
                 .find(|text| !text.is_empty())
@@ -957,13 +957,6 @@ mod tests {
                 .native_text
                 .contains("does not name the command shown above")
         );
-
-        // Only the last line counts: a JSON line followed by text is not a result.
-        let trailing = format!("{}\nNot JSON\n", fixture("install-user.json").trim());
-        assert!(matches!(
-            json_outcome(&output(&trailing, true)),
-            Err(AgentError::Protocol(_))
-        ));
     }
 
     #[test]
