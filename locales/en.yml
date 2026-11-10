@@ -667,6 +667,7 @@ permissions:
   manage_on_host: "Manage these system permissions on %{host}."
   restart_banner: "Screen Recording grants take effect only after Tcode restarts."
   relaunch: "Relaunch Tcode"
+  relaunch_failed: "Could not relaunch Tcode: %{error}"
   accessibility:
     name: "Accessibility"
     why: "Read the on-screen accessibility tree and post keyboard and mouse events."

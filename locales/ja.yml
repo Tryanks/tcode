@@ -667,6 +667,7 @@ permissions:
   manage_on_host: "これらのシステム権限は %{host} で管理してください。"
   restart_banner: "画面収録の権限は、Tcode を再起動するまで有効になりません。"
   relaunch: "Tcode を再起動"
+  relaunch_failed: "Tcode を再起動できませんでした: %{error}"
   accessibility:
     name: "アクセシビリティ"
     why: "画面上のアクセシビリティツリーを読み取り、キーボードとマウスのイベントを送信します。"

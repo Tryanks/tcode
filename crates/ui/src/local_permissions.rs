@@ -18,6 +18,7 @@ use gpui::{
 use gpui_base::{h_flex, v_flex};
 
 use crate::icon::{Icon, IconName};
+use crate::overlay::{Notification, OverlayExt as _};
 use crate::shell::Quit;
 use crate::sizing::Sizable as _;
 use crate::store::WorkspaceStore;
@@ -133,7 +134,19 @@ impl LocalPermissions {
             store.write_relaunch_marker_for(session_id, "computer_use".into());
         });
         if let Err(error) = relaunch_app() {
-            log::warn!("failed to relaunch tcode: {error}");
+            // No instance starts to read the marker; one a grant in flight
+            // wrote stays for that grant.
+            if !self.marker_pending {
+                self.store
+                    .update(cx, |store, _cx| store.clear_relaunch_marker());
+            }
+            window.push_notification(
+                Notification::error(
+                    crate::tr!("permissions.relaunch_failed", error = error.to_string())
+                        .into_owned(),
+                ),
+                cx,
+            );
             return;
         }
         // Quit through the app's existing quit action; the fresh instance

@@ -667,6 +667,7 @@ permissions:
   manage_on_host: "请在 %{host} 上管理系统权限。"
   restart_banner: "屏幕录制授权需重新启动 Tcode 后才会生效。"
   relaunch: "重新启动 Tcode"
+  relaunch_failed: "无法重新启动 Tcode：%{error}"
   accessibility:
     name: "辅助功能"
     why: "读取屏幕上的辅助功能树，并发送键盘和鼠标事件。"
