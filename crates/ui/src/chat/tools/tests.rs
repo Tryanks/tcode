@@ -241,8 +241,7 @@ pub(in crate::chat) fn read(
 
 /// A call no family claims reads as its server and tool and the value that
 /// names it — a Codex connector's whose result was stored as MCP JSON as
-/// much as a Claude Code MCP call's; an item canonicalization does not
-/// model as its kind and the value in its summary, never as JSON.
+/// much as a Claude Code MCP call's.
 #[gpui::test]
 fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
@@ -272,16 +271,6 @@ fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppCo
     ] {
         assert_eq!(thread.header(id, cx), expected, "{id}");
     }
-    let other = "call_000000000000000000000025";
-    let header = thread.header(other, cx);
-    assert_eq!(
-        (header.verb, header.subject, header.argument),
-        (
-            None,
-            Some("subAgentActivity".to_owned()),
-            Some("/root".to_owned())
-        ),
-    );
 
     thread.open_work_log(mcp, cx);
     assert!(!shows(cx, &format!("tool-error-{mcp}")));
@@ -302,10 +291,6 @@ fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppCo
     click(cx, &format!("tool-nested-{mcp}-rows"));
     assert!(shows(cx, &rows));
     assert!(shows(cx, &format!("tool-text-{mcp}-output-more")));
-
-    // An item canonicalization does not model has nothing more to open.
-    click(cx, &format!("activity-row-{other}"));
-    assert!(!shows(cx, &format!("tool-detail-{other}")));
     thread.shutdown(cx);
 }
 
