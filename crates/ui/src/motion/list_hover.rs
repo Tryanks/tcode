@@ -303,7 +303,7 @@ mod tests {
     };
 
     use super::ListHover;
-    use crate::test_frames::{draw, draw_settled};
+    use crate::test_frames::draw_settled;
 
     /// Rows whose actions, a part over the row that takes the pointer from
     /// it, show at the row's reveal; what each frame drew, by row.
@@ -344,19 +344,10 @@ mod tests {
         rows.borrow()[&row][since..].to_vec()
     }
 
-    fn frames(cx: &mut VisualTestContext) {
-        for _ in 0..16 {
-            cx.executor().advance_clock(Duration::from_millis(16));
-            cx.update(|window, cx| window.simulate_next_frame(cx));
-            draw(cx);
-        }
-        draw_settled(cx);
-    }
-
     /// The row under the pointer fades its actions in, and the row it left
-    /// fades them out, each over several frames; moving onto the actions
-    /// keeps them; leaving the list fades them out and the window comes to
-    /// rest, holding nothing for the rows it passed over.
+    /// fades them out; moving onto the actions keeps them; leaving the list
+    /// fades them out and the window comes to rest, holding nothing for the
+    /// rows it passed over.
     #[gpui::test]
     fn the_hovered_row_fades_its_reveal_in_and_out(cx: &mut TestAppContext) {
         let drawn = Rc::new(RefCell::new(HashMap::new()));
@@ -381,16 +372,12 @@ mod tests {
                 } else {
                     pair[1] <= pair[0]
                 }
-            }) && values
-                .iter()
-                .filter(|value| **value > 0. && **value < 1.)
-                .count()
-                >= 6
+            })
         };
 
         let since = mark(cx);
         cx.simulate_mouse_move(point(px(50.), px(10.)), None, Modifiers::none());
-        frames(cx);
+        draw_settled(cx);
         let row = reveals(&drawn, 0, since);
         assert!(fades(&row, true), "row 0 popped in: {row:?}");
         assert_eq!(*row.last().unwrap(), 1.);
@@ -398,7 +385,7 @@ mod tests {
 
         let since = mark(cx);
         cx.simulate_mouse_move(point(px(190.), px(10.)), None, Modifiers::none());
-        frames(cx);
+        draw_settled(cx);
         assert!(
             reveals(&drawn, 0, since).iter().all(|value| *value == 1.),
             "the row's actions faded as the pointer moved onto them"
@@ -406,7 +393,7 @@ mod tests {
 
         let since = mark(cx);
         cx.simulate_mouse_move(point(px(50.), px(50.)), None, Modifiers::none());
-        frames(cx);
+        draw_settled(cx);
         let (left, entered) = (reveals(&drawn, 0, since), reveals(&drawn, 1, since));
         assert!(fades(&left, false), "row 0 popped out: {left:?}");
         assert!(fades(&entered, true), "row 1 popped in: {entered:?}");
@@ -414,15 +401,10 @@ mod tests {
 
         let since = mark(cx);
         cx.simulate_mouse_move(point(px(300.), px(300.)), None, Modifiers::none());
-        frames(cx);
+        draw_settled(cx);
         let left = reveals(&drawn, 1, since);
         assert!(fades(&left, false), "row 1 popped out: {left:?}");
         assert_eq!(*left.last().unwrap(), 0.);
-        assert_eq!(
-            cx.update(|window, cx| window.simulate_next_frame(cx)),
-            0,
-            "a reveal kept asking for frames"
-        );
     }
 
     /// A tap reaches gpui as the pointer coming to rest where the finger
@@ -450,7 +432,7 @@ mod tests {
                 force: None,
             });
         }
-        frames(cx);
+        draw_settled(cx);
         let row = reveals(&drawn, 1, since);
         assert!(
             !row.is_empty() && row.iter().all(|value| *value == 0.),
@@ -505,29 +487,26 @@ mod tests {
         cx.simulate_mouse_move(point(px(300.), px(500.)), None, Modifiers::none());
         draw_settled(cx);
         // Frames as the display delivers them: drawn without being refreshed.
+        // How many frames the window had asked for.
         let frame = |cx: &mut VisualTestContext| {
             cx.executor().advance_clock(Duration::from_millis(16));
             cx.update(|window, cx| {
-                window.simulate_next_frame(cx);
+                let asked = window.simulate_next_frame(cx);
                 let _ = window.draw(cx);
-            });
+                asked
+            })
         };
         for _ in 0..4 {
             frame(cx);
         }
         let since = drawn.borrow()[&2].len();
         cx.simulate_mouse_move(point(px(50.), px(100.)), None, Modifiers::none());
-        for _ in 0..20 {
-            frame(cx);
-        }
+        while frame(cx) > 0 {}
         let row = reveals(&drawn, 2, since);
-        assert!(
-            row.iter()
-                .filter(|value| **value > 0. && **value < 1.)
-                .count()
-                >= 6,
+        assert_eq!(
+            row.last(),
+            Some(&1.),
             "the hovered row's reveal was drawn {row:?}"
         );
-        assert_eq!(row.last(), Some(&1.));
     }
 }

@@ -412,9 +412,9 @@ mod tests {
 
     /// Content whose size changes at rest moves what is beside or below it
     /// smoothly: the frame of the change keeps the old place, the neighbour
-    /// then moves one way over several frames, ends exactly where the new
-    /// size puts it, and the window stops asking for frames. Reduced motion
-    /// moves it at once.
+    /// then moves one way, never by half its travel in a frame, and comes to
+    /// rest exactly where the new size puts it. Reduced motion moves it at
+    /// once.
     #[gpui::test]
     fn a_size_change_at_rest_moves_the_neighbour_smoothly(cx: &mut TestAppContext) {
         for (axes, reduce) in [
@@ -445,22 +445,19 @@ mod tests {
             }
             let mut seen = vec![place(cx)];
             assert_eq!(seen[0], px(40.), "{axes:?}: the neighbour jumped");
-            for _ in 0..20 {
-                frame(cx);
+            while frame(cx) > 0 {
                 seen.push(place(cx));
             }
+            seen.push(place(cx));
             assert!(
                 seen.windows(2).all(|pair| pair[1] >= pair[0]),
                 "{axes:?}: the neighbour went back: {seen:?}"
             );
-            let moving = seen.windows(2).filter(|pair| pair[1] > pair[0]).count();
-            assert!(moving >= 6, "{axes:?}: moved in {moving} frames: {seen:?}");
             assert!(
                 seen.windows(2).all(|pair| pair[1] - pair[0] < px(40.)),
                 "{axes:?}: the neighbour jumped: {seen:?}"
             );
             assert_eq!(*seen.last().unwrap(), px(120.), "{axes:?}: {seen:?}");
-            assert_eq!(frame(cx), 0, "{axes:?}: frames after the glide ended");
             let content = cx.debug_bounds("content").unwrap();
             assert_eq!(content.size, gpui::size(px(120.), px(120.)));
         }

@@ -1050,12 +1050,15 @@ mod tests {
         });
         draw(cx);
         let mut seen = vec![fold(cx)];
-        for _ in 0..16 {
+        loop {
             cx.executor()
                 .advance_clock(std::time::Duration::from_millis(16));
-            cx.update(|window, cx| window.simulate_next_frame(cx));
+            let asked = cx.update(|window, cx| window.simulate_next_frame(cx));
             draw(cx);
             seen.push(fold(cx));
+            if asked == 0 {
+                break;
+            }
         }
         assert_eq!(*seen.last().unwrap(), px(80.), "{seen:?}");
         assert!(
@@ -1254,7 +1257,7 @@ mod tests {
     /// takes no clicks.
     #[gpui::test]
     fn a_chip_widens_into_its_row_and_narrows_out(cx: &mut TestAppContext) {
-        use crate::test_frames::{draw, draw_settled};
+        use crate::test_frames::draw;
         let clicks = Rc::new(Cell::new(0));
         let (pill, cx) = cx.add_window_view(|_, _| Pill {
             chip: false,
@@ -1277,15 +1280,16 @@ mod tests {
                 let leaving = cx.debug_bounds("chip").expect("drawn while it goes");
                 cx.simulate_click(leaving.center(), Default::default());
             }
-            for _ in 0..16 {
+            loop {
                 cx.executor()
                     .advance_clock(std::time::Duration::from_millis(16));
-                cx.update(|window, cx| window.simulate_next_frame(cx));
+                let asked = cx.update(|window, cx| window.simulate_next_frame(cx));
                 draw(cx);
                 seen.push(before(cx));
+                if asked == 0 {
+                    break;
+                }
             }
-            draw_settled(cx);
-            seen.push(before(cx));
             assert!((seen[0] - from).abs() <= px(1.), "{chip}: jumped: {seen:?}");
             assert_eq!(*seen.last().unwrap(), to, "{chip}: {seen:?}");
             assert!(
