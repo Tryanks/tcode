@@ -219,8 +219,8 @@ enum Read {
 
 type Reading = Pin<Box<dyn Future<Output = Read> + Send>>;
 
-/// Query errors raised before the host answered.
-const UNREACHED: [&str; 3] = ["timeout", "transport_closed", "disconnected"];
+/// Query errors `HostLink` raises before the host answered.
+const UNREACHED: [&str; 2] = ["transport_closed", "disconnected"];
 
 /// A read that did not reach the host is asked again only when drawn this long after it failed,
 /// so a link that fails at once cannot turn each redraw into another read.
@@ -1436,10 +1436,10 @@ mod tests {
         let pixels = [16., 32.].map(|size: f32| (size * scale).round() as u32);
         let mut previous: Option<Vec<Drawn>> = None;
         // The host answers a color, or an error by its code: "not_found" is its answer,
-        // "timeout" never reached it.
+        // "transport_closed" never reached it.
         for (reconnect, answer) in [
             (None, Err("not_found")),
-            (Some(true), Err("timeout")),
+            (Some(true), Err("transport_closed")),
             (Some(false), Ok([255, 0, 0, 255])),
             (Some(true), Ok([0, 0, 255, 255])),
         ] {
