@@ -15,8 +15,7 @@ use tcode_core::{
     session::ReviewSide,
 };
 use tcode_protocol::{
-    PullRequestAction, PullRequestActionResult, PullRequestCapabilities, PullRequestRejection,
-    PullRequestReviewVerdict,
+    PullRequestAction, PullRequestActionResult, PullRequestRejection, PullRequestReviewVerdict,
 };
 
 use super::compose::{EditorSpec, LineAnchor, Sheet, Slot, Write};
@@ -997,7 +996,8 @@ impl PullRequestView {
                 }
             }
         };
-        let segments = offered_verdicts(this.capabilities())
+        let request_changes = this.capabilities().is_some_and(|host| host.request_changes);
+        let segments = offered_verdicts(request_changes)
             .map(|segment| {
                 let (id, label) = match segment {
                     PullRequestReviewVerdict::Comment => {
@@ -1259,16 +1259,12 @@ impl PullRequestView {
 
 /// The verdicts the host offers, in the picker's order. One the account may not give is drawn
 /// disabled; one the host lacks is not drawn, so it never reads as a permission denied.
-fn offered_verdicts(
-    capabilities: PullRequestCapabilities,
-) -> impl Iterator<Item = PullRequestReviewVerdict> {
+fn offered_verdicts(request_changes: bool) -> impl Iterator<Item = PullRequestReviewVerdict> {
     [
         PullRequestReviewVerdict::Comment,
         PullRequestReviewVerdict::Approve,
         PullRequestReviewVerdict::RequestChanges,
     ]
     .into_iter()
-    .filter(move |verdict| {
-        *verdict != PullRequestReviewVerdict::RequestChanges || capabilities.request_changes
-    })
+    .filter(move |verdict| *verdict != PullRequestReviewVerdict::RequestChanges || request_changes)
 }

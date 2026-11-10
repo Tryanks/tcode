@@ -1568,25 +1568,24 @@ impl PullRequestView {
             .into_any_element()
     }
 
-    /// What the host offers at all, as the conversation carries it.
-    pub(super) fn capabilities(&self) -> PullRequestCapabilities {
+    /// What the host offers at all, as the conversation carries it; nothing is known before
+    /// the conversation is read.
+    pub(super) fn capabilities(&self) -> Option<PullRequestCapabilities> {
         self.page()
             .and_then(|page| page.conversation.data.as_ref())
-            .map_or(PullRequestCapabilities::ALL, |conversation| {
-                conversation.capabilities
-            })
+            .map(|conversation| conversation.capabilities)
     }
 
     fn can_reply(&self, thread: &PullRequestReviewThread) -> bool {
-        self.capabilities().reply && thread.viewer_can_reply
+        self.capabilities().is_some_and(|host| host.reply) && thread.viewer_can_reply
     }
 
     fn can_resolve(&self, thread: &PullRequestReviewThread) -> bool {
-        self.capabilities().resolve && thread.viewer_can_resolve
+        self.capabilities().is_some_and(|host| host.resolve) && thread.viewer_can_resolve
     }
 
     fn can_react(&self, comment: &PullRequestComment) -> bool {
-        self.capabilities().reactions && comment.viewer_can_react
+        self.capabilities().is_some_and(|host| host.reactions) && comment.viewer_can_react
     }
 
     /// Reply and Resolve under a whole thread, as the host says this account may.

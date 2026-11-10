@@ -888,10 +888,10 @@ impl PullRequestView {
                 || page
                     .and_then(|page| page.viewed.data.as_ref())
                     .is_some_and(|viewed| !viewed.complete);
-            let host_marks = self.capabilities().host_viewed_marks;
-            let tooltip = if unknown {
+            let host_marks = self.capabilities().map(|host| host.host_viewed_marks);
+            let tooltip = if unknown || host_marks.is_none() {
                 crate::tr!("pull_requests.files.viewed_unknown")
-            } else if host_marks {
+            } else if host_marks == Some(true) {
                 crate::tr!("pull_requests.files.viewed_owner_anonymous")
             } else {
                 crate::tr!(
@@ -907,7 +907,7 @@ impl PullRequestView {
             )
             .into_owned();
             // The host keeps no marks Tcode can read, so the ones shown are Tcode's own.
-            if !host_marks {
+            if host_marks == Some(false) {
                 counter.push_str(" · ");
                 counter.push_str(&crate::tr!("pull_requests.files.viewed_owner_tcode"));
             }
