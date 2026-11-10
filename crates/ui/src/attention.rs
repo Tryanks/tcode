@@ -158,7 +158,7 @@ mod tests {
         let mut show = |waiting: bool, cx: &mut gpui::VisualTestContext| {
             incoming.try_send(index(&meta, waiting)).unwrap();
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             cx.update(|_, cx| attention.update(store.read(cx), cx))
         };
 

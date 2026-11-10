@@ -3584,8 +3584,6 @@ mod tests {
                 )
                 .unwrap();
             cx.run_until_parked();
-            self.store
-                .update(cx, |store, cx| store.drain_host_events_for_test(cx));
             crate::test_frames::draw(cx);
         }
 

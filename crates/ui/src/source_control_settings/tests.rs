@@ -172,11 +172,7 @@ fn open_panel<'a>(
 }
 
 /// Lets what the machine sent land and what it started play out, as frames do in the app.
-fn draw(remote: &Remote, cx: &mut VisualTestContext) {
-    cx.run_until_parked();
-    remote
-        .store
-        .update(cx, |store, cx| store.drain_host_events_for_test(cx));
+fn draw(_remote: &Remote, cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, cx| {
         window.refresh();

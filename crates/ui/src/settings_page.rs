@@ -3623,7 +3623,7 @@ mod tests {
         };
         let shown = |cx: &mut VisualTestContext| {
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             crate::test_frames::draw_settled(cx);
             cx.debug_bounds("storage-migration").is_some()
         };
@@ -3700,7 +3700,7 @@ mod tests {
         };
         let shown = |cx: &mut VisualTestContext, selectors: &[&'static str]| {
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             crate::test_frames::draw_settled(cx);
             selectors
                 .iter()
@@ -4258,7 +4258,7 @@ mod tests {
         };
         let drawn = |cx: &mut VisualTestContext| {
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             crate::test_frames::draw_settled(cx);
             page.read_with(cx, |page, cx| {
                 page.new_project_dir_input

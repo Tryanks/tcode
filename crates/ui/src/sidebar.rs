@@ -7112,7 +7112,7 @@ mod tests {
                 ServerEvent::IndexSummaryReplaced(summary(doing)),
             );
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
             assert!(cx.debug_bounds("compact-row-background").is_some());
             sidebar.read_with(cx, |sidebar, cx| {
@@ -8757,7 +8757,7 @@ mod tests {
         let mut serve = |cx: &mut VisualTestContext| {
             for _ in 0..4 {
                 cx.run_until_parked();
-                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                cx.run_until_parked();
                 while let Ok(line) = outgoing.try_recv() {
                     let message = decode_client_line(&line).unwrap();
                     let state = |shared: &Vec<String>| HostingState {
@@ -8916,7 +8916,7 @@ mod tests {
         let (sidebar, cx) =
             cx.add_window_view(|_, cx| SessionsSidebar::new(vec![store.clone()], window_state, cx));
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.simulate_resize(size(px(300.), px(800.)));
         sidebar.update(cx, |_, cx| {
             cx.notify();
@@ -8958,7 +8958,7 @@ mod tests {
         let apply = |sessions: &Vec<SessionMeta>, cx: &mut VisualTestContext| {
             send(Topic::Index, snapshot(sessions));
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
         };
         apply(&sessions, cx);
@@ -9083,7 +9083,7 @@ mod tests {
         });
         cx.simulate_resize(size(px(393.), px(852.)));
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         draw(cx);
         assert!(cx.debug_bounds("compact-row-parent").is_some());
         assert!(cx.debug_bounds("compact-row-child").is_none());
@@ -9173,7 +9173,7 @@ mod tests {
                 cx.notify();
             });
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             sidebar.update(cx, |sidebar, cx| {
                 sidebar.expanded_settled.clear();
                 sidebar.settled_limits.clear();
@@ -9339,7 +9339,7 @@ mod tests {
             SessionsSidebar::new(vec![store.clone()], window_state.clone(), cx)
         });
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);
         let list = sidebar.read_with(cx, |sidebar, _| sidebar.flat_list_state.clone());
@@ -9413,7 +9413,7 @@ mod tests {
             }),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         draw(cx);
         assert_eq!(
             sidebar.update(cx, |sidebar, cx| sidebar.navigation_ids(cx))[0],
@@ -9532,7 +9532,7 @@ mod tests {
             SessionsSidebar::new(vec![store.clone()], window_state.clone(), cx)
         });
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.simulate_resize(size(px(393.), px(2000.)));
         let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
         let lead = |open: bool| {
@@ -9693,7 +9693,7 @@ mod tests {
                 }),
             );
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw_settled(cx);
             assert_eq!(
                 sidebar.update(cx, |sidebar, cx| sidebar.navigation_ids(cx)),
@@ -9708,7 +9708,7 @@ mod tests {
                 ServerEvent::SettingsSnapshot(Default::default()),
             );
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
         }
     }
 
@@ -9818,7 +9818,7 @@ mod tests {
             panic!("the list keeps scrolling");
         };
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         for layout in [SidebarLayout::Flat, SidebarLayout::Grouped] {
             cx.update(|_, cx| DevicePreferences::set_sidebar_layout(layout, cx));
             let key = match layout {

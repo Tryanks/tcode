@@ -88,9 +88,8 @@ fn serve_running(host: &MountedShell, id: &str) {
 }
 
 /// What the host has sent arrives, and a frame is drawn.
-fn arrive(shell: &Entity<AppShell>, cx: &mut VisualTestContext) {
+fn arrive(_shell: &Entity<AppShell>, cx: &mut VisualTestContext) {
     cx.run_until_parked();
-    store_of(shell, cx).update(cx, |store, cx| store.drain_host_events_for_test(cx));
     draw(cx);
 }
 

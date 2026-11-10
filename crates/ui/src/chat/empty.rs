@@ -551,7 +551,7 @@ mod tests {
         });
         let cx: &mut VisualTestContext = cx;
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.simulate_resize(size(px(1_024.), px(700.)));
         draw_settled(cx);
         let row = |name: &str, cx: &mut VisualTestContext| -> Option<Bounds<Pixels>> {
@@ -567,7 +567,7 @@ mod tests {
             ] {
                 incoming.try_send(index(names)).unwrap();
                 cx.run_until_parked();
-                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                cx.run_until_parked();
                 draw(cx);
                 let mut frames = Vec::new();
                 for _ in 0..20 {

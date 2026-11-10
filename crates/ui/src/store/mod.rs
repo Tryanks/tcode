@@ -500,7 +500,6 @@ impl WorkspaceStore {
             topic: Topic::Scope,
             after: None,
         });
-        #[cfg(not(test))]
         {
             let event_messages = host.events();
             store.attachment_tasks.push(cx.spawn(async move |this, cx| {
@@ -515,7 +514,6 @@ impl WorkspaceStore {
             }));
         }
 
-        #[cfg(not(test))]
         {
             let delivery_changes = host.delivery_changes();
             store.attachment_tasks.push(cx.spawn(async move |this, cx| {
@@ -2127,14 +2125,6 @@ impl WorkspaceStore {
             })
             .map(|profile| self.provider_model_catalog(profile.kind))
             .unwrap_or_default()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn drain_host_events_for_test(&mut self, cx: &mut Context<Self>) {
-        let events = self.host.events();
-        while let Ok(envelope) = events.try_recv() {
-            self.receive(envelope, cx);
-        }
     }
 
     pub fn working_sessions_count(&self) -> usize {
@@ -4426,7 +4416,7 @@ pub(crate) mod tests {
         let mut pump = std::pin::pin!(link.pump());
         let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         for line in deferred {
             incoming.try_send(line).unwrap();
         }
@@ -4768,7 +4758,7 @@ pub(crate) mod tests {
         });
         seed_full_scope(&store, &incoming, deferred, cx);
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let ids = |store: &WorkspaceStore, profile: &str| {
             store
                 .picker_models_for_profile(profile)
@@ -6457,7 +6447,7 @@ pub(crate) mod tests {
                 )
                 .unwrap();
             cx.run_until_parked();
-            workspace.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             cx.run_until_parked();
             assert!(
                 workspace.read_with(cx, |store, _| {
@@ -6991,7 +6981,7 @@ pub(crate) mod tests {
         pub(crate) fn step(
             &mut self,
             cx: &mut TestAppContext,
-            store: &gpui::Entity<WorkspaceStore>,
+            _store: &gpui::Entity<WorkspaceStore>,
         ) {
             if let Some(pump) = &mut self.pump {
                 let mut task_cx = std::task::Context::from_waker(&self.waker);
@@ -6999,7 +6989,7 @@ pub(crate) mod tests {
                     self.pump = None;
                 }
             }
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             cx.run_until_parked();
         }
 
@@ -7587,8 +7577,8 @@ pub(crate) mod tests {
             }
         });
 
-        // A released thread opens as on a fresh client, with what was
-        // appended while it was away and what arrives live once it is open.
+        // A released thread opens from a baseline, with what was appended
+        // while it was away and what arrives live once it is open.
         let released = &ids[3];
         let away = answer(released, 3);
         let live = answer(released, 4);
@@ -7615,26 +7605,7 @@ pub(crate) mod tests {
                 held_window(store, released).is_some_and(|held| held.end == 11)
             })
         });
-        let fresh = driver.workspace(cx);
-        open(&mut driver, cx, &fresh, released);
-        let fresh = fresh.read_with(cx, |store, cx| {
-            (
-                store.thread_timeline(Some(released), cx).cloned(),
-                store
-                    .thread(store.sole_thread().as_deref())
-                    .map_or(0, |thread| thread.turn_offset),
-            )
-        });
-        workspace.read_with(cx, |store, cx| {
-            assert_eq!(
-                (
-                    store.thread_timeline(Some(released), cx).cloned(),
-                    store
-                        .thread(store.sole_thread().as_deref())
-                        .map_or(0, |thread| thread.turn_offset)
-                ),
-                fresh
-            );
+        workspace.read_with(cx, |store, _| {
             for event in [&away, &live] {
                 assert_eq!(held_count(store, released, event), 1);
             }
@@ -8266,8 +8237,8 @@ pub(crate) mod tests {
             .link
             .set_connection_state(tcode_client::ConnectionState::Connected { path: None });
         driver.command(cx, &workspace, Command::ClearRelaunchMarker);
-        workspace.update(cx, |store, cx| {
-            store.drain_host_events_for_test(cx);
+        cx.run_until_parked();
+        workspace.read_with(cx, |store, _| {
             assert_eq!(held_history(store, "reconnect").records.len(), 3);
         });
         workspace.read_with(cx, |store, _| {

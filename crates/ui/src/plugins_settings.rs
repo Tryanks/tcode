@@ -3369,8 +3369,6 @@ mod tests {
         fn replicate(&self, catalogs: Vec<ProviderPluginCatalog>, cx: &mut VisualTestContext) {
             send(&self.incoming, Topic::Providers, providers(catalogs));
             cx.run_until_parked();
-            self.store
-                .update(cx, |store, cx| store.drain_host_events_for_test(cx));
             draw(cx);
         }
 
@@ -3646,8 +3644,6 @@ mod tests {
         });
         cx.simulate_resize(size(px(1400.), px(1600.)));
         cx.run_until_parked();
-        host.store
-            .update(cx, |store, cx| store.drain_host_events_for_test(cx));
         draw(cx);
         (host, cx)
     }

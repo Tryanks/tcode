@@ -3251,7 +3251,7 @@ mod tests {
             });
             crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             Self {
                 store,
                 outgoing,

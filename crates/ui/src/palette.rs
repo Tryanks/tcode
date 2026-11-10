@@ -1866,7 +1866,7 @@ mod tests {
         });
         let cx: &mut VisualTestContext = cx;
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         while requests.try_recv().is_ok() {}
         let (palette, window_state) = cx.update(|_, cx| {
             let harness = harness.read(cx);
@@ -2139,7 +2139,7 @@ mod tests {
             }),
         });
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
         let palette = sheet.read_with(cx, |sheet, _| sheet.palette.clone());
         cx.update(|window, cx| palette.update(cx, |palette, cx| palette.open(false, window, cx)));

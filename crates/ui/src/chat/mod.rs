@@ -2363,8 +2363,6 @@ pub(crate) mod tests {
         /// Deliver what the host sent.
         pub(in crate::chat) fn deliver(&self, cx: &mut VisualTestContext) {
             cx.run_until_parked();
-            self.store
-                .update(cx, |store, cx| store.drain_host_events_for_test(cx));
         }
 
         /// A chat view on the thread, at desktop size.

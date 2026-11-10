@@ -2625,7 +2625,7 @@ mod tests {
             )
             .unwrap();
         settle(cx);
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         store.update(cx, |store, cx| store.show_alone("session".into(), cx));
         view.update(cx, |view, cx| {
             view.window_state
@@ -3190,8 +3190,7 @@ mod tests {
             )
             .unwrap();
         settle(cx);
-        let store = view.read_with(cx, |view, _| view.store.clone());
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         settle(cx);
         let label =
             |cx: &mut VisualTestContext| view.read_with(cx, |view, cx| view.files_label(cx));
@@ -3305,7 +3304,7 @@ mod tests {
         });
         send_links(&incoming, &[7, 8, 9]);
         settle(cx);
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         store.update(cx, |store, cx| store.show_alone("session".into(), cx));
         cx.replace_root_view(|_, cx| {
             super::super::PullRequestsPanel::new(
@@ -3328,7 +3327,7 @@ mod tests {
         let change = |links: &[u64], cx: &mut VisualTestContext| {
             send_links(&incoming, links);
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
             cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
             draw(cx);

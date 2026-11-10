@@ -446,7 +446,7 @@ mod tests {
             incoming.try_send(line).unwrap();
         }
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let (_dialog, cx) = cx.add_window_view(|window, cx| {
             CommitDialog::new(
                 store.clone(),

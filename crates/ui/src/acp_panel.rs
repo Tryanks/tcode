@@ -548,7 +548,7 @@ mod tests {
         let (_, cx) = cx.add_window_view(|window, cx| AcpPanel::new(store.clone(), window, cx));
         cx.simulate_resize(gpui::size(px(588.), px(456.)));
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.update(|window, cx| _ = window.draw(cx));
         assert!(cx.debug_bounds("acp-market-row-agent-0").is_some());
         assert!(
@@ -622,7 +622,7 @@ mod tests {
             )
             .unwrap();
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         (store, pump)
     }
 

@@ -3317,7 +3317,7 @@ mod tests {
         // asked for, ten turns above `before`; then let the store's single
         // request gate reopen.
         let frame = |thread: &mut ScriptedThread, cx: &mut VisualTestContext| -> Option<u64> {
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
             cx.update(|window, cx| {
                 window.simulate_next_frame(cx);
@@ -3479,7 +3479,7 @@ mod tests {
             )
             .unwrap();
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         assert_eq!(replica(cx).unwrap(), tail);
     }
 
@@ -3719,7 +3719,7 @@ mod tests {
         let store = thread.store.clone();
         let (view, cx) = thread.open(cx);
         let frame = |cx: &mut VisualTestContext| {
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             cx.executor().advance_clock(Duration::from_millis(16));
             cx.update(|window, cx| {
                 window.simulate_next_frame(cx);

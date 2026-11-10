@@ -7002,7 +7002,7 @@ pub(crate) mod tests {
                 .try_send(tcode_client::ConnectionState::Connected { path: None })
                 .unwrap();
             draw(cx);
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
         }
     }
@@ -7510,7 +7510,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-1"), cx)
         });
-        b.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         crate::test_frames::draw_settled(cx);
         (shell, hosts, cx)
     }
@@ -7984,7 +7984,7 @@ pub(crate) mod tests {
             RuntimeToast,
         };
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
+        let (_shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
         // The device took up the system's language.
         crate::set_locale(crate::LANGUAGE_ENGLISH);
         let (key_a, key_b) = (
@@ -8000,8 +8000,7 @@ pub(crate) mod tests {
                 )],
             );
             draw(cx);
-            let store = store_on(&shell, host.name(), cx);
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
         };
         let said = |cx: &mut VisualTestContext| cx.update(crate::overlay::notifications_said);
@@ -8188,8 +8187,8 @@ pub(crate) mod tests {
 
     /// `store` takes in what `host` sent it, and what it sent `host` so far
     /// is set aside.
-    fn heard(host: &WorkspaceHost, store: &Entity<WorkspaceStore>, cx: &mut VisualTestContext) {
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+    fn heard(host: &WorkspaceHost, _store: &Entity<WorkspaceStore>, cx: &mut VisualTestContext) {
+        cx.run_until_parked();
         draw(cx);
         let _ = sent(&host.host);
     }
@@ -8275,7 +8274,7 @@ pub(crate) mod tests {
         draw(cx);
         assert_eq!(drafts_asked(&hosts[&key_a]), Vec::<Option<String>>::new());
         ack_project_draft(&hosts[&key_b].host, "on-b", "draft");
-        b.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         crate::test_frames::draw_settled(cx);
         assert_eq!(store_of(&shell, cx), b, "the column goes to B");
         assert_eq!(pane_threads(&shell, cx), [Some("draft".into())]);
@@ -8368,7 +8367,7 @@ pub(crate) mod tests {
         assert_eq!(store_of(&shell, cx), b);
 
         ack_draft(&hosts[&key_a].host, "late");
-        a.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         crate::test_frames::draw_settled(cx);
         assert_eq!(store_of(&shell, cx), b, "the column stays on B");
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
@@ -8614,7 +8613,7 @@ pub(crate) mod tests {
     ) {
         let store = store_of(shell, cx);
         for _ in 0..500 {
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
             if store.read_with(cx, |store, cx| ready(store, cx)) {
                 return;
@@ -10313,7 +10312,7 @@ pub(crate) mod tests {
                 )],
             );
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             let at = from + (to - from) * (step as f32 / 8.);
             cx.simulate_mouse_move(at, Some(MouseButton::Left), none);
             draw(cx);
@@ -10443,7 +10442,7 @@ pub(crate) mod tests {
     #[cfg(preview_backend)]
     fn render_preview_here(
         host: &MountedShell,
-        store: &Entity<WorkspaceStore>,
+        _store: &Entity<WorkspaceStore>,
         id: &str,
         cx: &mut VisualTestContext,
     ) {
@@ -10486,7 +10485,7 @@ pub(crate) mod tests {
             ],
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
     }
 
     /// What the host answers a thread's subscriptions with: its status and an
@@ -16304,7 +16303,6 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         as_mobile(cx);
-        let store = store_of(&shell, cx);
         host.incoming
             .try_send(
                 encode_line(&HostMessage::Event(EventEnvelope {
@@ -16319,7 +16317,7 @@ pub(crate) mod tests {
                 .unwrap(),
             )
             .unwrap();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         // The thread is opened and the host describes it, so the chat draws
         // it with its composer.
         deliver_thread(&shell, &host, "thread-1", false, cx);
@@ -17204,7 +17202,7 @@ pub(crate) mod tests {
         let store = store_of(shell, cx);
         store.update(cx, |store, cx| store.show_thread(session.into(), cx));
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
     }
 
     #[gpui::test]
@@ -17230,7 +17228,7 @@ pub(crate) mod tests {
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| store.show_thread(session.into(), cx));
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         crate::settings::assert_follows_language_switch(cx, "chat.new_thread", |cx| {
             cx.window_title().expect("the shell titles its window")
         });
@@ -17243,7 +17241,7 @@ pub(crate) mod tests {
     /// working-tree read is answered with `git_diff` when given; returns how
     /// many the client made.
     fn draw_until(
-        shell: &Entity<AppShell>,
+        _shell: &Entity<AppShell>,
         cx: &mut VisualTestContext,
         host: &MountedShell,
         selector: &'static str,
@@ -17251,8 +17249,7 @@ pub(crate) mod tests {
     ) -> usize {
         let mut git_diff_reads = 0;
         for _ in 0..12 {
-            let store = store_of(shell, cx);
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             while let Ok(line) = host.outgoing.try_recv() {
                 let line = decode_client_line(&line).expect("client line");
                 let ClientPayload::Query(query) = line.payload else {
@@ -17753,7 +17750,7 @@ pub(crate) mod tests {
         };
         let arrive = |cx: &mut VisualTestContext| {
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
         };
         let open = |cx: &mut VisualTestContext| {
@@ -18014,7 +18011,7 @@ pub(crate) mod tests {
         let store = store_of(shell, cx);
         store.update(cx, |store, cx| store.show_thread(session.into(), cx));
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         resize(cx, 1200.);
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for(session, tcode_core::ui::RightTab::Diff, cx)
@@ -18025,13 +18022,13 @@ pub(crate) mod tests {
     /// query is refused, as a workspace without a checkout would. Returns the held reads in
     /// the order the client made them.
     fn held_git_diff_reads(
-        shell: &Entity<AppShell>,
+        _shell: &Entity<AppShell>,
         host: &MountedShell,
         cx: &mut VisualTestContext,
     ) -> Vec<u64> {
         let mut reads = Vec::new();
         for _ in 0..6 {
-            store_of(shell, cx).update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             while let Ok(line) = host.outgoing.try_recv() {
                 let line = decode_client_line(&line).expect("client line");
                 let ClientPayload::Query(query) = line.payload else {
@@ -18494,7 +18491,7 @@ pub(crate) mod tests {
             serve_finished_turns(&host, id, turns, agent);
             cx.simulate_keystrokes(key);
             let store = store_of(&shell, cx);
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
             assert_eq!(pane_threads(&shell, cx), [Some(id.into())]);
             let shown = store.read_with(cx, |store, cx| {

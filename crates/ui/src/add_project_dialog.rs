@@ -1496,8 +1496,7 @@ mod tests {
             let mut pump = std::pin::pin!(self.link.pump());
             let mut task = std::task::Context::from_waker(std::task::Waker::noop());
             assert!(pump.as_mut().poll(&mut task).is_pending());
-            self.store
-                .update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             crate::test_frames::draw_settled(cx);
         }
 
