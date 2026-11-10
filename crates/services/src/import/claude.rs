@@ -21,7 +21,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
     let mut next_id = 0_u64;
 
     for line in BufReader::new(file).lines() {
-        let Ok(line) = line else { continue };
+        let line = line.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
