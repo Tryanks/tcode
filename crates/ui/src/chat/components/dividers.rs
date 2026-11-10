@@ -128,33 +128,31 @@ pub(crate) fn model_change_divider(
 /// itself at model-swap prominence rather than hiding in the work log.
 pub(crate) fn context_compacted_divider(
     id: &str,
-    metadata: Option<&agent::Compaction>,
+    compaction: &agent::Compaction,
     motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
-    let mut label = if metadata.is_some_and(|c| c.in_progress) {
+    let mut label = if compaction.in_progress {
         crate::tr!("chat.context_compacting").into_owned()
     } else {
         crate::tr!("chat.context_compacted").into_owned()
     };
-    if let Some(c) = metadata {
-        if let Some(trigger) = &c.trigger {
-            let trigger = match trigger.as_str() {
-                "manual" => crate::tr!("chat.context_manual").into_owned(),
-                "auto" => crate::tr!("chat.context_auto").into_owned(),
-                other => other.to_owned(),
-            };
-            label.push_str(&format!(" · {trigger}"));
-        }
-        if let Some(tokens) = c.pre_tokens {
-            label.push_str(&format!(
-                " · {}",
-                crate::tr!(
-                    "chat.context_pre_tokens",
-                    tokens = crate::context_meter::format_tokens(Some(tokens))
-                )
-            ));
-        }
+    if let Some(trigger) = &compaction.trigger {
+        let trigger = match trigger.as_str() {
+            "manual" => crate::tr!("chat.context_manual").into_owned(),
+            "auto" => crate::tr!("chat.context_auto").into_owned(),
+            other => other.to_owned(),
+        };
+        label.push_str(&format!(" · {trigger}"));
+    }
+    if let Some(tokens) = compaction.pre_tokens {
+        label.push_str(&format!(
+            " · {}",
+            crate::tr!(
+                "chat.context_pre_tokens",
+                tokens = crate::context_meter::format_tokens(Some(tokens))
+            )
+        ));
     }
     divider_in(
         SharedString::from(format!("context-compacted-{id}")),

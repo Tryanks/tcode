@@ -115,7 +115,7 @@ impl TimelineView {
                     };
                     column = column.child(components::dividers::context_compacted_divider(
                         &entry.id,
-                        Some(compaction),
+                        compaction,
                         &self.motion,
                         cx,
                     ));
