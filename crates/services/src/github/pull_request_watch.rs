@@ -517,7 +517,7 @@ fn next_cursor(connection: &Value) -> Option<String> {
 }
 
 /// Every remark on the pull request, or `Ok(None)` when one could be missing: a list longer
-/// than ten pages, or a review thread whose replies could not all be read. Such a read never
+/// than ten pages, or a review thread whose replies fall short of its count. Such a read never
 /// advances the watermark.
 pub fn activity(
     api: &GitHubApi,
@@ -634,7 +634,7 @@ pub fn activity(
         let cached = tails.get(id).filter(|tail| tail.count == count);
         let tail = match cached {
             Some(tail) => tail.comments.clone(),
-            None => match read_tail(api, key, &options, id, cursor, path) {
+            None => match read_tail(api, key, &options, id, cursor, path)? {
                 Some(comments) if first_page.len() + comments.len() >= count as usize => {
                     tails.insert(
                         id.to_owned(),
@@ -658,7 +658,7 @@ pub fn activity(
     Ok(complete.then_some(remarks))
 }
 
-/// A thread's replies after its first page; `None` when they could not all be read.
+/// A thread's replies after its first page; `None` past the page bound.
 fn read_tail(
     api: &GitHubApi,
     key: &PullRequestKey,
@@ -666,14 +666,14 @@ fn read_tail(
     thread: &str,
     cursor: String,
     path: Option<&str>,
-) -> Option<Vec<PullRequestRemark>> {
+) -> Result<Option<Vec<PullRequestRemark>>, GitHubError> {
     let mut comments: Vec<PullRequestRemark> = Vec::new();
     let mut cursor = Some(cursor);
     let mut pages = 0;
     while let Some(after) = cursor.take() {
         pages += 1;
         if pages > MAX_PAGES {
-            return None;
+            return Ok(None);
         }
         let response = query(
             api,
@@ -686,14 +686,7 @@ fn read_tail(
                 ("thread".into(), json!(thread)),
                 ("cursor".into(), json!(after)),
             ]),
-        );
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                log::warn!("pull request watch comment pagination failed: {error}");
-                return None;
-            }
-        };
+        )?;
         let page = &response["data"]["node"]["comments"];
         comments.extend(
             page["nodes"]
@@ -704,5 +697,5 @@ fn read_tail(
         );
         cursor = next_cursor(page);
     }
-    Some(comments)
+    Ok(Some(comments))
 }
