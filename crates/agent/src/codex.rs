@@ -3771,9 +3771,10 @@ fn parse_elicitation_url(
 }
 
 /// Map an `item/tool/requestUserInput` params object into canonical
-/// [`UserInputQuestion`]s. Questions missing a non-empty `id`/`header`/`question`
-/// are dropped, as are options with an empty label. Questions with zero options
-/// remain available for free-text answers. `multiSelect` is forced false.
+/// [`UserInputQuestion`]s. A question without a non-empty `id` cannot be
+/// answered and is dropped, as are options with an empty label. Questions with
+/// zero options remain available for free-text answers. `multiSelect` is forced
+/// false.
 fn parse_codex_user_input(params: &Value) -> Vec<UserInputQuestion> {
     let questions = match params.get("questions").and_then(Value::as_array) {
         Some(q) => q,
@@ -3786,14 +3787,11 @@ fn parse_codex_user_input(params: &Value) -> Vec<UserInputQuestion> {
                 .get("id")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())?;
-            let header = q
-                .get("header")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())?;
+            let header = q.get("header").and_then(Value::as_str).unwrap_or_default();
             let question = q
                 .get("question")
                 .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())?;
+                .unwrap_or_default();
             let options = q
                 .get("options")
                 .and_then(Value::as_array)
@@ -7206,8 +7204,9 @@ mod tests {
     fn request_user_input_maps_questions_and_answer_wire_shape() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            // isOther/isSecret dropped; question missing header dropped; option
-            // with empty label dropped; zero-option question KEPT (options: []).
+            // isOther/isSecret dropped; question missing id dropped; option
+            // with empty label dropped; zero-option question without a header
+            // KEPT (options: []).
             actor
                 .handle_line(
                     &json!({
@@ -7228,7 +7227,7 @@ mod tests {
                                     "isOther": true,
                                     "isSecret": false
                                 },
-                                { "id": "free", "header": "Notes", "question": "Any notes?" },
+                                { "id": "free", "header": "", "question": "Any notes?" },
                                 { "header": "no id", "question": "dropped?" }
                             ]
                         }
@@ -7251,6 +7250,8 @@ mod tests {
                     assert!(!questions[0].multi_select);
                     // Free-text-only questions remain valid with empty options.
                     assert_eq!(questions[1].id, "free");
+                    assert_eq!(questions[1].header, "");
+                    assert_eq!(questions[1].question, "Any notes?");
                     assert!(questions[1].options.is_empty());
                 }
                 other => panic!("expected UserInputRequested, got {other:?}"),
