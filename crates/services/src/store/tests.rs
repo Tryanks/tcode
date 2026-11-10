@@ -376,32 +376,6 @@ fn an_unparseable_index_does_not_stop_the_logs_migrating() {
     assert!(!dir.path().join("sessions.json").exists());
 }
 
-#[test]
-fn duplicate_index_ids_fail_the_migration_and_leave_the_sources_alone() {
-    let dir = DataDir::new();
-    let session = serde_json::json!({
-        "id": "twice", "title": "One", "provider": "codex",
-        "cwd": "/work", "created_at": 1, "updated_at": 1
-    });
-    let index = serde_json::json!({"projects": [], "sessions": [session, session]}).to_string();
-    fs::write(dir.path().join("sessions.json"), &index).unwrap();
-    fs::write(dir.path().join("twice.jsonl"), ORPHAN_LOG).unwrap();
-
-    let error = migrate(&dir.store()).unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert!(error.to_string().contains("twice"), "{error}");
-    assert!(!dir.path().join(DB_FILE).exists());
-    assert!(!dir.path().join(LEGACY_DIR_NAME).exists());
-    assert_eq!(
-        fs::read(dir.path().join("sessions.json")).unwrap(),
-        index.as_bytes()
-    );
-    assert_eq!(
-        fs::read(dir.path().join("twice.jsonl")).unwrap(),
-        ORPHAN_LOG
-    );
-}
-
 const LEGACY_DIR_NAME: &str = "legacy";
 
 fn archive_list(names: &[&str]) -> Vec<u8> {

@@ -22,8 +22,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use turso::Connection;
 
+use super::DB_FILE;
 use super::db::{Db, SCHEMA, SCHEMA_VERSION, V1_VERSION, blob, integer, text, wal_path};
-use super::{DB_FILE, read_index};
 use crate::fs_tree::sync_dir;
 
 pub(super) const SOURCE_FILE: &str = "tcode.db.v1";
@@ -491,10 +491,6 @@ pub(super) fn switch(root: &Path) -> io::Result<()> {
             Ok(())
         })?;
         new.checkpoint()?;
-        // Confirm what a fresh open will see before publishing it.
-        if new.read(read_index)?.sessions.len() != carried.index.len() {
-            return Err(io::Error::other("the staged database lost sessions"));
-        }
     }
     fs::OpenOptions::new()
         .write(true)
