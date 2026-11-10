@@ -71,11 +71,8 @@ pub async fn list_models(
         let mut server = Server::spawn(binary_path.as_deref(), &cwd, &launch_env, &[], &[])?;
         let result = (|| {
             let models = server.http.get("/api/model")?;
-            let default = server.http.get("/api/model/default").ok();
-            Ok(map_models(
-                &models["data"],
-                default.as_ref().map(|default| &default["data"]),
-            ))
+            let default = server.http.get("/api/model/default")?;
+            Ok(map_models(&models["data"], &default["data"]))
         })();
         server.stop();
         result
@@ -195,6 +192,9 @@ async fn run_actor(
             commands: setup.commands,
         })
         .await;
+    for message in setup.warnings {
+        actor.events.emit(AgentEvent::Warning { message }).await;
+    }
     if opts.launch_env.home.is_some() {
         actor
             .events
@@ -223,6 +223,8 @@ struct SessionSetup {
     commands: Vec<ProviderCommand>,
     context_windows: HashMap<String, u64>,
     mcp_servers: Vec<String>,
+    /// The reads that failed, for the session to report once it starts.
+    warnings: Vec<String>,
 }
 
 fn open_session(http: &Http, opts: &SessionOptions) -> Result<SessionSetup, AgentError> {
@@ -297,6 +299,7 @@ fn open_session(http: &Http, opts: &SessionOptions) -> Result<SessionSetup, Agen
         }
         None => http.clone(),
     };
+    let mut warnings = Vec::new();
     let mut model = ModelRef::from_wire(&session["model"]);
     if let Some(requested) = requested_model
         && model.as_ref() != Some(&requested)
@@ -310,10 +313,12 @@ fn open_session(http: &Http, opts: &SessionOptions) -> Result<SessionSetup, Agen
     if model.is_none() {
         // A session without its own model runs on the server default; knowing
         // it lets a per-turn variant be applied to it.
-        model = http
-            .get("/api/model/default")
-            .ok()
-            .and_then(|default| ModelRef::from_wire(&default["data"]));
+        model = optional(
+            http.get("/api/model/default")
+                .map(|default| ModelRef::from_wire(&default["data"])),
+            "default model",
+            &mut warnings,
+        );
     }
     let mut agent = session["agent"].as_str().map(str::to_owned);
     if let Some(requested) = requested_agent
@@ -334,21 +339,39 @@ fn open_session(http: &Http, opts: &SessionOptions) -> Result<SessionSetup, Agen
         None => http.delete(&entry)?,
     };
     Ok(SessionSetup {
-        commands: discover_commands(&http),
-        agents: http
-            .get("/api/agent")
-            .map(|agents| map_agents(&agents["data"]))
-            .unwrap_or_default(),
-        context_windows: http
-            .get("/api/model")
-            .map(|models| context_windows(&models["data"]))
-            .unwrap_or_default(),
-        mcp_servers: mcp_servers(&http),
+        commands: optional(discover_commands(&http), "commands", &mut warnings),
+        agents: optional(
+            http.get("/api/agent")
+                .map(|agents| map_agents(&agents["data"])),
+            "agents",
+            &mut warnings,
+        ),
+        context_windows: optional(
+            http.get("/api/model")
+                .map(|models| context_windows(&models["data"])),
+            "models",
+            &mut warnings,
+        ),
+        mcp_servers: optional(mcp_servers(&http), "MCP servers", &mut warnings),
+        warnings,
         session_id,
         http,
         model,
         agent,
     })
+}
+
+/// A read the session runs without: its failure is told, and the session
+/// starts as if it had read nothing.
+fn optional<T: Default>(read: Result<T, AgentError>, what: &str, warnings: &mut Vec<String>) -> T {
+    read.unwrap_or_else(|err| {
+        warnings.push(read_failure(what, &err));
+        T::default()
+    })
+}
+
+fn read_failure(what: &str, err: &AgentError) -> String {
+    format!("failed to read OpenCode {what}: {err}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,24 +442,23 @@ fn map_agents(agents: &Value) -> Vec<AgentInfo> {
 }
 
 /// The MCP servers configured for the session's location, Tcode's included.
-fn mcp_servers(http: &Http) -> Vec<String> {
-    http.get("/api/mcp")
-        .ok()
-        .and_then(|servers| servers["data"].as_array().cloned())
-        .unwrap_or_default()
-        .iter()
+fn mcp_servers(http: &Http) -> Result<Vec<String>, AgentError> {
+    Ok(http.get("/api/mcp")?["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(|server| server["name"].as_str().map(str::to_owned))
-        .collect()
+        .collect())
 }
 
-fn discover_commands(http: &Http) -> Vec<ProviderCommand> {
-    let listed = |path: &str| {
-        http.get(path)
-            .ok()
-            .and_then(|value| value["data"].as_array().cloned())
-            .unwrap_or_default()
+fn discover_commands(http: &Http) -> Result<Vec<ProviderCommand>, AgentError> {
+    let listed = |path: &str| -> Result<Vec<Value>, AgentError> {
+        Ok(http.get(path)?["data"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
     };
-    let mut commands: Vec<ProviderCommand> = listed("/api/command")
+    let mut commands: Vec<ProviderCommand> = listed("/api/command")?
         .iter()
         .filter_map(|command| {
             let name = command["name"].as_str()?.trim();
@@ -448,7 +470,7 @@ fn discover_commands(http: &Http) -> Vec<ProviderCommand> {
         })
         .collect();
     // A skill is invoked by its id; its display name may contain spaces.
-    commands.extend(listed("/api/skill").iter().filter_map(|skill| {
+    commands.extend(listed("/api/skill")?.iter().filter_map(|skill| {
         let id = skill["id"].as_str()?.trim();
         (!id.is_empty()).then(|| ProviderCommand {
             name: id.to_owned(),
@@ -456,11 +478,11 @@ fn discover_commands(http: &Http) -> Vec<ProviderCommand> {
             kind: ProviderCommandKind::Skill,
         })
     }));
-    commands
+    Ok(commands)
 }
 
-fn map_models(models: &Value, default: Option<&Value>) -> Vec<ModelSpec> {
-    let default = default.and_then(ModelRef::from_wire);
+fn map_models(models: &Value, default: &Value) -> Vec<ModelSpec> {
+    let default = ModelRef::from_wire(default);
     models
         .as_array()
         .into_iter()
@@ -1181,7 +1203,7 @@ impl OpenCodeActor {
             // Plugins register commands, skills and agents after the server
             // is ready; these announce each change.
             "command.updated" | "skill.updated" => self.refresh_commands().await,
-            "mcp.status.changed" => self.mapper.mcp_servers = mcp_servers(&self.http),
+            "mcp.status.changed" => self.refresh_mcp_servers().await,
             "agent.updated" => self.refresh_agents().await,
             // Moved by `MoveTo` or by the model's own `session_move`: requests
             // follow the session, and so does what OpenCode scopes to a location.
@@ -1198,7 +1220,7 @@ impl OpenCodeActor {
                         .await;
                     self.refresh_commands().await;
                     self.refresh_agents().await;
-                    self.mapper.mcp_servers = mcp_servers(&self.http);
+                    self.refresh_mcp_servers().await;
                 }
             }
             "session.step.started" if data["sessionID"] == self.mapper.root.as_str() => {
@@ -1284,23 +1306,44 @@ impl OpenCodeActor {
     }
 
     async fn refresh_commands(&mut self) {
-        let commands = discover_commands(&self.http);
-        if commands != self.commands {
-            self.commands = commands.clone();
-            self.events
-                .emit(AgentEvent::ProviderCommands { commands })
-                .await;
+        match discover_commands(&self.http) {
+            Ok(commands) if commands != self.commands => {
+                self.commands = commands.clone();
+                self.events
+                    .emit(AgentEvent::ProviderCommands { commands })
+                    .await;
+            }
+            Ok(_) => {}
+            Err(err) => self.read_failed("commands", &err).await,
         }
     }
 
     async fn refresh_agents(&mut self) {
-        if let Ok(agents) = self.http.get("/api/agent") {
-            let agents = map_agents(&agents["data"]);
-            if agents != self.agents {
-                self.agents = agents;
-                self.emit_options().await;
+        match self.http.get("/api/agent") {
+            Ok(agents) => {
+                let agents = map_agents(&agents["data"]);
+                if agents != self.agents {
+                    self.agents = agents;
+                    self.emit_options().await;
+                }
             }
+            Err(err) => self.read_failed("agents", &err).await,
         }
+    }
+
+    async fn refresh_mcp_servers(&mut self) {
+        match mcp_servers(&self.http) {
+            Ok(servers) => self.mapper.mcp_servers = servers,
+            Err(err) => self.read_failed("MCP servers", &err).await,
+        }
+    }
+
+    async fn read_failed(&self, what: &str, err: &AgentError) {
+        self.events
+            .emit(AgentEvent::Warning {
+                message: read_failure(what, err),
+            })
+            .await;
     }
 
     async fn permission_asked(&mut self, data: &Value) {
@@ -3294,6 +3337,31 @@ cat > /dev/null
                 "provider reported error: OpenCode server exited during startup\n\
                  server output:\ndatabase is locked"
             );
+        });
+    }
+
+    /// Without `/api/mcp` Tcode's own tools go unrecognized; the session
+    /// still starts, and the user is told why with OpenCode's words.
+    #[test]
+    fn a_read_that_fails_as_the_session_opens_is_reported_and_the_session_starts() {
+        smol::block_on(async {
+            let fixture = fixture(
+                Vec::new(),
+                vec![(
+                    "GET /api/mcp",
+                    500,
+                    r#"{"message":"mcp config invalid"}"#.into(),
+                )],
+            );
+            let handle = open(fixture.options.clone()).await;
+            let AgentEvent::Warning { message } = recv(&handle).await else {
+                panic!("the failed read is reported");
+            };
+            assert!(
+                message.contains("OpenCode HTTP 500: mcp config invalid"),
+                "{message}"
+            );
+            shut_down(handle).await;
         });
     }
 
