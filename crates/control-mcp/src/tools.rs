@@ -188,7 +188,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Change thread lifecycle and metadata in a batch: settle, unsettle, archive, unarchive, pin, unpin, rename, mark_read, mark_unread, follow_up, park and keep. One result per change in input order (applied, would_apply, skipped or failed, with the reason); dry_run previews without changing anything, and expect skips a thread that changed since you looked. A busy thread refuses settle as busy. Settle stops the provider, ends the thread's pull request watches, drops its non-human queued messages, ends the shells of its idle terminals (their output stays readable), unpins it, and answers pending non-blocking input with empty answers; the result lists the side effects that actually happened. Unsettle restores none of these: the thread merely becomes Active again, held out of automatic settlement by an override. Archive hides the thread until unarchived."
+        description = "Change thread lifecycle and metadata in a batch: settle, unsettle, archive, unarchive, pin, unpin, rename, mark_read, mark_unread, follow_up, park and keep. One result per change in input order (applied, would_apply, skipped or failed, with the reason); dry_run previews without changing anything, and expect skips a thread that changed since you looked. A busy thread refuses settle as busy. Settle stops the provider, ends the thread's pull request watches, drops its non-human queued messages, ends the shells of its idle terminals (their output stays readable), unpins it, and closes pending non-blocking input unanswered; the result lists the side effects that actually happened. Unsettle restores none of these: the thread merely becomes Active again, held out of automatic settlement by an override. Archive hides the thread until unarchived."
     )]
     async fn update_threads(
         &self,
@@ -205,7 +205,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Arrange for this thread, and only this thread, to settle itself: at the end of your current turn, or when a named pull request merges or closes. Requires the user's consent, quoted verbatim in consent_quote from a message the user sent in this thread (case and spacing aside); a quote the user never said here is refused. The user can revoke it from the thread's title menu, and any new message from the user withdraws it. Settle stops the provider, ends the thread's pull request watches, drops its non-human queued messages, ends the shells of its idle terminals (their output stays readable), unpins it, and answers pending non-blocking input with empty answers. Never fires mid-turn."
+        description = "Arrange for this thread, and only this thread, to settle itself: at the end of your current turn, or when a named pull request merges or closes. Requires the user's consent, quoted verbatim in consent_quote from a message the user sent in this thread (case and spacing aside); a quote the user never said here is refused. The user can revoke it from the thread's title menu, and any new message from the user withdraws it. Settle stops the provider, ends the thread's pull request watches, drops its non-human queued messages, ends the shells of its idle terminals (their output stays readable), unpins it, and closes pending non-blocking input unanswered. Never fires mid-turn."
     )]
     async fn settle_self(&self, Parameters(p): Parameters<SettleSelfParams>) -> CallToolResult {
         self.run(ControlOp::SettleSelf(p)).await

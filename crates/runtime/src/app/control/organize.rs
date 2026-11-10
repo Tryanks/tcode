@@ -644,8 +644,8 @@ fn describe_settle(effects: SettleEffects) -> Vec<String> {
     if effects.unpinned {
         described.push("unpinned".into());
     }
-    if effects.input_answered {
-        described.push("pending input answered with empty answers".into());
+    if effects.input_closed {
+        described.push("pending non-blocking input closed unanswered".into());
     }
     described
 }

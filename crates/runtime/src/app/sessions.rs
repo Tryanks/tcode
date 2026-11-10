@@ -15,7 +15,7 @@ pub struct SettleEffects {
     pub unpinned: bool,
     /// A non-blocking question was open; it closes with the provider,
     /// unanswered.
-    pub input_answered: bool,
+    pub input_closed: bool,
 }
 
 /// Sessions viewed by clients and sessions retained for in-flight work or re-adoption.
@@ -1309,7 +1309,7 @@ impl AppState {
                 })
                 .map_or(0, |workspace| workspace.terminals.len()),
             unpinned: meta.as_ref().is_some_and(|meta| meta.pinned_at.is_some()),
-            input_answered: resident
+            input_closed: resident
                 .and_then(|session| session.timeline.pending_user_input.as_ref())
                 .is_some_and(|input| !input.delivery.is_blocking()),
         }
