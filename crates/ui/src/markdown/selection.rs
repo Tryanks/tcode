@@ -786,7 +786,7 @@ impl RenderOnce for SelectionArea {
                     "copy",
                     crate::tr!("edit_menu.copy").into_owned(),
                     move |_, cx| {
-                        let text = copy.read(cx).selected_text(cx).trim().to_string();
+                        let text = copy.read(cx).selected_text(cx);
                         if !text.is_empty() {
                             cx.write_to_clipboard(ClipboardItem::new_string(text));
                         }
@@ -816,7 +816,7 @@ impl RenderOnce for SelectionArea {
             .on_action({
                 let document = document.clone();
                 move |_: &gpui_base::input::Copy, _, cx| {
-                    let text = document.read(cx).selected_text(cx).trim().to_string();
+                    let text = document.read(cx).selected_text(cx);
                     if text.is_empty() {
                         cx.propagate();
                         return;
