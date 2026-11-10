@@ -168,10 +168,7 @@ impl SystemProbe {
     }
 
     pub(super) fn read(&self, path: &Path) -> Option<String> {
-        let metadata = std::fs::metadata(path).ok()?;
-        (metadata.len() <= 1024 * 1024)
-            .then(|| std::fs::read_to_string(path).ok())
-            .flatten()
+        std::fs::read_to_string(path).ok()
     }
 
     pub(super) fn which(&self, name: &str, env: &[(String, String)]) -> Option<PathBuf> {
@@ -222,18 +219,11 @@ async fn run_process(command: &UpdateCommand, timeout: Duration) -> Option<Strin
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     let mut child = process.spawn().ok()?;
-    let stdout = child.stdout.take()?;
+    let mut stdout = child.stdout.take()?;
     smol::future::race(
         async {
             let mut output = Vec::new();
-            stdout
-                .take(4 * 1024 * 1024 + 1)
-                .read_to_end(&mut output)
-                .await
-                .ok()?;
-            if output.len() > 4 * 1024 * 1024 {
-                return None;
-            }
+            stdout.read_to_end(&mut output).await.ok()?;
             child
                 .status()
                 .await
@@ -391,14 +381,7 @@ async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Option<String> {
                 .call()
                 .ok()?;
             let mut bytes = Vec::new();
-            response
-                .into_reader()
-                .take(1024 * 1024 + 1)
-                .read_to_end(&mut bytes)
-                .ok()?;
-            if bytes.len() > 1024 * 1024 {
-                return None;
-            }
+            response.into_reader().read_to_end(&mut bytes).ok()?;
             let json: Value = serde_json::from_slice(&bytes).ok()?;
             json.get("version")?.as_str().map(str::to_string)
         }
@@ -428,11 +411,7 @@ async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Option<String> {
                 .call()
                 .ok()?;
             let mut version = String::new();
-            response
-                .into_reader()
-                .take(256)
-                .read_to_string(&mut version)
-                .ok()?;
+            response.into_reader().read_to_string(&mut version).ok()?;
             let parsed = super::parse_version(&version)?;
             if maximum.is_some_and(|maximum| parsed > maximum) {
                 return None;

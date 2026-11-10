@@ -36,7 +36,6 @@ impl ReleaseFeed {
                     authentication: Authentication::Anonymous,
                     operation: "LatestRelease",
                     timeout: Duration::from_secs(10),
-                    body_limit: 1024 * 1024,
                     ..Default::default()
                 },
             )
@@ -71,7 +70,6 @@ pub enum FetchError {
     Network,
     RateLimited { status: u16 },
     Http { status: u16 },
-    Read,
     ResponseTooLarge,
 }
 
