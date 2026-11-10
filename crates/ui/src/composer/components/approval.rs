@@ -435,7 +435,7 @@ mod tests {
             tcode_runtime::pipe::HostServices::default(),
         )
         .unwrap();
-        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
+        let session_id = smol::block_on(host.update_state_for_test(|state, cx| {
             let id = state.start_draft("approval-list".into(), std::env::temp_dir(), cx);
             let request = ApprovalRequest {
                 id: "patch".into(),
@@ -447,7 +447,7 @@ mod tests {
                 options,
             };
             state.provider_event_for_test(&id, agent::AgentEvent::ApprovalRequested(request), cx);
-            (id.clone(), state.residents.live[&id].timeline.clone())
+            id
         }))
         .unwrap();
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
@@ -469,9 +469,6 @@ mod tests {
                 store.baseline_ready()
                     && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
-        });
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let (_composer, cx) = cx.add_window_view(|window, cx| {
             Composer::new_with_layout(store.clone(), Some(session_id), compact, window, cx)

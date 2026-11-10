@@ -798,24 +798,23 @@ mod tests {
             tcode_runtime::pipe::HostServices::default(),
         )
         .unwrap();
-        let (session_id, timeline) =
-            smol::block_on(host.update_state_for_test(move |state, cx| {
-                let id = state.start_draft("question".into(), std::env::temp_dir(), cx);
-                for event in [
-                    agent::AgentEvent::TurnStarted {
-                        turn_id: "turn".into(),
-                    },
-                    agent::AgentEvent::UserInputRequested {
-                        request_id: "ask".into(),
-                        questions: vec![question("first"), question("second")],
-                        delivery,
-                    },
-                ] {
-                    state.provider_event_for_test(&id, event, cx);
-                }
-                (id.clone(), state.residents.live[&id].timeline.clone())
-            }))
-            .unwrap();
+        let session_id = smol::block_on(host.update_state_for_test(move |state, cx| {
+            let id = state.start_draft("question".into(), std::env::temp_dir(), cx);
+            for event in [
+                agent::AgentEvent::TurnStarted {
+                    turn_id: "turn".into(),
+                },
+                agent::AgentEvent::UserInputRequested {
+                    request_id: "ask".into(),
+                    questions: vec![question("first"), question("second")],
+                    delivery,
+                },
+            ] {
+                state.provider_event_for_test(&id, event, cx);
+            }
+            id
+        }))
+        .unwrap();
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -835,9 +834,6 @@ mod tests {
                 store.baseline_ready()
                     && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
-        });
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let (composer, cx) = cx.add_window_view(|window, cx| {
             Composer::new(store.clone(), Some(session_id), window, cx)

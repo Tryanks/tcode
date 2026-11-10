@@ -370,10 +370,8 @@ mod tests {
             tcode_runtime::pipe::HostServices::default(),
         )
         .unwrap();
-        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
-            let id = state.start_draft("dictation".into(), std::env::temp_dir(), cx);
-            let timeline = state.residents.live[&id].timeline.clone();
-            (id, timeline)
+        let session_id = smol::block_on(host.update_state_for_test(|state, cx| {
+            state.start_draft("dictation".into(), std::env::temp_dir(), cx)
         }))
         .unwrap();
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
@@ -395,9 +393,6 @@ mod tests {
                 store.baseline_ready()
                     && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
-        });
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let sink = Rc::new(RefCell::new(None::<async_channel::Sender<PlatformEvent>>));
         let (composer, cx) = cx.add_window_view(|window, cx| {

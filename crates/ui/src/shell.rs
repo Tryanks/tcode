@@ -18268,57 +18268,53 @@ pub(crate) mod tests {
         assert_eq!(overlay(cx), None, "it goes once the pointer leaves it");
     }
 
-    /// thread-1's timeline: a running turn holding a question, an agent
-    /// when `agent`, a first answer, and the command it runs now, which has
-    /// printed `lines` short lines so far: none long enough to wrap at any
-    /// width the tests draw, so only motion changes their heights.
-    fn reparented_timeline(lines: usize, agent: bool) -> tcode_core::session::Timeline {
-        use crate::chat::tests::{assistant, entry, user_item};
-        let mut timeline = tcode_core::session::Timeline::default();
-        timeline.turns = vec![tcode_core::session::TurnMeta {
-            running: true,
-            ..Default::default()
-        }];
-        timeline
-            .entries
-            .push(entry("user", user_item("Look at the build.")));
-        if agent {
-            timeline.entries.push(entry(
-                "agent-1",
-                tcode_core::session::EntryContent::Item(agent::ItemContent::Subagent {
-                    agent_type: "Explore".into(),
-                    description: "Survey the code".into(),
-                    status: agent::ItemStatus::InProgress,
-                    summary: None,
-                    model: None,
-                    effort: None,
-                }),
-            ));
-        }
-        timeline
-            .entries
-            .push(entry("reply", assistant("I will build it first.")));
-        let output: String = (0..lines).map(|line| format!("line {line}\n")).collect();
-        timeline.entries.push(entry(
-            "cmd",
-            tcode_core::session::EntryContent::Item(agent::ItemContent::CommandExecution {
-                command: "cargo build".into(),
-                output,
-                exit_code: None,
-                status: agent::ItemStatus::InProgress,
-            }),
-        ));
-        timeline
-    }
-
-    fn show_timeline(
-        store: &Entity<WorkspaceStore>,
-        timeline: tcode_core::session::Timeline,
-        cx: &mut VisualTestContext,
-    ) {
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test("thread-1".into(), timeline, cx)
+    /// The host serves thread-1 as a running turn holding a question, a
+    /// first answer, and the command it runs now, which has printed two
+    /// short lines so far: none long enough to wrap at any width the tests
+    /// draw, so only motion changes their heights.
+    fn serve_running_command(host: &MountedShell) {
+        let item = |id: &str, content| agent::ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content,
+        };
+        let mut status = session_status("thread-1", std::path::Path::new(PANES_CWD));
+        status.activity.working = true;
+        status.activity.turn_running = true;
+        status.running_turn = Some(tcode_core::session::RunningTurn {
+            turn: 0,
+            started_at: None,
         });
+        scenes::serve_log(
+            host,
+            status,
+            vec![
+                scenes::started(),
+                agent::AgentEvent::ItemCompleted(item(
+                    "user",
+                    agent::ItemContent::UserMessage {
+                        text: "Look at the build.".into(),
+                        attachments: Vec::new(),
+                    },
+                )),
+                agent::AgentEvent::ItemCompleted(item(
+                    "reply",
+                    agent::ItemContent::AssistantMessage {
+                        text: "I will build it first.".into(),
+                        summarized: false,
+                    },
+                )),
+                agent::AgentEvent::ItemStarted(item(
+                    "cmd",
+                    agent::ItemContent::CommandExecution {
+                        command: "cargo build".into(),
+                        output: "line 0\nline 1\n".into(),
+                        exit_code: None,
+                        status: agent::ItemStatus::InProgress,
+                    },
+                )),
+            ],
+        );
     }
 
     /// One display frame: time passes and the window draws what it asked
@@ -18539,8 +18535,7 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
         cx.update(|_, cx| cx.set_reduce_motion(true));
-        let store = store_of(&shell, cx);
-        show_timeline(&store, reparented_timeline(2, false), cx);
+        serve_running_command(&host);
         crate::test_frames::draw_settled(cx);
         // Shut, the command's header is the timeline's last control.
         click_command(cx);
