@@ -1528,7 +1528,7 @@ fn stays(result: &PullRequestActionResult) -> bool {
     )
 }
 
-fn notice_text(result: &PullRequestActionResult) -> Option<String> {
+fn notice_text(result: &PullRequestActionResult, machine: &str) -> Option<String> {
     let PullRequestActionResult::Rejected(rejection) = result else {
         return None;
     };
@@ -1547,15 +1547,16 @@ fn notice_text(result: &PullRequestActionResult) -> Option<String> {
         }
         PullRequestRejection::NoGitIdentity => tr_with(
             "rebase_blocked_identity",
-            &[("machine", machine_label(None))],
+            &[("machine", machine.to_owned())],
         ),
         _ => return None,
     })
 }
 
-fn machine_label(store: Option<&WorkspaceStore>) -> String {
+fn machine_label(store: &WorkspaceStore) -> String {
     store
-        .and_then(|store| store.remote_host_name().map(str::to_owned))
+        .remote_host_name()
+        .map(str::to_owned)
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| tr("this_machine"))
 }
@@ -1844,7 +1845,7 @@ impl MergeStackDialog {
                     window.push_notification(note, cx);
                 }
                 if stays(&result) {
-                    this.notice = notice_text(&result);
+                    this.notice = notice_text(&result, &machine_label(target.store.read(cx)));
                 } else {
                     window.close_dialog(cx);
                 }
@@ -2443,7 +2444,7 @@ impl RebaseStackDialog {
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Ok(state)) = &self.state else { return };
-        let machine = machine_label(Some(self.target.store.read(cx)));
+        let machine = machine_label(self.target.store.read(cx));
         if self.sending || !self.blockers(state, &machine).is_empty() || self.notice.is_some() {
             return;
         }
@@ -2495,7 +2496,7 @@ impl RebaseStackDialog {
                         window.push_notification(note, cx);
                     }
                     if stays(&result) {
-                        this.notice = notice_text(&result);
+                        this.notice = notice_text(&result, &machine_label(target.store.read(cx)));
                     } else {
                         window.close_dialog(cx);
                     }
@@ -2525,7 +2526,7 @@ impl RebaseStackDialog {
         let target = &self.target;
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
-        let machine = machine_label(Some(target.store.read(cx)));
+        let machine = machine_label(target.store.read(cx));
         let base = target
             .offer
             .stack
@@ -2832,7 +2833,7 @@ fn progress_view(
 ) -> AnyElement {
     let theme = cx.theme().clone();
     let store = target.store.read(cx);
-    let machine = machine_label(Some(store));
+    let machine = machine_label(store);
     let offer = StackOffer::new(
         &target.offer.key,
         store.pull_requests(&target.session),
