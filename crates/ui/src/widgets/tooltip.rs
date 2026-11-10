@@ -1,12 +1,11 @@
 use std::rc::Rc;
 
 use crate::overlay::{TooltipBuilder, TooltipHost, TooltipOwner};
-use crate::{theme::ActiveTheme as _, typography::TextRole as _, widgets::Kbd};
+use crate::{theme::ActiveTheme as _, typography::TextRole as _};
 use gpui::{
-    Action, AnyElement, App, Bounds, Element, ElementId, Entity, GlobalElementId, Hitbox,
-    HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseExitEvent, MouseMoveEvent,
-    ParentElement, Pixels, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
-    Window, canvas, div, prelude::FluentBuilder as _,
+    AnyElement, App, Bounds, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior,
+    InspectorElementId, IntoElement, LayoutId, MouseExitEvent, MouseMoveEvent, ParentElement,
+    Pixels, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, canvas, div,
 };
 use gpui_base::StyledExt as _;
 
@@ -23,8 +22,6 @@ type ElementBuilder = Box<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 pub struct Tooltip {
     style: StyleRefinement,
     content: TooltipContent,
-    key_binding: Option<Kbd>,
-    action: Option<(Box<dyn Action>, Option<SharedString>)>,
 }
 
 impl Tooltip {
@@ -32,8 +29,6 @@ impl Tooltip {
         Self {
             style: StyleRefinement::default(),
             content: TooltipContent::Text(text.into()),
-            key_binding: None,
-            action: None,
         }
     }
 
@@ -47,28 +42,11 @@ impl Tooltip {
             content: TooltipContent::Element(Box::new(move |window, cx| {
                 builder(window, cx).into_any_element()
             })),
-            key_binding: None,
-            action: None,
         }
-    }
-
-    pub fn action(mut self, action: &dyn Action, context: Option<&str>) -> Self {
-        self.action = Some((action.boxed_clone(), context.map(SharedString::new)));
-        self
-    }
-
-    pub fn key_binding(mut self, key_binding: Option<Kbd>) -> Self {
-        self.key_binding = key_binding;
-        self
     }
 
     /// The popup at `progress` of its appear motion.
     pub(crate) fn surface(&self, progress: f32, window: &mut Window, cx: &mut App) -> AnyElement {
-        let key_binding = self.key_binding.clone().or_else(|| {
-            self.action.as_ref().and_then(|(action, context)| {
-                Kbd::binding_for_action(action.as_ref(), context.as_deref(), window)
-            })
-        });
         crate::material::raised(gpui_base::Tooltip::new("tooltip-popup"))
             .h_flex()
             .relative()
@@ -82,25 +60,14 @@ impl Tooltip {
             .border_color(cx.theme().border)
             .shadow_md()
             .rounded(crate::material::radius_chip(cx))
-            .justify_between()
             .py_0p5()
             .px_2()
             .text_token(&cx.theme().tokens.typography.sm)
-            .gap_3()
             .refine_style(&self.style)
             .child(div().child(match &self.content {
                 TooltipContent::Text(text) => text.clone().into_any_element(),
                 TooltipContent::Element(builder) => builder(window, cx),
             }))
-            .when_some(key_binding, |this, kbd| {
-                this.child(
-                    div()
-                        .text_token(&cx.theme().tokens.typography.xs)
-                        .flex_shrink_0()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(kbd.appearance(false)),
-                )
-            })
             .into_any_element()
     }
 }

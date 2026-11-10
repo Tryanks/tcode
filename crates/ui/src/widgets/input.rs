@@ -14,8 +14,8 @@ use gpui::{
     RenderOnce, SharedString, StyleRefinement, Styled, TextAlign, TouchPhase, Window, div,
     prelude::FluentBuilder as _, px,
 };
+use gpui_base::InputBase;
 use gpui_base::StyledExt as _;
-use gpui_base::{InputBase, RoleOverride};
 use serde::Deserialize;
 
 /// How long a value drawn here takes to glide to a new one.
@@ -82,10 +82,7 @@ pub struct Input {
     style: StyleRefinement,
     height: Option<DefiniteLength>,
     appearance: bool,
-    bordered: bool,
     disabled: bool,
-    tab_index: isize,
-    role: RoleOverride,
     aria_label: Option<SharedString>,
     placeholder: Option<SharedString>,
 }
@@ -103,10 +100,7 @@ impl Input {
             style: StyleRefinement::default(),
             height: None,
             appearance: true,
-            bordered: true,
             disabled: false,
-            tab_index: 0,
-            role: RoleOverride::Implicit,
             aria_label: None,
             placeholder: None,
         }
@@ -115,20 +109,8 @@ impl Input {
         self.appearance = appearance;
         self
     }
-    pub fn bordered(mut self, bordered: bool) -> Self {
-        self.bordered = bordered;
-        self
-    }
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
-        self
-    }
-    pub fn tab_index(mut self, tab_index: isize) -> Self {
-        self.tab_index = tab_index;
-        self
-    }
-    pub fn role(mut self, role: impl Into<RoleOverride>) -> Self {
-        self.role = role.into();
         self
     }
     pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
@@ -389,7 +371,6 @@ impl RenderOnce for Input {
                 .when(disabled, |this| {
                     this.capture_any_mouse_down(|_, window, _| window.prevent_default())
                 })
-                .role(self.role)
                 .when_some(aria_label.clone(), |this, label| {
                     this.accessibility_label(label)
                 })
@@ -410,8 +391,7 @@ impl RenderOnce for Input {
                         .when_some(self.height, |this, height| this.h(height))
                 })
                 .when(self.appearance, |this| {
-                    this.bg(theme.background)
-                        .when(self.bordered, |this| this.border_1().border_color(border))
+                    this.bg(theme.background).border_1().border_color(border)
                 })
                 .refine_style(&self.style)
                 .text_color(foreground)
@@ -532,10 +512,6 @@ impl Textarea {
     }
     pub fn appearance(mut self, value: bool) -> Self {
         self.input = self.input.appearance(value);
-        self
-    }
-    pub fn bordered(mut self, value: bool) -> Self {
-        self.input = self.input.bordered(value);
         self
     }
     pub fn disabled(mut self, value: bool) -> Self {
