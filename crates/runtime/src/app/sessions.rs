@@ -85,7 +85,7 @@ impl AppState {
                 // subscriber rebuilds the frame. A later one reads that same
                 // retained frame and continues from the shared delta sequence.
                 Topic::Terminal { terminal_id } => {
-                    self.refresh_terminal_projection(*terminal_id);
+                    self.refresh_terminal_projection(*terminal_id, cx);
                 }
                 Topic::CommandOutput { .. } => self.open_command_output(&subscription.topic),
                 Topic::Preview { client } => self.preview_client_subscribed(client, cx),

@@ -39,18 +39,30 @@ pub(crate) fn observed_events(link: &HostLink) -> async_channel::Receiver<EventE
 }
 
 pub(super) fn fixture() -> (SpawnedHost, HostMux, HostLink, String) {
-    let (host, mux, link, session_id, _) = fixture_in_project();
+    fixture_on(crate::clock::HostClock::default())
+}
+
+/// [`fixture`], on a host that keeps `clock`.
+pub(super) fn fixture_on(
+    clock: crate::clock::HostClock,
+) -> (SpawnedHost, HostMux, HostLink, String) {
+    let (host, mux, link, session_id, _) = fixture_in_project(clock);
     (host, mux, link, session_id)
 }
 
-/// [`fixture`], with the thread's directory.
-fn fixture_in_project() -> (SpawnedHost, HostMux, HostLink, String, PathBuf) {
+/// [`fixture_on`], with the thread's directory.
+fn fixture_in_project(
+    clock: crate::clock::HostClock,
+) -> (SpawnedHost, HostMux, HostLink, String, PathBuf) {
     let root = std::env::temp_dir().join(format!("tcode-p4b-{}", uuid::Uuid::new_v4()));
     let project = root.join("project");
     std::fs::create_dir_all(&project).unwrap();
     let host = spawn_host(
         SessionStore::open_at(root).unwrap(),
-        HostServices::default(),
+        HostServices {
+            clock,
+            ..HostServices::default()
+        },
     )
     .unwrap();
     let mux = HostMux::new(host.attachments.clone(), host.from_host.clone());
@@ -925,7 +937,8 @@ fn dev_server_process() {
 #[test]
 fn a_remote_client_sees_the_dev_servers_the_host_machine_runs() {
     use std::io::BufRead as _;
-    let (_host, mux, desk, session_id, project) = fixture_in_project();
+    let (_host, mux, desk, session_id, project) =
+        fixture_in_project(crate::clock::HostClock::default());
     let phone = linked(&mux);
     let events = observed_events(&phone);
     let executable = std::env::current_exe().unwrap();
