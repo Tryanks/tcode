@@ -49,17 +49,8 @@ fn main_window_background() -> WindowBackgroundAppearance {
     }
 }
 
-const QUIT_PROMPT_TIMEOUT: Duration = Duration::from_secs(15);
-
-fn finish_quit_prompt(window_state: &Entity<WindowState>, epoch: u64, cx: &mut App) -> bool {
-    window_state.update(cx, |state, _| {
-        if !state.quit_prompt_open || state.quit_prompt_epoch != epoch {
-            return false;
-        }
-        state.quit_prompt_epoch = state.quit_prompt_epoch.wrapping_add(1);
-        state.quit_prompt_open = false;
-        true
-    })
+fn finish_quit_prompt(window_state: &Entity<WindowState>, cx: &mut App) {
+    window_state.update(cx, |state, _| state.quit_prompt_open = false);
 }
 
 fn handle_quit(_: &Quit, shell: &Entity<AppShell>, cx: &mut App) {
@@ -94,17 +85,12 @@ fn handle_quit(_: &Quit, shell: &Entity<AppShell>, cx: &mut App) {
     };
 
     let window_state = shell.read(cx).window_state();
-    let epoch = window_state.update(cx, |state, _| {
-        if state.quit_prompt_open {
-            return None;
-        }
-        state.quit_prompt_epoch = state.quit_prompt_epoch.wrapping_add(1);
-        state.quit_prompt_open = true;
-        Some(state.quit_prompt_epoch)
+    let opened = window_state.update(cx, |state, _| {
+        !std::mem::replace(&mut state.quit_prompt_open, true)
     });
-    let Some(epoch) = epoch else {
+    if !opened {
         return;
-    };
+    }
 
     let prompt_state = window_state.clone();
     if window_handle
@@ -132,7 +118,7 @@ fn handle_quit(_: &Quit, shell: &Entity<AppShell>, cx: &mut App) {
                                     .label(tcode_ui::tr!("quit.confirm"))
                                     .danger()
                                     .on_click(move |_, window, cx| {
-                                        finish_quit_prompt(&quit_state, epoch, cx);
+                                        finish_quit_prompt(&quit_state, cx);
                                         window.close_dialog(cx);
                                         cx.quit();
                                     }),
@@ -142,38 +128,26 @@ fn handle_quit(_: &Quit, shell: &Entity<AppShell>, cx: &mut App) {
                                     .label(tcode_ui::tr!("settings.cancel"))
                                     .primary()
                                     .on_click(move |_, window, cx| {
-                                        finish_quit_prompt(&cancel_state, epoch, cx);
+                                        finish_quit_prompt(&cancel_state, cx);
                                         window.close_dialog(cx);
                                     }),
                             ),
                     )
                     .on_ok(move |_, _, cx| {
-                        finish_quit_prompt(&enter_state, epoch, cx);
+                        finish_quit_prompt(&enter_state, cx);
                         true
                     })
                     .on_cancel(move |_, _, cx| {
-                        finish_quit_prompt(&escape_state, epoch, cx);
+                        finish_quit_prompt(&escape_state, cx);
                         true
                     })
             });
         })
         .is_err()
     {
-        finish_quit_prompt(&window_state, epoch, cx);
+        finish_quit_prompt(&window_state, cx);
         cx.quit();
-        return;
     }
-
-    let timeout_state = window_state.clone();
-    cx.spawn(async move |cx| {
-        cx.background_executor().timer(QUIT_PROMPT_TIMEOUT).await;
-        cx.update(|cx| {
-            if finish_quit_prompt(&timeout_state, epoch, cx) {
-                let _ = window_handle.update(cx, |_, window, cx| window.close_dialog(cx));
-            }
-        });
-    })
-    .detach();
 }
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {
