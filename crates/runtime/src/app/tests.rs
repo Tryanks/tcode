@@ -594,32 +594,40 @@ enum MirrorEnd {
     SessionClosed,
 }
 
-// Exercise provider routing and disk replay, including residency changes between events.
-fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, end: MirrorEnd, reload: bool) {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-native-mirror-turn-lifecycle");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+// Exercise provider routing and disk replay, including residency changes
+// between events. Each case is a parent thread of its own on one host.
+fn assert_native_mirror_turn_lifecycle(
+    cx: &mut TestAppContext,
+    state: &TestEntity,
+    evict: bool,
+    late: bool,
+    end: MirrorEnd,
+) {
+    let parent = format!("parent-{evict}-{late}-{end:?}");
+    let parent = parent.as_str();
     let mirror_id = state.update(cx, |state, cx| {
         let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
-        meta.id = "parent".into();
+        meta.id = parent.into();
         state.sessions.push(meta.clone());
         state.install_selected(ActiveSession::new(meta, false, Vec::new()));
         state.on_event(
-            "parent",
+            parent,
             AgentEvent::TurnStarted {
                 turn_id: "parent-turn".into(),
             },
             cx,
         );
         state.on_event(
-            "parent",
+            parent,
             native_mirror_parent_item(ItemStatus::InProgress),
             cx,
         );
         let id = state
             .sessions
             .iter()
-            .find(|m| m.native_subagent.is_some())
+            .find(|m| {
+                m.native_subagent.is_some() && m.parent_session_id.as_deref() == Some(parent)
+            })
             .unwrap()
             .id
             .clone();
@@ -627,24 +635,20 @@ fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, end: MirrorEnd, 
             if evict && i == 1 {
                 assert!(state.residents.evict(&id).is_some());
                 assert!(state.resident(&id).is_none());
-                if reload {
-                    // Force metadata lookup and its asynchronous timeline load.
-                    state.native_subagent_sessions.clear();
-                }
             }
-            state.on_event("parent", native_mirror_child_item(i), cx);
+            state.on_event(parent, native_mirror_child_item(i), cx);
         }
         match end {
             MirrorEnd::SubagentCompleted => {
                 state.on_event(
-                    "parent",
+                    parent,
                     native_mirror_parent_item(ItemStatus::Completed),
                     cx,
                 );
             }
             MirrorEnd::ParentTurnThenSubagentCompleted => {
                 state.on_event(
-                    "parent",
+                    parent,
                     AgentEvent::TurnCompleted {
                         turn_id: "parent-turn".into(),
                         status: TurnStatus::Completed,
@@ -658,19 +662,19 @@ fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, end: MirrorEnd, 
                     "background subagent keeps running after the parent turn"
                 );
                 assert!(evict || state.turn_running_for(&id));
-                state.on_event("parent", native_mirror_child_item(3), cx);
+                state.on_event(parent, native_mirror_child_item(3), cx);
                 state.on_event(
-                    "parent",
+                    parent,
                     native_mirror_parent_item(ItemStatus::Completed),
                     cx,
                 );
             }
             MirrorEnd::SessionClosed => {
-                state.on_event("parent", AgentEvent::SessionClosed { reason: None }, cx);
+                state.on_event(parent, AgentEvent::SessionClosed { reason: None }, cx);
             }
         }
         if late {
-            state.on_event("parent", native_mirror_child_item(4), cx);
+            state.on_event(parent, native_mirror_child_item(4), cx);
         }
         id
     });
@@ -791,17 +795,17 @@ fn native_mirror_child_item(i: usize) -> AgentEvent {
 
 #[test]
 fn native_mirror_keeps_one_turn_across_residency_late_items_and_parent_completion() {
-    for (evict, reload) in [(false, false), (true, false), (true, true)] {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-native-mirror-turn-lifecycle");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    for evict in [false, true] {
         for late in [false, true] {
             for end in [
                 MirrorEnd::SubagentCompleted,
                 MirrorEnd::ParentTurnThenSubagentCompleted,
                 MirrorEnd::SessionClosed,
             ] {
-                eprintln!(
-                    "mirror lifecycle: evict={evict}, reload={reload}, late={late}, end={end:?}"
-                );
-                assert_native_mirror_turn_lifecycle(evict, late, end, reload);
+                assert_native_mirror_turn_lifecycle(cx, &state, evict, late, end);
             }
         }
     }
@@ -2114,7 +2118,7 @@ fn title_session_uses_configured_model_with_low_effort() {
 
 #[test]
 fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
-    for (outcome, raw_title, status, output_tokens, expected) in [
+    let cases = [
         (
             "generated",
             "Improve QR Sharing",
@@ -2193,16 +2197,17 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
             None,
             Some("Old title"),
         ),
-    ] {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("tcode-regenerate-title");
+    ];
+    // Every case is a thread of its own, stored before the host starts so
+    // none is resident when its title is asked for.
+    let store = TestStore::new("tcode-regenerate-title");
+    let image = store.root().join("qr.png");
+    fs::write(&image, [1, 2, 3]).unwrap();
+    let ids = cases.map(|_| {
         let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
         meta.title = "Old title".into();
         meta.updated_at = 123;
-        let id = meta.id.clone();
         store.upsert_meta(&meta).unwrap();
-        let image = store.root().join("qr.png");
-        fs::write(&image, [1, 2, 3]).unwrap();
         for (item_id, content) in [
             (
                 "user",
@@ -2222,7 +2227,7 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
         ] {
             store
                 .append_event(
-                    &id,
+                    &meta.id,
                     1,
                     &AgentEvent::ItemCompleted(ThreadItem {
                         id: item_id.into(),
@@ -2232,24 +2237,29 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                 )
                 .unwrap();
         }
-        let scripted = scripted_provider(ProviderKind::Codex);
-        let state = cx.new_entity({
-            let mut state = TestClientState::new((*store).clone());
-            state.ai_title_generation_enabled = true;
-            state.set_provider_launcher_for_test(scripted.launcher);
-            state
-        });
-        state.deliver(
-            cx,
-            1000,
-            tcode_protocol::ClientPayload::Subscribe(Subscription {
-                topic: Topic::Index,
-                after: None,
-                known_index: None,
-            }),
-        );
-        cx.run_until_parked();
-        cx.drain_outgoing();
+        meta.id
+    });
+    let cx = &mut TestAppContext::default();
+    let scripted = scripted_provider(ProviderKind::Codex);
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*store).clone());
+        state.ai_title_generation_enabled = true;
+        state.set_provider_launcher_for_test(scripted.launcher);
+        state
+    });
+    state.deliver(
+        cx,
+        1000,
+        tcode_protocol::ClientPayload::Subscribe(Subscription {
+            topic: Topic::Index,
+            after: None,
+            known_index: None,
+        }),
+    );
+    cx.run_until_parked();
+    cx.drain_outgoing();
+    for ((outcome, raw_title, status, output_tokens, expected), id) in cases.into_iter().zip(ids)
+    {
         if outcome == "cached" {
             state.update(cx, |state, cx| {
                 state.record_event(
@@ -2385,12 +2395,13 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                 .find(|meta| meta.id == id);
             assert_eq!(persisted.as_ref().map(|meta| meta.title.as_str()), expected);
             if !matches!(outcome, "renamed" | "deleted") {
-                assert_eq!(state.sessions[0].updated_at, 123, "{outcome}");
+                assert_eq!(state.find_meta(&id).unwrap().updated_at, 123, "{outcome}");
                 assert_eq!(persisted.unwrap().updated_at, 123, "{outcome}");
             }
         });
+        let sent = cx.drain_outgoing();
         if outcome == "failed" {
-            assert!(cx.drain_outgoing().iter().any(|message| matches!(
+            assert!(sent.iter().any(|message| matches!(
                 message,
                 HostMessage::Event(EventEnvelope {
                     event: ServerEvent::Runtime(RuntimeEvent::Error(
@@ -2400,6 +2411,12 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                 })
             )));
         }
+        // The scratch session the title ran in is stopped once it answered.
+        assert!(matches!(
+            scripted.commands.try_recv(),
+            Ok(SessionCommand::Shutdown)
+        ));
+        assert!(scripted.commands.try_recv().is_err(), "{outcome}");
     }
 }
 
