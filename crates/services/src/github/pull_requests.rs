@@ -285,16 +285,8 @@ fn decode_summary(raw: &Value) -> Option<Summary> {
 }
 pub(super) fn decode_stack(raw: &Value, repository: &Repository) -> Option<PullRequestStack> {
     let number = raw["number"].as_u64()?;
-    let id = raw["id"]
-        .as_str()
-        .map(str::to_owned)
-        .or_else(|| raw["id"].as_u64().map(|n| n.to_string()))
-        .or_else(|| string(raw, "node_id"))
-        .unwrap_or_else(|| number.to_string());
-    let base = raw["base"]
-        .as_str()
-        .or_else(|| raw["base"]["ref"].as_str())?
-        .to_owned();
+    let id = raw["id"].as_u64()?.to_string();
+    let base = string(&raw["base"], "ref")?;
     let layers: Option<Vec<_>> = raw["pull_requests"]
         .as_array()?
         .iter()
@@ -419,5 +411,51 @@ mod tests {
             Some(ReviewDecision::Approved)
         );
         assert_eq!(decision(Value::Null, &[]), None);
+    }
+
+    /// A stack as GitHub's REST API "Get a stack" returns it. Shape: the stack schema of
+    /// docs.github.com/en/rest/pulls/stacks (`id` an integer, `base.ref`, each pull request's
+    /// `number`, `state` open or closed, `merged_at`, `head.ref`). Content is invented.
+    #[test]
+    fn a_rest_stack_reads_its_layers_bottom_first() {
+        let repository = Repository {
+            host: "github.com".into(),
+            owner: "example-org".into(),
+            name: "tool".into(),
+        };
+        let stack = json!({
+            "id": 4021,
+            "number": 3,
+            "node_id": "PRS_invented",
+            "url": "https://api.github.com/repos/example-org/tool/stacks/3",
+            "base": { "ref": "main" },
+            "open": true,
+            "created_at": "2026-01-02T03:04:05Z",
+            "pull_requests": [
+                { "number": 11, "state": "closed", "draft": false,
+                  "merged_at": "2026-01-03T00:00:00Z",
+                  "head": { "ref": "parser-1", "sha": "1111111111111111111111111111111111111111" } },
+                { "number": 12, "state": "open", "draft": true, "merged_at": null,
+                  "head": { "ref": "parser-2", "sha": "2222222222222222222222222222222222222222" } }
+            ]
+        });
+        let stack = decode_stack(&stack, &repository).expect("a documented stack");
+        assert_eq!((stack.id.as_str(), stack.number), ("4021", 3));
+        assert_eq!(stack.base, "main");
+        assert_eq!(
+            stack
+                .layers
+                .iter()
+                .map(|layer| (layer.number, layer.head_branch.as_str(), layer.state))
+                .collect::<Vec<_>>(),
+            [
+                (11, "parser-1", PullRequestState::Merged),
+                (12, "parser-2", PullRequestState::Open)
+            ]
+        );
+        assert_eq!(
+            stack.layers[1].url,
+            "https://github.com/example-org/tool/pull/12"
+        );
     }
 }
