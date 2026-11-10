@@ -17,6 +17,8 @@ pub(super) async fn serve<S: AsyncWrite + Unpin>(
         .and_then(|header| header.strip_prefix("Bearer "))
         .unwrap_or_default()
         .to_owned();
+    // Marked by every revocation and token rotation from here on.
+    let mut devices_changed = shared.devices_changed.subscribe();
     let device = shared.auth.lock().unwrap().device_id_for_token(&token);
     let Some(device) = device else {
         return response(stream, "401 Unauthorized", "text/plain", b"invalid token").await;
@@ -156,7 +158,8 @@ pub(super) async fn serve<S: AsyncWrite + Unpin>(
     };
     let revoked = async {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            // Cannot fail: `shared` holds the sender.
+            let _ = devices_changed.changed().await;
             if shared.auth.lock().unwrap().device_id_for_token(&token) != Some(device) {
                 break;
             }
