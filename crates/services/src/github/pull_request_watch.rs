@@ -215,7 +215,7 @@ pub fn detail(api: &GitHubApi, key: &PullRequestKey) -> Result<PullRequestWatchR
         ("", "")
     };
     let document = format!(
-        "query PullRequestWatchDetail($owner: String!, $name: String!, $number: Int!, $checksAfter: String) {{ viewer {{ login }} repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ number state mergedAt mergeable headRefOid baseRefName author {{ login }}{rules} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100, after: $checksAfter) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ __typename ... on StatusContext {{ context state targetUrl createdAt{required} }} ... on CheckRun {{ name status conclusion startedAt completedAt detailsUrl{required} checkSuite {{ workflowRun {{ runNumber workflow {{ databaseId name }} }} }} }} }} }} }} }} }} }} }} }} }}"
+        "query PullRequestWatchDetail($owner: String!, $name: String!, $number: Int!, $checksAfter: String) {{ viewer {{ login }} repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ state mergedAt mergeable headRefOid baseRefName author {{ login }}{rules} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100, after: $checksAfter) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ __typename ... on StatusContext {{ context state targetUrl createdAt{required} }} ... on CheckRun {{ name status conclusion startedAt completedAt detailsUrl{required} checkSuite {{ workflowRun {{ runNumber workflow {{ databaseId name }} }} }} }} }} }} }} }} }} }} }} }} }}"
     );
     let mut variables = repository_variables(key)?;
     let mut contexts = Vec::new();
@@ -227,9 +227,6 @@ pub fn detail(api: &GitHubApi, key: &PullRequestKey) -> Result<PullRequestWatchR
         let pr = &response["data"]["repository"]["pullRequest"];
         if pr.is_null() {
             return Err(GitHubError::NotFound);
-        }
-        if pr["number"].as_u64() != Some(key.number) {
-            return Err(GitHubError::InvalidResponse);
         }
         // A page of a newer head would mix two commits' checks.
         if let Some(first) = &first
