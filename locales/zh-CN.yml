@@ -6,7 +6,7 @@ chat:
   waiting_connection: "等待连接…"
   retry_delivery: "重试"
   discard_delivery: "丢弃"
-  history_record_too_large: 一条历史记录超过了 8 MiB 的响应大小限制。
+  history_record_too_large: 一条历史记录超过了发往此设备的单个应答能承载的大小。
   relayed: "已从 %{from} 接力至 %{to}"
   moved: "已从 %{from} 移入此目录，%{to} 以新会话继续"
   session_moved: "已从 %{from} 移至 %{to}，原会话在那里继续"

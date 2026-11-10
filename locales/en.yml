@@ -6,7 +6,7 @@ chat:
   waiting_connection: "Waiting for connection…"
   retry_delivery: "Retry"
   discard_delivery: "Discard"
-  history_record_too_large: A history record exceeds the 8 MiB response limit.
+  history_record_too_large: A history record is larger than one reply to this device can carry.
   relayed: "Relayed from %{from} to %{to}"
   moved: "Moved here from %{from}; %{to} continues in a new session"
   session_moved: "Moved from %{from} to %{to}; the same session continues there"

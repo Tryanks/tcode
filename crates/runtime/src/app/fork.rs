@@ -269,6 +269,9 @@ impl AppState {
                             },
                             after: None,
                         },
+                        // Every subscriber of the fork gets this window, so it
+                        // fits the line of any network connection.
+                        Some(tcode_protocol::MAX_LINE_BYTES),
                         cx,
                     );
                 }

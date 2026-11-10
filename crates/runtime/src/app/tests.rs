@@ -10416,12 +10416,6 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
             after: None,
         };
         let snapshot = events_reply(state, &subscription);
-        assert!(
-            tcode_protocol::encode_line(&HostMessage::Event(snapshot.clone()))
-                .unwrap()
-                .len()
-                <= tcode_protocol::MAX_SESSION_HISTORY_BYTES
-        );
         let ServerEvent::SessionSnapshot {
             from,
             records: tail,
@@ -10443,7 +10437,7 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
                 end,
                 truncated,
             } = state.event_records["large"]
-                .history_page(before, 200)
+                .history_page(before, 200, None)
                 .unwrap()
             else {
                 panic!("page")
@@ -10570,7 +10564,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
             records: page,
             truncated,
         } = state.event_records["streamed"]
-            .history_page(from, 200)
+            .history_page(from, 200, None)
             .unwrap()
         else {
             panic!("page")
@@ -11382,7 +11376,9 @@ fn superseded_turn_changes_cross_without_diffs() {
             .event_records
             .insert("changes".into(), session_log(records.clone()));
         let QueryResponse::SessionHistoryPage { records: sent, .. } =
-            state.event_records["changes"].history_page(4, 200).unwrap()
+            state.event_records["changes"]
+                .history_page(4, 200, None)
+                .unwrap()
         else {
             panic!("page")
         };
@@ -11856,27 +11852,24 @@ fn history_windows_are_byte_budgeted() {
         huge[199].event = AgentEvent::Warning {
             message: "w".repeat(2 * tcode_protocol::SESSION_WINDOW_BYTES),
         };
-        state
-            .event_records
-            .insert("wide".into(), session_log(huge.clone()));
+        state.event_records.insert("wide".into(), session_log(huge));
         let QueryResponse::SessionHistoryPage {
             from,
             records: sent,
             ..
-        } = state.event_records["wide"].history_page(200, 200).unwrap()
+        } = state.event_records["wide"]
+            .history_page(200, 200, Some(tcode_protocol::MAX_LINE_BYTES))
+            .unwrap()
         else {
             panic!("page")
         };
         assert_eq!((from, sent.len()), (199, 1));
 
-        // A record no reply can carry is refused by name; the client says so.
-        huge[199].event = AgentEvent::Warning {
-            message: "w".repeat(tcode_protocol::MAX_SESSION_HISTORY_BYTES),
-        };
-        state.event_records.insert("wide".into(), session_log(huge));
+        // A record whose reply is longer than the connection's line is refused
+        // by name; the client says so.
         assert_eq!(
             state.event_records["wide"]
-                .history_page(200, 1)
+                .history_page(200, 1, Some(2 * tcode_protocol::SESSION_WINDOW_BYTES))
                 .unwrap_err()
                 .code,
             "history_record_too_large"
@@ -11959,7 +11952,7 @@ fn events_reply(state: &AppState, subscription: &Subscription) -> EventEnvelope 
     EventEnvelope {
         request_id: None,
         topic: subscription.topic.clone(),
-        event: state.event_records[session_id].events_window(subscription),
+        event: state.event_records[session_id].events_window(subscription, None),
     }
 }
 
@@ -12435,13 +12428,16 @@ fn an_unindexed_cold_thread_opens_through_hydration() {
     );
     assert_eq!(
         window,
-        window_of(&whole.events_window(&Subscription {
-            topic: Topic::SessionEvents {
-                session_id: "legacy".into()
+        window_of(&whole.events_window(
+            &Subscription {
+                topic: Topic::SessionEvents {
+                    session_id: "legacy".into()
+                },
+                after: None,
+                known_index: None,
             },
-            after: None,
-            known_index: None,
-        }))
+            None,
+        ))
         .unwrap()
     );
     state.read(|state| {
@@ -12452,7 +12448,7 @@ fn an_unindexed_cold_thread_opens_through_hydration() {
         &through_pipe(&state, cx, 2, history_page("legacy", window.end)),
         2,
     );
-    assert_eq!(page, whole.history_page(window.end, 200).unwrap());
+    assert_eq!(page, whole.history_page(window.end, 200, None).unwrap());
     assert!(store.turn_index("legacy").unwrap().is_none());
 }
 

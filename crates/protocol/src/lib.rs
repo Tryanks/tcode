@@ -57,12 +57,12 @@ pub use query::{
     AgentAccess, AgentGrant, ControlActivityFilter, ControlActivityPage, ControlActivityThread,
     DeviceAccess, DirectoryListing, ExternalThread, GitDiffResult, GitDiffScope, GitFileText,
     GroupAction, GroupInfo, GroupMachineInfo, HostedDevice, HostingAction, HostingState,
-    IconImageEntry, MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, ModelGrant,
-    OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo, PathKind, Query, QueryResponse, RecentDir,
-    SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, STORED_OUTPUT_BYTES, STORED_OUTPUT_COLS,
-    STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool, SpaceAction,
-    SpaceAgents, SpaceApproval, SpaceInfo, SpacePolicy, TraverseLookupState, TraverseLookupStatus,
-    TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus, TraverseSourceStatus,
+    IconImageEntry, MAX_THREAD_EXPORT_BYTES, ModelGrant, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo,
+    PathKind, Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES,
+    STORED_OUTPUT_BYTES, STORED_OUTPUT_COLS, STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS,
+    SessionSearchHit, SourceTool, SpaceAction, SpaceAgents, SpaceApproval, SpaceInfo, SpacePolicy,
+    TraverseLookupState, TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus,
+    TraverseRelayStatus, TraverseSourceStatus,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{

@@ -416,9 +416,6 @@ pub struct RecentDir {
 
 /// Fresh history and backwards pages are bounded independently of live cursors.
 pub const SESSION_HISTORY_RECORDS: usize = 200;
-/// The most one history reply may carry: a single record larger than this is
-/// an error rather than a reply.
-pub const MAX_SESSION_HISTORY_BYTES: usize = 8 * 1024 * 1024;
 /// What one history reply aims for. A reply always carries at least one
 /// record, so a larger record still arrives alone.
 pub const SESSION_WINDOW_BYTES: usize = 512 * 1024;

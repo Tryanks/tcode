@@ -6,7 +6,7 @@ chat:
   waiting_connection: "接続を待っています…"
   retry_delivery: "再試行"
   discard_delivery: "破棄"
-  history_record_too_large: "履歴レコードが 8 MiB の応答サイズの上限を超えています。"
+  history_record_too_large: "履歴レコードが、このデバイスへの 1 回の応答で送れる大きさを超えています。"
   relayed: "%{from} から %{to} に引き継ぎました"
   moved: "%{from} からここに移動しました。%{to} は新しいセッションで続行します"
   session_moved: "%{from} から %{to} に移動しました。同じセッションがそこで続行します"

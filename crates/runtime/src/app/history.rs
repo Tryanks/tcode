@@ -7,8 +7,8 @@ use tcode_core::session::{
     ItemStreams, SupersededStream, TurnSnapshots, TurnStarts, drop_turn_diffs,
 };
 use tcode_protocol::{
-    CommandResponse, HostMessage, MAX_SESSION_HISTORY_BYTES, OUTPUT_PREVIEW_BYTES,
-    SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, Subscription,
+    CommandResponse, HostMessage, OUTPUT_PREVIEW_BYTES, SESSION_HISTORY_RECORDS,
+    SESSION_WINDOW_BYTES, Subscription,
 };
 use tcode_services::store::{EventLog, LogRead, TurnIndex};
 
@@ -257,7 +257,10 @@ struct Window {
 
 /// Choose the contiguous cursors a reply covers and the records it sends for
 /// them. Starting from the `backwards` end of `requested`, records are taken
-/// while the reply fits [`SESSION_WINDOW_BYTES`], and always at least one.
+/// while the reply fits [`SESSION_WINDOW_BYTES`], and always at least one: a
+/// first record whose reply is longer than `line_limit`, the longest line the
+/// receiving connection carries, is refused by name instead, since a network
+/// connection closes on a longer line. An in-process connection has no limit.
 /// Consecutive deltas of one item are merged into one, which folds the same
 /// because nothing between them moves the turn.
 fn wire_window(
@@ -265,6 +268,7 @@ fn wire_window(
     requested: Range<usize>,
     backwards: bool,
     overhead: usize,
+    line_limit: Option<usize>,
 ) -> Result<Window, tcode_protocol::ProtocolError> {
     let budget = SESSION_WINDOW_BYTES.saturating_sub(overhead);
     let mut used = 0;
@@ -277,10 +281,17 @@ fn wire_window(
         };
         // Separator; also leaves room for an empty array.
         let size = wire_len(&wire_record(&records[index])) + 1;
-        if count == 0 && size > MAX_SESSION_HISTORY_BYTES.saturating_sub(overhead) {
+        if count == 0
+            && let Some(line_limit) = line_limit
+            && overhead + size > line_limit
+        {
             return Err(tcode_protocol::ProtocolError {
                 code: "history_record_too_large".into(),
-                message: "A history record exceeds the 8 MiB response limit.".into(),
+                message: format!(
+                    "A history record takes {} bytes to send, more than the {line_limit} bytes \
+                     one reply to this device can carry.",
+                    overhead + size
+                ),
             });
         }
         if count > 0 && used + size > budget {
@@ -391,23 +402,23 @@ impl LogView<'_> {
     /// newest end. A client that missed more than a reply holds gets the
     /// thread as a fresh subscriber does, in one reply, rather than every
     /// record it missed over as many round trips.
-    fn events_window(&self, subscription: &Subscription) -> ServerEvent {
+    fn events_window(&self, subscription: &Subscription, line_limit: Option<usize>) -> ServerEvent {
         let continuation = subscription
             .after
             .filter(|after| *after <= self.end)
-            .map(|after| self.window(&subscription.topic, Some(after)));
+            .map(|after| self.window(&subscription.topic, Some(after), line_limit));
         match continuation {
             Some(ServerEvent::SessionSnapshot { end, total, .. }) if end < total => {
-                self.window(&subscription.topic, None)
+                self.window(&subscription.topic, None, line_limit)
             }
             Some(window) => window,
-            None => self.window(&subscription.topic, None),
+            None => self.window(&subscription.topic, None, line_limit),
         }
     }
 
     /// The records from `after` on, as many as fit one reply, or without it
     /// the baseline [`Self::events_window`] describes.
-    fn window(&self, topic: &Topic, after: Option<u64>) -> ServerEvent {
+    fn window(&self, topic: &Topic, after: Option<u64>, line_limit: Option<usize>) -> ServerEvent {
         let empty = HostMessage::Event(EventEnvelope {
             request_id: Some(u64::MAX),
             topic: topic.clone(),
@@ -429,6 +440,7 @@ impl LogView<'_> {
             first..self.records.len(),
             after.is_none(),
             wire_overhead(&empty),
+            line_limit,
         ) {
             Ok(window) => {
                 let start = self.start(window.range.start, first, from);
@@ -459,6 +471,7 @@ impl LogView<'_> {
         &self,
         before: u64,
         limit: u32,
+        line_limit: Option<usize>,
     ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
         let end = before.min(self.end);
         let start = self.page_start(end, limit);
@@ -472,7 +485,13 @@ impl LogView<'_> {
                 truncated: false,
             }),
         };
-        let window = wire_window(self.records, requested.clone(), true, wire_overhead(&empty))?;
+        let window = wire_window(
+            self.records,
+            requested.clone(),
+            true,
+            wire_overhead(&empty),
+            line_limit,
+        )?;
         Ok(QueryResponse::SessionHistoryPage {
             from: self.start(window.range.start, requested.start, start),
             end,
@@ -620,16 +639,21 @@ impl SessionLog {
         }
     }
 
-    pub(super) fn events_window(&self, subscription: &Subscription) -> ServerEvent {
-        self.view().events_window(subscription)
+    pub(super) fn events_window(
+        &self,
+        subscription: &Subscription,
+        line_limit: Option<usize>,
+    ) -> ServerEvent {
+        self.view().events_window(subscription, line_limit)
     }
 
     pub(super) fn history_page(
         &self,
         before: u64,
         limit: u32,
+        line_limit: Option<usize>,
     ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
-        self.view().history_page(before, limit)
+        self.view().history_page(before, limit, line_limit)
     }
 
     fn image_attachment(
@@ -837,8 +861,9 @@ impl Tail {
 pub(super) struct Hydration {
     live: bool,
     pending: Vec<SessionEventRecord>,
-    /// Subscription replies; one without a request id answers no request.
-    replies: Vec<(Option<u64>, Subscription)>,
+    /// Subscription replies, each with the longest line its connection
+    /// carries; one without a request id answers no request.
+    replies: Vec<(Option<u64>, Subscription, Option<usize>)>,
     /// Queries answered from the whole log.
     queries: Vec<LogQuery>,
     /// The timeline load waiting for the log, with how many `pending` records
@@ -966,7 +991,7 @@ impl AppState {
                     code: "history_unavailable".into(),
                     message: format!("could not read the history of {session_id}: {error}"),
                 });
-                for (request_id, subscription) in &hydration.replies {
+                for (request_id, subscription, _) in &hydration.replies {
                     self.reply_with(failure.clone(), *request_id, subscription, cx);
                 }
                 for query in hydration.queries {
@@ -1045,12 +1070,12 @@ impl AppState {
     fn reply_from_log(
         &self,
         log: &SessionLog,
-        replies: &[(Option<u64>, Subscription)],
+        replies: &[(Option<u64>, Subscription, Option<usize>)],
         cx: &mut HostCx,
     ) {
-        for (request_id, subscription) in replies {
+        for (request_id, subscription, line_limit) in replies {
             self.reply_with(
-                log.events_window(subscription),
+                log.events_window(subscription, *line_limit),
                 *request_id,
                 subscription,
                 cx,
@@ -1126,10 +1151,13 @@ impl AppState {
         });
     }
 
+    /// Answer `subscription` for a connection whose lines carry at most
+    /// `line_limit` bytes.
     pub(crate) fn reply_to_subscription(
         &mut self,
         request_id: Option<u64>,
         subscription: Subscription,
+        line_limit: Option<usize>,
         cx: &mut HostCx,
     ) {
         if let Topic::CommandOutput { .. } = &subscription.topic {
@@ -1139,7 +1167,7 @@ impl AppState {
         if let Topic::SessionEvents { session_id } = &subscription.topic {
             if let Some(log) = self.event_records.get(session_id) {
                 self.reply_with(
-                    log.events_window(&subscription),
+                    log.events_window(&subscription, line_limit),
                     request_id,
                     &subscription,
                     cx,
@@ -1148,9 +1176,11 @@ impl AppState {
             }
             let session_id = session_id.clone();
             let after = subscription.after;
-            self.hydrate_log(&session_id, None, cx)
-                .replies
-                .push((request_id, subscription.clone()));
+            self.hydrate_log(&session_id, None, cx).replies.push((
+                request_id,
+                subscription.clone(),
+                line_limit,
+            ));
             let read_id = session_id.clone();
             self.read_bounded(
                 &read_id,
@@ -1183,7 +1213,7 @@ impl AppState {
                                 tail.records.len(), tail.from, tail.covered_end, tail.end,
                             );
                             state.reply_with(
-                                tail.view().events_window(&subscription),
+                                tail.view().events_window(&subscription, line_limit),
                                 request_id,
                                 &subscription,
                                 cx,
@@ -1275,11 +1305,15 @@ impl AppState {
         session_id: &str,
         before: u64,
         limit: u32,
+        line_limit: Option<usize>,
         cx: &mut HostCx,
     ) -> HostTask<Result<QueryResponse, tcode_protocol::ProtocolError>> {
         let resident = self.event_records.contains_key(session_id);
-        let (answer, task) =
-            self.query_session_log(session_id, move |log| log.history_page(before, limit), cx);
+        let (answer, task) = self.query_session_log(
+            session_id,
+            move |log| log.history_page(before, limit, line_limit),
+            cx,
+        );
         if resident {
             return task;
         }
@@ -1288,7 +1322,7 @@ impl AppState {
             move |read| Tail::read_cut(read, None, Some((before, limit))),
             move |_, _, tail, _| {
                 if let Some(tail) = tail.filter(|tail| before <= tail.end) {
-                    answer.complete(tail.view().history_page(before, limit));
+                    answer.complete(tail.view().history_page(before, limit, line_limit));
                 }
             },
             cx,
@@ -1617,8 +1651,8 @@ mod tests {
             .unwrap()
             .unwrap()
             .view()
-            .events_window(&subscription);
-        assert_eq!(cold, resident.events_window(&subscription));
+            .events_window(&subscription, None);
+        assert_eq!(cold, resident.events_window(&subscription, None));
         let ServerEvent::SessionSnapshot {
             from,
             end,
@@ -1637,7 +1671,7 @@ mod tests {
         assert!(matches!(&records[1].event, AgentEvent::Warning { message } if message == "last"));
         subscription.after = Some(from);
         assert_eq!(
-            resident.events_window(&subscription),
+            resident.events_window(&subscription, None),
             ServerEvent::SessionSnapshot {
                 from,
                 end,
