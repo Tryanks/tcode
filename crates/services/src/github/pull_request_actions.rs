@@ -196,10 +196,6 @@ fn answered<T>(result: Result<T, GitHubError>) -> Outcome {
     }
 }
 
-fn blank(text: &str) -> bool {
-    text.trim().is_empty()
-}
-
 fn side(side: ReviewSide) -> &'static str {
     match side {
         ReviewSide::Old => "LEFT",
@@ -290,9 +286,6 @@ impl Reader<'_> {
         let (id, state) = self.action_state().map_err(rejection)?;
         if state.head != head {
             return Err(Rejection::StaleHead { head: state.head });
-        }
-        if !state.merge_methods.contains(&method) {
-            return Err(Rejection::Invalid);
         }
         let mut input = json!({
             "pullRequestId": id,
@@ -458,9 +451,6 @@ impl PullRequestReads {
         let reader = self.reader(key).map_err(rejection)?;
         Ok(match action {
             PullRequestAction::Comment { body } => {
-                if blank(body) {
-                    return Err(Rejection::Invalid);
-                }
                 let subject = self.node_id(&reader).map_err(rejection)?;
                 reader.mutate(
                     "AddPullRequestComment",
@@ -473,9 +463,6 @@ impl PullRequestReads {
             | PullRequestAction::MergeStack { .. }
             | PullRequestAction::RebaseStack { .. } => return Err(Rejection::Invalid),
             PullRequestAction::ReplyToThread { thread_id, body } => {
-                if blank(body) {
-                    return Err(Rejection::Invalid);
-                }
                 reader.mutate(
                     "ReplyToPullRequestThread",
                     "mutation ReplyToPullRequestThread($threadId: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id } } }",
@@ -534,9 +521,6 @@ impl PullRequestReads {
                 )
             }
             PullRequestAction::EditComment { comment_id, body } => {
-                if blank(body) {
-                    return Err(Rejection::Invalid);
-                }
                 let (operation, query) = match reader.subject(comment_id)?.as_str() {
                     "IssueComment" => (
                         "EditPullRequestComment",
@@ -555,7 +539,7 @@ impl PullRequestReads {
                 )
             }
             PullRequestAction::Edit { title, body } => {
-                if (title.is_none() && body.is_none()) || title.as_deref().is_some_and(blank) {
+                if title.is_none() && body.is_none() {
                     return Err(Rejection::Invalid);
                 }
                 let mut variables =
@@ -754,10 +738,7 @@ impl PullRequestReads {
         body: &str,
         comments: &[PullRequestReviewDraftComment],
     ) -> Result<Outcome, Rejection> {
-        if !is_revision(head)
-            || comments.iter().any(|comment| !comment.placed)
-            || (verdict != PullRequestReviewVerdict::Approve && blank(body) && comments.is_empty())
-        {
+        if !is_revision(head) || comments.iter().any(|comment| !comment.placed) {
             return Err(Rejection::Invalid);
         }
         let reader = self.reader(key).map_err(rejection)?;
