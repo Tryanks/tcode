@@ -10902,101 +10902,6 @@ fn session_log_follows_residency_and_flushes_before_release() {
 }
 
 #[test]
-fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("history-byte-budget");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    state.update(cx, |state, _| {
-        let records: Vec<SessionEventRecord> = (0..10)
-            .map(|index| SessionEventRecord {
-                origin: None,
-                author: None,
-                ts: Some(index),
-                event: AgentEvent::Warning {
-                    message: "x".repeat(1024 * 1024),
-                },
-                elided: None,
-            })
-            .collect();
-        state
-            .event_records
-            .insert("large".into(), session_log(records.clone()));
-        let subscription = tcode_protocol::Subscription {
-            known_index: None,
-            topic: Topic::SessionEvents {
-                session_id: "large".into(),
-            },
-            after: None,
-        };
-        let mut snapshot = events_reply(state, &subscription);
-        snapshot.request_id = Some(u64::MAX);
-        assert!(
-            tcode_protocol::encode_line(&HostMessage::Event(snapshot.clone()))
-                .unwrap()
-                .len()
-                <= tcode_protocol::MAX_SESSION_HISTORY_BYTES
-        );
-        let ServerEvent::SessionSnapshot {
-            from,
-            records: tail,
-            truncated,
-            ..
-        } = snapshot.event
-        else {
-            panic!("snapshot")
-        };
-        assert!(truncated);
-        assert_eq!(tail, records[from as usize..]);
-        let response = state.event_records["large"]
-            .history_page(10, u32::MAX)
-            .unwrap();
-        let line = tcode_protocol::encode_line(&HostMessage::QueryResult {
-            id: u64::MAX,
-            result: Ok(response.clone()),
-        })
-        .unwrap();
-        assert!(line.len() <= tcode_protocol::MAX_SESSION_HISTORY_BYTES);
-        let QueryResponse::SessionHistoryPage {
-            from,
-            records: page,
-            truncated,
-            ..
-        } = response
-        else {
-            panic!("page")
-        };
-        assert!(truncated);
-        assert_eq!(page, records[from as usize..]);
-        // A cursor whose rest overflows the budget gets that same tail.
-        assert_eq!(
-            events_reply(
-                state,
-                &tcode_protocol::Subscription {
-                    after: Some(0),
-                    ..subscription.clone()
-                },
-            )
-            .event,
-            events_reply(state, &subscription).event
-        );
-        let mut records = records;
-        records[9].event = AgentEvent::Warning {
-            message: "x".repeat(tcode_protocol::MAX_SESSION_HISTORY_BYTES),
-        };
-        state
-            .event_records
-            .insert("large".into(), session_log(records));
-        assert_eq!(
-            state.event_records["large"]
-                .history_page(10, 1)
-                .unwrap_err()
-                .code,
-            "history_record_too_large"
-        );
-    });
-}
-
-#[test]
 fn computer_use_registrations_survive_stop_but_are_replaced_after_provider_shutdown() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-cu-registration-lifecycle");
@@ -12066,7 +11971,9 @@ fn history_windows_are_byte_budgeted() {
         huge[199].event = AgentEvent::Warning {
             message: "w".repeat(2 * tcode_protocol::SESSION_WINDOW_BYTES),
         };
-        state.event_records.insert("wide".into(), session_log(huge));
+        state
+            .event_records
+            .insert("wide".into(), session_log(huge.clone()));
         let QueryResponse::SessionHistoryPage {
             from,
             records: sent,
@@ -12076,6 +11983,19 @@ fn history_windows_are_byte_budgeted() {
             panic!("page")
         };
         assert_eq!((from, sent.len()), (199, 1));
+
+        // A record no reply can carry is refused by name; the client says so.
+        huge[199].event = AgentEvent::Warning {
+            message: "w".repeat(tcode_protocol::MAX_SESSION_HISTORY_BYTES),
+        };
+        state.event_records.insert("wide".into(), session_log(huge));
+        assert_eq!(
+            state.event_records["wide"]
+                .history_page(200, 1)
+                .unwrap_err()
+                .code,
+            "history_record_too_large"
+        );
     });
 }
 
