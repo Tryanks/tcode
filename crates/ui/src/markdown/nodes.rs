@@ -80,19 +80,12 @@ impl BlockNode {
                 let cached = prepared
                     .highlights
                     .lock()
-                    .ok()
-                    .and_then(|cache| cache.as_ref().and_then(|(_, held)| held.get()))
-                    .or_else(|| {
-                        prepared
-                            .previous_highlights
-                            .lock()
-                            .ok()
-                            .and_then(|previous| previous.clone())
-                    });
-                if let Some(cached) = cached
-                    && let Ok(mut previous) = new.prepared().previous_highlights.lock()
-                {
-                    *previous = Some(cached);
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|(_, held)| held.get())
+                    .or_else(|| prepared.previous_highlights.lock().unwrap().clone());
+                if let Some(cached) = cached {
+                    *new.prepared().previous_highlights.lock().unwrap() = Some(cached);
                 }
             }
             (Self::Root { children: new }, Self::Root { children: old })

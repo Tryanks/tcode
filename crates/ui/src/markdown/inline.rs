@@ -76,10 +76,7 @@ impl Inline {
         font_overrides: Vec<(Range<usize>, SharedString)>,
     ) -> Self {
         let id = id.into();
-        let text = state
-            .lock()
-            .map(|state| state.text.clone())
-            .unwrap_or_default();
+        let text = state.lock().unwrap().text.clone();
         let styled_text = StyledText::new(text.clone());
         let text_layout = styled_text.layout().clone();
         Self {
