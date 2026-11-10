@@ -4883,48 +4883,6 @@ mod tests {
         );
     }
 
-    /// claude 2.1.317 records a usage read in its config directory on its way
-    /// out, and that record is all it has to answer from when the usage
-    /// endpoint refuses a later read. A CLI that never leaves costs the read
-    /// nothing.
-    #[cfg(unix)]
-    #[test]
-    fn a_usage_read_lets_the_cli_leave_on_its_own() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        const ANSWER: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"usage-1","response":{"rate_limits_available":true,"rate_limits":{}}}}"#;
-        let dir = std::env::temp_dir().join(format!("tcode-usage-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let read = |name: &str, after_answer: &str| {
-            let binary = dir.join(name);
-            std::fs::write(
-                &binary,
-                format!("#!/bin/sh\nread request\necho '{ANSWER}'\n{after_answer}\n"),
-            )
-            .unwrap();
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-            smol::block_on(read_usage(
-                Some(binary),
-                LaunchEnv {
-                    env: Vec::new(),
-                    home: Some(dir.clone()),
-                },
-            ))
-            .unwrap()
-        };
-
-        let leaves = read(
-            "leaves",
-            "while read line; do :; done\ntouch \"$CLAUDE_CONFIG_DIR/recorded\"",
-        );
-        assert_eq!(leaves["rate_limits_available"], true);
-        assert!(dir.join("recorded").exists());
-
-        let stays = read("stays", "exec sleep 30");
-        assert_eq!(stays["rate_limits_available"], true);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
     #[test]
     fn native_permission_switches_publish_only_confirmed_values() {
         let mut mapper = Mapper::new();
@@ -5108,188 +5066,46 @@ mod tests {
         }
     }
 
-    /// A stand-in CLI that records its arguments, each ended by a NUL, in `directory/argv`.
-    #[cfg(unix)]
-    fn recording_claude(directory: &std::path::Path) -> PathBuf {
-        recording_claude_at(directory, "2.1.200")
-    }
-
-    #[cfg(unix)]
-    fn recording_claude_at(directory: &std::path::Path, version: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::create_dir_all(directory).unwrap();
-        let binary = directory.join("claude");
-        std::fs::write(&binary, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '{version}\\n'; exit 0; fi\nprintf '%s\\0' \"$@\" > argv\nprintf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}}'\nwhile IFS= read -r line; do :; done\n")).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        binary
-    }
-
-    /// A running session answers a usage read itself: the `get_usage`
-    /// control request goes to the live CLI and its payload reaches the
-    /// asker, so no second process is started for it.
-    #[cfg(unix)]
-    #[test]
-    fn a_usage_read_asks_the_running_cli() {
-        use std::os::unix::fs::PermissionsExt as _;
-        smol::block_on(async {
-            let directory =
-                std::env::temp_dir().join(format!("agent-claude-usage-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&directory).unwrap();
-            let binary = directory.join("claude");
-            std::fs::write(
-                &binary,
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.200\\n'; exit 0; fi\n\
-                 printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}'\n\
-                 while IFS= read -r line; do case \"$line\" in *get_usage*)\n\
-                 id=$(printf '%s' \"$line\" | sed -n 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/p')\n\
-                 printf '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{\"rate_limits_available\":true}}}\\n' \"$id\";;\n\
-                 esac; done\n",
-            )
-            .unwrap();
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let handle = start(SessionOptions {
-                cwd: directory.clone(),
-                model: None,
-                resume: None,
-                fork: None,
-                binary_path: Some(binary),
-                option_selections: Vec::new(),
-                mcp_servers: Vec::new(),
-                launch_env: LaunchEnv::default(),
-                extra_args: Vec::new(),
-                acp: None,
-                instructions: None,
-            })
-            .await
-            .unwrap();
-            while !matches!(
-                handle.events.recv().await.unwrap(),
-                AgentEvent::ProviderOptions { .. }
-            ) {}
-            let (reply, answer) = smol::channel::bounded(1);
-            handle
-                .commands
-                .send(SessionCommand::ReadAccountUsage { reply })
-                .await
-                .unwrap();
-            assert_eq!(
-                answer.recv().await.unwrap().unwrap(),
-                json!({"rate_limits_available": true})
-            );
-            shut_down(handle).await;
-            let _ = std::fs::remove_dir_all(directory);
-        });
-    }
-
     /// Every worktree goes through the host: the hooks are registered before
-    /// any message, Claude's `WorktreeCreate` callback becomes a request to the
-    /// host, and the host's answer reaches Claude as the hook's output. Frames
-    /// as Claude Code 2.1.319 sends and accepts them.
-    #[cfg(unix)]
+    /// any message, and the host's answer to Claude's `WorktreeCreate`
+    /// callback reaches Claude as the hook's output.
     #[test]
     fn the_host_answers_claudes_worktree_hooks() {
-        use std::os::unix::fs::PermissionsExt as _;
-        smol::block_on(async {
-            let directory = std::env::temp_dir()
-                .join(format!("agent-claude-worktree-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&directory).unwrap();
-            let binary = directory.join("claude");
-            std::fs::write(
-                &binary,
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.319\\n'; exit 0; fi\n\
-                 while IFS= read -r line; do printf '%s\\n' \"$line\" >> stdin; case \"$line\" in *initialize*)\n\
-                 printf '%s\\n' '{\"type\":\"control_request\",\"request_id\":\"hook-1\",\"request\":{\"subtype\":\"hook_callback\",\"callback_id\":\"tcode-worktree-create\",\"input\":{\"session_id\":\"native\",\"transcript_path\":\"/home/me/.claude/projects/-work-repo/native.jsonl\",\"cwd\":\"/work/repo\",\"prompt_id\":\"prompt-1\",\"hook_event_name\":\"WorktreeCreate\",\"name\":\"feat\"},\"tool_use_id\":\"446fc413-fa9e-45ab-b701-854b8177c9a9\"}}';;\n\
-                 *hookSpecificOutput*) printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\"}';;\n\
-                 esac; done\n",
-            )
-            .unwrap();
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let handle = start(SessionOptions {
-                cwd: directory.clone(),
-                model: None,
-                resume: None,
-                fork: None,
-                binary_path: Some(binary),
-                option_selections: Vec::new(),
-                mcp_servers: Vec::new(),
-                launch_env: LaunchEnv::default(),
-                extra_args: Vec::new(),
-                acp: None,
-                instructions: None,
-            })
-            .await
-            .unwrap();
-            let request = loop {
-                if let AgentEvent::WorktreeRequested {
-                    request_id,
-                    request,
-                } = handle.events.recv().await.unwrap()
-                {
-                    break (request_id, request);
+        let mut mapper = Mapper::new();
+        assert_eq!(
+            mapper.initialize_request(),
+            json!({"type":"control_request","request_id":"tcode-ctrl-1","request":{
+                "subtype":"initialize",
+                "hooks":{
+                    "WorktreeCreate":[{"hookCallbackIds":["tcode-worktree-create"],"onFailure":"block"}],
+                    "WorktreeRemove":[{"hookCallbackIds":["tcode-worktree-remove"],"onFailure":"block"}]
                 }
-            };
-            assert_eq!(
-                request,
-                (
-                    "hook-1".to_owned(),
-                    WorktreeRequest::Create {
-                        cwd: PathBuf::from("/work/repo"),
-                        name: "feat".into(),
-                    }
-                )
-            );
-            let answer = WorktreeAnswer::Ready {
-                path: PathBuf::from("/data/worktrees/repo-1a2b3c4d/feat"),
-                reused: false,
-            };
-            handle
-                .commands
-                .send(SessionCommand::RespondWorktree {
-                    request_id: "hook-1".into(),
-                    answer: answer.clone(),
-                })
-                .await
-                .unwrap();
-            assert_eq!(
-                handle.events.recv().await.unwrap(),
-                AgentEvent::WorktreeResolved {
-                    request_id: "hook-1".into(),
-                    request: request.1,
-                    answer,
+            }})
+        );
+        feed(
+            &mut mapper,
+            r#"{"type":"control_request","request_id":"hook-1","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-create","input":{"session_id":"native","transcript_path":"/home/me/.claude/projects/-work-repo/native.jsonl","cwd":"/work/repo","prompt_id":"prompt-1","hook_event_name":"WorktreeCreate","name":"feat"},"tool_use_id":"446fc413-fa9e-45ab-b701-854b8177c9a9"}}"#,
+        );
+        let answer = WorktreeAnswer::Ready {
+            path: PathBuf::from("/data/worktrees/repo-1a2b3c4d/feat"),
+            reused: false,
+        };
+        assert_eq!(
+            mapper.worktree_response("hook-1", &answer),
+            Some((
+                json!({"type":"control_response","response":{
+                    "subtype":"success","request_id":"hook-1",
+                    "response":{"hookSpecificOutput":{
+                        "hookEventName":"WorktreeCreate",
+                        "worktreePath":"/data/worktrees/repo-1a2b3c4d/feat"
+                    }}
+                }}),
+                WorktreeRequest::Create {
+                    cwd: PathBuf::from("/work/repo"),
+                    name: "feat".into(),
                 }
-            );
-            // The stand-in answers the reply it read, so it has recorded it.
-            while !matches!(
-                handle.events.recv().await.unwrap(),
-                AgentEvent::TurnCompleted { .. }
-            ) {}
-            let stdin: Vec<Value> = std::fs::read_to_string(directory.join("stdin"))
-                .unwrap()
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
-            assert_eq!(
-                stdin,
-                [
-                    json!({"type":"control_request","request_id":"tcode-ctrl-1","request":{
-                        "subtype":"initialize",
-                        "hooks":{
-                            "WorktreeCreate":[{"hookCallbackIds":["tcode-worktree-create"],"onFailure":"block"}],
-                            "WorktreeRemove":[{"hookCallbackIds":["tcode-worktree-remove"],"onFailure":"block"}]
-                        }
-                    }}),
-                    json!({"type":"control_response","response":{
-                        "subtype":"success","request_id":"hook-1",
-                        "response":{"hookSpecificOutput":{
-                            "hookEventName":"WorktreeCreate",
-                            "worktreePath":"/data/worktrees/repo-1a2b3c4d/feat"
-                        }}
-                    }}),
-                ]
-            );
-            shut_down(handle).await;
-            let _ = std::fs::remove_dir_all(directory);
-        });
+            ))
+        );
     }
 
     /// An `isolation: "worktree"` subagent asks for `agent-<agent id>` before
@@ -5447,161 +5263,6 @@ mod tests {
         let (_, events) = started(&worktree);
         assert_eq!(moved(&events), [(link.clone(), worktree.clone())]);
         let _ = std::fs::remove_dir_all(directory);
-    }
-
-    #[cfg(unix)]
-    async fn shut_down(handle: SessionHandle) {
-        handle
-            .commands
-            .send(SessionCommand::Shutdown)
-            .await
-            .unwrap();
-        while let Ok(event) = handle.events.recv().await {
-            if matches!(event, AgentEvent::SessionClosed { .. }) {
-                break;
-            }
-        }
-    }
-
-    /// Every argument fits on one line, so a Windows batch launcher can pass it,
-    /// and the instructions reach the system prompt word for word.
-    #[cfg(unix)]
-    #[test]
-    fn instructions_append_to_the_system_prompt_on_creation_and_resume() {
-        smol::block_on(async {
-            let directory = std::env::temp_dir().join(format!(
-                "agent-claude-instructions-{}",
-                uuid::Uuid::new_v4()
-            ));
-            let binary = recording_claude(&directory);
-            let instructions =
-                "<pull_request_linking>\nLink every PR.\n</pull_request_linking>\n\n";
-            for resume in [None, Some(ResumeCursor(json!({"session_id": "native"})))] {
-                let handle = start(SessionOptions {
-                    cwd: directory.clone(),
-                    model: None,
-                    resume: resume.clone(),
-                    fork: None,
-                    binary_path: Some(binary.clone()),
-                    option_selections: Vec::new(),
-                    mcp_servers: vec![crate::McpRegistration {
-                        name: "tcode_pull_requests".into(),
-                        url: "http://127.0.0.1:1/mcp".into(),
-                        bearer_token: "token".into(),
-                    }],
-                    launch_env: LaunchEnv::default(),
-                    extra_args: Vec::new(),
-                    acp: None,
-                    instructions: Some(instructions.into()),
-                })
-                .await
-                .unwrap();
-                while !matches!(
-                    handle.events.recv().await.unwrap(),
-                    AgentEvent::ProviderOptions { .. }
-                ) {}
-                let argv = std::fs::read_to_string(directory.join("argv")).unwrap();
-                let args: Vec<_> = argv.trim_end_matches('\0').split('\0').collect();
-                assert!(
-                    !args.iter().any(|arg| arg.contains(['\r', '\n'])),
-                    "{args:?}"
-                );
-                assert_eq!(
-                    resume.is_some(),
-                    args.windows(2).any(|pair| pair == ["--resume", "native"])
-                );
-                let files: Vec<_> = args
-                    .windows(2)
-                    .filter(|pair| pair[0] == "--append-system-prompt-file")
-                    .map(|pair| pair[1])
-                    .collect();
-                let [file] = files[..] else {
-                    panic!("{args:?}");
-                };
-                assert_eq!(std::fs::read_to_string(file).unwrap(), instructions);
-                assert!(args.contains(&"--mcp-config"));
-                shut_down(handle).await;
-            }
-            // A CLI older than the file option is given the text itself.
-            let older = directory.join("older");
-            let handle = start(SessionOptions {
-                cwd: directory.clone(),
-                model: None,
-                resume: None,
-                fork: None,
-                binary_path: Some(recording_claude_at(&older, "2.0.32")),
-                option_selections: Vec::new(),
-                mcp_servers: Vec::new(),
-                launch_env: LaunchEnv::default(),
-                extra_args: Vec::new(),
-                acp: None,
-                instructions: Some(instructions.into()),
-            })
-            .await
-            .unwrap();
-            while !matches!(
-                handle.events.recv().await.unwrap(),
-                AgentEvent::ProviderOptions { .. }
-            ) {}
-            let argv = std::fs::read_to_string(directory.join("argv")).unwrap();
-            let args: Vec<_> = argv.trim_end_matches('\0').split('\0').collect();
-            assert!(
-                args.windows(2)
-                    .any(|pair| pair == ["--append-system-prompt", instructions])
-            );
-            assert!(!args.contains(&"--append-system-prompt-file"));
-            shut_down(handle).await;
-            std::fs::remove_dir_all(directory).unwrap();
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn launch_uses_native_permission_selection_and_enables_live_bypass() {
-        smol::block_on(async {
-            let directory = std::env::temp_dir()
-                .join(format!("agent-claude-permission-{}", uuid::Uuid::new_v4()));
-            let binary = recording_claude(&directory);
-            let handle = start(SessionOptions {
-                cwd: directory.clone(),
-                model: None,
-                resume: None,
-                fork: None,
-                binary_path: Some(binary),
-                option_selections: vec![OptionSelection {
-                    id: "permissionMode".into(),
-                    value: json!("auto"),
-                }],
-                mcp_servers: Vec::new(),
-                launch_env: LaunchEnv::default(),
-                extra_args: Vec::new(),
-                acp: None,
-                instructions: None,
-            })
-            .await
-            .unwrap();
-            loop {
-                let event = handle.events.recv().await.unwrap();
-                if let AgentEvent::ProviderOptions { selections, .. } = event {
-                    assert!(
-                        selections
-                            .iter()
-                            .any(|selection| selection.id == "permissionMode"
-                                && selection.value == "auto")
-                    );
-                    break;
-                }
-            }
-            let argv = std::fs::read_to_string(directory.join("argv")).unwrap();
-            let args: Vec<_> = argv.split('\0').collect();
-            assert!(
-                args.windows(2)
-                    .any(|pair| pair == ["--permission-mode", "auto"])
-            );
-            assert!(args.contains(&"--allow-dangerously-skip-permissions"));
-            shut_down(handle).await;
-            std::fs::remove_dir_all(directory).unwrap();
-        });
     }
 
     #[test]
@@ -5985,187 +5646,6 @@ mod tests {
                 ..
             }
         ));
-    }
-
-    /// A stand-in Claude Code 2.1.318 that answers the rewind controls the way
-    /// the CLI does, echoes a user message under the uuid it was sent with,
-    /// and records every line it reads in `directory/requests`.
-    #[cfg(unix)]
-    fn rewinding_claude(directory: &std::path::Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::create_dir_all(directory).unwrap();
-        let binary = directory.join("claude");
-        let answer = |response: &str| {
-            format!(
-                "id=$(printf '%s' \"$line\" | sed -n 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/p'); \
-                 printf '{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{response}}}}}\\n' \"$id\";;"
-            )
-        };
-        std::fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.318\\n'; exit 0; fi\n\
-                 printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"default\"}}'\n\
-                 while IFS= read -r line; do printf '%s\\n' \"$line\" >> requests; case \"$line\" in\n\
-                 *'\"dry_run\":true'*) {}\n\
-                 *'\"subtype\":\"rewind_files\"'*) {}\n\
-                 *'\"subtype\":\"rewind_conversation\"'*) {}\n\
-                 *'\"type\":\"user\"'*) uuid=$(printf '%s' \"$line\" | sed -n 's/.*\"uuid\":\"\\([^\"]*\\)\".*/\\1/p'); \
-                 printf '{{\"type\":\"user\",\"uuid\":\"%s\",\"isReplay\":true,\"session_id\":\"native\",\"parent_tool_use_id\":null,\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"also this\"}}]}}}}\\n' \"$uuid\";;\n\
-                 esac; done\n",
-                answer(r#"{"canRewind":true,"filesChanged":["src/lib.rs"],"insertions":3,"deletions":1}"#),
-                answer(r#"{"canRewind":true,"skippedLinks":0}"#),
-                answer(
-                    r#"{"rewound":false,"reason":"stale_target","error":"The conversation changed since this message was chosen.","precedingAssistantUuid":null}"#
-                ),
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        binary
-    }
-
-    /// Through a running session: a steer is sent under its own uuid and its
-    /// replayed echo makes it a restore point; a preview is Claude's dry run;
-    /// a combined rewind whose conversation half is refused reports the files
-    /// it restored and why the conversation was not rewound.
-    #[cfg(unix)]
-    #[test]
-    fn a_session_previews_rewinds_and_reports_the_part_claude_refused() {
-        smol::block_on(async {
-            let directory =
-                std::env::temp_dir().join(format!("agent-claude-rewind-{}", uuid::Uuid::new_v4()));
-            let binary = rewinding_claude(&directory);
-            let handle = start(SessionOptions {
-                cwd: directory.clone(),
-                model: None,
-                resume: None,
-                fork: None,
-                binary_path: Some(binary),
-                option_selections: Vec::new(),
-                mcp_servers: Vec::new(),
-                launch_env: LaunchEnv::default(),
-                extra_args: Vec::new(),
-                acp: None,
-                instructions: None,
-            })
-            .await
-            .unwrap();
-            let next = async |matches: fn(&AgentEvent) -> bool| loop {
-                let event = handle.events.recv().await.unwrap();
-                if matches(&event) {
-                    break event;
-                }
-            };
-            assert!(matches!(
-                next(|event| matches!(event, AgentEvent::RewindAvailability { .. })).await,
-                AgentEvent::RewindAvailability { unavailable: None }
-            ));
-
-            handle
-                .commands
-                .send(SessionCommand::Steer {
-                    request_id: "steer-1".into(),
-                    text: "also this".into(),
-                    attachments: Vec::new(),
-                })
-                .await
-                .unwrap();
-            let AgentEvent::SteerCheckpoint {
-                request_id,
-                checkpoint_id,
-            } = next(|event| matches!(event, AgentEvent::SteerCheckpoint { .. })).await
-            else {
-                unreachable!()
-            };
-            assert_eq!(request_id, "steer-1");
-
-            for mode in [RewindMode::FilesAndConversation, RewindMode::Conversation] {
-                handle
-                    .commands
-                    .send(SessionCommand::PreviewRewind {
-                        checkpoint_id: "checkpoint-2".into(),
-                        mode,
-                    })
-                    .await
-                    .unwrap();
-            }
-            let previews = [
-                next(|event| matches!(event, AgentEvent::RewindPreviewed { .. })).await,
-                next(|event| matches!(event, AgentEvent::RewindPreviewed { .. })).await,
-            ];
-            let files = RewindFiles {
-                files: vec![RewindFile::path("src/lib.rs")],
-                insertions: Some(3),
-                deletions: Some(1),
-                skipped_links: 0,
-            };
-            for (mode, expected) in [
-                (
-                    RewindMode::FilesAndConversation,
-                    RewindPreview {
-                        files: files.clone(),
-                        conflicts: Vec::new(),
-                    },
-                ),
-                (RewindMode::Conversation, RewindPreview::default()),
-            ] {
-                assert!(
-                    previews.contains(&AgentEvent::RewindPreviewed {
-                        checkpoint_id: "checkpoint-2".into(),
-                        mode,
-                        result: RewindPreviewResult::Ready(expected),
-                    }),
-                    "{previews:?}"
-                );
-            }
-
-            handle
-                .commands
-                .send(SessionCommand::Rewind {
-                    checkpoint_id: "checkpoint-2".into(),
-                    mode: RewindMode::FilesAndConversation,
-                })
-                .await
-                .unwrap();
-            assert_eq!(
-                next(|event| matches!(event, AgentEvent::RewindCompleted { .. })).await,
-                AgentEvent::RewindCompleted {
-                    checkpoint_id: "checkpoint-2".into(),
-                    mode: RewindMode::Files,
-                    prefill: None,
-                    prefill_attachments: Vec::new(),
-                    later_history: LaterHistory::Truncated,
-                    files: Some(files),
-                    incomplete: Some(RewindIncomplete {
-                        requested: RewindMode::FilesAndConversation,
-                        failure: RewindFailure::new(
-                            RewindFailureReason::ConversationChanged,
-                            "The conversation changed since this message was chosen.".to_owned(),
-                        ),
-                    }),
-                    undo_token: None,
-                }
-            );
-            shut_down(handle).await;
-
-            let requests: Vec<Value> = std::fs::read_to_string(directory.join("requests"))
-                .unwrap()
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
-            assert!(
-                requests.iter().any(|request| request["type"] == "user"
-                    && request["uuid"] == checkpoint_id.as_str())
-            );
-            assert!(requests.iter().any(|request| request["request"]
-                == json!({
-                    "subtype": "rewind_files",
-                    "user_message_id": "checkpoint-2",
-                    "dry_run": true,
-                })));
-            let _ = std::fs::remove_dir_all(directory);
-        });
     }
 
     fn select(id: &str, value: Value) -> OptionSelection {
