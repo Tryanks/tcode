@@ -1802,7 +1802,7 @@ impl ToolItem {
     /// `TodoWrite` or `ExitPlanMode`, and the state its result completes.
     /// Calls made at the top level and inside a subagent map alike.
     pub(crate) fn started(name: String, input: Value) -> (Self, ItemContent) {
-        if name == "Bash" {
+        if is_command_tool(&name) {
             let command = input
                 .get("command")
                 .and_then(Value::as_str)
@@ -1863,12 +1863,18 @@ impl ToolItem {
         let ToolOutput { text, images } =
             ToolOutput::from_content(block.get("content").unwrap_or(&Value::Null));
         match self {
-            ToolItem::Command { command, .. } => ItemContent::CommandExecution {
-                command,
-                output: text,
-                exit_code: Some(i32::from(is_error)),
-                status,
-            },
+            ToolItem::Command { command, .. } => {
+                let (output, exit_code) = match is_error.then(|| exited(&text)).flatten() {
+                    Some((code, rest)) => (rest.to_owned(), Some(code)),
+                    None => (text, None),
+                };
+                ItemContent::CommandExecution {
+                    command,
+                    output,
+                    exit_code,
+                    status,
+                }
+            }
             ToolItem::File { mut changes } => {
                 if let Some(structured_patch) =
                     tool_use_result.and_then(|result| result.get("structuredPatch"))
@@ -1937,6 +1943,25 @@ impl ToolItem {
             effort: effort.clone(),
             parent_item_id,
         })
+    }
+}
+
+/// A call a transcript records, mapped as a live session maps the same call:
+/// a command as a command, an edit as a file change, anything else as the
+/// tool call it is. The importer reads transcripts through this.
+pub struct TranscriptCall(ToolItem);
+
+impl TranscriptCall {
+    /// The call as it starts, and its item until its result arrives.
+    pub fn start(name: String, input: Value) -> (Self, ItemContent) {
+        let (item, content) = ToolItem::started(name, input);
+        (Self(item), content)
+    }
+
+    /// The finished item, from the `tool_result` block and the line's
+    /// `toolUseResult`.
+    pub fn finish(self, block: &Value, tool_use_result: Option<&Value>) -> ItemContent {
+        self.0.finished(block, tool_use_result)
     }
 }
 
@@ -4389,6 +4414,20 @@ fn is_file_tool(name: &str) -> bool {
     matches!(name, "Write" | "Edit" | "NotebookEdit")
 }
 
+fn is_command_tool(name: &str) -> bool {
+    matches!(name, "Bash" | "PowerShell")
+}
+
+/// A command's error result as Claude Code 2.1.322 words it (its tool error
+/// formatter starts with `Exit code ${code}` for a command that exited
+/// non-zero): the code, and what follows it. Any other error is not an
+/// exit, and a success says no code.
+fn exited(text: &str) -> Option<(i32, &str)> {
+    let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
+    let code = first.strip_prefix("Exit code ")?.trim().parse().ok()?;
+    Some((code, rest))
+}
+
 pub(crate) fn one_line_summary(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -6369,7 +6408,7 @@ mod tests {
             &ItemContent::CommandExecution {
                 command: "echo hi".into(),
                 output: "hi".into(),
-                exit_code: Some(0),
+                exit_code: None,
                 status: ItemStatus::Completed,
             }
         );
@@ -6389,6 +6428,45 @@ mod tests {
             ItemContent::ToolCall { name, output: Some(output), .. }
                 if name == "Read" && output == "1\thello\n2\tworld\n3\t"
         ));
+    }
+
+    /// A command is a command whichever shell runs it, and one that exited
+    /// non-zero carries the code Claude Code wrote before its output
+    /// (2.1.322's tool error formatter: `Exit code ${code}`, then what the
+    /// command printed); the lines are stream-json `assistant` and `user`
+    /// messages with Anthropic `tool_use` and `tool_result` blocks, content
+    /// invented.
+    #[test]
+    fn a_command_carries_the_code_it_exited_with() {
+        let mut mapper = Mapper::new();
+        let started = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg_ps","content":[{"type":"tool_use","id":"toolu_ps","name":"PowerShell","input":{"command":"Get-ChildItem build"}}]}}"#,
+        );
+        assert!(
+            matches!(
+                started.as_slice(),
+                [AgentEvent::ItemStarted(ThreadItem { content: ItemContent::CommandExecution { command, .. }, .. })]
+                    if command == "Get-ChildItem build"
+            ),
+            "{started:?}"
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_ps","is_error":true,"content":"Exit code 2\nGet-ChildItem: Cannot find path 'build'."}]}}"#,
+        );
+        let [AgentEvent::ItemCompleted(item)] = completed.as_slice() else {
+            panic!("{completed:?}");
+        };
+        assert_eq!(
+            item.content,
+            ItemContent::CommandExecution {
+                command: "Get-ChildItem build".into(),
+                output: "Get-ChildItem: Cannot find path 'build'.".into(),
+                exit_code: Some(2),
+                status: ItemStatus::Failed,
+            }
+        );
     }
 
     /// A message sent to a resumed session whose background command did not

@@ -3,7 +3,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use agent::{ItemContent, ItemStatus, ThreadItem, ToolOutput};
+use agent::claude::TranscriptCall;
+use agent::{ItemContent, ItemStatus, ThreadItem};
 use serde_json::Value;
 
 use super::{ConvertedEntry, ConvertedThread, file_modified_ms, timestamp_ms};
@@ -13,7 +14,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
         File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
     let fallback_ts = file_modified_ms(path);
     let mut entries = Vec::new();
-    let mut pending: HashMap<String, usize> = HashMap::new();
+    let mut pending: HashMap<String, (usize, TranscriptCall)> = HashMap::new();
     let mut parsed_lines = 0_usize;
     let mut first_ts = None;
     let mut last_ts = None;
@@ -56,25 +57,13 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                 });
                             }
                         }
-                        UserBlock::ToolResult { id, output, failed } => {
-                            let Some(index) = pending.remove(&id) else {
+                        UserBlock::ToolResult { id, block } => {
+                            let Some((index, call)) = pending.remove(id) else {
                                 continue;
                             };
                             if let Some(ConvertedEntry::Item { item, .. }) = entries.get_mut(index)
-                                && let ItemContent::ToolCall {
-                                    output: item_output,
-                                    status,
-                                    image_reads,
-                                    ..
-                                } = &mut item.content
                             {
-                                *image_reads = output.images;
-                                *item_output = Some(output.text);
-                                *status = if failed {
-                                    ItemStatus::Failed
-                                } else {
-                                    ItemStatus::Completed
-                                };
+                                item.content = call.finish(block, value.get("toolUseResult"));
                             }
                         }
                     }
@@ -105,18 +94,11 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
                             let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
                             let input = block.get("input").cloned().unwrap_or(Value::Null);
-                            Some(ItemContent::ToolCall {
-                                image_reads: Vec::new(),
-                                name: name.to_string(),
-                                input,
-                                output: None,
-                                status: ItemStatus::InProgress,
-                            })
-                            .inspect(|_| {
-                                if !id.is_empty() {
-                                    pending.insert(id.to_string(), entries.len());
-                                }
-                            })
+                            let (call, content) = TranscriptCall::start(name.to_string(), input);
+                            if !id.is_empty() {
+                                pending.insert(id.to_string(), (entries.len(), call));
+                            }
+                            Some(content)
                         }
                         _ => None,
                     };
@@ -166,9 +148,11 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
         ));
     }
     // A call the transcript never answered was cut off with its turn.
-    for index in pending.into_values() {
+    for (index, _) in pending.into_values() {
         if let Some(ConvertedEntry::Item { item, .. }) = entries.get_mut(index)
-            && let ItemContent::ToolCall { status, .. } = &mut item.content
+            && let ItemContent::CommandExecution { status, .. }
+            | ItemContent::FileChange { status, .. }
+            | ItemContent::ToolCall { status, .. } = &mut item.content
         {
             *status = ItemStatus::Interrupted;
         }
@@ -242,16 +226,16 @@ fn user_message(text: String) -> ItemContent {
     }
 }
 
-enum UserBlock {
+enum UserBlock<'a> {
     Text(String),
+    /// A `tool_result` block, answering the call its `tool_use_id` names.
     ToolResult {
-        id: String,
-        output: ToolOutput,
-        failed: bool,
+        id: &'a str,
+        block: &'a Value,
     },
 }
 
-fn content_blocks(content: &Value) -> Vec<UserBlock> {
+fn content_blocks(content: &Value) -> Vec<UserBlock<'_>> {
     if let Some(text) = content.as_str() {
         return vec![UserBlock::Text(text.to_string())];
     }
@@ -268,13 +252,8 @@ fn content_blocks(content: &Value) -> Vec<UserBlock> {
                 id: block
                     .get("tool_use_id")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                output: ToolOutput::from_content(block.get("content").unwrap_or(&Value::Null)),
-                failed: block
-                    .get("is_error")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                    .unwrap_or_default(),
+                block,
             }),
             _ => None,
         })

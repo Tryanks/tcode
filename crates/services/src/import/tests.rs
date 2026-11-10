@@ -179,7 +179,9 @@ const CLAUDE_TRANSCRIPT: &str = r#"{"type":"user","message":{"role":"user","cont
 {"type":"assistant","message":{"id":"msg_example_1","type":"message","role":"assistant","model":"claude-example","content":[{"type":"thinking","thinking":"Reading it.","signature":"c2lnbmF0dXJl"},{"type":"tool_use","id":"toolu_read","name":"Read","input":{"file_path":"/work/example/README.md"}}]},"uuid":"00000000-0000-4000-8000-000000000013","parentUuid":"00000000-0000-4000-8000-000000000012","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:07.000Z"}
 {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_read","content":"Example readme"}]},"uuid":"00000000-0000-4000-8000-000000000014","parentUuid":"00000000-0000-4000-8000-000000000013","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:08.000Z"}
 {"type":"assistant","message":{"id":"msg_example_2","type":"message","role":"assistant","model":"claude-example","content":[{"type":"tool_use","id":"toolu_make","name":"Bash","input":{"command":"make"}}]},"uuid":"00000000-0000-4000-8000-000000000015","parentUuid":"00000000-0000-4000-8000-000000000014","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:09.000Z"}
-{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_make","content":"make: no targets","is_error":true}]},"uuid":"00000000-0000-4000-8000-000000000016","parentUuid":"00000000-0000-4000-8000-000000000015","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:10.000Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_make","content":"Exit code 2\nmake: *** No targets.  Stop.","is_error":true}]},"uuid":"00000000-0000-4000-8000-000000000016","parentUuid":"00000000-0000-4000-8000-000000000015","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:10.000Z"}
+{"type":"assistant","message":{"id":"msg_example_5","type":"message","role":"assistant","model":"claude-example","content":[{"type":"tool_use","id":"toolu_edit","name":"Edit","input":{"file_path":"/work/example/README.md","old_string":"Example readme","new_string":"Example readme, revised","replace_all":false}}]},"uuid":"00000000-0000-4000-8000-000000000025","parentUuid":"00000000-0000-4000-8000-000000000016","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:10.500Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_edit","content":"The file /work/example/README.md has been updated successfully."}]},"toolUseResult":{"filePath":"/work/example/README.md","oldString":"Example readme","newString":"Example readme, revised","originalFile":"Example readme\n","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-Example readme","+Example readme, revised"]}],"userModified":false,"replaceAll":false},"uuid":"00000000-0000-4000-8000-000000000026","parentUuid":"00000000-0000-4000-8000-000000000025","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:10.700Z"}
 {"type":"ai-title","aiTitle":"Read and build the example","sessionId":"00000000-0000-4000-8000-000000000010"}
 {"type":"custom-title","customTitle":"Readme review","sessionId":"00000000-0000-4000-8000-000000000010"}
 {"type":"ai-title","aiTitle":"Review the example","sessionId":"00000000-0000-4000-8000-000000000010"}
@@ -218,12 +220,20 @@ fn a_claude_transcript_imports_as_claude_recorded_it() {
                 Some("Example readme"),
                 ItemStatus::Completed,
             ),
-            tool(
-                "Bash",
-                json!({"command": "make"}),
-                Some("make: no targets"),
-                ItemStatus::Failed,
-            ),
+            Some(ItemContent::CommandExecution {
+                command: "make".into(),
+                output: "make: *** No targets.  Stop.".into(),
+                exit_code: Some(2),
+                status: ItemStatus::Failed,
+            }),
+            Some(ItemContent::FileChange {
+                changes: vec![agent::FileChange {
+                    path: "/work/example/README.md".into(),
+                    kind: agent::FileChangeKind::Modify,
+                    diff: Some("@@ -1,1 +1,1 @@\n-Example readme\n+Example readme, revised".into()),
+                }],
+                status: ItemStatus::Completed,
+            }),
             None,
             Some(ItemContent::AssistantMessage {
                 text: "Done.".into(),
@@ -235,12 +245,12 @@ fn a_claude_transcript_imports_as_claude_recorded_it() {
                 provider_kind: "local-command-stdout".into(),
                 summary: "Total cost: $0.00".into(),
             }),
-            tool(
-                "Bash",
-                json!({"command": "make test"}),
-                None,
-                ItemStatus::Interrupted,
-            ),
+            Some(ItemContent::CommandExecution {
+                command: "make test".into(),
+                output: String::new(),
+                exit_code: None,
+                status: ItemStatus::Interrupted,
+            }),
         ]
     );
 }
