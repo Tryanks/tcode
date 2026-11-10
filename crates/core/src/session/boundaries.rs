@@ -11,13 +11,10 @@ pub struct TurnBoundaries {
     users: HashMap<String, User>,
     compacting: bool,
     /// Steer restore points, by checkpoint id: the steer's request id.
-    #[serde(default)]
     steer_checkpoints: HashMap<String, String>,
     /// The next message's [`User::seq`].
-    #[serde(default)]
     next_seq: u64,
     /// What the latest rewind removed while the harness can still undo it.
-    #[serde(default)]
     undo: Option<Box<UndoState>>,
 }
 
@@ -43,7 +40,6 @@ struct User {
     pending: bool,
     /// When the message joined the fold, which orders a turn's messages:
     /// a cut at a steer removes it and the messages after it.
-    #[serde(default)]
     seq: u64,
 }
 
@@ -400,7 +396,6 @@ impl TurnBoundaries {
 pub struct TurnStarts {
     rows: Vec<u64>,
     /// The rows before the latest rewind, which its undo puts back.
-    #[serde(default)]
     before_rewind: Option<Vec<u64>>,
 }
 
