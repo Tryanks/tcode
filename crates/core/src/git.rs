@@ -458,8 +458,9 @@ pub fn sanitize_commit_message(raw: &str) -> String {
     }
 }
 
-/// Parse `git status --porcelain=2 --branch` output plus the numstat map into
-/// the local part of a [`GitStatus`]. `default_branch` is the short name from
+/// Parse `git status --porcelain=2 --branch` output plus the numstat rows of
+/// the unstaged and the staged diff, which add up per path, into the local
+/// part of a [`GitStatus`]. `default_branch` is the short name from
 /// `origin/HEAD` (or `None`); `has_origin_remote` from `git remote`.
 ///
 /// This parser assumes a repository and sets `is_repo` to true.
@@ -503,10 +504,13 @@ pub fn parse_status(
         }
     }
 
-    let numstat_map: std::collections::HashMap<&str, (u32, u32)> = numstat
-        .iter()
-        .map(|(p, i, d)| (p.as_str(), (*i, *d)))
-        .collect();
+    let mut numstat_map: std::collections::HashMap<&str, (u32, u32)> =
+        std::collections::HashMap::new();
+    for (path, insertions, deletions) in numstat {
+        let delta = numstat_map.entry(path.as_str()).or_default();
+        delta.0 += insertions;
+        delta.1 += deletions;
+    }
     paths.sort();
     let changed_files = paths
         .into_iter()
@@ -924,9 +928,11 @@ mod tests {
             "u UU N... 100644 100644 100644 100644 4444444444444444444444444444444444444444 5555555555555555555555555555555555555555 6666666666666666666666666666666666666666 merged.rs\n",
             "? new file.txt \n",
         );
+        // `src/app.rs` is staged and edited again: `git diff --numstat` and
+        // `git diff --cached --numstat` each give one row for it.
         let status = parse_status(
             porcelain,
-            &[("src/app.rs".into(), 5, 3)],
+            &[("src/app.rs".into(), 4, 1), ("src/app.rs".into(), 1, 2)],
             Some("main"),
             true,
         );
