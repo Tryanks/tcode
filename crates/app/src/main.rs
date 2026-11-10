@@ -179,9 +179,7 @@ fn start_local(store: SessionStore) -> std::io::Result<(SpawnedHost, HostMux)> {
         ai_title_generation: true,
         ..HostServices::default()
     };
-    if let Err(error) = host_services.start_mcp_servers(true) {
-        log::warn!("MCP servers unavailable: {error}");
-    }
+    host_services.start_mcp_servers(true);
     let host = spawn_host(store, host_services)?;
     let mux = HostMux::new(host.attachments.clone(), host.from_host.clone())
         .with_original_backend(std::sync::Arc::new(host.clone()));

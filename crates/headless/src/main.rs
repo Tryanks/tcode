@@ -166,7 +166,8 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         ai_title_generation: true,
         ..HostServices::default()
     };
-    if let Err(error) = services.start_mcp_servers(false) {
+    services.start_mcp_servers(false);
+    if let Some(error) = &services.mcp_unavailable {
         eprintln!("tcode-headless: MCP servers unavailable: {error}");
     }
     let host =

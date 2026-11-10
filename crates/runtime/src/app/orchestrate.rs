@@ -41,9 +41,16 @@ pub(super) struct McpWiring {
     pub(super) control_grants: Arc<std::sync::Mutex<HashMap<String, control_mcp::ThreadAccess>>>,
     /// The control server's record of the tools each thread's connection received.
     pub(super) control_source: Option<control_mcp::GrantSource>,
+    /// Why the MCP servers did not start, until the first thread that would have had them
+    /// starts and the user is told.
+    pub(super) unavailable: Option<String>,
 }
 
 impl AppState {
+    pub(crate) fn mcp_unavailable(&mut self, error: Option<String>) {
+        self.mcp.unavailable = error;
+    }
+
     /// Attach the serializable registration half of the preview MCP server.
     /// Its broker receiver is drained by the host reverse-RPC pump.
     pub fn attach_preview_mcp(&mut self, url: String, tokens: preview_mcp::TokenRegistry) {

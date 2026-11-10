@@ -1206,6 +1206,11 @@ pub enum RuntimeError {
     FileUnreadable {
         error: String,
     },
+    /// The host's MCP servers did not start, so threads start without Tcode's tools; told
+    /// once, when the first thread that would have had them starts.
+    McpUnavailable {
+        error: String,
+    },
     TerminalStart {
         error: String,
     },

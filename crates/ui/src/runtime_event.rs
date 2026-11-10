@@ -36,6 +36,9 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::FileUnreadable { error } => {
                     crate::tr!("errors.file_unreadable", error = error).into_owned()
                 }
+                RuntimeError::McpUnavailable { error } => {
+                    crate::tr!("errors.mcp_unavailable", error = error).into_owned()
+                }
                 RuntimeError::TerminalStart { error } => {
                     crate::tr!("errors.terminal_start", error = error).into_owned()
                 }

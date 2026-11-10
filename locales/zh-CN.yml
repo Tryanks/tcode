@@ -1370,6 +1370,7 @@ errors:
   persist_settings: "保存设置失败：%{error}"
   settings_unreadable: "Tcode 读不了 settings.json（%{error}），现在使用默认设置，也不会把任何设置写进这个文件。它可能是更新版本的 Tcode 写的，请改用那个版本打开。"
   file_unreadable: "Tcode 读不了自己的一个文件（%{error}），现在不使用其中的内容运行，也不会把任何内容写进这个文件。它可能是更新版本的 Tcode 写的，请改用那个版本打开。"
+  mcp_unavailable: "本次运行无法向代理提供 Tcode 的工具（%{error}），线程将在没有这些工具的情况下启动。"
   delete_session: "删除线程失败：%{error}"
   delete_project: "删除项目失败：%{error}"
   persist_session: "保存线程失败：%{error}"

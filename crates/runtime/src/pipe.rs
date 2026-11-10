@@ -36,25 +36,35 @@ pub struct HostServices {
     /// request receiver or live backend handle.
     pub computer_use: Option<computer_use_mcp::ComputerUseMcpServer>,
     pub control: Option<control_mcp::ControlMcpServer>,
+    /// Why the MCP servers could not start; the host tells the user when the first thread
+    /// starts without them.
+    pub mcp_unavailable: Option<String>,
 }
 
 impl HostServices {
     /// Starts the MCP servers a host offers its agents on one loopback MCP host, computer use
-    /// only where `computer_use`. A host that cannot bind or start runs without any of them.
-    /// Preview requests travel to the client rendering the thread's preview, so a host without a
-    /// desktop serves preview too.
-    pub fn start_mcp_servers(&mut self, computer_use: bool) -> std::io::Result<()> {
-        let mut host = mcp_host::Host::bind()?;
-        let preview = preview_mcp::start(&mut host);
-        let pull_requests = pull_request_mcp::start(&mut host);
-        let control = control_mcp::start(&mut host);
-        let computer_use = computer_use.then(|| computer_use_mcp::start(&mut host));
-        host.start()?;
-        self.preview = Some(preview);
-        self.pull_requests = Some(pull_requests);
-        self.control = Some(control);
-        self.computer_use = computer_use;
-        Ok(())
+    /// only where `computer_use`. A host that cannot bind or start runs without any of them,
+    /// and keeps the reason in `mcp_unavailable`. Preview requests travel to the client
+    /// rendering the thread's preview, so a host without a desktop serves preview too.
+    pub fn start_mcp_servers(&mut self, computer_use: bool) {
+        let started = (|| {
+            let mut host = mcp_host::Host::bind()?;
+            let preview = preview_mcp::start(&mut host);
+            let pull_requests = pull_request_mcp::start(&mut host);
+            let control = control_mcp::start(&mut host);
+            let computer_use = computer_use.then(|| computer_use_mcp::start(&mut host));
+            host.start()?;
+            std::io::Result::Ok((preview, pull_requests, control, computer_use))
+        })();
+        match started {
+            Ok((preview, pull_requests, control, computer_use)) => {
+                self.preview = Some(preview);
+                self.pull_requests = Some(pull_requests);
+                self.control = Some(control);
+                self.computer_use = computer_use;
+            }
+            Err(error) => self.mcp_unavailable = Some(error.to_string()),
+        }
     }
 }
 
@@ -266,6 +276,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             if let Some(server) = services.control.take() {
                 state.attach_control_mcp(server);
             }
+            state.mcp_unavailable(services.mcp_unavailable.take());
             let mut cx = HostCx::new(mailbox_tx, event_tx);
             state.pump_pull_request_requests(services.pull_requests.take(), &mut cx);
             state.start_pull_request_workers(&mut cx);
