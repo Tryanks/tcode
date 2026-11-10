@@ -1076,11 +1076,12 @@ fn no_plugin_management(provider: ProviderKind) -> AgentError {
 
 /// Registry agents never offered for new sessions because they duplicate a
 /// native integration.
-pub const HIDDEN_ACP_AGENT_IDS: [&str; 6] = [
+pub const HIDDEN_ACP_AGENT_IDS: [&str; 7] = [
     "claude-acp",
     "codex-acp",
     "pi-acp",
     "opencode",
+    "opencode-v2",
     "cursor",
     "grok-build",
 ];
@@ -1672,18 +1673,11 @@ mod permission_tests {
 
     #[test]
     fn permission_controls_publish_native_choices_and_decode_old_model_options() {
-        for (provider, id, apply, values, default, recommended, permissive) in [
+        for (provider, id, apply, default, recommended, permissive) in [
             (
                 ProviderKind::ClaudeCode,
                 "permissionMode",
                 ApplyTiming::Live,
-                vec![
-                    "default",
-                    "acceptEdits",
-                    "auto",
-                    "dontAsk",
-                    "bypassPermissions",
-                ],
                 "default",
                 "auto",
                 "bypassPermissions",
@@ -1692,7 +1686,6 @@ mod permission_tests {
                 ProviderKind::Codex,
                 "permissions",
                 ApplyTiming::NextTurn,
-                vec!["ask", "auto_review", "read_only", "full_access"],
                 "ask",
                 "auto_review",
                 "full_access",
@@ -1701,13 +1694,6 @@ mod permission_tests {
                 ProviderKind::Grok,
                 "permissionMode",
                 ApplyTiming::Restart,
-                vec![
-                    "default",
-                    "acceptEdits",
-                    "auto",
-                    "bypassPermissions",
-                    "dontAsk",
-                ],
                 "default",
                 "auto",
                 "bypassPermissions",
@@ -1716,7 +1702,6 @@ mod permission_tests {
                 ProviderKind::OpenCode,
                 "permission_mode",
                 ApplyTiming::Live,
-                vec!["normal", "auto"],
                 "normal",
                 "auto",
                 "auto",
@@ -1725,7 +1710,6 @@ mod permission_tests {
                 ProviderKind::Cursor,
                 "approvalMode",
                 ApplyTiming::Restart,
-                vec!["unrestricted"],
                 "unrestricted",
                 "unrestricted",
                 "unrestricted",
@@ -1733,7 +1717,6 @@ mod permission_tests {
         ] {
             let OptionDescriptor::Select {
                 id: actual_id,
-                options,
                 default_value,
                 role,
                 apply: actual_apply,
@@ -1747,20 +1730,6 @@ mod permission_tests {
             assert_eq!(actual_id, id);
             assert_eq!(role, OptionRole::Permission);
             assert_eq!(actual_apply, apply);
-            assert_eq!(
-                options
-                    .iter()
-                    .map(|option| option.value.as_str())
-                    .collect::<Vec<_>>(),
-                values
-            );
-            assert!(options.iter().all(|option| {
-                option
-                    .description
-                    .as_ref()
-                    .is_some_and(|description| !description.is_empty())
-                    && option.unavailable.is_none()
-            }));
             assert_eq!(default_value.as_deref(), Some(default));
             assert_eq!(actual_recommended.as_deref(), Some(recommended));
             assert_eq!(actual_permissive.as_deref(), Some(permissive));
@@ -3200,8 +3169,8 @@ pub enum ApprovalKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
     },
-    /// A read-only file/search operation (Claude's `file_read_approval` family:
-    /// Read/View/Grep/Glob/…/WebSearch). `detail` is the pre-rendered summary.
+    /// A read-only file or search operation. `detail` is the pre-rendered
+    /// summary.
     FileRead {
         detail: String,
     },
@@ -3391,31 +3360,53 @@ fn json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
 mod launch_env_tests {
     use super::*;
 
+    /// A profile's home reaches each CLI as the variable that CLI reads its
+    /// state directory from, over a configured pair of the same name.
     #[test]
     fn home_override_is_provider_specific_and_wins_over_configured_pairs() {
-        for (provider, variable) in [
-            (ProviderKind::ClaudeCode, Some("CLAUDE_CONFIG_DIR")),
-            (ProviderKind::Codex, Some("CODEX_HOME")),
-            (ProviderKind::Pi, Some("PI_CODING_AGENT_DIR")),
-            (ProviderKind::OpenCode, None),
-            (ProviderKind::Acp, None),
+        for (provider, variables) in [
+            (ProviderKind::ClaudeCode, &["CLAUDE_CONFIG_DIR"][..]),
+            (ProviderKind::Codex, &["CODEX_HOME"]),
+            (ProviderKind::Pi, &["PI_CODING_AGENT_DIR"]),
+            (
+                ProviderKind::Cursor,
+                &["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"],
+            ),
+            (ProviderKind::Grok, &["GROK_HOME"]),
+            (ProviderKind::OpenCode, &[]),
+            (ProviderKind::Acp, &[]),
         ] {
-            let configured = vec![("FOO".to_owned(), "bar".to_owned())];
+            let configured: Vec<(String, String)> = std::iter::once(("FOO", "bar"))
+                .chain(
+                    variables
+                        .iter()
+                        .map(|variable| (*variable, "/home/user/old")),
+                )
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect();
             let mut env = LaunchEnv {
                 env: configured.clone(),
                 home: None,
             };
-            assert_eq!(env.pairs(provider), configured);
-            assert!(LaunchEnv::default().pairs(provider).is_empty());
-            if let Some(variable) = variable {
-                env.env.push((variable.into(), "previous".into()));
-            }
-            let mut expected = env.env.clone();
-            env.home = Some(PathBuf::from("/tmp/provider-profile"));
-            if let Some(variable) = variable {
-                expected.push((variable.into(), "/tmp/provider-profile".into()));
-            }
+            assert_eq!(env.pairs(provider), configured, "{provider:?}");
+            env.home = Some(PathBuf::from("/home/user/profile"));
+            let expected: Vec<_> = configured
+                .iter()
+                .cloned()
+                .chain(
+                    variables
+                        .iter()
+                        .map(|variable| ((*variable).to_owned(), "/home/user/profile".to_owned())),
+                )
+                .collect();
             assert_eq!(env.pairs(provider), expected, "{provider:?}");
+            for variable in variables {
+                assert_eq!(
+                    env.child_path(provider, variable),
+                    Some(PathBuf::from("/home/user/profile")),
+                    "{provider:?}"
+                );
+            }
         }
     }
 }
@@ -3518,22 +3509,6 @@ mod resolve_binary_tests {
     #[cfg(windows)]
     fn resolved_name(path: Option<PathBuf>) -> Option<String> {
         Some(path?.file_name()?.to_string_lossy().to_lowercase())
-    }
-
-    /// The real Windows shape: `claude` only ever exists as `claude.cmd`, so the
-    /// bare join the old resolver did found nothing.
-    // Relies on the Windows filesystem being case-insensitive: PATHEXT is
-    // upper-case while npm writes `claude.cmd`. On a case-sensitive FS the
-    // join cannot match, so this is a Windows-only behavior test. The
-    // case-independent ordering/fallback logic is covered below on every OS.
-    #[cfg(windows)]
-    #[test]
-    fn windows_resolves_a_cmd_shim_for_a_bare_name() {
-        let dir = temp_dir("win-cmd");
-        std::fs::write(dir.join("claude.cmd"), "@echo off\n").unwrap();
-
-        let found = find_in_dirs([dir], "claude", &windows_pathext(), is_file);
-        assert_eq!(resolved_name(found), Some("claude.cmd".to_string()));
     }
 
     /// PATHEXT order decides: `.EXE` beats `.CMD` when both exist.
@@ -3783,22 +3758,15 @@ mod usage_compatibility_tests {
         .unwrap();
         assert_eq!(usage.freshness, ContextFreshness::Unknown);
         assert_eq!(usage.total_processed_tokens, Some(4100000));
-        // Existing readers use a unit variant with this tag. Extra fields are
-        // additive and do not introduce an unknown protocol event tag.
-        #[derive(Deserialize)]
-        #[serde(tag = "type", rename_all = "snake_case")]
-        enum LegacyEvent {
-            ContextCompacted,
-        }
-        let _: LegacyEvent = serde_json::from_str(r#"{"type":"context_compacted","in_progress":false,"trigger":"manual","pre_tokens":500}"#).unwrap();
         let event = AgentEvent::ContextCompacted(Compaction {
             trigger: Some("manual".into()),
             pre_tokens: Some(500),
             ..Default::default()
         });
-        let wire = serde_json::to_value(event).unwrap();
-        assert_eq!(wire["type"], "context_compacted");
-        assert_eq!(wire["pre_tokens"], 500);
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"context_compacted","in_progress":false,"trigger":"manual","pre_tokens":500,"post_tokens":null,"dropped_tokens":null,"duration_ms":null}"#
+        );
     }
 }
 

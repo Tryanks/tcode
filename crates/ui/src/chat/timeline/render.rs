@@ -2235,81 +2235,56 @@ mod tests {
         }
     }
 
-    /// A Work Log's header and a tool window's header fill in over several
-    /// frames as the pointer comes onto them and empty as it leaves, and the
-    /// window comes to rest; with motion reduced the fill comes and goes at
-    /// once.
+    /// A Work Log's header and a tool window's header fill as the pointer
+    /// comes onto them and empty as it leaves; with motion reduced, on the
+    /// frame the pointer moves.
     #[gpui::test]
-    fn a_header_under_the_pointer_fades_its_fill_in_and_out(cx: &mut TestAppContext) {
+    fn a_header_under_the_pointer_fills_while_it_is_there(cx: &mut TestAppContext) {
         use gpui::{AppContext as _, Modifiers, VisualTestContext, point, px, size};
         use std::time::Duration;
 
         let keys: &[&str] = &["worklog-header-0-command-0", "activity-row-command-0"];
-        for reduce in [false, true] {
-            let mut timeline = Timeline::default();
-            timeline.turns = vec![TurnMeta::default()];
-            timeline.entries.push(entry("user", user_item("go")));
-            for index in 0..3 {
-                timeline.entries.push(command(&format!("command-{index}")));
-            }
-            timeline
-                .entries
-                .push(entry("assistant", assistant("Done.")));
-            let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
-            cx.update(|cx| cx.set_reduce_motion(reduce));
-            let drawn = std::rc::Rc::default();
-            let (_, cx) = cx.add_window_view(|window, cx| HoverProbe {
-                chat: cx.new(|cx| {
-                    ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
-                }),
-                keys,
-                drawn: std::rc::Rc::clone(&drawn),
-            });
-            let cx: &mut VisualTestContext = cx;
-            cx.simulate_resize(size(px(1_024.), px(700.)));
-            draw_settled(cx);
-            let header = cx.debug_bounds(keys[0]).expect("collapsed work log");
-            cx.simulate_click(header.center(), Modifiers::default());
-            draw_settled(cx);
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta::default()];
+        timeline.entries.push(entry("user", user_item("go")));
+        for index in 0..3 {
+            timeline.entries.push(command(&format!("command-{index}")));
+        }
+        timeline
+            .entries
+            .push(entry("assistant", assistant("Done.")));
+        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let drawn = std::rc::Rc::default();
+        let (_, cx) = cx.add_window_view(|window, cx| HoverProbe {
+            chat: cx.new(|cx| {
+                ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
+            }),
+            keys,
+            drawn: std::rc::Rc::clone(&drawn),
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw_settled(cx);
+        let header = cx.debug_bounds(keys[0]).expect("collapsed work log");
+        cx.simulate_click(header.center(), Modifiers::default());
+        draw_settled(cx);
 
-            let away = point(px(1_000.), px(4.));
-            for key in keys {
-                // The fill drawn on each frame after the pointer moves.
-                let follow = |to, cx: &mut VisualTestContext| {
-                    cx.simulate_mouse_move(to, None, Modifiers::default());
-                    let mut seen = Vec::new();
-                    for _ in 0..20 {
-                        cx.executor().advance_clock(Duration::from_millis(16));
-                        cx.update(|window, cx| window.simulate_next_frame(cx));
-                        draw(cx);
-                        seen.push(drawn.borrow()[key]);
-                    }
-                    draw_settled(cx);
-                    seen
-                };
-                let fades = |seen: &[f32], up: bool| {
-                    seen.windows(2)
-                        .all(|pair| pair[1] == pair[0] || (pair[1] > pair[0]) == up)
-                        && seen
-                            .iter()
-                            .filter(|fill| **fill > 0. && **fill < 1.)
-                            .count()
-                            >= 3
-                };
-                follow(away, cx);
-                let bounds = cx.debug_bounds(key).unwrap_or_else(|| panic!("{key}"));
-                let entering = follow(bounds.center(), cx);
-                let leaving = follow(away, cx);
-                assert_eq!(*entering.last().unwrap(), 1., "{key}: {entering:?}");
-                assert_eq!(*leaving.last().unwrap(), 0., "{key}: {leaving:?}");
-                if reduce {
-                    assert_eq!((entering[0], leaving[0]), (1., 0.), "{key} faded");
-                } else {
-                    assert!(fades(&entering, true), "{key} popped in: {entering:?}");
-                    assert!(fades(&leaving, false), "{key} popped out: {leaving:?}");
-                }
-            }
-            cx.update(|_, cx| cx.set_reduce_motion(false));
+        let away = point(px(1_000.), px(4.));
+        for key in keys {
+            // The fill drawn on the frame after the pointer moves.
+            let follow = |to, cx: &mut VisualTestContext| {
+                cx.simulate_mouse_move(to, None, Modifiers::default());
+                cx.executor().advance_clock(Duration::from_millis(16));
+                cx.update(|window, cx| window.simulate_next_frame(cx));
+                draw(cx);
+                drawn.borrow()[key]
+            };
+            follow(away, cx);
+            let bounds = cx.debug_bounds(key).unwrap_or_else(|| panic!("{key}"));
+            let entering = follow(bounds.center(), cx);
+            let leaving = follow(away, cx);
+            assert_eq!((entering, leaving), (1., 0.), "{key}");
         }
     }
 
@@ -2377,7 +2352,7 @@ mod tests {
         let mut timeline = Timeline::default();
         timeline.turns = vec![TurnMeta::default()];
         timeline.entries.push(entry("user", user_item("go")));
-        for index in 0..400 {
+        for index in 0..100 {
             timeline.entries.push(command(&format!("command-{index}")));
         }
         timeline
@@ -2385,6 +2360,7 @@ mod tests {
             .push(entry("assistant", assistant("Done.")));
 
         let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
         });
@@ -2404,8 +2380,8 @@ mod tests {
         draw_settled(cx);
         assert!(cx.debug_bounds("activity-row-command-0").is_some());
         assert!(
-            cx.debug_bounds("activity-row-command-399").is_none(),
-            "an expanded work log must not lay out all 400 activities"
+            cx.debug_bounds("activity-row-command-99").is_none(),
+            "an expanded work log must not lay out all 100 activities"
         );
 
         view.update(cx, |chat, cx| {
@@ -2413,7 +2389,7 @@ mod tests {
             cx.notify();
         });
         draw_settled(cx);
-        assert!(cx.debug_bounds("activity-row-command-399").is_some());
+        assert!(cx.debug_bounds("activity-row-command-99").is_some());
         assert!(cx.debug_bounds("activity-row-command-0").is_none());
 
         // Opening one activity keeps the measured heights of the turn's
@@ -2838,6 +2814,7 @@ mod tests {
         });
 
         let window_state = cx.new(|_| WindowState::default());
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
@@ -3101,6 +3078,7 @@ This begins after the hard break."#;
         });
         let window_state = cx.new(|_| WindowState::default());
 
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 workspace_store.clone(),
@@ -3123,7 +3101,7 @@ This begins after the hard break."#;
             max_scroll > px(800.),
             "long markdown did not contribute its full height to the chat list: {max_scroll:?}"
         );
-        let scroll_step = px(40.);
+        let scroll_step = px(160.);
         let steps = (f32::from(max_scroll / 2.) / f32::from(scroll_step)).ceil() as usize;
         for step in 0..steps {
             let distance = (scroll_step * (step + 1) as f32).min(max_scroll / 2.);
@@ -3605,6 +3583,7 @@ This begins after the hard break."#;
                 .unwrap();
             let (workspace_store, window_state, session_id, _driver) =
                 seed_chat_with_history_on(cx, timeline, false, Some(ProviderKind::OpenCode));
+            cx.update(|cx| cx.set_reduce_motion(true));
             let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
             });

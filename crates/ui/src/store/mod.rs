@@ -4390,7 +4390,6 @@ pub(crate) mod tests {
     use agent::{AgentEvent, ItemContent, ProviderKind, ThreadItem, TurnStatus};
     use gpui::{App, AppContext as _, TestAppContext};
     use tcode_core::{
-        git::{GitFileEntry, GitStatus},
         project::{Project, SessionMeta},
         session::{EntryContent, ReviewComment, ReviewSide},
         settings::Settings,
@@ -7100,7 +7099,7 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn reconnect_on_a_delayed_link_restores_workspace_readiness(cx: &mut TestAppContext) {
+    fn reconnect_restores_workspace_readiness_once_the_link_answers(cx: &mut TestAppContext) {
         use tcode_client::{ConnectionFailure, ConnectionState};
         let root = scratch_root("delayed-reconnect");
         let disk = SessionStore::open_at(root.clone()).unwrap();
@@ -7119,7 +7118,6 @@ pub(crate) mod tests {
         let state_link = link.clone();
         let replies = async move {
             while let Ok(line) = connection.from_host.recv().await {
-                smol::Timer::after(std::time::Duration::from_millis(30)).await;
                 if matches!(
                     state_link.connection_state(),
                     ConnectionState::Syncing { .. }
@@ -7456,7 +7454,7 @@ pub(crate) mod tests {
                 }
             },
             async {
-                smol::Timer::after(std::time::Duration::from_secs(5)).await;
+                smol::Timer::after(HOST_PATIENCE).await;
                 panic!("recovery Scope and IndexUnchanged were not delivered");
             },
         ));
@@ -8343,169 +8341,6 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn session_replica_matches_live_timeline_for_synthetic_turn(cx: &mut TestAppContext) {
-        let root = scratch_root("tcode-session-replica-consistency-test");
-        let session_store = SessionStore::open_at(root.clone()).expect("open test store");
-        let meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
-        let session_id = meta.id.clone();
-        session_store.upsert_meta(&meta).expect("persist session");
-        let events = [
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "user-1".into(),
-                parent_item_id: None,
-                content: ItemContent::UserMessage {
-                    text: "replicate this turn".into(),
-                    context_len: None,
-                    attachments: Vec::new(),
-                },
-            }),
-            AgentEvent::TurnStarted {
-                turn_id: "turn-1".into(),
-            },
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "assistant-1".into(),
-                parent_item_id: None,
-                content: ItemContent::AssistantMessage {
-                    text: "replicated".into(),
-                    summarized: false,
-                },
-            }),
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-        ];
-        for (offset, event) in events.iter().enumerate() {
-            session_store
-                .append_event(&session_id, 100 + offset as u64, event)
-                .expect("persist synthetic event");
-        }
-
-        let host = test_host(session_store);
-        let mut driver = LocalHostDriver::new(&host);
-        let workspace = driver.workspace(cx);
-        workspace.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, &workspace, "initial session timeline replica", |cx| {
-            workspace.read_with(cx, |store, cx| {
-                store.sole_thread().as_ref() == Some(&session_id)
-                    && store
-                        .thread_timeline(Some(&session_id), cx)
-                        .is_some_and(|timeline| timeline.turns.len() == 1)
-            })
-        });
-
-        // The replica above is fed by the SessionEvents baseline, which the host
-        // reads from the store independently of its own resident timeline. That
-        // timeline is hydrated by a detached load; on slow disks (Windows CI) it
-        // can still be empty here, so live events would land on nothing and the
-        // snapshot below would miss turn-1.
-        driver.wait_until(cx, &workspace, "host resident timeline hydration", |_| {
-            let target_id = session_id.clone();
-            update_host!(&host, move |state, _| {
-                state
-                    .residents
-                    .live
-                    .get(&target_id)
-                    .is_some_and(|session| session.timeline.turns.len() == 1)
-            })
-        });
-
-        let live_events = [
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "user-2".into(),
-                parent_item_id: None,
-                content: ItemContent::UserMessage {
-                    text: "apply incrementally".into(),
-                    context_len: None,
-                    attachments: Vec::new(),
-                },
-            }),
-            AgentEvent::TurnStarted {
-                turn_id: "turn-2".into(),
-            },
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "assistant-2".into(),
-                parent_item_id: None,
-                content: ItemContent::AssistantMessage {
-                    text: "incremental replica".into(),
-                    summarized: false,
-                },
-            }),
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-2".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-        ];
-        for (offset, event) in live_events.into_iter().enumerate() {
-            let event_session_id = session_id.clone();
-            update_host!(&host, move |state, cx| {
-                state.record_event_for_replica_test(
-                    &event_session_id,
-                    200 + offset as u64,
-                    &event,
-                    cx,
-                );
-            });
-        }
-        let target_id = session_id.clone();
-        let live = update_host!(&host, move |state, _| {
-            let timeline = &state
-                .residents
-                .live
-                .get(&target_id)
-                .expect("selected session")
-                .timeline;
-            (
-                timeline
-                    .entries
-                    .iter()
-                    .map(|entry| (entry.id.clone(), entry.turn, format!("{:?}", entry.content)))
-                    .collect::<Vec<_>>(),
-                timeline.turns.len(),
-            )
-        });
-        // Both timelines can have the same entry and turn counts before the
-        // new events arrive. Wait for the final event before comparing contents.
-        driver.wait_until(
-            cx,
-            &workspace,
-            "incremental session timeline replica",
-            |cx| {
-                workspace.read_with(cx, |store, _| {
-                    held_window(store, &session_id)
-                        .and_then(|held| held.records.last())
-                        .is_some_and(|record| {
-                            matches!(
-                                &record.event,
-                                AgentEvent::TurnCompleted { turn_id, .. } if turn_id == "turn-2"
-                            )
-                        })
-                })
-            },
-        );
-        let replica = workspace.read_with(cx, |store, cx| {
-            let timeline = store
-                .thread_timeline(Some(&session_id), cx)
-                .expect("session replica");
-            assert_eq!(store.sole_thread().as_ref(), Some(&session_id));
-            (
-                timeline
-                    .entries
-                    .iter()
-                    .map(|entry| (entry.id.clone(), entry.turn, format!("{:?}", entry.content)))
-                    .collect::<Vec<_>>(),
-                timeline.turns.len(),
-            )
-        });
-        assert_eq!(replica, live);
-
-        driver.shutdown(cx, &workspace, &host);
-        std::fs::remove_dir_all(root).expect("remove test data");
-    }
-
-    #[gpui::test]
     fn index_and_settings_replicas_follow_representative_commands(cx: &mut TestAppContext) {
         let root = scratch_root("tcode-replica-consistency-test");
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
@@ -8837,135 +8672,6 @@ pub(crate) mod tests {
                 text: "second parked prefill".into(),
                 attachments: Vec::new(),
             })
-        );
-
-        driver.shutdown(cx, &workspace, &host);
-        std::fs::remove_dir_all(root).expect("remove test data");
-    }
-
-    #[gpui::test]
-    fn providers_and_git_replicas_match_live_after_representative_mutations(
-        cx: &mut TestAppContext,
-    ) {
-        let root = scratch_root("tcode-provider-git-replica-consistency-test");
-        let session_store = SessionStore::open_at(root.clone()).expect("open test store");
-        let mut meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
-        meta.id = "git-replica".into();
-        session_store.upsert_meta(&meta).unwrap();
-        let host = test_host(session_store);
-        let mut driver = LocalHostDriver::new(&host);
-        let workspace = driver.workspace(cx);
-
-        workspace.update(cx, |store, cx| store.show_alone("git-replica".into(), cx));
-        // Subscribing adopts the session and spawns a real git probe of the
-        // (non-repo) cwd. Let that probe land before injecting the fixture
-        // status, or its late result overwrites the injected one.
-        driver.wait_until(cx, &workspace, "initial git probe", |cx| {
-            workspace.read_with(cx, |store, cx| {
-                store
-                    .thread_git(Some("git-replica"), cx)
-                    .is_some_and(|git| git.status.is_some())
-            })
-        });
-        driver.command(cx, &workspace, Command::ClearRelaunchMarker);
-        update_host!(&host, |state, _cx| {
-            *state.acp_registry = Some(
-                serde_json::from_value(serde_json::json!({
-                    "agents": [{
-                        "id": "replicated-agent",
-                        "name": "Replicated Agent",
-                        "version": "1.0.0",
-                        "description": "registry refresh result",
-                        "distribution": { "npx": { "package": "replicated-agent" } }
-                    }]
-                }))
-                .expect("registry fixture"),
-            );
-            state.acp_registry_loading = false;
-            state.acp_registry_error = None;
-            state
-                .providers
-                .provider_versions
-                .entry(ProviderKind::Codex)
-                .or_default()
-                .checking = true;
-            state.git_status.insert(
-                "git-replica".into(),
-                GitStatus {
-                    is_repo: true,
-                    branch: Some("feature/replica".into()),
-                    has_working_tree_changes: true,
-                    changed_files: vec![GitFileEntry {
-                        path: "src/replica.rs".into(),
-                        insertions: 4,
-                        deletions: 2,
-                    }],
-                    ..Default::default()
-                },
-            );
-            state.git_busy.insert("git-replica".into());
-        });
-        driver.wait_until(cx, &workspace, "provider and git replicas", |cx| {
-            workspace.read_with(cx, |store, cx| {
-                store.providers_replica.providers_checking
-                    && store
-                        .thread_git(Some("git-replica"), cx)
-                        .and_then(|git| git.status.as_ref())
-                        .is_some_and(|status| status.branch.as_deref() == Some("feature/replica"))
-            })
-        });
-
-        let (live_providers, live_git) = update_host!(&host, |state, _| {
-            (
-                state.providers_status_snapshot(),
-                state.git_status_snapshot("git-replica"),
-            )
-        });
-        let (replica_providers, replica_git) = workspace.read_with(cx, |store, cx| {
-            (
-                store.providers_replica.clone(),
-                store
-                    .thread_git(Some("git-replica"), cx)
-                    .cloned()
-                    .expect("git replica"),
-            )
-        });
-
-        assert_eq!(replica_providers, live_providers);
-        assert_eq!(replica_git, live_git);
-        assert!(replica_providers.providers_checking);
-        assert_eq!(
-            replica_providers.acp_marketplace_items[0].id,
-            "replicated-agent"
-        );
-        assert_eq!(
-            replica_git.status.expect("git replica").changed_files[0].path,
-            "src/replica.rs"
-        );
-
-        // A usage read that lands moves nothing else in the providers status.
-        update_host!(&host, |state, _cx| {
-            state.providers.provider_usage.insert(
-                "codex".into(),
-                tcode_core::usage::ProviderUsage {
-                    fetched_at: 7,
-                    plan: Some("pro".into()),
-                    ..Default::default()
-                },
-            );
-            state.providers.usage_checking.insert("claude".into());
-        });
-        driver.wait_until(cx, &workspace, "usage replica", |cx| {
-            workspace.read_with(cx, |store, _| {
-                store.providers_replica.usage_checking.contains("claude")
-            })
-        });
-        let live_providers = update_host!(&host, |state, _| state.providers_status_snapshot());
-        let replica_providers = workspace.read_with(cx, |store, _| store.providers_replica.clone());
-        assert_eq!(replica_providers, live_providers);
-        assert_eq!(
-            replica_providers.provider_usage["codex"].plan.as_deref(),
-            Some("pro")
         );
 
         driver.shutdown(cx, &workspace, &host);

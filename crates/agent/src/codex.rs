@@ -34,16 +34,13 @@ pub use developer_instructions::PREVIEW_BROWSER_INSTRUCTIONS;
 /// The `additionalContext` key [`SessionOptions::instructions`] ride under.
 const INSTRUCTIONS_CONTEXT_KEY: &str = "tcode";
 
-/// Fallback model slug for `collaborationMode.settings.model` when the session
-/// has no resolved model yet.
-const DEFAULT_MODEL: &str = "gpt-5-codex";
 const ELICITATION_URL_ACK_LABEL: &str = "I've opened the link";
 const ELICITATION_URL_CANCEL_LABEL: &str = "Cancel";
 
 fn permission_params(value: &str, turn: bool) -> Result<Value, String> {
     let (sandbox, policy, reviewer) = match value {
         "ask" => ("workspace-write", "on-request", "user"),
-        "auto_review" | "guardian_subagent" => ("workspace-write", "on-request", "auto_review"),
+        "auto_review" => ("workspace-write", "on-request", "auto_review"),
         "read_only" => ("read-only", "on-request", "user"),
         "full_access" => ("danger-full-access", "never", "user"),
         value
@@ -73,11 +70,7 @@ fn permission_params(value: &str, turn: bool) -> Result<Value, String> {
 }
 
 fn requested_permission(selections: &[OptionSelection]) -> String {
-    match selection_str(selections, "permissions").as_deref() {
-        Some("guardian_subagent") => "auto_review".into(),
-        Some(value) => value.into(),
-        None => "ask".into(),
-    }
+    selection_str(selections, "permissions").unwrap_or_else(|| "ask".into())
 }
 
 fn effective_permission(result: &Value) -> String {
@@ -89,9 +82,8 @@ fn effective_permission(result: &Value) -> String {
     }
     let sandbox = result
         .get("sandboxPolicy")
-        .or_else(|| result.get("sandbox"));
-    let sandbox = sandbox
-        .and_then(|value| value.get("type").or(Some(value)))
+        .or_else(|| result.get("sandbox"))
+        .and_then(|sandbox| sandbox.get("type"))
         .and_then(Value::as_str);
     let policy = result.get("approvalPolicy").and_then(Value::as_str);
     let reviewer = result
@@ -99,16 +91,12 @@ fn effective_permission(result: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("user");
     match (sandbox, policy, reviewer) {
-        (Some("workspaceWrite" | "workspace-write"), Some("on-request"), "user") => "ask".into(),
-        (
-            Some("workspaceWrite" | "workspace-write"),
-            Some("on-request"),
-            "auto_review" | "guardian_subagent",
-        ) => "auto_review".into(),
-        (Some("readOnly" | "read-only"), Some("on-request"), "user") => "read_only".into(),
-        (Some("dangerFullAccess" | "danger-full-access"), Some("never"), "user") => {
-            "full_access".into()
+        (Some("workspaceWrite"), Some("on-request"), "user") => "ask".into(),
+        (Some("workspaceWrite"), Some("on-request"), "auto_review" | "guardian_subagent") => {
+            "auto_review".into()
         }
+        (Some("readOnly"), Some("on-request"), "user") => "read_only".into(),
+        (Some("dangerFullAccess"), Some("never"), "user") => "full_access".into(),
         _ => format!(
             "effective:{}",
             json!({"approvalPolicy":result.get("approvalPolicy"), "approvalsReviewer":reviewer, "sandbox":result.get("sandboxPolicy").or_else(|| result.get("sandbox")), "activePermissionProfile":result.get("activePermissionProfile")})
@@ -119,15 +107,14 @@ fn effective_permission(result: &Value) -> String {
 fn current_permission_option(effective: &str, settings: &Value) -> SelectOption {
     let sandbox = settings
         .get("sandboxPolicy")
-        .or_else(|| settings.get("sandbox"));
-    let sandbox = sandbox
-        .and_then(|value| value.get("type").or(Some(value)))
+        .or_else(|| settings.get("sandbox"))
+        .and_then(|sandbox| sandbox.get("type"))
         .and_then(Value::as_str);
     let sandbox = match sandbox {
-        Some("readOnly" | "read-only") => "read-only sandbox",
-        Some("workspaceWrite" | "workspace-write") => "workspace sandbox",
-        Some("dangerFullAccess" | "danger-full-access") => "full access",
-        Some("externalSandbox" | "external-sandbox") => "external sandbox",
+        Some("readOnly") => "read-only sandbox",
+        Some("workspaceWrite") => "workspace sandbox",
+        Some("dangerFullAccess") => "full access",
+        Some("externalSandbox") => "external sandbox",
         _ => "unspecified sandbox",
     };
     let approval = match settings.get("approvalPolicy") {
@@ -318,28 +305,44 @@ async fn collect_models(
     windows: &HashMap<String, model_windows::ModelWindows>,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     initialize(stdin, lines).await?;
+    let entries = list_models_raw(stdin, lines, &mut 2, false).await?;
+    Ok(entries
+        .iter()
+        .filter_map(|model| {
+            let slug = model.get("model").and_then(Value::as_str);
+            map_model(model, slug.and_then(|slug| windows.get(slug)))
+        })
+        .collect())
+}
 
-    let mut models = Vec::new();
+/// Every `model/list` entry, page after page (initial `{}`, then `{cursor}`
+/// until `nextCursor` is empty); `include_hidden` adds the models hidden from
+/// the picker.
+async fn list_models_raw(
+    stdin: &mut BufWriter<ChildStdin>,
+    lines: &Receiver<ChildOutput>,
+    next_id: &mut i64,
+    include_hidden: bool,
+) -> Result<Vec<Value>, AgentError> {
+    let mut entries = Vec::new();
     let mut cursor: Option<String> = None;
-    let mut id = 2;
     loop {
-        let params = match &cursor {
+        let mut params = match &cursor {
             Some(cursor) => json!({ "cursor": cursor }),
             None => json!({}),
         };
+        if include_hidden {
+            params["includeHidden"] = json!(true);
+        }
+        let id = *next_id;
+        *next_id += 1;
         send_json(
             stdin,
             &json!({ "id": id, "method": "model/list", "params": params }),
         )?;
         let response = wait_for_response(lines, id).await?;
-        id += 1;
         if let Some(data) = response.get("data").and_then(Value::as_array) {
-            for model in data {
-                let slug = model.get("model").and_then(Value::as_str);
-                if let Some(spec) = map_model(model, slug.and_then(|slug| windows.get(slug))) {
-                    models.push(spec);
-                }
-            }
+            entries.extend(data.iter().cloned());
         }
         cursor = response
             .get("nextCursor")
@@ -347,10 +350,9 @@ async fn collect_models(
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
         if cursor.is_none() {
-            break;
+            return Ok(entries);
         }
     }
-    Ok(models)
 }
 
 /// Map one `model/list` entry to a [`ModelSpec`]; `None` for hidden models.
@@ -584,6 +586,64 @@ fn codex_effort(selections: &[OptionSelection]) -> Option<String> {
     selection_str(selections, "reasoningEffort")
 }
 
+/// What `model/list` says of each model's reasoning effort (`v2/Model.ts`).
+#[derive(Default)]
+struct ModelEfforts {
+    /// Slug → its supported efforts and its default one.
+    models: HashMap<String, (Vec<String>, String)>,
+    /// The slug the list marks `isDefault`.
+    default_model: Option<String>,
+}
+
+impl ModelEfforts {
+    fn from_list(entries: &[Value]) -> Self {
+        let mut efforts = Self::default();
+        for entry in entries {
+            let (Some(slug), Some(default)) = (
+                entry.get("model").and_then(Value::as_str),
+                entry.get("defaultReasoningEffort").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            let supported = entry
+                .get("supportedReasoningEfforts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|option| option.get("reasoningEffort").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect();
+            if entry.get("isDefault").and_then(Value::as_bool) == Some(true) {
+                efforts.default_model = Some(slug.to_owned());
+            }
+            efforts
+                .models
+                .insert(slug.to_owned(), (supported, default.to_owned()));
+        }
+        efforts
+    }
+
+    /// The effort a turn of `model` runs at, in ChatGPT.app's order: the one
+    /// chosen or configured when the model supports it, else the model's
+    /// default; for a model the list does not have, the chosen or configured
+    /// one, else the default model's default, and only then `medium`.
+    fn resolve(&self, model: &str, chosen: Option<&str>) -> String {
+        match self.models.get(model) {
+            Some((supported, default)) => chosen
+                .filter(|chosen| supported.iter().any(|effort| effort == chosen))
+                .unwrap_or(default)
+                .to_owned(),
+            None => chosen
+                .map(str::to_owned)
+                .or_else(|| {
+                    let default_model = self.default_model.as_ref()?;
+                    Some(self.models.get(default_model)?.1.clone())
+                })
+                .unwrap_or_else(|| "medium".to_owned()),
+        }
+    }
+}
+
 /// Selected service tier (option id `serviceTier`).
 fn codex_service_tier(selections: &[OptionSelection]) -> Option<String> {
     selection_str(selections, "serviceTier")
@@ -640,7 +700,11 @@ enum PendingRequest {
     /// [`SessionCommand::ReadAccountUsage`]: the result goes to its asker.
     AccountUsage(Sender<Result<Value, String>>),
     BackgroundTerminalList,
-    BackgroundTerminalStop,
+    /// `thread/backgroundTerminals/terminate` or `clean`; either way the list
+    /// is read again.
+    BackgroundTerminalStop {
+        method: &'static str,
+    },
 }
 
 struct PendingApproval {
@@ -652,12 +716,15 @@ struct PendingApproval {
 
 struct PendingElicitation {
     rpc_id: Value,
+    questions: Vec<UserInputQuestion>,
     fields: Vec<ElicitField>,
 }
 
 struct ElicitField {
     key: String,
     kind: ElicitFieldKind,
+    /// Listed in the schema's `required`.
+    required: bool,
     /// Display label → wire value for titled enums.
     values: HashMap<String, String>,
 }
@@ -681,10 +748,16 @@ struct Actor {
     events: Sender<AgentEvent>,
     thread_id: String,
     cwd: PathBuf,
-    /// Resolved model slug; used for `collaborationMode.settings.model`.
-    model: Option<String>,
+    /// The model turns run on, for `collaborationMode.settings.model`.
+    model: String,
+    /// The model a session without a chosen one runs on.
+    default_model: String,
     /// Session reasoning effort (`reasoningEffort` selection), if any.
     effort: Option<String>,
+    /// The effort Codex's configuration sets, if any: the thread's
+    /// `reasoningEffort` as `thread/start`, `resume` or `fork` reported it.
+    config_effort: Option<String>,
+    model_efforts: ModelEfforts,
     /// Session service tier (`serviceTier` selection), if any.
     service_tier: Option<String>,
     /// What the thread started with that only a new thread changes.
@@ -718,14 +791,12 @@ struct Actor {
     /// gives completion activities a fresh item id, so the activity id cannot
     /// be the lifecycle identity after spawn.
     subagent_parent_by_thread: HashMap<String, String>,
-    /// The v2 item lifecycle and its legacy fan-out describe the same activity.
-    /// Track their provider identity so only one canonical transition is sent.
+    /// An activity item may come with both `item/started` and `item/completed`;
+    /// its provider identity keeps it to one canonical transition.
     seen_subagent_activities: HashSet<String>,
     usage_by_turn: HashMap<String, TokenUsage>,
     active_turn: Option<String>,
     retry: Option<crate::TurnRetry>,
-    retry_deadline: Option<std::time::Instant>,
-    capacity_retries: usize,
     last_turn_options: Option<TurnOptions>,
     interrupted: bool,
     /// Steers the server acknowledged but has not yet consumed, as
@@ -775,10 +846,14 @@ async fn run_actor(
         thread_id,
         unrevertable,
         model,
+        default_model,
+        config_effort,
+        model_efforts,
         next_id,
         provider_commands,
         permission_descriptor,
         effective_permission,
+        warnings,
     } = match startup {
         Ok(value) => value,
         Err(err) => {
@@ -801,7 +876,10 @@ async fn run_actor(
         thread_id: thread_id.clone(),
         cwd: opts.cwd.clone(),
         model: model.clone(),
+        default_model,
         effort: codex_effort(&opts.option_selections),
+        config_effort,
+        model_efforts,
         service_tier: codex_service_tier(&opts.option_selections),
         thread_config: thread_config(&opts.option_selections),
         requested_permission: requested_permission(&opts.option_selections),
@@ -824,8 +902,6 @@ async fn run_actor(
         usage_by_turn: HashMap::new(),
         active_turn: None,
         retry: None,
-        retry_deadline: None,
-        capacity_retries: 0,
         last_turn_options: None,
         interrupted: false,
         pending_steers: Vec::new(),
@@ -838,7 +914,7 @@ async fn run_actor(
     let started = AgentEvent::SessionStarted {
         provider_session_id: thread_id.clone(),
         resume: ResumeCursor(json!({ "thread_id": thread_id })),
-        model,
+        model: Some(model),
     };
     if actor.events.send(started).await.is_err() {
         let _ = ready
@@ -862,6 +938,9 @@ async fn run_actor(
             commands: provider_commands,
         })
         .await;
+    for message in warnings {
+        actor.events.emit(AgentEvent::Warning { message }).await;
+    }
     let thread = json!({ "threadId": actor.thread_id });
     if let Err(err) = actor.request("thread/goal/get", thread, PendingRequest::GoalSnapshot) {
         log::debug!("Codex thread/goal/get not sent: {err}");
@@ -898,8 +977,6 @@ impl SessionActor for Actor {
                 attachments,
             } => {
                 self.retry = None;
-                self.retry_deadline = None;
-                self.capacity_retries = 0;
                 self.last_turn_options = options.clone();
                 self.interrupted = false;
                 let params = self.build_turn_params(&text, options.as_ref(), &attachments);
@@ -923,7 +1000,7 @@ impl SessionActor for Actor {
                     .as_ref()
                     .is_some_and(|retry| retry.turn_id == turn_id)
                 {
-                    self.wake().await?;
+                    self.retry_turn()?;
                 }
                 Ok(())
             }
@@ -1061,13 +1138,47 @@ impl SessionActor for Actor {
                         &json!({ "id": json_rpc_id, "result": { "answers": wire_answers } }),
                     )
                     .map_err(|e| e.to_string())?;
-                } else if let Some(pending) = self.elicitations.remove(&request_id) {
-                    let result = elicitation_result(&pending.fields, &answers);
-                    send_json(
-                        &mut self.stdin,
-                        &json!({ "id": pending.rpc_id, "result": result }),
-                    )
-                    .map_err(|e| e.to_string())?;
+                } else if let Some(pending) = self.elicitations.get_mut(&request_id) {
+                    let result = match elicitation_result(&pending.fields, &answers) {
+                        Ok(result) => result,
+                        Err(unusable) => {
+                            // Nothing is sent until the answers fit the schema: a decline
+                            // would tell the server the user refused.
+                            for question in &mut pending.questions {
+                                question.prefill = answers
+                                    .get(&question.id)
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned);
+                            }
+                            let headers: Vec<&str> = pending
+                                .questions
+                                .iter()
+                                .filter(|question| unusable.contains(&question.id))
+                                .map(|question| question.header.as_str())
+                                .collect();
+                            let questions = pending.questions.clone();
+                            self.events
+                                .emit(AgentEvent::Warning {
+                                    message: format!(
+                                        "Check these answers and try again: {}",
+                                        headers.join(", ")
+                                    ),
+                                })
+                                .await;
+                            self.events
+                                .emit(AgentEvent::UserInputRequested {
+                                    request_id,
+                                    questions,
+                                    delivery: UserInputDelivery::Blocking,
+                                })
+                                .await;
+                            return Ok(());
+                        }
+                    };
+                    let rpc_id = pending.rpc_id.clone();
+                    self.elicitations.remove(&request_id);
+                    send_json(&mut self.stdin, &json!({ "id": rpc_id, "result": result }))
+                        .map_err(|e| e.to_string())?;
                 } else if self
                     .async_questions
                     .as_ref()
@@ -1101,7 +1212,7 @@ impl SessionActor for Actor {
             } => {
                 let applied = thread_config(&option_selections) == self.thread_config;
                 if applied {
-                    self.model = model;
+                    self.model = model.unwrap_or_else(|| self.default_model.clone());
                     self.effort = codex_effort(&option_selections);
                     self.service_tier = codex_service_tier(&option_selections);
                 }
@@ -1122,27 +1233,16 @@ impl SessionActor for Actor {
                         json!({ "threadId": thread_id }),
                     ),
                 };
-                self.request(method, params, PendingRequest::BackgroundTerminalStop)
+                self.request(
+                    method,
+                    params,
+                    PendingRequest::BackgroundTerminalStop { method },
+                )
             }
             SessionCommand::SetOption { id, value } => {
                 if id == "permissions" {
                     let value = value.as_str().ok_or("Codex permissions must be a string")?;
-                    let value = if value == "guardian_subagent" {
-                        "auto_review"
-                    } else {
-                        value
-                    };
                     permission_params(value, true)?;
-                    let OptionDescriptor::Select { options, .. } = &self.permission_descriptor
-                    else {
-                        unreachable!()
-                    };
-                    if !options
-                        .iter()
-                        .any(|option| option.value == value && option.unavailable.is_none())
-                    {
-                        return Err(format!("Codex permission value is unavailable: {value}"));
-                    }
                     self.requested_permission = value.into();
                 } else if id == "reasoningEffort" {
                     self.effort = value.as_str().map(str::to_owned);
@@ -1268,10 +1368,7 @@ impl SessionActor for Actor {
     }
 
     fn wake_at(&self) -> Option<std::time::Instant> {
-        [self.retry_deadline, self.background_terminal_read]
-            .into_iter()
-            .flatten()
-            .min()
+        self.background_terminal_read
     }
 
     async fn wake(&mut self) -> Result<(), String> {
@@ -1282,27 +1379,7 @@ impl SessionActor for Actor {
             self.background_terminal_read = None;
             return self.read_background_terminals();
         }
-        if self.retry.is_none()
-            || self
-                .pending_requests
-                .values()
-                .any(|request| matches!(request, PendingRequest::TurnStart { .. }))
-        {
-            return Ok(());
-        }
-        self.retry_deadline = None;
-        let mut params = self.build_turn_params("", self.last_turn_options.as_ref(), &[]);
-        params["input"] = json!([]);
-        self.continuing = true;
-        self.request(
-            "turn/start",
-            params,
-            PendingRequest::TurnStart {
-                permission: self.requested_permission.clone(),
-                settings: None,
-                moved_to: self.moved_to.clone(),
-            },
-        )
+        Ok(())
     }
 
     async fn settle_shutdown(&mut self) {
@@ -1429,16 +1506,16 @@ struct OpenedThread {
     /// Why `thread/revert` refuses this thread, when it does: only paginated
     /// threads that are written to disk can be reverted.
     unrevertable: Option<RewindFailureReason>,
-    model: Option<String>,
+    model: String,
+    default_model: String,
+    config_effort: Option<String>,
+    model_efforts: ModelEfforts,
     next_id: i64,
     provider_commands: Vec<ProviderCommand>,
     permission_descriptor: OptionDescriptor,
     effective_permission: String,
+    warnings: Vec<String>,
 }
-
-/// Ids of the startup's `thread/turns/list` pages, clear of the ones
-/// [`initialize_and_open_thread`] numbers one by one.
-const FIRST_TURN_LIST_REQUEST: i64 = 1 << 32;
 
 async fn initialize_and_open_thread(
     opts: &SessionOptions,
@@ -1450,22 +1527,7 @@ async fn initialize_and_open_thread(
     let cwd = opts.cwd.to_string_lossy();
     let permission = requested_permission(&opts.option_selections);
     let (method, mut params) = if let Some(resume) = &opts.resume {
-        let fork = match &opts.fork {
-            None => None,
-            Some(ForkPoint::Tail) => Some(None),
-            Some(ForkPoint::Before { checkpoint_id }) => {
-                let thread_id = resume_thread_id(resume)?;
-                Some(Some(
-                    turn_before(stdin, lines, thread_id, checkpoint_id).await?,
-                ))
-            }
-            Some(ForkPoint::Branch { .. }) => {
-                return Err(AgentError::Provider(
-                    "Codex keeps no branches to go on in".into(),
-                ));
-            }
-        };
-        resume_request(resume, fork, &cwd)?
+        resume_request(resume, opts.fork.as_ref(), &cwd)?
     } else {
         (
             "thread/start",
@@ -1506,42 +1568,65 @@ async fn initialize_and_open_thread(
     let model = result
         .get("model")
         .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| opts.model.clone());
+        .ok_or_else(|| AgentError::Protocol(format!("{method} response omitted model: {result}")))?
+        .to_owned();
+    let config_effort = result
+        .get("reasoningEffort")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let effective_permission = effective_permission(&result);
     let unrevertable = (result.pointer("/thread/ephemeral") == Some(&json!(true))
         || result.pointer("/thread/historyMode") != Some(&json!("paginated")))
     .then_some(RewindFailureReason::Unsupported);
 
-    // Discover the session's skills for the composer's `$` menu. Supported since
-    // codex 0.144.1 (verified live); a failure is non-fatal so older builds
-    // still start. The app-server expands a `$name` mention in plain turn text
-    // itself; it has no request to list or run `~/.codex/prompts` files, so
-    // those are not offered.
+    // The thread is open either way: a failed listing is reported once the
+    // session has started. The app-server expands a `$name` mention in plain
+    // turn text itself; it has no request to list or run `~/.codex/prompts`
+    // files, so those are not offered.
+    let mut warnings = Vec::new();
     let mut next_id = 3;
     let profiles = request_permission_profiles(&opts.cwd, stdin, lines, &mut next_id)
         .await
         .unwrap_or_else(|err| {
-            log::debug!("Codex permissionProfile/list unavailable: {err}");
+            warnings.push(format!("Codex permissionProfile/list failed: {err}"));
             Vec::new()
         });
     let permission_descriptor = permission_descriptor(&profiles, &effective_permission, &result);
-    let provider_commands = match request_codex_skills(&opts.cwd, stdin, lines, next_id).await {
-        Ok(commands) => commands,
-        Err(err) => {
-            log::debug!("codex skills/list unavailable: {err}");
+    let provider_commands = request_codex_skills(&opts.cwd, stdin, lines, next_id)
+        .await
+        .unwrap_or_else(|err| {
+            warnings.push(format!("Codex skills/list failed: {err}"));
             Vec::new()
-        }
-    };
+        });
     next_id += 1;
+    let model_efforts = list_models_raw(stdin, lines, &mut next_id, true)
+        .await
+        .map(|entries| ModelEfforts::from_list(&entries))
+        .unwrap_or_else(|err| {
+            warnings.push(format!("Codex model/list failed: {err}"));
+            ModelEfforts::default()
+        });
+    // Without a chosen model Codex ran the configured one or its default; a
+    // chosen one hides which, and the list's default stands in.
+    let default_model = match &opts.model {
+        None => model.clone(),
+        Some(_) => model_efforts
+            .default_model
+            .clone()
+            .unwrap_or_else(|| model.clone()),
+    };
     Ok(OpenedThread {
         thread_id,
         unrevertable,
         model,
+        default_model,
+        config_effort,
+        model_efforts,
         next_id,
         provider_commands,
         permission_descriptor,
         effective_permission,
+        warnings,
     })
 }
 
@@ -1551,74 +1636,30 @@ fn resume_thread_id(resume: &ResumeCursor) -> Result<&str, AgentError> {
     })
 }
 
-/// `fork` is the thread's resume as a fork, through the turn it names when
-/// it names one.
+/// `thread/resume`, or `thread/fork` when the session forks the thread.
 fn resume_request(
     resume: &ResumeCursor,
-    fork: Option<Option<String>>,
+    fork: Option<&ForkPoint>,
     cwd: &str,
 ) -> Result<(&'static str, Value), AgentError> {
     let mut params = json!({
         "threadId": resume_thread_id(resume)?,
         "cwd": cwd,
     });
-    if let Some(Some(last_turn_id)) = &fork {
-        params["lastTurnId"] = json!(last_turn_id);
-    }
-    Ok((
-        if fork.is_some() {
+    let method = match fork {
+        None => "thread/resume",
+        Some(ForkPoint::Tail) => "thread/fork",
+        Some(ForkPoint::Before { checkpoint_id }) => {
+            params["beforeTurnId"] = json!(checkpoint_id);
             "thread/fork"
-        } else {
-            "thread/resume"
-        },
-        params,
-    ))
-}
-
-/// The turn before `turn_id`, which `thread/fork` keeps through: it has no
-/// parameter for a fork before a turn. `thread/turns/list` knows the turns of
-/// the rollout a Tcode turn may not show, such as a compaction's, newest
-/// first.
-async fn turn_before(
-    stdin: &mut BufWriter<ChildStdin>,
-    lines: &Receiver<ChildOutput>,
-    thread_id: &str,
-    turn_id: &str,
-) -> Result<String, AgentError> {
-    let mut cursor = Value::Null;
-    let mut found = false;
-    for id in FIRST_TURN_LIST_REQUEST.. {
-        send_json(
-            stdin,
-            &json!({"id": id, "method": "thread/turns/list", "params": {
-                "threadId": thread_id, "cursor": cursor, "sortDirection": "desc",
-            }}),
-        )?;
-        let page = wait_for_response(lines, id).await?;
-        for turn in page
-            .get("data")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let id = turn.get("id").and_then(Value::as_str);
-            if found {
-                return id.map(str::to_owned).ok_or_else(|| {
-                    AgentError::Protocol(format!("Codex turn without an id: {turn}"))
-                });
-            }
-            found = id == Some(turn_id);
         }
-        cursor = page.get("nextCursor").cloned().unwrap_or(Value::Null);
-        if cursor.as_str().is_none_or(str::is_empty) {
-            break;
+        Some(ForkPoint::Branch { .. }) => {
+            return Err(AgentError::Provider(
+                "Codex keeps no branches to go on in".into(),
+            ));
         }
-    }
-    Err(AgentError::Provider(if found {
-        "Codex cannot fork before a thread's first turn".into()
-    } else {
-        format!("turn {turn_id} is not in Codex thread {thread_id}")
-    }))
+    };
+    Ok((method, params))
 }
 
 async fn request_permission_profiles(
@@ -1688,11 +1729,6 @@ fn parse_codex_skills(result: &Value) -> Vec<ProviderCommand> {
             let description = skill
                 .get("description")
                 .and_then(Value::as_str)
-                .or_else(|| {
-                    skill
-                        .pointer("/interface/shortDescription")
-                        .and_then(Value::as_str)
-                })
                 .map(str::to_owned)
                 .filter(|s| !s.is_empty());
             out.push(ProviderCommand {
@@ -2061,12 +2097,35 @@ impl Actor {
     }
 
     async fn clear_retry(&mut self) {
-        self.retry_deadline = None;
         if self.retry.take().is_some() {
             self.events
                 .emit(AgentEvent::TurnRetry { retry: None })
                 .await;
         }
+    }
+
+    /// The user's Retry of a turn that failed on an overloaded server: the
+    /// thread goes on with empty input, as ChatGPT.app's Retry does.
+    fn retry_turn(&mut self) -> Result<(), String> {
+        if self
+            .pending_requests
+            .values()
+            .any(|request| matches!(request, PendingRequest::TurnStart { .. }))
+        {
+            return Ok(());
+        }
+        let mut params = self.build_turn_params("", self.last_turn_options.as_ref(), &[]);
+        params["input"] = json!([]);
+        self.continuing = true;
+        self.request(
+            "turn/start",
+            params,
+            PendingRequest::TurnStart {
+                permission: self.requested_permission.clone(),
+                settings: None,
+                moved_to: self.moved_to.clone(),
+            },
+        )
     }
 
     fn build_turn_params(
@@ -2083,12 +2142,12 @@ impl Actor {
             "threadId": self.thread_id,
             "input": user_input(text, attachments),
         });
-        if let Ok(permission) = permission_params(&self.requested_permission, true) {
-            params
-                .as_object_mut()
-                .expect("turn params")
-                .extend(permission.as_object().expect("permission params").clone());
-        }
+        let permission = permission_params(&self.requested_permission, true)
+            .expect("the thread start and SetOption accept only mappable permissions");
+        params
+            .as_object_mut()
+            .expect("turn params")
+            .extend(permission.as_object().expect("permission params").clone());
         if let Some(effort) = &effort {
             params["effort"] = json!(effort);
         }
@@ -2106,15 +2165,12 @@ impl Actor {
             });
         }
 
-        let model = self
-            .model
-            .clone()
-            .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+        let chosen = effort.as_deref().or(self.config_effort.as_deref());
         params["collaborationMode"] = json!({
             "mode": "default",
             "settings": {
-                "model": model,
-                "reasoning_effort": effort.clone().unwrap_or_else(|| "medium".to_owned()),
+                "model": self.model,
+                "reasoning_effort": self.model_efforts.resolve(&self.model, chosen),
                 "developer_instructions": null,
             }
         });
@@ -2147,6 +2203,8 @@ impl Actor {
                 .await;
         } else if let Some(id) = value.get("id").and_then(Value::as_i64) {
             let pending = self.pending_requests.remove(&id);
+            let reread_background_terminals =
+                matches!(pending, Some(PendingRequest::BackgroundTerminalStop { .. }));
             if let Some(PendingRequest::AccountUsage(reply)) = &pending {
                 let result = match value.get("error") {
                     Some(error) => Err(describe_rpc_error(error)),
@@ -2168,13 +2226,6 @@ impl Actor {
                     Some(result) => self.on_background_terminals(result).await,
                     None => log::debug!("Codex background terminals unavailable: {value}"),
                 }
-                return;
-            }
-            if let Some(PendingRequest::BackgroundTerminalStop) = &pending {
-                if value.get("error").is_some() {
-                    log::warn!("Codex background terminal stop failed: {value}");
-                }
-                let _ = self.read_background_terminals();
                 return;
             }
             if let Some(PendingRequest::GoalSnapshot) = &pending {
@@ -2271,6 +2322,9 @@ impl Actor {
                     }
                     _ => {}
                 }
+            }
+            if reread_background_terminals {
+                let _ = self.read_background_terminals();
             }
         }
     }
@@ -2398,14 +2452,12 @@ impl Actor {
         }
 
         let kind = match method {
-            "item/commandExecution/requestApproval" | "execCommandApproval" => {
-                ApprovalKind::ExecCommand {
-                    command: shell_script(&string_field(params, "command")),
-                    cwd: params.get("cwd").and_then(Value::as_str).map(str::to_owned),
-                    description: None,
-                }
-            }
-            "item/fileChange/requestApproval" | "applyPatchApproval" => ApprovalKind::FileChange {
+            "item/commandExecution/requestApproval" => ApprovalKind::ExecCommand {
+                command: shell_script(&string_field(params, "command")),
+                cwd: params.get("cwd").and_then(Value::as_str).map(str::to_owned),
+                description: None,
+            },
+            "item/fileChange/requestApproval" => ApprovalKind::FileChange {
                 changes: self
                     .items
                     .get(item_id)
@@ -2589,8 +2641,14 @@ impl Actor {
             return;
         };
 
-        self.elicitations
-            .insert(request_id.clone(), PendingElicitation { rpc_id, fields });
+        self.elicitations.insert(
+            request_id.clone(),
+            PendingElicitation {
+                rpc_id,
+                questions: questions.clone(),
+                fields,
+            },
+        );
         self.events
             .emit(AgentEvent::UserInputRequested {
                 request_id,
@@ -2665,7 +2723,6 @@ impl Actor {
                     }
                     self.active_turn = Some(id.into());
                     self.retry = None;
-                    self.retry_deadline = None;
                     if self.interrupted {
                         let _ = self.request(
                             "turn/interrupt",
@@ -2699,22 +2756,11 @@ impl Actor {
                         .and_then(Value::as_str)
                         == Some("serverOverloaded")
                 {
-                    // Codex App retries overload failures with empty input at these intervals.
-                    // app-server ends the native turn instead of scheduling this continuation.
-                    let delay = [10, 30, 120, 300].get(self.capacity_retries).copied();
-                    self.capacity_retries = self.capacity_retries.saturating_add(1);
-                    self.retry_deadline = delay.map(|seconds| {
-                        std::time::Instant::now() + std::time::Duration::from_secs(seconds)
-                    });
+                    // Only Retry, with no countdown: ChatGPT.app 26.1103 continues on
+                    // its own only for an app-server older than 0.162.0-alpha.18.
                     self.retry = Some(crate::TurnRetry {
                         turn_id: id.clone(),
-                        retry_at: delay.map(|seconds| {
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs()
-                                + seconds
-                        }),
+                        retry_at: None,
                     });
                     self.events
                         .emit(AgentEvent::TurnRetry {
@@ -2723,7 +2769,6 @@ impl Actor {
                         .await;
                 } else {
                     self.clear_retry().await;
-                    self.capacity_retries = 0;
                 }
                 self.active_turn = None;
                 self.async_questions = None;
@@ -2875,7 +2920,7 @@ impl Actor {
                 let steps = params
                     .get("plan")
                     .and_then(Value::as_array)
-                    .map(|steps| steps.iter().map(map_plan_step).collect())
+                    .map(|steps| steps.iter().filter_map(map_plan_step).collect())
                     .unwrap_or_default();
                 self.events
                     .emit(AgentEvent::PlanUpdated {
@@ -2958,18 +3003,10 @@ impl Actor {
     }
 
     async fn handle_subagent_activity(&mut self, activity: &Value) {
-        let Some(activity_id) = activity
-            .get("event_id")
-            .or_else(|| activity.get("id"))
-            .and_then(Value::as_str)
-        else {
+        let Some(activity_id) = activity.get("id").and_then(Value::as_str) else {
             return;
         };
-        let Some(thread_id) = activity
-            .get("agent_thread_id")
-            .or_else(|| activity.get("agentThreadId"))
-            .and_then(Value::as_str)
-        else {
+        let Some(thread_id) = activity.get("agentThreadId").and_then(Value::as_str) else {
             return;
         };
         // Codex 0.154 also reports the root thread's own activity (`agentPath`
@@ -2998,8 +3035,7 @@ impl Actor {
                 .clone()
         };
         let path = activity
-            .get("agent_path")
-            .or_else(|| activity.get("agentPath"))
+            .get("agentPath")
             .and_then(Value::as_str)
             .unwrap_or("subagent");
         let spawn_input = self
@@ -3280,12 +3316,7 @@ fn approval_choices(
         }
         return (choices, replies, json!({"permissions":{}, "scope":"turn"}));
     }
-    let legacy = matches!(method, "execCommandApproval" | "applyPatchApproval");
-    let defaults = if legacy {
-        json!(["approved", "approved_for_session", "denied", "abort"])
-    } else {
-        json!(["accept", "acceptForSession", "decline", "cancel"])
-    };
+    let defaults = json!(["accept", "acceptForSession", "decline", "cancel"]);
     let decisions = params
         .get("availableDecisions")
         .and_then(Value::as_array)
@@ -3294,22 +3325,22 @@ fn approval_choices(
     let mut replies = HashMap::new();
     for (index, decision) in decisions.iter().enumerate() {
         let (id, label, kind) = match decision.as_str() {
-            Some("accept" | "approved") => (
-                decision.as_str().unwrap().to_owned(),
+            Some("accept") => (
+                "accept".to_owned(),
                 "Allow once",
                 ApprovalOptionKind::AllowOnce,
             ),
-            Some("acceptForSession" | "approved_for_session") => (
-                decision.as_str().unwrap().to_owned(),
+            Some("acceptForSession") => (
+                "acceptForSession".to_owned(),
                 "Allow for this session",
                 ApprovalOptionKind::AllowAlways,
             ),
-            Some("decline" | "denied") => (
-                decision.as_str().unwrap().to_owned(),
+            Some("decline") => (
+                "decline".to_owned(),
                 "Decline",
                 ApprovalOptionKind::RejectOnce,
             ),
-            Some("cancel" | "abort") => continue,
+            Some("cancel") => continue,
             _ if decision.get("acceptWithExecpolicyAmendment").is_some() => (
                 format!("decision:{index}"),
                 "Allow and remember this command",
@@ -3343,11 +3374,7 @@ fn approval_choices(
         });
         replies.insert(id, json!({"decision":decision}));
     }
-    (
-        options,
-        replies,
-        json!({"decision":if legacy { "abort" } else { "cancel" }}),
-    )
+    (options, replies, json!({"decision": "cancel"}))
 }
 
 fn auto_review_action_summary(action: &Value) -> String {
@@ -3518,7 +3545,7 @@ fn pending_name(request: Option<&PendingRequest>) -> &'static str {
     match request {
         Some(PendingRequest::TurnStart { .. }) => "turn/start",
         Some(PendingRequest::BackgroundTerminalList) => "thread/backgroundTerminals/list",
-        Some(PendingRequest::BackgroundTerminalStop) => "thread/backgroundTerminals/stop",
+        Some(PendingRequest::BackgroundTerminalStop { method }) => method,
         Some(PendingRequest::Interrupt) => "turn/interrupt",
         Some(PendingRequest::Steer { .. }) => "turn/steer",
         Some(PendingRequest::SubagentMetadata { .. }) => "thread/read",
@@ -3562,24 +3589,40 @@ fn non_empty_string(value: &Value) -> Option<String> {
         .find(|answer| !answer.is_empty())
 }
 
-fn elicitation_result(fields: &[ElicitField], answers: &serde_json::Map<String, Value>) -> Value {
+/// The reply to an elicitation, or the keys of the answers that do not fit
+/// its schema. No answer at all declines.
+fn elicitation_result(
+    fields: &[ElicitField],
+    answers: &serde_json::Map<String, Value>,
+) -> Result<Value, Vec<String>> {
     if fields.len() == 1 && matches!(fields[0].kind, ElicitFieldKind::UrlAck) {
         let action = answers
             .get(&fields[0].key)
             .and_then(non_empty_string)
             .filter(|answer| answer != ELICITATION_URL_CANCEL_LABEL)
             .map_or("cancel", |_| "accept");
-        return json!({ "action": action });
+        return Ok(json!({ "action": action }));
     }
 
     let mut content = serde_json::Map::new();
+    let mut unusable = Vec::new();
+    let mut answered = false;
     for field in fields {
-        let Some(answer) = answers.get(&field.key) else {
+        let answer = answers
+            .get(&field.key)
+            .filter(|answer| strings(Some(answer)).iter().any(|text| !text.is_empty()));
+        let Some(answer) = answer else {
+            if field.required {
+                unusable.push(field.key.clone());
+            }
             continue;
         };
+        answered = true;
         let value = match field.kind {
             ElicitFieldKind::Text => non_empty_string(answer).map(Value::String),
-            ElicitFieldKind::Enum => elicitation_enum_values(field, answer).into_iter().next(),
+            ElicitFieldKind::Enum => {
+                elicitation_enum_values(field, answer).and_then(|values| values.into_iter().next())
+            }
             ElicitFieldKind::Number => non_empty_string(answer)
                 .and_then(|answer| answer.parse::<f64>().ok())
                 .and_then(serde_json::Number::from_f64)
@@ -3594,29 +3637,32 @@ fn elicitation_result(fields: &[ElicitField], answers: &serde_json::Map<String, 
                     _ => None,
                 }
             }),
-            ElicitFieldKind::MultiEnum => {
-                let values = elicitation_enum_values(field, answer);
-                (!values.is_empty()).then_some(Value::Array(values))
-            }
+            ElicitFieldKind::MultiEnum => elicitation_enum_values(field, answer).map(Value::Array),
             ElicitFieldKind::UrlAck => None,
         };
-        if let Some(value) = value {
-            content.insert(field.key.clone(), value);
+        match value {
+            Some(value) => {
+                content.insert(field.key.clone(), value);
+            }
+            None => unusable.push(field.key.clone()),
         }
     }
 
-    if content.is_empty() {
-        json!({ "action": "decline" })
+    if !answered {
+        Ok(json!({ "action": "decline" }))
+    } else if unusable.is_empty() {
+        Ok(json!({ "action": "accept", "content": content }))
     } else {
-        json!({ "action": "accept", "content": content })
+        Err(unusable)
     }
 }
 
-fn elicitation_enum_values(field: &ElicitField, answer: &Value) -> Vec<Value> {
+/// The wire values of the chosen labels, or `None` when one is not offered.
+fn elicitation_enum_values(field: &ElicitField, answer: &Value) -> Option<Vec<Value>> {
     strings(Some(answer))
         .into_iter()
         .filter(|answer| !answer.is_empty())
-        .filter_map(|answer| {
+        .map(|answer| {
             if field.values.is_empty() {
                 Some(Value::String(answer))
             } else {
@@ -3671,6 +3717,7 @@ fn parse_elicitation_form(
         .pointer("/requestedSchema/properties")
         .and_then(Value::as_object)?;
     let message = schema_text(params, "message");
+    let required = strings(params.pointer("/requestedSchema/required"));
     let mut questions = Vec::new();
     let mut fields = Vec::new();
 
@@ -3739,6 +3786,7 @@ fn parse_elicitation_form(
         fields.push(ElicitField {
             key: key.clone(),
             kind,
+            required: required.contains(key),
             values,
         });
     }
@@ -3773,15 +3821,17 @@ fn parse_elicitation_url(
     let field = ElicitField {
         key: "url".into(),
         kind: ElicitFieldKind::UrlAck,
+        required: false,
         values: HashMap::new(),
     };
     (vec![question], vec![field])
 }
 
 /// Map an `item/tool/requestUserInput` params object into canonical
-/// [`UserInputQuestion`]s. Questions missing a non-empty `id`/`header`/`question`
-/// are dropped, as are options with an empty label. Questions with zero options
-/// remain available for free-text answers. `multiSelect` is forced false.
+/// [`UserInputQuestion`]s. A question without a non-empty `id` cannot be
+/// answered and is dropped. Questions with
+/// zero options remain available for free-text answers. `multiSelect` is forced
+/// false.
 fn parse_codex_user_input(params: &Value) -> Vec<UserInputQuestion> {
     let questions = match params.get("questions").and_then(Value::as_array) {
         Some(q) => q,
@@ -3794,24 +3844,18 @@ fn parse_codex_user_input(params: &Value) -> Vec<UserInputQuestion> {
                 .get("id")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())?;
-            let header = q
-                .get("header")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())?;
+            let header = q.get("header").and_then(Value::as_str).unwrap_or_default();
             let question = q
                 .get("question")
                 .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())?;
+                .unwrap_or_default();
             let options = q
                 .get("options")
                 .and_then(Value::as_array)
                 .map(|opts| {
                     opts.iter()
                         .filter_map(|opt| {
-                            let label = opt
-                                .get("label")
-                                .and_then(Value::as_str)
-                                .filter(|s| !s.is_empty())?;
+                            let label = opt.get("label").and_then(Value::as_str)?;
                             let description = opt
                                 .get("description")
                                 .and_then(Value::as_str)
@@ -4180,15 +4224,9 @@ fn collab_tool_input(item: &Value) -> Value {
 }
 
 fn find_subagent_activity(value: &Value) -> Option<&Value> {
-    if let Some(item) = value
+    value
         .get("item")
         .filter(|item| item.get("type").and_then(Value::as_str) == Some("subAgentActivity"))
-    {
-        return Some(item);
-    }
-    value
-        .pointer("/event/payload")
-        .filter(|payload| payload.get("type").and_then(Value::as_str) == Some("sub_agent_activity"))
 }
 
 fn item_status(content: &ItemContent) -> ItemStatus {
@@ -4250,8 +4288,6 @@ fn notification_turn_id(params: &Value, active_turn: &Option<String>) -> Option<
         .or_else(|| active_turn.clone())
 }
 
-/// Map one `turn/plan/updated` step, falling back to `pending` status and
-/// `"step"` text when those fields are absent or unusable.
 /// A `ThreadGoal`; `null` (no goal) maps to `None`.
 fn map_goal(goal: &Value) -> Option<Goal> {
     let status = match goal.get("status")?.as_str()? {
@@ -4286,20 +4322,18 @@ fn goal_status_wire(status: GoalStatus) -> &'static str {
     }
 }
 
-fn map_plan_step(step: &Value) -> PlanStep {
-    let text = step
-        .get("step")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("step")
-        .to_owned();
-    let status = match step.get("status").and_then(Value::as_str) {
-        Some("completed") => PlanStepStatus::Completed,
-        Some("inProgress") => PlanStepStatus::InProgress,
-        _ => PlanStepStatus::Pending,
+/// One `turn/plan/updated` step (`v2/TurnPlanStep.ts`).
+fn map_plan_step(step: &Value) -> Option<PlanStep> {
+    let status = match step.get("status")?.as_str()? {
+        "pending" => PlanStepStatus::Pending,
+        "inProgress" => PlanStepStatus::InProgress,
+        "completed" => PlanStepStatus::Completed,
+        _ => return None,
     };
-    PlanStep { step: text, status }
+    Some(PlanStep {
+        step: step.get("step")?.as_str()?.to_owned(),
+        status,
+    })
 }
 
 fn map_status(status: Option<&str>) -> ItemStatus {
@@ -4455,13 +4489,6 @@ mod tests {
                 ("profile:restricted", "on-request", "user", None),
             ] {
                 let (mut actor, events) = test_actor();
-                actor.permission_descriptor = permission_descriptor(
-                    &[
-                        json!({"id":"restricted","description":"Custom workspace rules","allowed":true}),
-                    ],
-                    "ask",
-                    &Value::Null,
-                );
                 actor
                     .handle_command(SessionCommand::SetOption {
                         id: "permissions".into(),
@@ -4483,13 +4510,10 @@ mod tests {
                     .await
                     .unwrap();
                 assert!(matches!(
-                    events.recv().await.unwrap(),
+                    events.try_recv().unwrap(),
                     AgentEvent::TurnAccepted { delivery_id: 7 }
                 ));
-                let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                    panic!("native request")
-                };
-                let request: Value = serde_json::from_str(&line).unwrap();
+                let request = sent(&mut actor).await;
                 assert_eq!(request["method"], "turn/start");
                 assert_eq!(request["params"]["approvalPolicy"], policy);
                 assert_eq!(request["params"]["approvalsReviewer"], reviewer);
@@ -4526,7 +4550,7 @@ mod tests {
                     )
                     .await;
                 assert!(
-                    matches!(events.recv().await.unwrap(), AgentEvent::ProviderOptions { selections, .. } if selections == vec![OptionSelection {id:"permissions".into(),value:json!(value)}])
+                    matches!(events.try_recv().unwrap(), AgentEvent::ProviderOptions { selections, .. } if selections == vec![OptionSelection {id:"permissions".into(),value:json!(value)}])
                 );
                 let _ = actor.child.kill();
                 let _ = actor.child.wait();
@@ -4553,10 +4577,7 @@ mod tests {
                 request_permission_profiles(Path::new("/workspace"), &mut actor.stdin, &rx, &mut 3)
                     .await
                     .unwrap();
-            let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                panic!("profile request")
-            };
-            let request: Value = serde_json::from_str(&line).unwrap();
+            let request = sent(&mut actor).await;
             assert_eq!(
                 request,
                 json!({"id":3,"method":"permissionProfile/list","params":{"cwd":"/workspace","cursor":null}})
@@ -4602,12 +4623,12 @@ mod tests {
                     "Profile my-team: read-only sandbox, asks for untrusted actions, reviewed by auto-review.",
                 ),
                 (
-                    json!({"sandboxPolicy":{"type":"externalSandbox"},"approvalPolicy":{"granular":{"sandbox_approval":false}},"approvalsReviewer":"guardian_subagent"}),
+                    json!({"sandboxPolicy":{"type":"externalSandbox","networkAccess":"restricted"},"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":true,"skill_approval":true,"request_permissions":true,"mcp_elicitations":true}},"approvalsReviewer":"guardian_subagent"}),
                     "Current permissions",
                     "external sandbox, uses granular approval rules, reviewed by auto-review.",
                 ),
                 (
-                    json!({"sandbox":"danger-full-access","approvalPolicy":"on-request","approvalsReviewer":"user"}),
+                    json!({"sandboxPolicy":{"type":"dangerFullAccess"},"approvalPolicy":"on-request","approvalsReviewer":"user"}),
                     "Current permissions",
                     "full access, asks on request, reviewed by you.",
                 ),
@@ -4644,7 +4665,7 @@ mod tests {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
             actor.handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}"#).await;
-            let _ = events.recv().await.unwrap();
+            let _ = events.try_recv().unwrap();
             for (rpc_id, decision, expected) in [
                 (
                     90,
@@ -4660,7 +4681,7 @@ mod tests {
                 actor.handle_line(&json!({"id":rpc_id,"method":"item/permissions/requestApproval","params":{
                     "threadId":"thread-child","turnId":"turn-child","itemId":"permissions-1","environmentId":null,"startedAtMs":1,"cwd":"/workspace","reason":"Access network","permissions":{"network":{"enabled":true},"fileSystem":null}
                 }}).to_string()).await;
-                let AgentEvent::ApprovalRequested(request) = events.recv().await.unwrap() else {
+                let AgentEvent::ApprovalRequested(request) = events.try_recv().unwrap() else {
                     panic!("native permission request")
                 };
                 assert_eq!(
@@ -4671,7 +4692,7 @@ mod tests {
                         .collect::<Vec<_>>(),
                     vec!["turn", "session", "decline"]
                 );
-                assert!(actor.lines.try_recv().is_err());
+                assert!(written(&mut actor).await.is_empty());
                 actor
                     .handle_command(SessionCommand::RespondApproval {
                         request_id: request.id,
@@ -4679,28 +4700,21 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                    panic!("native granted profile")
-                };
-                assert_eq!(
-                    serde_json::from_str::<Value>(&line).unwrap(),
-                    json!({"id":rpc_id,"result":expected})
-                );
+                let mut sent = written(&mut actor).await.into_iter();
+                assert_eq!(sent.next(), Some(json!({"id":rpc_id,"result":expected})));
                 assert!(matches!(
-                    events.recv().await.unwrap(),
+                    events.try_recv().unwrap(),
                     AgentEvent::ApprovalResolved { .. }
                 ));
                 if rpc_id == 91 {
-                    let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                        panic!("native interrupt")
-                    };
-                    let request: Value = serde_json::from_str(&line).unwrap();
+                    let request = sent.next().unwrap();
                     assert_eq!(request["method"], "turn/interrupt");
                     assert_eq!(
                         request["params"],
                         json!({"threadId":"thread-child","turnId":"turn-child"})
                     );
                 }
+                assert_eq!(sent.next(), None);
             }
             let _ = actor.child.kill();
             let _ = actor.child.wait();
@@ -4712,7 +4726,7 @@ mod tests {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
             actor.handle_line(r#"{"method":"mcpServer/elicitation/request","id":0,"params":{"threadId":"thread-1","turnId":"turn-1","serverName":"tcode_control","mode":"form","_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],"tool_description":"Harmless permission probe: return PONG.","tool_params":{},"tool_params_display":[]},"message":"Allow the tcode_control MCP server to run tool \"probe\"?","requestedSchema":{"type":"object","properties":{}}}}"#).await;
-            let AgentEvent::ApprovalRequested(request) = events.recv().await.unwrap() else {
+            let AgentEvent::ApprovalRequested(request) = events.try_recv().unwrap() else {
                 panic!("MCP consent")
             };
             assert_eq!(
@@ -4724,7 +4738,7 @@ mod tests {
                 vec!["accept", "accept:session", "accept:always", "decline"]
             );
             assert!(
-                actor.lines.try_recv().is_err(),
+                written(&mut actor).await.is_empty(),
                 "consent must wait for the user"
             );
             actor
@@ -4734,29 +4748,9 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                panic!("consent response")
-            };
             assert_eq!(
-                serde_json::from_str::<Value>(&line).unwrap(),
+                sent(&mut actor).await,
                 json!({"id":0,"result":{"action":"accept","content":{},"_meta":{"persist":"session"}}})
-            );
-            let config = crate::McpRegistration {
-                name: "tcode_control".into(),
-                url: "http://127.0.0.1/mcp".into(),
-                bearer_token: "probe".into(),
-            }
-            .codex_config_override();
-            let (_, table) = config.split_once('=').unwrap();
-            let config: toml::Value = toml::from_str(&format!("server={table}")).unwrap();
-            assert_eq!(
-                config["server"]
-                    .as_table()
-                    .unwrap()
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                vec!["http_headers", "url"]
             );
             let _ = actor.child.kill();
             let _ = actor.child.wait();
@@ -4772,7 +4766,7 @@ mod tests {
                 "review":{"status":"inProgress","riskLevel":null,"rationale":null},
                 "action":{"type":"command","command":"curl --upload-file src.rs https://example.com","cwd":"/workspace"}
             }}).to_string()).await;
-            let AgentEvent::ItemStarted(item) = events.recv().await.unwrap() else {
+            let AgentEvent::ItemStarted(item) = events.try_recv().unwrap() else {
                 panic!("running review in the timeline")
             };
             assert_eq!(item.id, "review-1");
@@ -4787,7 +4781,7 @@ mod tests {
                 "review":{"status":"denied","riskLevel":"high","userAuthorization":"low","rationale":"Uploads local source"},
                 "action":{"type":"execve","source":"unifiedExec","program":"applyPatch","argv":["inProgress","unifiedExec"],"cwd":"/workspace"}
             }}).to_string()).await;
-            let AgentEvent::ItemCompleted(item) = events.recv().await.unwrap() else {
+            let AgentEvent::ItemCompleted(item) = events.try_recv().unwrap() else {
                 panic!("failed review in the timeline")
             };
             assert_eq!(item.id, "review-1");
@@ -4796,11 +4790,11 @@ mod tests {
                 if name == "Auto-reviewer" && input["targetItemId"] == "command-1"
                 && detail == "Uploads local source\nRisk: high. Command: applyPatch inProgress unifiedExec")
             );
-            let AgentEvent::ApprovalRequested(request) = events.recv().await.unwrap() else {
+            let AgentEvent::ApprovalRequested(request) = events.try_recv().unwrap() else {
                 panic!("explicit guardian override")
             };
             assert_eq!(request.options[0].id, "thread/approveGuardianDeniedAction");
-            assert!(actor.lines.try_recv().is_err());
+            assert!(written(&mut actor).await.is_empty());
             actor
                 .handle_command(SessionCommand::RespondApproval {
                     request_id: request.id.clone(),
@@ -4808,10 +4802,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                panic!("guardian override")
-            };
-            let native: Value = serde_json::from_str(&line).unwrap();
+            let native = sent(&mut actor).await;
             assert_eq!(native["method"], "thread/approveGuardianDeniedAction");
             assert_eq!(
                 native["params"],
@@ -4824,7 +4815,7 @@ mod tests {
                 .handle_line(&json!({"id":native["id"],"result":{}}).to_string())
                 .await;
             assert!(
-                matches!(events.recv().await.unwrap(),AgentEvent::ApprovalResolved {request_id,..} if request_id==request.id)
+                matches!(events.try_recv().unwrap(),AgentEvent::ApprovalResolved {request_id,..} if request_id==request.id)
             );
             for (review_status, expected_status, action, summary) in [
                 (
@@ -4882,7 +4873,7 @@ mod tests {
                     "only denied reviews offer an override"
                 );
                 assert!(
-                    actor.lines.try_recv().is_err(),
+                    written(&mut actor).await.is_empty(),
                     "a verdict does not approve an action"
                 );
             }
@@ -4891,12 +4882,29 @@ mod tests {
         });
     }
 
+    /// A fork before a turn is `thread/fork` with `beforeTurnId`, which
+    /// `v2/ThreadForkParams.ts` of 0.167.0 defines as "fork before, excluding
+    /// that turn and all later turns"; ChatGPT.app 26.1103 sends it the same way.
     #[test]
     fn fork_request_uses_native_method_and_resume_thread_id() {
         let resume = ResumeCursor(json!({"thread_id": "thread-source"}));
-        let (method, params) = resume_request(&resume, Some(None), "/workspace").unwrap();
+        let (method, params) =
+            resume_request(&resume, Some(&ForkPoint::Tail), "/workspace").unwrap();
         assert_eq!(method, "thread/fork");
-        assert_eq!(params["threadId"], "thread-source");
+        assert_eq!(
+            params,
+            json!({"threadId": "thread-source", "cwd": "/workspace"})
+        );
+
+        let before = ForkPoint::Before {
+            checkpoint_id: "turn-2".into(),
+        };
+        let (method, params) = resume_request(&resume, Some(&before), "/workspace").unwrap();
+        assert_eq!(method, "thread/fork");
+        assert_eq!(
+            params,
+            json!({"threadId": "thread-source", "cwd": "/workspace", "beforeTurnId": "turn-2"})
+        );
 
         let (method, _) = resume_request(&resume, None, "/workspace").unwrap();
         assert_eq!(method, "thread/resume");
@@ -4958,7 +4966,12 @@ mod tests {
                     table["http_headers"]["Authorization"].as_str(),
                     Some(authorization)
                 );
-                assert!(table.get("bearer_token").is_none());
+                // Nothing else: no `bearer_token`, which Codex refuses for
+                // HTTP, and no key that approves the server's tools ahead.
+                assert_eq!(
+                    table.as_table().unwrap().keys().collect::<Vec<_>>(),
+                    ["http_headers", "url"]
+                );
             }
         }
     }
@@ -4995,8 +5008,11 @@ mod tests {
                 events: event_tx,
                 thread_id: "thread-1".into(),
                 cwd: std::env::temp_dir(),
-                model: Some("gpt-5-codex".into()),
+                model: "gpt-5-codex".into(),
+                default_model: "gpt-5-codex".into(),
                 effort: None,
+                config_effort: None,
+                model_efforts: ModelEfforts::default(),
                 service_tier: None,
                 thread_config: None,
                 requested_permission: "ask".into(),
@@ -5020,8 +5036,6 @@ mod tests {
                 usage_by_turn: HashMap::new(),
                 active_turn: None,
                 retry: None,
-                retry_deadline: None,
-                capacity_retries: 0,
                 last_turn_options: None,
                 interrupted: false,
                 moved_to: None,
@@ -5031,6 +5045,33 @@ mod tests {
             },
             event_rx,
         )
+    }
+
+    /// Everything Tcode wrote to Codex since the last call, in order. The
+    /// echo child returns lines in the order they were written, so a marker
+    /// written now comes back after all of them.
+    async fn written(actor: &mut Actor) -> Vec<Value> {
+        let marker = json!({"tcode_test_marker": true});
+        send_json(&mut actor.stdin, &marker).unwrap();
+        let mut written = Vec::new();
+        loop {
+            let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
+                panic!("the echo child stopped");
+            };
+            let message: Value = serde_json::from_str(&line).unwrap();
+            if message == marker {
+                return written;
+            }
+            written.push(message);
+        }
+    }
+
+    /// The one message Tcode wrote to Codex since the last read.
+    async fn sent(actor: &mut Actor) -> Value {
+        let written = written(actor).await;
+        let [message] = <[Value; 1]>::try_from(written)
+            .unwrap_or_else(|written| panic!("expected one message, got {written:?}"));
+        message
     }
 
     /// A moved thread's next `turn/start` names the directory it moved to, and so does
@@ -5056,14 +5097,8 @@ mod tests {
                     .await
                     .unwrap();
                 // A refused request's failure reports come first.
-                while !matches!(
-                    events.recv().await.unwrap(),
-                    AgentEvent::TurnAccepted { .. }
-                ) {}
-                let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                    panic!("native request")
-                };
-                serde_json::from_str::<Value>(&line).unwrap()
+                while !matches!(events.try_recv().unwrap(), AgentEvent::TurnAccepted { .. }) {}
+                sent(actor).await
             };
             let refused = turn_start(&mut actor, 1).await;
             assert_eq!(
@@ -5103,17 +5138,23 @@ mod tests {
     fn child_thread_lifecycle_preserves_parent_steer_and_interrupt() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            for (thread, turn) in [("thread-1", "T1"), ("thread_child", "T2")] {
+            // The child's turn ends before the parent's does.
+            for (method, thread, turn) in [
+                ("turn/started", "thread-1", json!({"id":"T1"})),
+                ("turn/started", "thread_child", json!({"id":"T2"})),
+                (
+                    "turn/completed",
+                    "thread_child",
+                    json!({"id":"T2", "status":"completed"}),
+                ),
+            ] {
                 actor
                     .handle_line(
-                        &json!({"method":"turn/started", "params":{
-                            "threadId":thread, "turn":{"id":turn}
-                        }})
-                        .to_string(),
+                        &json!({"method":method, "params":{"threadId":thread, "turn":turn}})
+                            .to_string(),
                     )
                     .await;
             }
-            assert_eq!(actor.active_turn.as_deref(), Some("T1"));
             assert!(
                 matches!(events.try_recv().unwrap(), AgentEvent::TurnStarted { turn_id } if turn_id == "T1")
             );
@@ -5132,10 +5173,7 @@ mod tests {
                 (SessionCommand::Compact, "thread/compact/start", None),
             ] {
                 actor.handle_command(command).await.unwrap();
-                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                    panic!("expected echoed request")
-                };
-                let request: Value = serde_json::from_str(&request).unwrap();
+                let request = sent(&mut actor).await;
                 assert_eq!(request["method"], method);
                 assert_eq!(request["params"]["threadId"], "thread-1");
                 if let Some(field) = field {
@@ -5180,10 +5218,7 @@ mod tests {
                 ),
             ] {
                 actor.handle_command(command).await.unwrap();
-                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                    panic!("expected echoed request")
-                };
-                let request: Value = serde_json::from_str(&request).unwrap();
+                let request = sent(&mut actor).await;
                 assert_eq!(request["method"], expected["method"]);
                 assert_eq!(request["params"], expected["params"]);
             }
@@ -5228,30 +5263,6 @@ mod tests {
     }
 
     #[test]
-    fn child_thread_completion_preserves_active_turn_and_usage() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            actor.active_turn = Some("T1".into());
-            actor
-                .usage_by_turn
-                .insert("T2".into(), TokenUsage::default());
-            actor
-                .handle_line(
-                    &json!({"method":"turn/completed", "params":{
-                        "threadId":"thread_child", "turn":{"id":"T2", "status":"completed"}
-                    }})
-                    .to_string(),
-                )
-                .await;
-            assert_eq!(actor.active_turn.as_deref(), Some("T1"));
-            assert!(actor.usage_by_turn.contains_key("T2"));
-            assert!(events.try_recv().is_err());
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    #[test]
     fn child_thread_items_route_to_known_or_synthetic_parent() {
         smol::block_on(async {
             for known in [true, false] {
@@ -5268,9 +5279,8 @@ mod tests {
                 } else {
                     "codex-subagent:thread_child"
                 };
-                let previous = actor.items.get("spawn").cloned();
                 for method in ["item/started", "item/updated", "item/completed"] {
-                    // A colliding id must not overwrite or acquire the parent's Subagent content.
+                    // An id that collides with its parent's does not take the parent's content.
                     actor.handle_line(&json!({"method":method, "params":{
                         "threadId":"thread_child", "item":{"type":"agentMessage", "id":"spawn", "text":"child reply"}
                     }}).to_string()).await;
@@ -5285,16 +5295,8 @@ mod tests {
                     assert!(
                         matches!(item.content, ItemContent::AssistantMessage { text, .. } if text == "child reply")
                     );
-                    assert_eq!(actor.items.get("spawn"), previous.as_ref());
                     assert!(events.try_recv().is_err());
                 }
-                assert_eq!(
-                    actor
-                        .subagent_parent_by_thread
-                        .get("thread_child")
-                        .map(String::as_str),
-                    Some(parent)
-                );
                 let _ = actor.child.kill();
                 let _ = actor.child.wait();
             }
@@ -5330,8 +5332,6 @@ mod tests {
                     assert!(events.try_recv().is_err());
                 }
             }
-            assert!(actor.usage_by_turn.is_empty());
-            assert!(actor.items.is_empty());
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -5353,10 +5353,7 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                    panic!("native request")
-                };
-                let request: Value = serde_json::from_str(&line).unwrap();
+                let request = sent(&mut actor).await;
                 assert_eq!(request["method"], "turn/start");
                 assert_eq!(
                     request["params"]["additionalContext"],
@@ -5373,10 +5370,7 @@ mod tests {
             actor
                 .handle_line(r#"{"method":"item/completed","params":{"threadId":"thread-1","item":{"type":"contextCompaction","id":"compaction"}}}"#)
                 .await;
-            let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                panic!("native request")
-            };
-            let request: Value = serde_json::from_str(&line).unwrap();
+            let request = sent(&mut actor).await;
             assert_eq!(request["method"], "thread/inject_items");
             assert_eq!(
                 request["params"],
@@ -5399,82 +5393,30 @@ mod tests {
     }
 
     #[test]
-    fn notifications_without_thread_id_keep_parent_behavior() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            for (method, params) in [
-                ("turn/started", json!({"turn":{"id":"T1"}})),
-                (
-                    "item/completed",
-                    json!({"item":{"type":"agentMessage","id":"message","text":"parent"}}),
-                ),
-                (
-                    "item/agentMessage/delta",
-                    json!({"itemId":"message","delta":"more"}),
-                ),
-                (
-                    "turn/completed",
-                    json!({"turn":{"id":"T1","status":"completed"}}),
-                ),
-            ] {
-                actor
-                    .handle_line(&json!({"method":method,"params":params}).to_string())
-                    .await;
-                let event = events.try_recv().unwrap();
-                match method {
-                    "turn/started" => {
-                        assert!(
-                            matches!(event, AgentEvent::TurnStarted { turn_id } if turn_id == "T1")
-                        );
-                        assert_eq!(actor.active_turn.as_deref(), Some("T1"));
-                    }
-                    "item/completed" => assert!(matches!(
-                        event,
-                        AgentEvent::ItemCompleted(ThreadItem {
-                            parent_item_id: None,
-                            ..
-                        })
-                    )),
-                    "item/plan/delta" | "item/agentMessage/delta" => {
-                        assert!(matches!(event, AgentEvent::Delta { .. }))
-                    }
-                    _ => {
-                        assert!(
-                            matches!(event, AgentEvent::TurnCompleted { turn_id, .. } if turn_id == "T1")
-                        );
-                        assert!(actor.active_turn.is_none());
-                        assert!(matches!(
-                            events.try_recv().unwrap(),
-                            AgentEvent::TurnCheckpoint { turn_id, .. } if turn_id == "T1"
-                        ));
-                    }
-                }
-            }
-            assert!(events.try_recv().is_err());
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    #[test]
     fn async_question_answers_steer_the_running_turn_with_codex_reply_envelope() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            actor.active_turn = Some("turn-1".into());
-            // Shape recorded from codex-cli 0.156 `request_user_input_async`.
+            actor
+                .handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}"#)
+                .await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::TurnStarted { .. }
+            ));
+            // `request_user_input_async` as the 0.167.0 schema shapes it (`v2/ThreadItem.ts`, `v2/AsyncUserInputQuestion.ts`).
             actor
                 .handle_line(
                     &json!({"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{
                         "type":"agentMessage","id":"call_q","text":"Which DB?\n- Postgres\n- SQLite",
                         "phase":"final_answer","delivery":"async",
-                        "questions":[{"title":"Which DB?","options":["Postgres","SQLite"]},{"title":"  "}]
+                        "questions":[{"title":"Which DB?","options":["Postgres","SQLite"]},{"title":"  ","options":null}]
                     }}})
                     .to_string(),
                 )
                 .await;
             // The listing text is not an answer; the transcript keeps the call.
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ItemCompleted(ThreadItem {
                     content: ItemContent::ToolCall { ref name, ref input, .. },
                     ..
@@ -5485,7 +5427,7 @@ mod tests {
                 request_id,
                 questions,
                 delivery,
-            } = events.recv().await.unwrap()
+            } = events.try_recv().unwrap()
             else {
                 panic!("expected UserInputRequested")
             };
@@ -5516,19 +5458,16 @@ mod tests {
                 .await
                 .unwrap();
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::SteerRequested { ref request_id, ref text, .. }
                     if request_id == "codex-question-reply-call_q"
                         && text == "> Which DB?\n\nSQLite"
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::UserInputResolved { ref request_id, .. } if request_id == "call_q"
             ));
-            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed request")
-            };
-            let request: Value = serde_json::from_str(&request).unwrap();
+            let request = sent(&mut actor).await;
             assert_eq!(request["method"], "turn/steer");
             assert_eq!(request["params"]["expectedTurnId"], "turn-1");
             let envelope = "<send_user_message_question_reply>\n\
@@ -5550,7 +5489,7 @@ mod tests {
                 )
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::SteerAccepted { ref request_id } if request_id == "codex-question-reply-call_q"
             ));
 
@@ -5561,22 +5500,22 @@ mod tests {
                 }}}).to_string())
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ItemCompleted(_)
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::UserInputRequested { ref request_id, .. } if request_id == "call_r"
             ));
             actor
                 .handle_line(&json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}).to_string())
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnCompleted { .. }
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnCheckpoint { .. }
             ));
             let mut answers = serde_json::Map::new();
@@ -5592,7 +5531,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::Warning { .. }
             ));
             assert!(events.try_recv().is_err());
@@ -5606,7 +5545,13 @@ mod tests {
     fn steer_acceptance_waits_for_the_consumed_user_message_echo() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            actor.active_turn = Some("turn-1".into());
+            actor
+                .handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}"#)
+                .await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::TurnStarted { .. }
+            ));
             actor
                 .handle_command(SessionCommand::Steer {
                     request_id: "steer-ok".into(),
@@ -5615,10 +5560,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed request")
-            };
-            let request: Value = serde_json::from_str(&request).unwrap();
+            let request = sent(&mut actor).await;
             let id = request["id"].as_i64().unwrap();
             actor
                 .handle_line(&json!({"id": id, "result": {"turnId": "turn-1"}}).to_string())
@@ -5645,7 +5587,7 @@ mod tests {
                     .await;
             }
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::SteerAccepted { ref request_id } if request_id == "steer-ok"
             ));
             assert!(
@@ -5661,10 +5603,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed request")
-            };
-            let request: Value = serde_json::from_str(&request).unwrap();
+            let request = sent(&mut actor).await;
             let id = request["id"].as_i64().unwrap();
             actor
                 .handle_line(
@@ -5673,7 +5612,7 @@ mod tests {
                 )
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::SteerRejected { ref request_id } if request_id == "steer-error"
             ));
             actor
@@ -5699,16 +5638,22 @@ mod tests {
     fn steer_after_turn_completed_is_rejected_by_request_id() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            actor.active_turn = Some("turn-1".into());
+            actor
+                .handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}"#)
+                .await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::TurnStarted { .. }
+            ));
             actor
                 .handle_line(&json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}).to_string())
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnCompleted { .. }
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnCheckpoint { .. }
             ));
             actor
@@ -5720,11 +5665,11 @@ mod tests {
                 .await
                 .unwrap();
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::SteerRejected { ref request_id } if request_id == "steer-late"
             ));
             assert!(
-                actor.lines.try_recv().is_err(),
+                written(&mut actor).await.is_empty(),
                 "no turn/steer request is written without an active turn"
             );
 
@@ -5751,13 +5696,10 @@ mod tests {
                 .await
                 .unwrap();
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnAccepted { delivery_id: 7 }
             ));
-            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed turn/start request")
-            };
-            let request: Value = serde_json::from_str(&request).unwrap();
+            let request = sent(&mut actor).await;
             let id = request["id"].as_i64().unwrap();
             actor
                 .handle_line(
@@ -5766,11 +5708,11 @@ mod tests {
                 )
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::Error { fatal: false, .. }
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnCompleted {
                     status: TurnStatus::Failed,
                     ..
@@ -5787,13 +5729,17 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let _ = events.recv().await.unwrap(); // TurnAccepted
-            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed turn/start request")
-            };
-            let request: Value = serde_json::from_str(&request).unwrap();
+            let _ = events.try_recv().unwrap(); // TurnAccepted
+            let request = sent(&mut actor).await;
             let id = request["id"].as_i64().unwrap();
-            actor.active_turn = Some("turn-live".into());
+            // The turn started before Codex refused the duplicate request.
+            actor
+                .handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-live"}}}"#)
+                .await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::TurnStarted { .. }
+            ));
             actor
                 .handle_line(
                     &json!({"id": id, "error": {"code": -32000, "message": "late duplicate"}})
@@ -5801,7 +5747,7 @@ mod tests {
                 )
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::Error { .. }
             ));
             assert!(
@@ -5974,74 +5920,39 @@ mod tests {
                     "cwd": "/tmp",
                     "skills": [
                         {"name": "browser:control", "description": "drive the browser", "interface": {"displayName": "Browser"}},
-                        {"name": "", "description": "dropped"},
-                        {"name": "dataviz", "interface": {"shortDescription": "charts"}}
+                        {"name": "", "description": "dropped"}
                     ]
                 },
                 {"cwd": "/tmp", "skills": [{"name": "browser:control", "description": "dup dropped"}]}
             ]
         });
         let commands = parse_codex_skills(&result);
-        assert_eq!(commands.len(), 2);
+        assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].name, "browser:control");
         assert_eq!(commands[0].kind, ProviderCommandKind::Skill);
         assert_eq!(
             commands[0].description.as_deref(),
             Some("drive the browser")
         );
-        // Falls back to interface.shortDescription when `description` is absent.
-        assert_eq!(commands[1].name, "dataviz");
-        assert_eq!(commands[1].description.as_deref(), Some("charts"));
     }
 
-    /// A codex binary that dies at startup (the npm-packaging failure mode:
-    /// a JS loader error on stderr, then exit 1) must surface its exit status
-    /// and stderr in the startup error, not just "exited during startup".
+    /// A configured codex that dies at startup (as a broken npm install does)
+    /// says why in the startup error: its exit status and its stderr, not
+    /// just "exited during startup". `cat app-server` is such a process.
     #[cfg(unix)]
     #[test]
     fn startup_failure_reports_exit_status_and_stderr_tail() {
-        use std::os::unix::fs::PermissionsExt;
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("agent-codex-crash-{nonce}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("codex");
-        std::fs::write(
-            &bin,
-            "#!/bin/sh\n\
-             echo 'node:internal/modules/cjs/loader:1215' >&2\n\
-             echo \"Error: Cannot find module './dist/cli.js'\" >&2\n\
-             exit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        // Concurrently-forked test children can hold the freshly written
-        // script's fd open, making exec fail with ETXTBSY on Linux — retry
-        // until the spawn reaches the script's own failure.
-        let mut attempts = 0;
-        let message = loop {
-            let err = smol::block_on(list_models(
-                Some(bin.clone()),
-                LaunchEnv {
-                    env: Vec::new(),
-                    home: None,
-                },
-            ))
-            .unwrap_err();
-            let message = err.to_string();
-            if message.contains("Text file busy") && attempts < 20 {
-                attempts += 1;
-                std::thread::sleep(std::time::Duration::from_millis(25));
-                continue;
-            }
-            break message;
-        };
-        assert!(message.contains("Cannot find module"), "{message}");
+        let message = smol::block_on(list_models(
+            Some(PathBuf::from("/bin/cat")),
+            LaunchEnv::default(),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("cat: app-server: No such file or directory"),
+            "{message}"
+        );
         assert!(message.contains("exit status: 1"), "{message}");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A running app-server answers a usage read itself:
@@ -6056,16 +5967,13 @@ mod tests {
                 .handle_command(SessionCommand::ReadAccountUsage { reply })
                 .await
                 .unwrap();
-            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                panic!("missing usage request")
-            };
-            let request: Value = serde_json::from_str(&request).unwrap();
+            let request = sent(&mut actor).await;
             assert_eq!(request["method"], "account/rateLimits/read");
             let result = json!({"rateLimits": {"planType": "pro"}});
             actor
                 .handle_line(&json!({"id": request["id"], "result": result}).to_string())
                 .await;
-            assert_eq!(answer.recv().await.unwrap().unwrap(), result);
+            assert_eq!(answer.try_recv().unwrap().unwrap(), result);
         });
     }
 
@@ -6073,12 +5981,6 @@ mod tests {
     fn background_terminals_are_listed_read_again_and_stopped() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            let next_request = async |actor: &mut Actor| {
-                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                    panic!("missing request")
-                };
-                serde_json::from_str::<Value>(&request).unwrap()
-            };
             let answer = async |actor: &mut Actor, request: &Value, result: Value| {
                 let response = json!({"id": request["id"], "result": result}).to_string();
                 actor.handle_line(&response).await;
@@ -6087,25 +5989,22 @@ mod tests {
             actor
                 .handle_notification(
                     "turn/completed",
-                    &json!({"turn":{"id":"T1","status":"completed"}}),
+                    &json!({"threadId": "thread-1", "turn":{"id":"T1","status":"completed"}}),
                 )
                 .await;
             while events.try_recv().is_ok() {}
             actor.background_terminal_read = Some(std::time::Instant::now());
             actor.wake().await.unwrap();
-            let list = next_request(&mut actor).await;
+            let list = sent(&mut actor).await;
             assert_eq!(list["method"], "thread/backgroundTerminals/list");
             assert_eq!(list["params"], json!({"threadId": "thread-1"}));
-            // Recorded from 0.167.0.
+            // `v2/ThreadBackgroundTerminalsListResponse.ts` of the 0.167.0 schema.
             let running = json!({"data":[{
                 "itemId":"call_1","processId":"98412","command":"sleep 40",
                 "cwd":"/tmp/project","osPid":null,"cpuPercent":null,"rssKb":null
             }],"nextCursor":null});
             answer(&mut actor, &list, running.clone()).await;
-            assert!(
-                actor.background_terminal_read.is_some(),
-                "it keeps watching"
-            );
+            assert!(actor.wake_at().is_some(), "it keeps watching");
             assert!(
                 matches!(
                     events.try_recv(),
@@ -6133,7 +6032,7 @@ mod tests {
 
             actor.background_terminal_read = Some(std::time::Instant::now());
             actor.wake().await.unwrap();
-            let again = next_request(&mut actor).await;
+            let again = sent(&mut actor).await;
             answer(&mut actor, &again, running).await;
             assert!(events.try_recv().is_err(), "an unchanged list says nothing");
 
@@ -6143,7 +6042,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let terminate = next_request(&mut actor).await;
+            let terminate = sent(&mut actor).await;
             assert_eq!(terminate["method"], "thread/backgroundTerminals/terminate");
             assert_eq!(
                 terminate["params"],
@@ -6151,10 +6050,10 @@ mod tests {
             );
             answer(&mut actor, &terminate, json!({"terminated": true})).await;
 
-            let list = next_request(&mut actor).await;
+            let list = sent(&mut actor).await;
             assert_eq!(list["method"], "thread/backgroundTerminals/list");
             answer(&mut actor, &list, json!({"data":[],"nextCursor":null})).await;
-            assert!(actor.background_terminal_read.is_none());
+            assert!(actor.wake_at().is_none(), "nothing is left to watch");
             assert!(matches!(
                 events.try_recv(),
                 Ok(AgentEvent::BackgroundTaskList { tasks }) if tasks.is_empty()
@@ -6168,9 +6067,23 @@ mod tests {
                 .handle_command(SessionCommand::StopBackgroundTask { task_id: None })
                 .await
                 .unwrap();
-            let clean = next_request(&mut actor).await;
+            let clean = sent(&mut actor).await;
             assert_eq!(clean["method"], "thread/backgroundTerminals/clean");
             assert_eq!(clean["params"], json!({"threadId": "thread-1"}));
+            let refusal =
+                json!({"id": clean["id"], "error": {"code": -32600, "message": "no such thread"}});
+            actor.handle_line(&refusal.to_string()).await;
+            assert!(
+                matches!(
+                    events.try_recv(),
+                    Ok(AgentEvent::Error { message, fatal: false })
+                        if message.contains("thread/backgroundTerminals/clean")
+                            && message.contains("no such thread")
+                ),
+                "a refused stop says why"
+            );
+            let list = sent(&mut actor).await;
+            assert_eq!(list["method"], "thread/backgroundTerminals/list");
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -6224,89 +6137,85 @@ mod tests {
         });
     }
 
+    /// A turn that fails on an overloaded server offers Retry with no
+    /// countdown, as ChatGPT.app 26.1103 does against app-server 0.162.0-alpha.18
+    /// and later. Retry continues the thread with empty input, once, even when
+    /// the background-terminal read the failed turn scheduled has come due.
     #[test]
-    fn capacity_failure_offers_native_continuation_after_ten_seconds() {
+    fn capacity_failure_offers_a_manual_retry() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            for (attempt, delay) in [Some(10), Some(30), Some(120), Some(300), None]
-                .into_iter()
-                .enumerate()
-            {
-                let turn_id = format!("capacity-{attempt}");
-                actor
-                    .handle_notification("turn/started", &json!({"turn":{"id":turn_id}}))
-                    .await;
-                let before = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                actor.handle_notification("error", &json!({
-                    "turnId": turn_id, "willRetry": false,
-                    "error": {"message": "Selected model is capacity. Please try a different model.",
-                              "codexErrorInfo": "serverOverloaded"}
-                })).await;
-                actor.handle_notification("turn/completed", &json!({
-                    "turn": {"id": turn_id, "status": "failed",
-                    "error": {"message": "Selected model is capacity. Please try a different model.",
-                              "codexErrorInfo": "serverOverloaded"}}
-                })).await;
-                let mut offered = None;
-                while let Ok(event) = events.try_recv() {
-                    if let AgentEvent::TurnRetry { retry: Some(retry) } = event {
-                        offered = Some(retry);
-                    }
-                }
-                let offered = offered.expect("capacity failure must offer a native retry");
-                assert_eq!(offered.turn_id, turn_id);
-                assert_eq!(offered.retry_at.is_some(), delay.is_some());
-                if let Some(delay) = delay {
-                    let deadline = offered.retry_at.unwrap();
-                    let after = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-                    assert!((before + delay..=after + delay).contains(&deadline));
-                }
-                // Both automatic and manual paths must continue without duplicating input.
-                if attempt == 0 {
-                    actor.wake().await.unwrap();
-                } else {
-                    actor
-                        .handle_command(SessionCommand::RetryTurn {
-                            turn_id: turn_id.clone(),
-                        })
-                        .await
-                        .unwrap();
-                }
-                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                    panic!("missing continuation")
-                };
-                let request: Value = serde_json::from_str(&request).unwrap();
-                assert_eq!(request["method"], "turn/start");
-                assert_eq!(request["params"]["threadId"], "thread-1");
-                assert_eq!(request["params"]["input"], json!([]));
-                // A second client cannot submit the same retry while start is pending.
-                actor
-                    .handle_command(SessionCommand::RetryTurn { turn_id })
-                    .await
-                    .unwrap();
-                assert!(actor.lines.try_recv().is_err());
-                actor.handle_line(&json!({"id":request["id"], "result":{"turn":{"id":format!("capacity-{}",attempt + 1)}}}).to_string()).await;
-            }
+            actor
+                .handle_notification(
+                    "turn/started",
+                    &json!({"threadId": "thread-1", "turn": {"id": "overloaded"}}),
+                )
+                .await;
+            // `v2/TurnCompletedNotification.ts` and `v2/TurnError.ts` of 0.167.0.
+            actor
+                .handle_line(
+                    &json!({"method": "turn/completed", "params": {
+                        "threadId": "thread-1",
+                        "turn": {"id": "overloaded", "rootTurnId": null, "items": [],
+                            "itemsView": "summary", "status": "failed",
+                            "error": {"message": "Selected model is at capacity.",
+                                "codexErrorInfo": "serverOverloaded",
+                                "additionalDetails": null, "misalignment": null},
+                            "startedAt": 1767225600, "completedAt": 1767225601,
+                            "durationMs": 1000}}})
+                    .to_string(),
+                )
+                .await;
+            let offered: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+                .filter_map(|event| match event {
+                    AgentEvent::TurnRetry { retry } => Some(retry),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                offered,
+                [Some(crate::TurnRetry {
+                    turn_id: "overloaded".into(),
+                    retry_at: None,
+                })]
+            );
+            // The turn's end scheduled a background-terminal read; it has come due.
+            actor.background_terminal_read = Some(std::time::Instant::now());
+            actor
+                .handle_command(SessionCommand::RetryTurn {
+                    turn_id: "overloaded".into(),
+                })
+                .await
+                .unwrap();
+            let request = sent(&mut actor).await;
+            assert_eq!(request["method"], "turn/start");
+            assert_eq!(request["params"]["threadId"], "thread-1");
+            assert_eq!(request["params"]["input"], json!([]));
+            // A second client cannot submit the same retry while start is pending.
+            actor
+                .handle_command(SessionCommand::RetryTurn {
+                    turn_id: "overloaded".into(),
+                })
+                .await
+                .unwrap();
+            assert!(written(&mut actor).await.is_empty());
+            actor
+                .handle_line(
+                    &json!({"id": request["id"], "result": {"turn": {"id": "continued"}}})
+                        .to_string(),
+                )
+                .await;
             actor
                 .handle_command(SessionCommand::Interrupt)
                 .await
                 .unwrap();
             actor
-                .handle_notification("turn/started", &json!({"turn":{"id":"capacity-5"}}))
+                .handle_notification(
+                    "turn/started",
+                    &json!({"threadId": "thread-1", "turn": {"id": "continued"}}),
+                )
                 .await;
-            let ChildOutput::Line(interrupt) = actor.lines.recv().await.unwrap() else {
-                panic!("missing interrupt")
-            };
-            assert_eq!(
-                serde_json::from_str::<Value>(&interrupt).unwrap()["method"],
-                "turn/interrupt"
-            );
+            assert_eq!(sent(&mut actor).await["method"], "turn/interrupt");
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -6316,14 +6225,21 @@ mod tests {
     fn capacity_retry_cancellation_and_non_capacity_failures_do_not_restart() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            for error in ["usageLimitExceeded", "other", "serverOverloaded"] {
+            for error in [
+                "usageLimitExceeded",
+                "internalServerError",
+                "serverOverloaded",
+            ] {
                 actor
-                    .handle_notification("turn/started", &json!({"turn":{"id":error}}))
+                    .handle_notification(
+                        "turn/started",
+                        &json!({"threadId": "thread-1", "turn":{"id":error}}),
+                    )
                     .await;
                 actor
                     .handle_notification(
                         "turn/completed",
-                        &json!({"turn":{"id":error,"status":"failed",
+                        &json!({"threadId": "thread-1", "turn":{"id":error,"status":"failed",
                     "error":{"message":"capacity","codexErrorInfo":error}}}),
                     )
                     .await;
@@ -6340,14 +6256,13 @@ mod tests {
                 events.try_recv(),
                 Ok(AgentEvent::TurnRetry { retry: None })
             ));
-            actor.wake().await.unwrap();
             actor
                 .handle_command(SessionCommand::RetryTurn {
                     turn_id: "serverOverloaded".into(),
                 })
                 .await
                 .unwrap();
-            assert!(actor.lines.try_recv().is_err());
+            assert!(written(&mut actor).await.is_empty());
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -6361,16 +6276,16 @@ mod tests {
                 .handle_notification(
                     "model/rerouted",
                     &json!({
-                        "from_model": "gpt-5",
-                        "toModel": "gpt-5-mini",
-                        "reason": "capacity"
+                        "threadId": "thread-1", "turnId": "turn-1",
+                        "fromModel": "gpt-5.5", "toModel": "gpt-5.4",
+                        "reason": "highRiskCyberActivity"
                     }),
                 )
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ServedModel { model, reason }
-                    if model == "gpt-5-mini" && reason.as_deref() == Some("capacity")
+                    if model == "gpt-5.4" && reason.as_deref() == Some("highRiskCyberActivity")
             ));
             let _ = actor.child.kill();
             let _ = actor.child.wait();
@@ -6381,11 +6296,11 @@ mod tests {
     fn turn_diff_notification_maps_to_exact_replacement_snapshot() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            actor.active_turn = Some("turn-9".into());
             actor
                 .handle_notification(
                     "turn/diff/updated",
                     &json!({
+                        "threadId": "thread-1",
                         "turnId": "turn-9",
                         "diff": concat!(
                             "diff --git a/src/lib.rs b/src/lib.rs\n",
@@ -6400,7 +6315,7 @@ mod tests {
                 .await;
 
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnChangesUpdated {
                     turn_id,
                     completeness: ChangeCompleteness::Exact,
@@ -6422,11 +6337,12 @@ mod tests {
             actor
                 .handle_notification(
                     "item/started",
-                    &json!({"item": {"type": "plan", "id": "native-plan", "text": ""}}),
+                    &json!({"threadId": "thread-1", "turnId": "turn-1", "startedAtMs": 1,
+                        "item": {"type": "plan", "id": "native-plan", "text": ""}}),
                 )
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ItemStarted(ThreadItem {
                     content: ItemContent::Plan { .. },
                     ..
@@ -6435,15 +6351,22 @@ mod tests {
             actor
                 .handle_notification(
                     "item/plan/delta",
-                    &json!({"itemId": "native-plan", "delta": "# Native plan"}),
+                    &json!({"threadId": "thread-1", "turnId": "turn-1",
+                        "itemId": "native-plan", "delta": "# Native plan"}),
                 )
                 .await;
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::Delta { kind: DeltaKind::AssistantText, text, .. } if text == "# Native plan")
+                matches!(events.try_recv().unwrap(), AgentEvent::Delta { kind: DeltaKind::AssistantText, text, .. } if text == "# Native plan")
             );
-            actor.handle_notification("item/completed", &json!({"item": {"type": "plan", "id": "native-plan", "text": "# Final native plan"}})).await;
+            actor
+                .handle_notification(
+                    "item/completed",
+                    &json!({"threadId": "thread-1", "turnId": "turn-1", "completedAtMs": 2,
+                "item": {"type": "plan", "id": "native-plan", "text": "# Final native plan"}}),
+                )
+                .await;
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::Plan { markdown }, .. }) if markdown == "# Final native plan")
+                matches!(events.try_recv().unwrap(), AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::Plan { markdown }, .. }) if markdown == "# Final native plan")
             );
             let _ = actor.child.kill();
             let _ = actor.child.wait();
@@ -6454,22 +6377,22 @@ mod tests {
     fn plan_notifications_map_to_events() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            actor.active_turn = Some("turn-9".into());
-
             actor
                 .handle_notification(
                     "turn/plan/updated",
                     &json!({
+                        "threadId": "thread-1",
+                        "turnId": "turn-9",
                         "explanation": "  building  ",
                         "plan": [
                             {"step": "explore", "status": "completed"},
-                            {"step": "  ", "status": "inProgress"},
-                            {"status": "weird"}
+                            {"step": "build", "status": "inProgress"},
+                            {"step": "verify", "status": "pending"}
                         ]
                     }),
                 )
                 .await;
-            match events.recv().await.unwrap() {
+            match events.try_recv().unwrap() {
                 AgentEvent::PlanUpdated {
                     turn_id,
                     explanation,
@@ -6477,83 +6400,20 @@ mod tests {
                 } => {
                     assert_eq!(turn_id.as_deref(), Some("turn-9"));
                     assert_eq!(explanation.as_deref(), Some("building"));
-                    assert_eq!(steps[0].status, PlanStepStatus::Completed);
-                    assert_eq!(steps[1].step, "step");
-                    assert_eq!(steps[1].status, PlanStepStatus::InProgress);
-                    assert_eq!(steps[2].step, "step");
-                    assert_eq!(steps[2].status, PlanStepStatus::Pending);
+                    assert_eq!(
+                        steps
+                            .iter()
+                            .map(|step| (step.step.as_str(), step.status))
+                            .collect::<Vec<_>>(),
+                        [
+                            ("explore", PlanStepStatus::Completed),
+                            ("build", PlanStepStatus::InProgress),
+                            ("verify", PlanStepStatus::Pending),
+                        ]
+                    );
                 }
                 other => panic!("expected PlanUpdated, got {other:?}"),
             }
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    #[test]
-    fn subagent_activity_is_found_in_defensive_notification_envelope() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            actor.items.insert(
-                "call_spawn".into(),
-                ThreadItem {
-                    id: "call_spawn".into(),
-                    parent_item_id: None,
-                    content: ItemContent::ToolCall {
-                        image_reads: Vec::new(),
-                        name: "spawn_agent".into(),
-                        input: json!({"agent_type":"researcher","description":"Inspect protocol"}),
-                        output: None,
-                        status: ItemStatus::InProgress,
-                    },
-                },
-            );
-            actor
-                .handle_notification(
-                    "thread/event",
-                    &json!({
-                        "event": {
-                            "type": "event_msg",
-                            "payload": {
-                                "type": "sub_agent_activity",
-                                "event_id": "call_spawn",
-                                "occurred_at_ms": 1783944057000_u64,
-                                "agent_thread_id": "thread_child",
-                                "agent_path": "/root/researcher",
-                                "kind": "started"
-                            }
-                        }
-                    }),
-                )
-                .await;
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ItemUpdated(ThreadItem {
-                    id,
-                    parent_item_id: None,
-                    content: ItemContent::Subagent { status: ItemStatus::InProgress, .. }
-                }) if id == "call_spawn"
-            ));
-
-            actor
-                .handle_notification(
-                    "item/completed",
-                    &json!({"item": {
-                        "type":"dynamicToolCall",
-                        "id":"call_spawn",
-                        "tool":"spawn_agent",
-                        "arguments":{},
-                        "contentItems":[{"type":"inputText","text":"done"}],
-                        "status":"completed"
-                    }}),
-                )
-                .await;
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::Subagent { status: ItemStatus::Completed, .. }, .. })
-                    if id == "call_spawn"
-            ));
-            assert!(events.try_recv().is_err());
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -6578,7 +6438,7 @@ mod tests {
                 actor
                     .handle_notification(
                         "item/completed",
-                        &json!({"item": {
+                        &json!({"threadId": "thread-1", "turnId": "turn-1", "item": {
                             "type": "subAgentActivity", "id": format!("activity-{index}"),
                             "agentThreadId": "child", "agentPath": "/root/researcher",
                             "kind": kind
@@ -6609,7 +6469,7 @@ mod tests {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
             let activity = |id: &str, child: &str, kind: &str| {
-                json!({"item": {
+                json!({"threadId": "thread-1", "turnId": "turn-1", "item": {
                     "type": "subAgentActivity", "id": id,
                     "agentThreadId": child, "agentPath": "/root/reply_ok",
                     "kind": kind
@@ -6658,10 +6518,22 @@ mod tests {
                 ("interrupted", ItemStatus::Interrupted),
             ] {
                 let (mut actor, events) = test_actor();
-                actor.model = Some("gpt-6-astra".into());
-                actor.effort = Some("low".into());
+                actor
+                    .handle_command(SessionCommand::ApplySettings {
+                        model: Some("gpt-6-astra".into()),
+                        option_selections: vec![OptionSelection {
+                            id: "reasoningEffort".into(),
+                            value: json!("low"),
+                        }],
+                    })
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    events.try_recv().unwrap(),
+                    AgentEvent::SettingsApplied { applied: true }
+                ));
                 let activity = |kind| {
-                    json!({"item": {
+                    json!({"threadId": "thread-1", "turnId": "turn-1", "item": {
                         "type": "subAgentActivity", "id": "spawn",
                         "agentThreadId": "child", "agentPath": "/root/header_mouse",
                         "kind": kind
@@ -6685,10 +6557,7 @@ mod tests {
                     ),
                     "unknown child metadata must not borrow the parent's model: {event:?}"
                 );
-                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                    panic!("expected thread metadata request");
-                };
-                let request: Value = serde_json::from_str(&request).unwrap();
+                let request = sent(&mut actor).await;
                 assert_eq!(request["method"], "thread/read");
                 assert_eq!(
                     request["params"],
@@ -6740,7 +6609,7 @@ mod tests {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
             let root = actor.thread_id.clone();
-            let activity = json!({"item": {
+            let activity = json!({"threadId": "thread-1", "turnId": "turn-1", "item": {
                 "type": "subAgentActivity", "id": "act-root",
                 "agentThreadId": root, "agentPath": "/root", "kind": "interacted"
             }});
@@ -6750,173 +6619,17 @@ mod tests {
                 events.try_recv().is_err(),
                 "root activity must not emit a capsule"
             );
-            assert!(actor.subagents.is_empty());
-            assert!(actor.subagent_parent_by_thread.is_empty());
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    #[test]
-    fn codex_0150_subagent_activity_uses_v2_fields_and_thread_identity() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            actor.items.insert(
-                "call_spawn".into(),
-                ThreadItem {
-                    id: "call_spawn".into(),
-                    parent_item_id: None,
-                    content: ItemContent::ToolCall {
-                        image_reads: Vec::new(),
-                        name: "spawnAgent".into(),
-                        input: json!({"prompt":"Inspect protocol", "reasoning_effort":"high"}),
-                        output: None,
-                        status: ItemStatus::Completed,
-                    },
-                },
+            assert!(
+                written(&mut actor).await.is_empty(),
+                "nor ask for a child's metadata"
             );
-            let started = json!({"item": {
-                "type": "subAgentActivity",
-                "id": "call_spawn",
-                "agentThreadId": "thread_child",
-                "agentPath": "/root/researcher",
-                "kind": "started"
-            }});
-            actor.handle_notification("item/started", &started).await;
-            // Keep the explicit effort while the child's model is still unknown.
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ItemUpdated(ThreadItem {
-                    id,
-                    content: ItemContent::Subagent {
-                        status: ItemStatus::InProgress,
-                        model: None,
-                        effort: Some(effort),
-                        ..
-                    },
-                    ..
-                }) if id == "call_spawn" && effort == "high"
-            ));
-
-            // Codex emits the instantaneous activity as item/started +
-            // item/completed and may additionally fan out the legacy event.
-            actor.handle_notification("item/completed", &started).await;
-            actor
-                .handle_notification(
-                    "thread/event",
-                    &json!({"event":{"payload":{
-                        "type":"sub_agent_activity",
-                        "event_id":"call_spawn",
-                        "agent_thread_id":"thread_child",
-                        "agent_path":"/root/researcher",
-                        "kind":"started"
-                    }}}),
-                )
-                .await;
-            assert!(events.try_recv().is_err(), "duplicate activity was emitted");
-
-            // Completion uses a fresh activity id in Codex 0.150. It must close
-            // the original thread-backed capsule instead of creating a second
-            // synthetic subagent.
-            let completed = json!({"item": {
-                "type": "subAgentActivity",
-                "id": "subagent-completed-turn-child",
-                "agentThreadId": "thread_child",
-                "agentPath": "/root/researcher",
-                "kind": "completed"
-            }});
-            actor.handle_notification("item/started", &completed).await;
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ItemCompleted(ThreadItem {
-                    id,
-                    parent_item_id: None,
-                    content: ItemContent::Subagent {
-                        status: ItemStatus::Completed,
-                        ..
-                    }
-                }) if id == "call_spawn"
-            ));
-            actor
-                .handle_notification("item/completed", &completed)
-                .await;
-            assert!(events.try_recv().is_err(), "completion was emitted twice");
-
-            let interrupted = json!({"item": {
-                "type": "subAgentActivity",
-                "id": "call_interrupt",
-                "agentThreadId": "thread_child",
-                "agentPath": "/root/researcher",
-                "kind": "interrupted"
-            }});
-            actor
-                .handle_notification("item/started", &interrupted)
-                .await;
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ItemCompleted(ThreadItem {
-                    id,
-                    content: ItemContent::Subagent {
-                        status: ItemStatus::Interrupted,
-                        ..
-                    },
-                    ..
-                }) if id == "call_spawn"
-            ));
-            assert!(events.try_recv().is_err());
-
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
     }
 
-    #[test]
-    fn codex_0150_collab_tool_items_accept_new_values() {
-        for tool in [
-            "sendMessage",
-            "followupTask",
-            "interruptAgent",
-            "listAgents",
-        ] {
-            let item = map_item(&json!({
-                "type": "collabAgentToolCall",
-                "id": format!("call-{tool}"),
-                "tool": tool,
-                "status": if tool == "interruptAgent" { "interrupted" } else { "completed" },
-                "senderThreadId": "root-thread",
-                "receiverThreadIds": ["child-thread"],
-                "agentsStates": {}
-            }))
-            .unwrap();
-            assert!(matches!(
-                item.content,
-                ItemContent::ToolCall { name, status, .. }
-                    if name == tool
-                        && status == if tool == "interruptAgent" {
-                            ItemStatus::Interrupted
-                        } else {
-                            ItemStatus::Completed
-                        }
-            ));
-        }
-    }
-
-    #[test]
-    fn service_tier_uses_explicit_selection_only() {
-        let selections = vec![OptionSelection {
-            id: "fastMode".into(),
-            value: json!(true),
-        }];
-        assert_eq!(codex_service_tier(&selections), None);
-        let explicit = vec![OptionSelection {
-            id: "serviceTier".into(),
-            value: json!("flex"),
-        }];
-        assert_eq!(codex_service_tier(&explicit).as_deref(), Some("flex"));
-    }
-
-    /// MCP results recorded from the app-server (each `result` as Tcode
-    /// stored it, base64 swapped for a 1x1 JPEG): the timeline keeps the text
+    /// MCP results in the shape the app-server sends them (each `result` as
+    /// Tcode stores it, the image a 1x1 JPEG): the timeline keeps the text
     /// the model read and moves image parts into `image_reads`, typed by their
     /// bytes, whatever the tool.
     #[test]
@@ -6996,7 +6709,7 @@ mod tests {
                 let AgentEvent::ItemCompleted(ThreadItem {
                     content: ItemContent::ImageRead { image, .. },
                     ..
-                }) = events.recv().await.unwrap()
+                }) = events.try_recv().unwrap()
                 else {
                     panic!("image read");
                 };
@@ -7009,7 +6722,7 @@ mod tests {
             let AgentEvent::ItemCompleted(ThreadItem {
                 content: ItemContent::ImageRead { image, .. },
                 ..
-            }) = events.recv().await.unwrap()
+            }) = events.try_recv().unwrap()
             else {
                 panic!("image read");
             };
@@ -7091,10 +6804,10 @@ mod tests {
     /// A sleep and an image generation, as Codex sent them, arrive as the
     /// calls a rollout records them as: the sleep finished once it
     /// completes, the picture an image the call holds, kept where Codex
-    /// saved it. A row recorded before they were mapped reads back the same.
+    /// saved it.
     #[test]
     fn sleeps_and_image_generations_arrive_as_their_calls() {
-        let sleep = json!({"type":"sleep","id":"call_wmvrnLAr0GTnBoYQog6Gvjq0","durationMs":20000});
+        let sleep = json!({"type":"sleep","id":"call_000000000000000000000003","durationMs":20000});
         let call = |status| ItemContent::ToolCall {
             image_reads: Vec::new(),
             name: "sleep".into(),
@@ -7112,8 +6825,8 @@ mod tests {
         );
 
         let picture = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
-        let saved = "/Users/me/.codex/generated_images/01a196f6-db20-7941-b9de-d73415937480/exec-89f575db-4c35-4d77-a024-611fdd5d1d50.png";
-        let generation = json!({"type":"imageGeneration","id":"exec-89f575db-4c35-4d77-a024-611fdd5d1d50","status":"completed","revisedPrompt":"Edit the reference image: keep the subject, make the background transparent.","result":picture,"transparentBackground":true,"failure":null,"savedPath":saved,"inputImages":[{"path":"/Users/me/project/assets/reference.png","sha256":"f5000811e1aa0c2f9f23baeb7fc932e2d4e41974204fb409ece85cd70197840d"}],"generationId":"695e31e3-b3a3-4def-afce-27493b36fb7e","startedAtMs":1_793_534_383_829_u64,"completedAtMs":1_793_534_414_873_u64});
+        let saved = "/home/user/.codex/generated_images/00000000-0000-7000-8000-000000000066/exec-00000000-0000-4000-8000-000000000067.png";
+        let generation = json!({"type":"imageGeneration","id":"exec-00000000-0000-4000-8000-000000000067","status":"completed","revisedPrompt":"Edit the reference image: keep the subject, make the background transparent.","result":picture,"transparentBackground":true,"failure":null,"savedPath":saved,"inputImages":[{"path":"/home/user/project/assets/reference.png","sha256":"0000000000000000000000000000000000000000000000000000000000000001"}],"generationId":"00000000-0000-4000-8000-000000000068","startedAtMs":1_793_534_383_829_u64,"completedAtMs":1_793_534_414_873_u64});
         let generated = ItemContent::ToolCall {
             image_reads: vec![Attachment {
                 media_type: "image/png".into(),
@@ -7123,7 +6836,7 @@ mod tests {
             name: "image_generation".into(),
             input: json!({
                 "revised_prompt": "Edit the reference image: keep the subject, make the background transparent.",
-                "input_images": ["/Users/me/project/assets/reference.png"],
+                "input_images": ["/home/user/project/assets/reference.png"],
             }),
             output: None,
             status: ItemStatus::Completed,
@@ -7134,22 +6847,6 @@ mod tests {
                 .content,
             generated
         );
-
-        for (value, content) in [
-            (sleep, call(ItemStatus::Completed)),
-            (generation, generated),
-        ] {
-            let mut legacy = ThreadItem {
-                id: "legacy".into(),
-                parent_item_id: None,
-                content: ItemContent::Other {
-                    provider_kind: value["type"].as_str().unwrap().into(),
-                    summary: value.to_string(),
-                },
-            };
-            normalize_legacy_item(&mut legacy, true);
-            assert_eq!(legacy.content, content);
-        }
     }
 
     #[test]
@@ -7160,8 +6857,7 @@ mod tests {
                 {"path": "new.md", "kind": {"type": "add"}, "diff": "hello\n- list\n++literal\n\nlast"},
                 {"path": "old.md", "kind": {"type": "delete"}, "diff": "hello\n"},
                 {"path": "empty", "kind": {"type": "add"}, "diff": ""},
-                {"path": "unknown", "kind": {"type": "add"}},
-                {"path": "edit", "kind": {"type": "update"}, "diff": "@@ -1 +1 @@\n-old\n+new\n"}
+                {"path": "edit", "kind": {"type": "update", "move_path": null}, "diff": "@@ -1 +1 @@\n-old\n+new\n"}
             ]
         })).unwrap();
         let ItemContent::FileChange { changes, .. } = item.content else {
@@ -7178,9 +6874,8 @@ mod tests {
             Some("@@ -1,1 +0,0 @@\n-hello\n")
         );
         assert_eq!(changes[2].diff.as_deref(), Some(""));
-        assert_eq!(changes[3].diff, None);
         assert_eq!(
-            changes[4].diff.as_deref(),
+            changes[3].diff.as_deref(),
             Some("@@ -1 +1 @@\n-old\n+new\n")
         );
     }
@@ -7207,30 +6902,30 @@ mod tests {
     fn request_user_input_maps_questions_and_answer_wire_shape() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            // isOther/isSecret dropped; question missing header dropped; option
-            // with empty label dropped; zero-option question KEPT (options: []).
+            // A question without options or a header is kept (options: []).
             actor
                 .handle_line(
                     &json!({
-                        "jsonrpc": "2.0",
                         "id": 55,
                         "method": "item/tool/requestUserInput",
                         "params": {
-                            "threadId": "t", "turnId": "turn-1", "itemId": "item-1",
+                            "threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1",
+                            "isBlocking": true, "autoResolutionMs": null,
                             "questions": [
                                 {
                                     "id": "os",
                                     "header": "Target",
                                     "question": "macOS or Linux?",
                                     "options": [
-                                        {"label": "macOS", "description": "apple"},
-                                        {"label": "", "description": "skip me"}
+                                        {"label": "macOS", "description": "apple"}
                                     ],
                                     "isOther": true,
                                     "isSecret": false
                                 },
-                                { "id": "free", "header": "Notes", "question": "Any notes?" },
-                                { "header": "no id", "question": "dropped?" }
+                                {
+                                    "id": "free", "header": "", "question": "Any notes?",
+                                    "isOther": false, "isSecret": false, "options": null
+                                }
                             ]
                         }
                     })
@@ -7238,20 +6933,21 @@ mod tests {
                 )
                 .await;
 
-            match events.recv().await.unwrap() {
+            match events.try_recv().unwrap() {
                 AgentEvent::UserInputRequested {
                     request_id,
                     questions,
                     ..
                 } => {
                     assert_eq!(request_id, "55");
-                    assert_eq!(questions.len(), 2, "question missing id is dropped");
+                    assert_eq!(questions.len(), 2);
                     assert_eq!(questions[0].id, "os");
-                    assert_eq!(questions[0].options.len(), 1, "empty-label option dropped");
                     assert_eq!(questions[0].options[0].label, "macOS");
                     assert!(!questions[0].multi_select);
                     // Free-text-only questions remain valid with empty options.
                     assert_eq!(questions[1].id, "free");
+                    assert_eq!(questions[1].header, "");
+                    assert_eq!(questions[1].question, "Any notes?");
                     assert!(questions[1].options.is_empty());
                 }
                 other => panic!("expected UserInputRequested, got {other:?}"),
@@ -7270,13 +6966,10 @@ mod tests {
                 .unwrap();
 
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::UserInputResolved { ref request_id, .. } if request_id == "55"
             ));
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
+            let response = sent(&mut actor).await;
             assert_eq!(response["id"], 55);
             assert_eq!(
                 response["result"]["answers"]["os"]["answers"],
@@ -7327,7 +7020,13 @@ mod tests {
                                                 {"const": "blue-wire", "title": "Blue"}
                                             ]
                                         }
-                                    }
+                                    },
+                                    "named": {
+                                        "type": "string",
+                                        "enum": ["wire-1", "wire-2"],
+                                        "enumNames": ["First", "Second"]
+                                    },
+                                    "bare": {"type": "string", "enum": ["x", "y"]}
                                 }
                             }
                         }
@@ -7340,7 +7039,7 @@ mod tests {
                 request_id,
                 questions,
                 ..
-            } = events.recv().await.unwrap()
+            } = events.try_recv().unwrap()
             else {
                 panic!("expected UserInputRequested")
             };
@@ -7350,7 +7049,7 @@ mod tests {
                     .iter()
                     .map(|question| question.id.as_str())
                     .collect::<Vec<_>>(),
-                ["name", "age", "active", "choice", "tags"]
+                ["name", "age", "active", "choice", "tags", "named", "bare"]
             );
             assert_eq!(questions[0].header, "calendar: Name");
             assert_eq!(questions[0].question, "Fill this in");
@@ -7393,6 +7092,20 @@ mod tests {
                 ["Red", "Blue"]
             );
             assert!(questions[4].multi_select);
+            for (question, labels) in [
+                (&questions[5], ["First", "Second"]),
+                (&questions[6], ["x", "y"]),
+            ] {
+                assert_eq!(
+                    question
+                        .options
+                        .iter()
+                        .map(|option| option.label.as_str())
+                        .collect::<Vec<_>>(),
+                    labels
+                );
+                assert!(!question.multi_select);
+            }
 
             let mut answers = serde_json::Map::new();
             answers.insert("name".into(), json!("Ada"));
@@ -7400,6 +7113,8 @@ mod tests {
             answers.insert("active".into(), json!("Yes"));
             answers.insert("choice".into(), json!("Choice B"));
             answers.insert("tags".into(), json!(["Red", "Blue"]));
+            answers.insert("named".into(), json!("Second"));
+            answers.insert("bare".into(), json!("y"));
             actor
                 .handle_command(SessionCommand::RespondUserInput {
                     request_id: "81".into(),
@@ -7408,13 +7123,10 @@ mod tests {
                 .await
                 .unwrap();
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::UserInputResolved { ref request_id, .. } if request_id == "81"
             ));
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
+            let response = sent(&mut actor).await;
             assert_eq!(
                 response,
                 json!({
@@ -7426,7 +7138,9 @@ mod tests {
                             "age": 42,
                             "choice": "wire-b",
                             "name": "Ada",
-                            "tags": ["red-wire", "blue-wire"]
+                            "tags": ["red-wire", "blue-wire"],
+                            "named": "wire-2",
+                            "bare": "y"
                         }
                     }
                 })
@@ -7438,98 +7152,13 @@ mod tests {
         });
     }
 
+    /// An answer that does not fit the form's schema is not sent: the request
+    /// goes back to the user with the answers filled in, as ChatGPT.app 26.1103
+    /// keeps its form open ("Check this answer and try again"), and the
+    /// corrected answers are accepted. The request is `form` mode of
+    /// `v2/McpServerElicitationRequestParams.ts` of 0.167.0.
     #[test]
-    fn elicitation_form_maps_enum_names_and_bare_enum() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            actor
-                .handle_line(
-                    &json!({
-                        "id": "enum-request",
-                        "method": "mcpServer/elicitation/request",
-                        "params": {
-                            "serverName": "choices",
-                            "threadId": "thread-1",
-                            "mode": "form",
-                            "message": "Choose",
-                            "requestedSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "named": {
-                                        "type": "string",
-                                        "enum": ["wire-1", "wire-2"],
-                                        "enumNames": ["First", "Second"]
-                                    },
-                                    "bare": {"type": "string", "enum": ["x", "y"]}
-                                }
-                            }
-                        }
-                    })
-                    .to_string(),
-                )
-                .await;
-
-            let AgentEvent::UserInputRequested { questions, .. } = events.recv().await.unwrap()
-            else {
-                panic!("expected UserInputRequested")
-            };
-            assert_eq!(
-                questions
-                    .iter()
-                    .map(|question| question.id.as_str())
-                    .collect::<Vec<_>>(),
-                ["named", "bare"]
-            );
-            assert_eq!(
-                questions[0]
-                    .options
-                    .iter()
-                    .map(|option| option.label.as_str())
-                    .collect::<Vec<_>>(),
-                ["First", "Second"]
-            );
-            assert_eq!(
-                questions[1]
-                    .options
-                    .iter()
-                    .map(|option| option.label.as_str())
-                    .collect::<Vec<_>>(),
-                ["x", "y"]
-            );
-
-            let mut answers = serde_json::Map::new();
-            answers.insert("bare".into(), json!("y"));
-            answers.insert("named".into(), json!("Second"));
-            actor
-                .handle_command(SessionCommand::RespondUserInput {
-                    request_id: "enum-request".into(),
-                    answers,
-                })
-                .await
-                .unwrap();
-            let _ = events.recv().await.unwrap();
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
-            assert_eq!(
-                response,
-                json!({
-                    "id": "enum-request",
-                    "result": {
-                        "action": "accept",
-                        "content": {"bare": "y", "named": "wire-2"}
-                    }
-                })
-            );
-
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    #[test]
-    fn elicitation_form_empty_answers_declines() {
+    fn elicitation_answer_that_does_not_fit_goes_back_to_the_user() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
             actor
@@ -7538,37 +7167,70 @@ mod tests {
                         "id": 82,
                         "method": "mcpServer/elicitation/request",
                         "params": {
-                            "serverName": "numbers",
-                            "threadId": "thread-1",
-                            "mode": "form",
-                            "message": "Number?",
+                            "threadId": "thread-1", "turnId": "turn-1",
+                            "serverName": "numbers", "mode": "form", "_meta": null,
+                            "message": "How many?",
                             "requestedSchema": {
                                 "type": "object",
-                                "properties": {"count": {"type": "number"}}
+                                "properties": {
+                                    "count": {"type": "integer", "title": "Count"},
+                                    "note": {"type": "string", "title": "Note"}
+                                },
+                                "required": ["count"]
                             }
                         }
                     })
                     .to_string(),
                 )
                 .await;
-            let _ = events.recv().await.unwrap();
+            let _ = events.try_recv().unwrap();
 
-            let mut answers = serde_json::Map::new();
-            answers.insert("count".into(), json!("not-a-number"));
-            actor
-                .handle_command(SessionCommand::RespondUserInput {
-                    request_id: "82".into(),
-                    answers,
-                })
-                .await
-                .unwrap();
-            let _ = events.recv().await.unwrap();
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
+            let respond = async |actor: &mut Actor, count: &str| {
+                let mut answers = serde_json::Map::new();
+                answers.insert("count".into(), json!(count));
+                answers.insert("note".into(), json!("weekly"));
+                actor
+                    .handle_command(SessionCommand::RespondUserInput {
+                        request_id: "82".into(),
+                        answers,
+                    })
+                    .await
+                    .unwrap();
             };
-            let response: Value = serde_json::from_str(&response).unwrap();
-            assert_eq!(response, json!({"id": 82, "result": {"action": "decline"}}));
-            assert!(response["result"].get("content").is_none());
+            respond(&mut actor, "1,000").await;
+            assert!(written(&mut actor).await.is_empty());
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::Warning { message } if message.contains("numbers: Count")
+            ));
+            let AgentEvent::UserInputRequested {
+                request_id,
+                questions,
+                ..
+            } = events.try_recv().unwrap()
+            else {
+                panic!("expected the request again")
+            };
+            assert_eq!(request_id, "82");
+            assert_eq!(
+                questions
+                    .iter()
+                    .map(|question| question.prefill.as_deref())
+                    .collect::<Vec<_>>(),
+                [Some("1,000"), Some("weekly")]
+            );
+            assert!(events.try_recv().is_err());
+
+            respond(&mut actor, "1000").await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::UserInputResolved { ref request_id, .. } if request_id == "82"
+            ));
+            assert_eq!(
+                sent(&mut actor).await,
+                json!({"id": 82, "result": {"action": "accept",
+                    "content": {"count": 1000, "note": "weekly"}}})
+            );
 
             let _ = actor.child.kill();
             let _ = actor.child.wait();
@@ -7600,7 +7262,7 @@ mod tests {
                         .to_string(),
                     )
                     .await;
-                let AgentEvent::UserInputRequested { questions, .. } = events.recv().await.unwrap()
+                let AgentEvent::UserInputRequested { questions, .. } = events.try_recv().unwrap()
                 else {
                     panic!("expected UserInputRequested")
                 };
@@ -7621,11 +7283,8 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                let _ = events.recv().await.unwrap();
-                let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                    panic!("expected echoed response")
-                };
-                let response: Value = serde_json::from_str(&response).unwrap();
+                let _ = events.try_recv().unwrap();
+                let response = sent(&mut actor).await;
                 assert_eq!(response["result"]["action"], action);
                 assert!(response["result"].get("content").is_none());
             }
@@ -7657,14 +7316,11 @@ mod tests {
                 .await;
 
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::Warning { ref message }
                     if message.contains("opaque") && message.contains("openai/form")
             ));
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
+            let response = sent(&mut actor).await;
             assert_eq!(response["result"]["action"], "decline");
             assert!(response.get("result").is_some());
             assert!(response.get("error").is_none());
@@ -7675,67 +7331,66 @@ mod tests {
         });
     }
 
+    /// A session that stops with questions open answers each the way its
+    /// protocol allows: an elicitation is cancelled, a `requestUserInput`
+    /// gets no answers, and the timeline closes both.
     #[test]
-    fn shutdown_cancels_pending_elicitation() {
+    fn shutdown_settles_every_open_question() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            actor
-                .handle_line(
-                    &json!({
-                        "id": 86,
-                        "method": "mcpServer/elicitation/request",
-                        "params": {
-                            "serverName": "pending",
-                            "threadId": "thread-1",
-                            "mode": "form",
-                            "message": "Wait",
-                            "requestedSchema": {
-                                "type": "object",
-                                "properties": {"value": {"type": "string"}}
-                            }
+            for request in [
+                json!({
+                    "id": 86,
+                    "method": "mcpServer/elicitation/request",
+                    "params": {
+                        "serverName": "pending",
+                        "threadId": "thread-1",
+                        "mode": "form",
+                        "message": "Wait",
+                        "requestedSchema": {
+                            "type": "object",
+                            "properties": {"value": {"type": "string"}}
                         }
-                    })
-                    .to_string(),
-                )
-                .await;
-            let _ = events.recv().await.unwrap();
-            actor.settle_pending_user_inputs_on_shutdown().await;
+                    }
+                }),
+                json!({
+                    "id": 77,
+                    "method": "item/tool/requestUserInput",
+                    "params": {
+                        "threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1",
+                        "questions": [{"id": "ready", "header": "", "question": "Ready?"}]
+                    }
+                }),
+            ] {
+                actor.handle_line(&request.to_string()).await;
+                assert!(matches!(
+                    events.try_recv().unwrap(),
+                    AgentEvent::UserInputRequested { .. }
+                ));
+            }
+            assert!(written(&mut actor).await.is_empty());
+            actor.settle_shutdown().await;
 
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::UserInputResolved { ref request_id, ref answers }
-                    if request_id == "86" && answers.is_empty()
-            ));
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
-            assert_eq!(response, json!({"id": 86, "result": {"action": "cancel"}}));
-            assert!(actor.elicitations.is_empty());
-
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    #[test]
-    fn shutdown_settles_pending_user_input_empty() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            actor.user_inputs.insert("77".into(), json!(77));
-            actor.settle_pending_user_inputs_on_shutdown().await;
-
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::UserInputResolved { ref request_id, ref answers }
-                    if request_id == "77" && answers.is_empty()
-            ));
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
-            assert_eq!(response, json!({"id": 77, "result": {"answers": {}}}));
-            assert!(actor.user_inputs.is_empty());
+            let mut resolved: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+                .map(|event| match event {
+                    AgentEvent::UserInputResolved {
+                        request_id,
+                        answers,
+                    } if answers.is_empty() => request_id,
+                    other => panic!("unexpected {other:?}"),
+                })
+                .collect();
+            resolved.sort();
+            assert_eq!(resolved, ["77", "86"]);
+            let mut replies = written(&mut actor).await;
+            replies.sort_by_key(|reply| reply["id"].as_i64());
+            assert_eq!(
+                replies,
+                [
+                    json!({"id": 77, "result": {"answers": {}}}),
+                    json!({"id": 86, "result": {"action": "cancel"}}),
+                ]
+            );
 
             let _ = actor.child.kill();
             let _ = actor.child.wait();
@@ -7751,25 +7406,25 @@ mod tests {
             }
 
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::TurnStarted { ref turn_id } if turn_id == "turn-1")
+                matches!(events.try_recv().unwrap(), AgentEvent::TurnStarted { ref turn_id } if turn_id == "turn-1")
             );
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::ItemStarted(ThreadItem { content: ItemContent::FileChange { ref changes, status: ItemStatus::InProgress }, .. }) if changes[0].kind == FileChangeKind::Create)
+                matches!(events.try_recv().unwrap(), AgentEvent::ItemStarted(ThreadItem { content: ItemContent::FileChange { ref changes, status: ItemStatus::InProgress }, .. }) if changes[0].kind == FileChangeKind::Create)
             );
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::ApprovalRequested(ApprovalRequest { ref id, kind: ApprovalKind::FileChange { ref changes, .. }, .. }) if id == "41" && changes.len() == 1)
+                matches!(events.try_recv().unwrap(), AgentEvent::ApprovalRequested(ApprovalRequest { ref id, kind: ApprovalKind::FileChange { ref changes, .. }, .. }) if id == "41" && changes.len() == 1)
             );
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::Delta { kind: DeltaKind::AssistantText, ref text, .. } if text == "PONG")
+                matches!(events.try_recv().unwrap(), AgentEvent::Delta { kind: DeltaKind::AssistantText, ref text, .. } if text == "PONG")
             );
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::Delta { kind: DeltaKind::ReasoningText, ref text, .. } if text == "Checking")
+                matches!(events.try_recv().unwrap(), AgentEvent::Delta { kind: DeltaKind::ReasoningText, ref text, .. } if text == "Checking")
             );
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::Delta { kind: DeltaKind::CommandOutput, ref text, .. } if text == "ok\n")
+                matches!(events.try_recv().unwrap(), AgentEvent::Delta { kind: DeltaKind::CommandOutput, ref text, .. } if text == "ok\n")
             );
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TokenUsage(TokenUsage {
                     input_tokens: Some(8),
                     cached_input_tokens: Some(2),
@@ -7781,7 +7436,7 @@ mod tests {
                 })
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ItemCompleted(ThreadItem {
                     content: ItemContent::FileChange {
                         status: ItemStatus::Completed,
@@ -7791,7 +7446,7 @@ mod tests {
                 })
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnCompleted {
                     status: TurnStatus::Completed,
                     usage: Some(TokenUsage {
@@ -7807,7 +7462,7 @@ mod tests {
                 }
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnCheckpoint { .. }
             ));
 
@@ -7817,7 +7472,7 @@ mod tests {
                     let message: Value = serde_json::from_str(line).unwrap();
                     message["method"] == "item/fileChange/requestApproval"
                 })
-                .expect("recorded native approval request");
+                .expect("native approval request");
             for (decision, wire) in [
                 (
                     ApprovalDecision::Option("acceptForSession".into()),
@@ -7829,7 +7484,7 @@ mod tests {
                     // Re-enter through the native request, never a seeded pending map.
                     actor.handle_line(approval_line).await;
                     assert!(matches!(
-                        events.recv().await.unwrap(),
+                        events.try_recv().unwrap(),
                         AgentEvent::ApprovalRequested(ApprovalRequest { ref id, .. }) if id == "41"
                     ));
                 }
@@ -7841,14 +7496,11 @@ mod tests {
                     .await
                     .unwrap();
                 assert!(matches!(
-                    events.recv().await.unwrap(),
+                    events.try_recv().unwrap(),
                     AgentEvent::ApprovalResolved { ref request_id, decision: resolved }
                         if request_id == "41" && resolved == decision
                 ));
-                let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                    panic!("expected echoed response")
-                };
-                let response: Value = serde_json::from_str(&response).unwrap();
+                let response = sent(&mut actor).await;
                 assert_eq!(response, json!({"id":41, "result":{"decision":wire}}));
             }
 
@@ -7891,10 +7543,7 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                    panic!("expected echoed request")
-                };
-                let request: Value = serde_json::from_str(&request).unwrap();
+                let request = sent(actor).await;
                 assert_eq!(request["method"], "thread/revert");
                 assert_eq!(
                     request["params"],
@@ -7943,139 +7592,190 @@ mod tests {
         });
     }
 
-    /// `thread/fork` keeps through a turn, so a fork before a turn asks
-    /// `thread/turns/list` (newest first, as 0.167.0 pages it, across pages)
-    /// for the turn before it. The first turn has none.
-    #[cfg(unix)]
-    #[test]
-    fn a_fork_before_a_turn_keeps_through_the_turn_before_it() {
-        use std::os::unix::fs::PermissionsExt;
-        for (before, forked) in [("turn-3", Some("turn-2")), ("turn-1", None), ("gone", None)] {
-            let dir =
-                std::env::temp_dir().join(format!("agent-codex-fork-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&dir).unwrap();
-            let bin = dir.join("codex");
-            let requests = dir.join("requests");
-            let script = format!(
-                r#"#!/bin/sh
-while IFS= read -r line; do
-  printf '%s\n' "$line" >> '{requests}'
-  id=$(printf '%s' "$line" | sed -n 's/^{{"id":\([0-9]*\).*/\1/p')
-  [ -z "$id" ] && continue
-  case "$line" in
-    *'"thread/turns/list"'*'"cursor":"older"'*) echo "{{\"id\":$id,\"result\":{{\"data\":[{{\"id\":\"turn-1\"}}]}}}}" ;;
-    *'"thread/turns/list"'*) echo "{{\"id\":$id,\"result\":{{\"data\":[{{\"id\":\"turn-3\"}},{{\"id\":\"turn-2\"}}],\"nextCursor\":\"older\"}}}}" ;;
-    *'"thread/fork"'*) echo "{{\"id\":$id,\"result\":{{\"thread\":{{\"id\":\"forked\",\"historyMode\":\"paginated\"}}}}}}" ;;
-    *'"initialize"'*) echo "{{\"id\":$id,\"result\":{{}}}}" ;;
-    *) echo "{{\"id\":$id,\"error\":{{\"code\":-32601,\"message\":\"no\"}}}}" ;;
-  esac
-done
-"#,
-                requests = requests.display()
-            );
-            std::fs::write(&bin, script).unwrap();
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-            smol::block_on(async {
-                let started = start(SessionOptions {
-                    cwd: dir.clone(),
-                    model: None,
-                    resume: Some(ResumeCursor(json!({"thread_id": "source"}))),
-                    fork: Some(ForkPoint::Before {
-                        checkpoint_id: before.into(),
-                    }),
-                    binary_path: Some(bin.clone()),
-                    option_selections: Vec::new(),
-                    mcp_servers: Vec::new(),
-                    launch_env: LaunchEnv::default(),
-                    extra_args: Vec::new(),
-                    acp: None,
-                    instructions: None,
-                })
-                .await;
-                match forked {
-                    Some(forked) => {
-                        let handle = started.unwrap();
-                        let fork = std::fs::read_to_string(&requests)
-                            .unwrap()
-                            .lines()
-                            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-                            .find(|request| request["method"] == "thread/fork")
-                            .unwrap();
-                        assert_eq!(fork["params"]["threadId"], "source");
-                        assert_eq!(fork["params"]["lastTurnId"], forked);
-                        let _ = handle.commands.send(SessionCommand::Shutdown).await;
-                    }
-                    None => assert!(matches!(started, Err(AgentError::Provider(_))), "{before}"),
-                }
-            });
-            std::fs::remove_dir_all(&dir).unwrap();
+    /// Replies queued in the order Codex sends them, for a startup step that
+    /// reads its own replies off the transport.
+    async fn replies(replies: impl IntoIterator<Item = (i64, Value)>) -> Receiver<ChildOutput> {
+        let (tx, rx) = smol::channel::unbounded();
+        for (id, result) in replies {
+            let reply = json!({"id": id, "result": result}).to_string();
+            tx.send(ChildOutput::Line(reply)).await.unwrap();
         }
+        rx
     }
 
-    /// Only a paginated thread written to disk can be reverted, so each
-    /// session says whether its thread can (0.166.0 `Thread.historyMode`,
-    /// `Thread.ephemeral`).
-    #[cfg(unix)]
+    /// A turn's `collaborationMode` names the model and effort as ChatGPT.app
+    /// 26.1103 fills them: the chosen effort, else the configured one (the
+    /// thread's `reasoningEffort`), else the model's own default from
+    /// `model/list`; the model is the one the thread runs. The replies are
+    /// `v2/ThreadStartResponse.ts` and `v2/Model.ts` of 0.167.0.
     #[test]
-    fn a_thread_says_whether_it_can_be_reverted() {
-        use std::os::unix::fs::PermissionsExt;
-        for (history_mode, unavailable) in [
-            ("paginated", None),
-            ("legacy", Some(RewindFailureReason::Unsupported)),
-        ] {
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let dir = std::env::temp_dir().join(format!("agent-codex-history-{nonce}"));
-            std::fs::create_dir_all(&dir).unwrap();
-            let bin = dir.join("codex");
-            let thread =
-                json!({"thread": {"id": "t", "historyMode": history_mode, "ephemeral": false}});
-            let script = format!(
-                r#"#!/bin/sh
-while IFS= read -r line; do
-  id=$(printf '%s' "$line" | sed -n 's/^{{"id":\([0-9]*\).*/\1/p')
-  [ -z "$id" ] && continue
-  case "$line" in
-    *'"thread/start"'*) echo "{{\"id\":$id,\"result\":{thread}}}" ;;
-    *'"initialize"'*) echo "{{\"id\":$id,\"result\":{{}}}}" ;;
-    *) echo "{{\"id\":$id,\"error\":{{\"code\":-32601,\"message\":\"no\"}}}}" ;;
-  esac
-done
-"#,
-                thread = thread.to_string().replace('"', "\\\"")
-            );
-            std::fs::write(&bin, script).unwrap();
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-            smol::block_on(async {
-                let handle = start(SessionOptions {
-                    cwd: dir.clone(),
+    fn a_turn_runs_at_the_chosen_then_configured_then_the_models_effort() {
+        smol::block_on(async {
+            let efforts: Vec<Value> = ["low", "medium", "high"]
+                .map(|effort| json!({"reasoningEffort": effort, "description": ""}))
+                .into();
+            let model = |slug: &str, default: &str, is_default: bool| {
+                json!({"id": slug, "model": slug, "upgrade": null, "upgradeInfo": null,
+                    "availabilityNux": null, "displayName": slug, "description": "",
+                    "modelSpecialty": null, "hidden": false,
+                    "supportedReasoningEfforts": efforts,
+                    "defaultReasoningEffort": default, "inputModalities": ["text"],
+                    "supportsPersonality": false, "multiAgentVersion": null,
+                    "additionalSpeedTiers": [], "serviceTiers": [], "defaultServiceTier": null,
+                    "availableAccessPrograms": null, "isDefault": is_default})
+            };
+            for (configured, chosen, effort) in [
+                (None, None, "low"),
+                (Some("high"), None, "high"),
+                (Some("high"), Some("medium"), "medium"),
+            ] {
+                let (mut actor, _events) = test_actor();
+                let thread = json!({
+                    "id": "thread-1", "sessionId": "session-1", "forkedFromId": null,
+                    "parentThreadId": null, "preview": "", "ephemeral": false,
+                    "historyMode": "paginated", "modelProvider": "openai",
+                    "model": "gpt-6-sol", "reasoningEffort": configured, "createdAt": 1767225600,
+                    "updatedAt": 1767225600, "status": {"type": "idle"}, "path": null,
+                    "cwd": "/home/user/project", "cliVersion": "0.167.0",
+                    "source": "appServer", "projectId": null, "turns": []
+                });
+                let replies = replies([
+                    (
+                        1,
+                        json!({"userAgent": "codex_cli_rs/0.167.0", "codexHome": "/home/user/.codex",
+                            "platformFamily": "unix", "platformOs": "linux"}),
+                    ),
+                    (
+                        2,
+                        json!({"thread": thread, "model": "gpt-6-sol", "modelProvider": "openai",
+                            "serviceTier": null, "cwd": "/home/user/project",
+                            "approvalPolicy": "on-request", "approvalsReviewer": "user",
+                            "sandbox": {"type": "workspaceWrite", "writableRoots": [],
+                                "networkAccess": false, "excludeTmpdirEnvVar": false,
+                                "excludeSlashTmp": false},
+                            "activePermissionProfile": null, "reasoningEffort": configured}),
+                    ),
+                    (3, json!({"data": [], "nextCursor": null})),
+                    (4, json!({"data": []})),
+                    (
+                        5,
+                        json!({"data": [model("gpt-6-luna", "medium", false),
+                            model("gpt-6-sol", "low", true)], "nextCursor": null}),
+                    ),
+                ])
+                .await;
+                let options = SessionOptions {
+                    cwd: PathBuf::from("/home/user/project"),
                     model: None,
                     resume: None,
                     fork: None,
-                    binary_path: Some(bin.clone()),
+                    binary_path: None,
                     option_selections: Vec::new(),
                     mcp_servers: Vec::new(),
                     launch_env: LaunchEnv::default(),
                     extra_args: Vec::new(),
                     acp: None,
                     instructions: None,
-                })
-                .await
-                .unwrap();
-                loop {
-                    if let AgentEvent::RewindAvailability {
-                        unavailable: reported,
-                    } = handle.events.recv().await.unwrap()
-                    {
-                        assert_eq!(reported, unavailable, "{history_mode}");
-                        break;
-                    }
+                };
+                let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
+                    .await
+                    .unwrap();
+                assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
+                assert_eq!(
+                    written(&mut actor).await.last().unwrap(),
+                    &json!({"id": 5, "method": "model/list", "params": {"includeHidden": true}})
+                );
+                actor.model = opened.model;
+                actor.default_model = opened.default_model;
+                actor.config_effort = opened.config_effort;
+                actor.model_efforts = opened.model_efforts;
+                if let Some(chosen) = chosen {
+                    actor
+                        .handle_command(SessionCommand::SetOption {
+                            id: "reasoningEffort".into(),
+                            value: json!(chosen),
+                        })
+                        .await
+                        .unwrap();
                 }
-                let _ = handle.commands.send(SessionCommand::Shutdown).await;
-            });
-            let _ = std::fs::remove_dir_all(dir);
-        }
+                assert_eq!(
+                    actor.build_turn_params("go on", None, &[])["collaborationMode"]["settings"],
+                    json!({"model": "gpt-6-sol", "reasoning_effort": effort,
+                        "developer_instructions": null}),
+                    "{configured:?} {chosen:?}"
+                );
+                let _ = actor.child.kill();
+                let _ = actor.child.wait();
+            }
+        });
+    }
+
+    /// Only a paginated thread written to disk can be reverted, so each
+    /// session says whether its thread can, from the `thread/start` result
+    /// (`v2/ThreadStartResponse.ts` and `v2/Thread.ts` of 0.167.0).
+    #[test]
+    fn a_thread_says_whether_it_can_be_reverted() {
+        smol::block_on(async {
+            for (history_mode, ephemeral, unrevertable) in [
+                ("paginated", false, None),
+                ("legacy", false, Some(RewindFailureReason::Unsupported)),
+                ("paginated", true, Some(RewindFailureReason::Unsupported)),
+            ] {
+                let (mut actor, _events) = test_actor();
+                let thread = json!({
+                    "id": "thread-1", "sessionId": "session-1", "forkedFromId": null,
+                    "parentThreadId": null, "preview": "", "ephemeral": ephemeral,
+                    "historyMode": history_mode, "modelProvider": "openai",
+                    "model": "gpt-5.5", "reasoningEffort": null, "createdAt": 1767225600,
+                    "updatedAt": 1767225600, "status": {"type": "idle"}, "path": null,
+                    "cwd": "/home/user/project", "cliVersion": "0.167.0",
+                    "source": "appServer", "projectId": null, "turns": []
+                });
+                let replies = replies([
+                    (
+                        1,
+                        json!({"userAgent": "codex_cli_rs/0.167.0", "codexHome": "/home/user/.codex",
+                            "platformFamily": "unix", "platformOs": "linux"}),
+                    ),
+                    (
+                        2,
+                        json!({"thread": thread, "model": "gpt-5.5", "modelProvider": "openai",
+                            "serviceTier": null, "cwd": "/home/user/project",
+                            "approvalPolicy": "on-request", "approvalsReviewer": "user",
+                            "sandbox": {"type": "workspaceWrite", "writableRoots": [],
+                                "networkAccess": false, "excludeTmpdirEnvVar": false,
+                                "excludeSlashTmp": false},
+                            "activePermissionProfile": null, "reasoningEffort": null}),
+                    ),
+                    (3, json!({"data": [], "nextCursor": null})),
+                    (4, json!({"data": []})),
+                    (5, json!({"data": [], "nextCursor": null})),
+                ])
+                .await;
+                let options = SessionOptions {
+                    cwd: PathBuf::from("/home/user/project"),
+                    model: None,
+                    resume: None,
+                    fork: None,
+                    binary_path: None,
+                    option_selections: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    launch_env: LaunchEnv::default(),
+                    extra_args: Vec::new(),
+                    acp: None,
+                    instructions: None,
+                };
+                let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    opened.unrevertable, unrevertable,
+                    "{history_mode} {ephemeral}"
+                );
+                assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
+                let _ = actor.child.kill();
+                let _ = actor.child.wait();
+            }
+        });
     }
 }

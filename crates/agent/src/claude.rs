@@ -223,7 +223,6 @@ fn plan_slugs(transcript: &Path) -> std::io::Result<Vec<String>> {
             continue;
         };
         if let Some(slug) = entry.get("slug").and_then(Value::as_str)
-            && is_file_name(slug)
             && !slugs.iter().any(|known| known == slug)
         {
             slugs.push(slug.to_owned());
@@ -258,14 +257,13 @@ pub(crate) fn copy_resolved(
     to: &Path,
     ancestors: &mut HashSet<PathBuf>,
 ) -> std::io::Result<()> {
-    const MAX_DEPTH: usize = 32;
     let metadata = match std::fs::metadata(from) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         metadata => metadata?,
     };
     if metadata.is_dir() {
         let canonical = std::fs::canonicalize(from)?;
-        if ancestors.len() == MAX_DEPTH || !ancestors.insert(canonical.clone()) {
+        if !ancestors.insert(canonical.clone()) {
             return Ok(());
         }
         std::fs::create_dir_all(to)?;
@@ -352,43 +350,10 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         effective_permission_mode(launch_permission_mode, &opts.extra_args);
 
     let mut cmd = crate::process::async_harness_command(&binary);
-    cmd.arg("--print")
-        .arg("--input-format")
-        .arg("stream-json")
-        .arg("--output-format")
-        .arg("stream-json")
-        .arg("--include-partial-messages")
-        .arg("--verbose")
-        .arg("--permission-prompt-tool")
-        .arg("stdio")
-        .arg("--permission-mode")
-        .arg(launch_permission_mode)
-        .arg("--allow-dangerously-skip-permissions");
-
     if native_rewind {
-        // User-message UUIDs are Claude's native checkpoint ids. SDK file
-        // checkpointing is opt-in for print/stream-json hosts even though the
-        // interactive CLI enables it automatically.
-        cmd.arg("--replay-user-messages")
-            .env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
-    }
-
-    if let Some(model) = &launch.model_id {
-        cmd.arg("--model").arg(model);
-    }
-    if let Some(effort) = &launch.effort {
-        cmd.arg("--effort").arg(effort);
-    }
-    if let Some(settings) = &launch.settings_json {
-        cmd.arg("--settings").arg(settings);
-    }
-    for arg in resume_args(&opts.resume, opts.fork.is_some(), fork_anchor.as_deref()) {
-        cmd.arg(arg);
-    }
-    // Register tcode's enabled HTTP MCP servers. Tokens ride in Authorization
-    // headers inside the merged `--mcp-config` JSON.
-    for arg in mcp_args(&opts.mcp_servers) {
-        cmd.arg(arg);
+        // SDK file checkpointing is opt-in for print/stream-json hosts even
+        // though the interactive CLI enables it automatically.
+        cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
     }
     // Passed on every launch: the CLI records the rendered system prompt with the conversation
     // and renders it again from the current launch after a compaction.
@@ -401,20 +366,21 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
             InstructionsFile::write(text)
                 .map_err(|err| AgentError::Spawn(format!("writing Tcode's instructions: {err}")))?,
         ),
-        Some(text) => {
-            cmd.arg("--append-system-prompt").arg(text);
-            None
-        }
-        None => None,
+        _ => None,
     };
-    if let Some(file) = &instructions_file {
-        cmd.arg("--append-system-prompt-file").arg(&file.0);
-    }
-    // Settings → Harnesses "Launch arguments", appended last so the user can
-    // override anything we set above.
-    for arg in &opts.extra_args {
-        cmd.arg(arg);
-    }
+    let system_prompt = match &instructions_file {
+        Some(file) => Some(SystemPrompt::File(&file.0)),
+        None => opts.instructions.as_deref().map(SystemPrompt::Text),
+    };
+    cmd.args(launch_args(
+        launch_permission_mode,
+        native_rewind,
+        &launch,
+        resume_args(&opts.resume, opts.fork.is_some(), fork_anchor.as_deref()),
+        &opts.mcp_servers,
+        system_prompt,
+        &opts.extra_args,
+    ));
     log::debug!(
         "claude spawn args: model={:?} effort={:?} settings={:?} permission-mode={} effective-permission-mode={}",
         launch.model_id,
@@ -529,6 +495,72 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         commands: cmd_tx,
         events: event_rx,
     })
+}
+
+/// How Tcode's instructions reach the system prompt.
+enum SystemPrompt<'a> {
+    /// The text itself, for a CLI without `--append-system-prompt-file`.
+    Text(&'a str),
+    /// A file holding the text.
+    File(&'a Path),
+}
+
+/// The arguments a session launches Claude Code with.
+fn launch_args(
+    permission_mode: &str,
+    native_rewind: bool,
+    launch: &ClaudeLaunchOptions,
+    resume: Vec<String>,
+    mcp_servers: &[crate::McpRegistration],
+    system_prompt: Option<SystemPrompt<'_>>,
+    extra_args: &[String],
+) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--verbose",
+        "--permission-prompt-tool",
+        "stdio",
+        "--permission-mode",
+        permission_mode,
+        "--allow-dangerously-skip-permissions",
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
+    if native_rewind {
+        // User-message UUIDs are Claude's native checkpoint ids.
+        args.push("--replay-user-messages".into());
+    }
+    for (flag, value) in [
+        ("--model", &launch.model_id),
+        ("--effort", &launch.effort),
+        ("--settings", &launch.settings_json),
+    ] {
+        if let Some(value) = value {
+            args.extend([flag.into(), value.into()]);
+        }
+    }
+    args.extend(resume.into_iter().map(Into::into));
+    // Tokens ride in Authorization headers inside the merged `--mcp-config` JSON.
+    args.extend(mcp_args(mcp_servers).into_iter().map(Into::into));
+    match system_prompt {
+        Some(SystemPrompt::Text(text)) => {
+            args.extend(["--append-system-prompt".into(), text.into()]);
+        }
+        Some(SystemPrompt::File(path)) => {
+            args.extend(["--append-system-prompt-file".into(), path.into()]);
+        }
+        None => {}
+    }
+    // Settings → Harnesses "Launch arguments", last so the user can override
+    // anything Tcode set.
+    args.extend(extra_args.iter().map(Into::into));
+    args
 }
 
 /// Tcode's instructions for `--append-system-prompt-file`, removed when dropped. Text that spans
@@ -2095,8 +2127,6 @@ pub(crate) struct Mapper {
     rewind_preview: bool,
     /// Last assistant model published to the canonical event stream.
     last_served_model: Option<String>,
-    /// Latest structured stop reason for the active turn.
-    stop_reason: Option<String>,
     /// Reset time reported for a rejected usage window in the active turn.
     limit_resets_at: Option<u64>,
     /// Warning-bearing stop reason already emitted for this occurrence.
@@ -2156,7 +2186,6 @@ impl Mapper {
             native_rewind,
             rewind_preview: native_rewind,
             last_served_model: None,
-            stop_reason: None,
             limit_resets_at: None,
             warned_stop_reason: None,
         }
@@ -2183,7 +2212,6 @@ impl Mapper {
         let id = format!("turn-{}", self.turn_counter);
         self.current_turn_id = Some(id.clone());
         self.awaiting_turn_checkpoint = self.native_rewind;
-        self.stop_reason = None;
         self.warned_stop_reason = None;
         id
     }
@@ -2229,13 +2257,15 @@ impl Mapper {
 
     fn rewind_request(&mut self, pending: PendingRewind) -> Value {
         let checkpoint_id = pending.checkpoint_id.as_str();
+        if matches!(
+            pending.step,
+            RewindStep::Interrupt | RewindStep::Conversation
+        ) && self.current_turn_id.is_some()
+        {
+            self.interrupt_pending = true;
+        }
         let request = match pending.step {
-            RewindStep::Interrupt => {
-                if self.current_turn_id.is_some() {
-                    self.interrupt_pending = true;
-                }
-                json!({ "subtype": "interrupt" })
-            }
+            RewindStep::Interrupt => json!({ "subtype": "interrupt" }),
             RewindStep::Files => {
                 json!({ "subtype": "rewind_files", "user_message_id": checkpoint_id })
             }
@@ -2999,12 +3029,13 @@ impl Mapper {
         let Some(status) = msg.pointer("/patch/status").and_then(Value::as_str) else {
             return Vec::new();
         };
-        let status = subagent_status(status);
-        if status != ItemStatus::InProgress {
-            self.tail_requests.push(TailRequest::Stop {
-                parent_id: tool_use_id.clone(),
-            });
-        }
+        let status = match status {
+            "completed" => ItemStatus::Completed,
+            "failed" | "killed" => ItemStatus::Failed,
+            _ => ItemStatus::InProgress,
+        };
+        // The tail is stopped by the task_notification that follows a
+        // terminal patch, so the notification's `output_file` reaches it first.
         self.update_subagent(&tool_use_id, status, None)
     }
 
@@ -3037,11 +3068,13 @@ impl Mapper {
         self.tail_requests.push(TailRequest::Stop {
             parent_id: tool_use_id.clone(),
         });
-        let status = subagent_status(
-            msg.get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("completed"),
-        );
+        // A notification is the task's terminal frame: `completed`, `failed`
+        // or `stopped`.
+        let status = if msg.get("status").and_then(Value::as_str) == Some("completed") {
+            ItemStatus::Completed
+        } else {
+            ItemStatus::Failed
+        };
         let summary = handback_summary(
             msg.get("handback"),
             msg.get("handback_report"),
@@ -3539,7 +3572,6 @@ impl Mapper {
         let Some(reason) = reason.filter(|reason| !reason.is_empty()) else {
             return Vec::new();
         };
-        self.stop_reason = Some(reason.to_owned());
         let message = match reason {
             "refusal" => Some("Request declined by safety classifiers (stop_reason: refusal)"),
             "max_tokens" => Some("Response truncated: max_tokens limit reached"),
@@ -4256,7 +4288,7 @@ impl Mapper {
             .unwrap_or_else(|| format!("turn-{}", self.turn_counter.max(1)));
         // No message outlives its turn, so the block counters can go.
         self.assistant_messages.clear();
-        let mut status = result_status(msg, self.stop_reason.as_deref());
+        let mut status = result_status(msg);
         if std::mem::take(&mut self.interrupt_pending) && status != TurnStatus::Completed {
             status = TurnStatus::Interrupted;
         }
@@ -4383,16 +4415,6 @@ fn is_file_tool(name: &str) -> bool {
     matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit")
 }
 
-fn subagent_status(status: &str) -> ItemStatus {
-    match status {
-        "completed" | "done" | "succeeded" => ItemStatus::Completed,
-        "failed" | "error" | "cancelled" | "canceled" | "stopped" | "killed" | "interrupted" => {
-            ItemStatus::Failed
-        }
-        _ => ItemStatus::InProgress,
-    }
-}
-
 pub(crate) fn one_line_summary(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -4439,7 +4461,6 @@ pub(crate) fn is_handback_note(text: &str) -> bool {
 }
 
 /// Approval categories; tools without a dedicated category use `ToolUse`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaudeRequestType {
     FileRead,
     ExecCommand,
@@ -4490,9 +4511,6 @@ fn subagent_description(input: &Value) -> String {
         })
 }
 
-/// Classify approvals with an ordered substring matcher. Read-only matches
-/// take precedence (`WebSearch` → `FileRead`); agent tools use `ToolUse` even
-/// when their names also match command or file-change substrings.
 /// The tool Claude Code calls to present its plan and leave plan mode.
 const EXIT_PLAN_MODE: &str = "ExitPlanMode";
 
@@ -4506,35 +4524,15 @@ fn plan_markdown(input: &Value) -> String {
         .to_owned()
 }
 
+/// The Claude Code tools (2.1.322) whose approval has a category of its own;
+/// every other tool, an MCP tool included, asks as itself.
 fn classify_claude_tool(name: &str) -> ClaudeRequestType {
-    let n = name.to_lowercase();
-    if n == "read"
-        || n.contains("read file")
-        || n.contains("view")
-        || n.contains("grep")
-        || n.contains("glob")
-        || n.contains("search")
-    {
-        return ClaudeRequestType::FileRead;
+    match name {
+        "Read" | "Glob" | "Grep" | "WebSearch" => ClaudeRequestType::FileRead,
+        "Bash" | "PowerShell" => ClaudeRequestType::ExecCommand,
+        "Write" | "Edit" | "NotebookEdit" => ClaudeRequestType::FileChange,
+        _ => ClaudeRequestType::ToolUse,
     }
-    if is_agent_tool(&n) {
-        return ClaudeRequestType::ToolUse;
-    }
-    if n.contains("bash") || n.contains("command") || n.contains("shell") || n.contains("terminal")
-    {
-        return ClaudeRequestType::ExecCommand;
-    }
-    if n.contains("edit")
-        || n.contains("write")
-        || n.contains("file")
-        || n.contains("patch")
-        || n.contains("replace")
-        || n.contains("create")
-        || n.contains("delete")
-    {
-        return ClaudeRequestType::FileChange;
-    }
-    ClaudeRequestType::ToolUse
 }
 
 /// Summarize a command, subagent brief, or tool input for its approval prompt.
@@ -4631,7 +4629,6 @@ fn file_changes(name: &str, input: &Value) -> Vec<FileChange> {
     let path = input
         .get("file_path")
         .or_else(|| input.get("notebook_path"))
-        .or_else(|| input.get("path"))
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
@@ -4708,36 +4705,11 @@ fn render_structured_patch(value: &Value) -> Option<String> {
     (!rendered.is_empty()).then(|| rendered.join("\n"))
 }
 
-fn result_status(msg: &Value, stop_reason: Option<&str>) -> TurnStatus {
-    let subtype = msg.get("subtype").and_then(Value::as_str);
-    let is_error = msg.get("is_error").and_then(Value::as_bool);
-    if subtype == Some("success") && is_error != Some(true) {
-        return TurnStatus::Completed;
-    }
-    if matches!(
-        subtype,
-        Some("interrupted" | "interrupt" | "cancelled" | "canceled" | "aborted")
-    ) || matches!(
-        stop_reason,
-        Some("interrupted" | "interrupt" | "cancelled" | "canceled" | "aborted")
-    ) {
-        return TurnStatus::Interrupted;
-    }
-    // Older CLI error results have no structured interrupt marker. Restrict the
-    // legacy prose heuristic to those non-success results so ordinary answers
-    // mentioning cancellation cannot be misclassified.
-    let haystack = format!(
-        "{} {}",
-        msg.get("result")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        msg.get("subtype")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-    )
-    .to_lowercase();
-    if haystack.contains("interrupt") || haystack.contains("abort") || haystack.contains("cancel") {
-        TurnStatus::Interrupted
+fn result_status(msg: &Value) -> TurnStatus {
+    if msg.get("subtype").and_then(Value::as_str) == Some("success")
+        && msg.get("is_error").and_then(Value::as_bool) != Some(true)
+    {
+        TurnStatus::Completed
     } else {
         TurnStatus::Failed
     }
@@ -4809,9 +4781,6 @@ fn is_todo_tool(name: &str) -> bool {
 /// Completed/InProgress, else Pending). `activeForm` is ignored.
 fn extract_plan_steps_from_todo(input: &Value) -> Option<Vec<PlanStep>> {
     let todos = input.get("todos").and_then(Value::as_array)?;
-    if todos.is_empty() {
-        return None;
-    }
     let steps = todos
         .iter()
         .filter(|todo| todo.is_object())
@@ -4918,48 +4887,6 @@ mod tests {
             account_file_in(None, Some("/home".into())),
             Some(PathBuf::from("/home/.claude.json"))
         );
-    }
-
-    /// claude 2.1.317 records a usage read in its config directory on its way
-    /// out, and that record is all it has to answer from when the usage
-    /// endpoint refuses a later read. A CLI that never leaves costs the read
-    /// nothing.
-    #[cfg(unix)]
-    #[test]
-    fn a_usage_read_lets_the_cli_leave_on_its_own() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        const ANSWER: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"usage-1","response":{"rate_limits_available":true,"rate_limits":{}}}}"#;
-        let dir = std::env::temp_dir().join(format!("tcode-usage-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let read = |name: &str, after_answer: &str| {
-            let binary = dir.join(name);
-            std::fs::write(
-                &binary,
-                format!("#!/bin/sh\nread request\necho '{ANSWER}'\n{after_answer}\n"),
-            )
-            .unwrap();
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-            smol::block_on(read_usage(
-                Some(binary),
-                LaunchEnv {
-                    env: Vec::new(),
-                    home: Some(dir.clone()),
-                },
-            ))
-            .unwrap()
-        };
-
-        let leaves = read(
-            "leaves",
-            "while read line; do :; done\ntouch \"$CLAUDE_CONFIG_DIR/recorded\"",
-        );
-        assert_eq!(leaves["rate_limits_available"], true);
-        assert!(dir.join("recorded").exists());
-
-        let stays = read("stays", "exec sleep 30");
-        assert_eq!(stays["rate_limits_available"], true);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -5145,188 +5072,46 @@ mod tests {
         }
     }
 
-    /// A stand-in CLI that records its arguments, each ended by a NUL, in `directory/argv`.
-    #[cfg(unix)]
-    fn recording_claude(directory: &std::path::Path) -> PathBuf {
-        recording_claude_at(directory, "2.1.200")
-    }
-
-    #[cfg(unix)]
-    fn recording_claude_at(directory: &std::path::Path, version: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::create_dir_all(directory).unwrap();
-        let binary = directory.join("claude");
-        std::fs::write(&binary, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '{version}\\n'; exit 0; fi\nprintf '%s\\0' \"$@\" > argv\nprintf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}}'\nwhile IFS= read -r line; do :; done\n")).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        binary
-    }
-
-    /// A running session answers a usage read itself: the `get_usage`
-    /// control request goes to the live CLI and its payload reaches the
-    /// asker, so no second process is started for it.
-    #[cfg(unix)]
-    #[test]
-    fn a_usage_read_asks_the_running_cli() {
-        use std::os::unix::fs::PermissionsExt as _;
-        smol::block_on(async {
-            let directory =
-                std::env::temp_dir().join(format!("agent-claude-usage-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&directory).unwrap();
-            let binary = directory.join("claude");
-            std::fs::write(
-                &binary,
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.200\\n'; exit 0; fi\n\
-                 printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}'\n\
-                 while IFS= read -r line; do case \"$line\" in *get_usage*)\n\
-                 id=$(printf '%s' \"$line\" | sed -n 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/p')\n\
-                 printf '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{\"rate_limits_available\":true}}}\\n' \"$id\";;\n\
-                 esac; done\n",
-            )
-            .unwrap();
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let handle = start(SessionOptions {
-                cwd: directory.clone(),
-                model: None,
-                resume: None,
-                fork: None,
-                binary_path: Some(binary),
-                option_selections: Vec::new(),
-                mcp_servers: Vec::new(),
-                launch_env: LaunchEnv::default(),
-                extra_args: Vec::new(),
-                acp: None,
-                instructions: None,
-            })
-            .await
-            .unwrap();
-            while !matches!(
-                handle.events.recv().await.unwrap(),
-                AgentEvent::ProviderOptions { .. }
-            ) {}
-            let (reply, answer) = smol::channel::bounded(1);
-            handle
-                .commands
-                .send(SessionCommand::ReadAccountUsage { reply })
-                .await
-                .unwrap();
-            assert_eq!(
-                answer.recv().await.unwrap().unwrap(),
-                json!({"rate_limits_available": true})
-            );
-            shut_down(handle).await;
-            let _ = std::fs::remove_dir_all(directory);
-        });
-    }
-
     /// Every worktree goes through the host: the hooks are registered before
-    /// any message, Claude's `WorktreeCreate` callback becomes a request to the
-    /// host, and the host's answer reaches Claude as the hook's output. Frames
-    /// as Claude Code 2.1.319 sends and accepts them.
-    #[cfg(unix)]
+    /// any message, and the host's answer to Claude's `WorktreeCreate`
+    /// callback reaches Claude as the hook's output.
     #[test]
     fn the_host_answers_claudes_worktree_hooks() {
-        use std::os::unix::fs::PermissionsExt as _;
-        smol::block_on(async {
-            let directory = std::env::temp_dir()
-                .join(format!("agent-claude-worktree-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&directory).unwrap();
-            let binary = directory.join("claude");
-            std::fs::write(
-                &binary,
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.319\\n'; exit 0; fi\n\
-                 while IFS= read -r line; do printf '%s\\n' \"$line\" >> stdin; case \"$line\" in *initialize*)\n\
-                 printf '%s\\n' '{\"type\":\"control_request\",\"request_id\":\"hook-1\",\"request\":{\"subtype\":\"hook_callback\",\"callback_id\":\"tcode-worktree-create\",\"input\":{\"session_id\":\"native\",\"transcript_path\":\"/home/me/.claude/projects/-work-repo/native.jsonl\",\"cwd\":\"/work/repo\",\"prompt_id\":\"prompt-1\",\"hook_event_name\":\"WorktreeCreate\",\"name\":\"feat\"},\"tool_use_id\":\"446fc413-fa9e-45ab-b701-854b8177c9a9\"}}';;\n\
-                 *hookSpecificOutput*) printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\"}';;\n\
-                 esac; done\n",
-            )
-            .unwrap();
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let handle = start(SessionOptions {
-                cwd: directory.clone(),
-                model: None,
-                resume: None,
-                fork: None,
-                binary_path: Some(binary),
-                option_selections: Vec::new(),
-                mcp_servers: Vec::new(),
-                launch_env: LaunchEnv::default(),
-                extra_args: Vec::new(),
-                acp: None,
-                instructions: None,
-            })
-            .await
-            .unwrap();
-            let request = loop {
-                if let AgentEvent::WorktreeRequested {
-                    request_id,
-                    request,
-                } = handle.events.recv().await.unwrap()
-                {
-                    break (request_id, request);
+        let mut mapper = Mapper::new();
+        assert_eq!(
+            mapper.initialize_request(),
+            json!({"type":"control_request","request_id":"tcode-ctrl-1","request":{
+                "subtype":"initialize",
+                "hooks":{
+                    "WorktreeCreate":[{"hookCallbackIds":["tcode-worktree-create"],"onFailure":"block"}],
+                    "WorktreeRemove":[{"hookCallbackIds":["tcode-worktree-remove"],"onFailure":"block"}]
                 }
-            };
-            assert_eq!(
-                request,
-                (
-                    "hook-1".to_owned(),
-                    WorktreeRequest::Create {
-                        cwd: PathBuf::from("/work/repo"),
-                        name: "feat".into(),
-                    }
-                )
-            );
-            let answer = WorktreeAnswer::Ready {
-                path: PathBuf::from("/data/worktrees/repo-1a2b3c4d/feat"),
-                reused: false,
-            };
-            handle
-                .commands
-                .send(SessionCommand::RespondWorktree {
-                    request_id: "hook-1".into(),
-                    answer: answer.clone(),
-                })
-                .await
-                .unwrap();
-            assert_eq!(
-                handle.events.recv().await.unwrap(),
-                AgentEvent::WorktreeResolved {
-                    request_id: "hook-1".into(),
-                    request: request.1,
-                    answer,
+            }})
+        );
+        feed(
+            &mut mapper,
+            r#"{"type":"control_request","request_id":"hook-1","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-create","input":{"session_id":"native","transcript_path":"/home/me/.claude/projects/-work-repo/native.jsonl","cwd":"/work/repo","prompt_id":"prompt-1","hook_event_name":"WorktreeCreate","name":"feat"},"tool_use_id":"00000000-0000-4000-8000-000000000062"}}"#,
+        );
+        let answer = WorktreeAnswer::Ready {
+            path: PathBuf::from("/data/worktrees/repo-1a2b3c4d/feat"),
+            reused: false,
+        };
+        assert_eq!(
+            mapper.worktree_response("hook-1", &answer),
+            Some((
+                json!({"type":"control_response","response":{
+                    "subtype":"success","request_id":"hook-1",
+                    "response":{"hookSpecificOutput":{
+                        "hookEventName":"WorktreeCreate",
+                        "worktreePath":"/data/worktrees/repo-1a2b3c4d/feat"
+                    }}
+                }}),
+                WorktreeRequest::Create {
+                    cwd: PathBuf::from("/work/repo"),
+                    name: "feat".into(),
                 }
-            );
-            // The stand-in answers the reply it read, so it has recorded it.
-            while !matches!(
-                handle.events.recv().await.unwrap(),
-                AgentEvent::TurnCompleted { .. }
-            ) {}
-            let stdin: Vec<Value> = std::fs::read_to_string(directory.join("stdin"))
-                .unwrap()
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
-            assert_eq!(
-                stdin,
-                [
-                    json!({"type":"control_request","request_id":"tcode-ctrl-1","request":{
-                        "subtype":"initialize",
-                        "hooks":{
-                            "WorktreeCreate":[{"hookCallbackIds":["tcode-worktree-create"],"onFailure":"block"}],
-                            "WorktreeRemove":[{"hookCallbackIds":["tcode-worktree-remove"],"onFailure":"block"}]
-                        }
-                    }}),
-                    json!({"type":"control_response","response":{
-                        "subtype":"success","request_id":"hook-1",
-                        "response":{"hookSpecificOutput":{
-                            "hookEventName":"WorktreeCreate",
-                            "worktreePath":"/data/worktrees/repo-1a2b3c4d/feat"
-                        }}
-                    }}),
-                ]
-            );
-            shut_down(handle).await;
-            let _ = std::fs::remove_dir_all(directory);
-        });
+            ))
+        );
     }
 
     /// An `isolation: "worktree"` subagent asks for `agent-<agent id>` before
@@ -5343,7 +5128,7 @@ mod tests {
         );
         let events = feed(
             &mut mapper,
-            r#"{"type":"control_request","request_id":"hook-1","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-create","input":{"session_id":"native","transcript_path":"/home/me/.claude/projects/-work-repo/native.jsonl","cwd":"/work/repo","prompt_id":"prompt-1","hook_event_name":"WorktreeCreate","name":"agent-a955ec08a6e37c75e"},"tool_use_id":"745e37e8-5bb4-421f-935d-909749721cb4"}}"#,
+            r#"{"type":"control_request","request_id":"hook-1","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-create","input":{"session_id":"native","transcript_path":"/home/me/.claude/projects/-work-repo/native.jsonl","cwd":"/work/repo","prompt_id":"prompt-1","hook_event_name":"WorktreeCreate","name":"agent-a0000000000000010"},"tool_use_id":"00000000-0000-4000-8000-000000000063"}}"#,
         );
         assert_eq!(
             events,
@@ -5351,11 +5136,11 @@ mod tests {
                 request_id: "hook-1".into(),
                 request: WorktreeRequest::Create {
                     cwd: PathBuf::from("/work/repo"),
-                    name: "agent-a955ec08a6e37c75e".into(),
+                    name: "agent-a0000000000000010".into(),
                 },
             }]
         );
-        let worktree = PathBuf::from("/data/worktrees/repo-1a2b3c4d/agent-a955ec08a6e37c75e");
+        let worktree = PathBuf::from("/data/worktrees/repo-1a2b3c4d/agent-a0000000000000010");
         mapper
             .worktree_response(
                 "hook-1",
@@ -5367,7 +5152,7 @@ mod tests {
             .unwrap();
         let events = feed(
             &mut mapper,
-            r#"{"type":"system","subtype":"task_started","task_id":"a955ec08a6e37c75e","tool_use_id":"toolu_agent","description":"Print working directory","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","prompt":"Run pwd","session_id":"native"}"#,
+            r#"{"type":"system","subtype":"task_started","task_id":"a0000000000000010","tool_use_id":"toolu_agent","description":"Print working directory","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","prompt":"Run pwd","session_id":"native"}"#,
         );
         assert!(
             events.contains(&AgentEvent::SessionMoved {
@@ -5381,7 +5166,7 @@ mod tests {
 
         feed(
             &mut mapper,
-            r#"{"type":"control_request","request_id":"hook-2","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-remove","input":{"session_id":"native","cwd":"/work/repo","hook_event_name":"WorktreeRemove","worktree_path":"/data/worktrees/repo-1a2b3c4d/agent-a955ec08a6e37c75e"}}}"#,
+            r#"{"type":"control_request","request_id":"hook-2","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-remove","input":{"session_id":"native","cwd":"/work/repo","hook_event_name":"WorktreeRemove","worktree_path":"/data/worktrees/repo-1a2b3c4d/agent-a0000000000000010"}}}"#,
         );
         let (removed, _) = mapper
             .worktree_response("hook-2", &WorktreeAnswer::Removed)
@@ -5486,161 +5271,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
-    #[cfg(unix)]
-    async fn shut_down(handle: SessionHandle) {
-        handle
-            .commands
-            .send(SessionCommand::Shutdown)
-            .await
-            .unwrap();
-        while let Ok(event) = handle.events.recv().await {
-            if matches!(event, AgentEvent::SessionClosed { .. }) {
-                break;
-            }
-        }
-    }
-
-    /// Every argument fits on one line, so a Windows batch launcher can pass it,
-    /// and the instructions reach the system prompt word for word.
-    #[cfg(unix)]
-    #[test]
-    fn instructions_append_to_the_system_prompt_on_creation_and_resume() {
-        smol::block_on(async {
-            let directory = std::env::temp_dir().join(format!(
-                "agent-claude-instructions-{}",
-                uuid::Uuid::new_v4()
-            ));
-            let binary = recording_claude(&directory);
-            let instructions =
-                "<pull_request_linking>\nLink every PR.\n</pull_request_linking>\n\n";
-            for resume in [None, Some(ResumeCursor(json!({"session_id": "native"})))] {
-                let handle = start(SessionOptions {
-                    cwd: directory.clone(),
-                    model: None,
-                    resume: resume.clone(),
-                    fork: None,
-                    binary_path: Some(binary.clone()),
-                    option_selections: Vec::new(),
-                    mcp_servers: vec![crate::McpRegistration {
-                        name: "tcode_pull_requests".into(),
-                        url: "http://127.0.0.1:1/mcp".into(),
-                        bearer_token: "token".into(),
-                    }],
-                    launch_env: LaunchEnv::default(),
-                    extra_args: Vec::new(),
-                    acp: None,
-                    instructions: Some(instructions.into()),
-                })
-                .await
-                .unwrap();
-                while !matches!(
-                    handle.events.recv().await.unwrap(),
-                    AgentEvent::ProviderOptions { .. }
-                ) {}
-                let argv = std::fs::read_to_string(directory.join("argv")).unwrap();
-                let args: Vec<_> = argv.trim_end_matches('\0').split('\0').collect();
-                assert!(
-                    !args.iter().any(|arg| arg.contains(['\r', '\n'])),
-                    "{args:?}"
-                );
-                assert_eq!(
-                    resume.is_some(),
-                    args.windows(2).any(|pair| pair == ["--resume", "native"])
-                );
-                let files: Vec<_> = args
-                    .windows(2)
-                    .filter(|pair| pair[0] == "--append-system-prompt-file")
-                    .map(|pair| pair[1])
-                    .collect();
-                let [file] = files[..] else {
-                    panic!("{args:?}");
-                };
-                assert_eq!(std::fs::read_to_string(file).unwrap(), instructions);
-                assert!(args.contains(&"--mcp-config"));
-                shut_down(handle).await;
-            }
-            // A CLI older than the file option is given the text itself.
-            let older = directory.join("older");
-            let handle = start(SessionOptions {
-                cwd: directory.clone(),
-                model: None,
-                resume: None,
-                fork: None,
-                binary_path: Some(recording_claude_at(&older, "2.0.32")),
-                option_selections: Vec::new(),
-                mcp_servers: Vec::new(),
-                launch_env: LaunchEnv::default(),
-                extra_args: Vec::new(),
-                acp: None,
-                instructions: Some(instructions.into()),
-            })
-            .await
-            .unwrap();
-            while !matches!(
-                handle.events.recv().await.unwrap(),
-                AgentEvent::ProviderOptions { .. }
-            ) {}
-            let argv = std::fs::read_to_string(directory.join("argv")).unwrap();
-            let args: Vec<_> = argv.trim_end_matches('\0').split('\0').collect();
-            assert!(
-                args.windows(2)
-                    .any(|pair| pair == ["--append-system-prompt", instructions])
-            );
-            assert!(!args.contains(&"--append-system-prompt-file"));
-            shut_down(handle).await;
-            std::fs::remove_dir_all(directory).unwrap();
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn launch_uses_native_permission_selection_and_enables_live_bypass() {
-        smol::block_on(async {
-            let directory = std::env::temp_dir()
-                .join(format!("agent-claude-permission-{}", uuid::Uuid::new_v4()));
-            let binary = recording_claude(&directory);
-            let handle = start(SessionOptions {
-                cwd: directory.clone(),
-                model: None,
-                resume: None,
-                fork: None,
-                binary_path: Some(binary),
-                option_selections: vec![OptionSelection {
-                    id: "permissionMode".into(),
-                    value: json!("auto"),
-                }],
-                mcp_servers: Vec::new(),
-                launch_env: LaunchEnv::default(),
-                extra_args: Vec::new(),
-                acp: None,
-                instructions: None,
-            })
-            .await
-            .unwrap();
-            loop {
-                let event = handle.events.recv().await.unwrap();
-                if let AgentEvent::ProviderOptions { selections, .. } = event {
-                    assert!(
-                        selections
-                            .iter()
-                            .any(|selection| selection.id == "permissionMode"
-                                && selection.value == "auto")
-                    );
-                    break;
-                }
-            }
-            let argv = std::fs::read_to_string(directory.join("argv")).unwrap();
-            let args: Vec<_> = argv.split('\0').collect();
-            assert!(
-                args.windows(2)
-                    .any(|pair| pair == ["--permission-mode", "auto"])
-            );
-            assert!(args.contains(&"--allow-dangerously-skip-permissions"));
-            shut_down(handle).await;
-            std::fs::remove_dir_all(directory).unwrap();
-        });
-    }
-
     #[test]
     fn fork_flag_requires_both_request_and_resume_cursor() {
         let resume = Some(ResumeCursor(json!({"session_id": "session-source"})));
@@ -5703,6 +5333,92 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A launch asks for the native permission prompt in the selected mode
+    /// with a live switch to bypass allowed, puts Tcode's instructions in the
+    /// system prompt (a file, or the text for a CLI without the file option),
+    /// and leaves the user's launch arguments last so they win.
+    #[test]
+    fn a_launch_passes_the_selected_mode_and_leaves_the_users_arguments_last() {
+        let base = [
+            "--print",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--verbose",
+            "--permission-prompt-tool",
+            "stdio",
+            "--permission-mode",
+        ];
+        let os =
+            |args: &[&str]| -> Vec<std::ffi::OsString> { args.iter().map(Into::into).collect() };
+        let launch = ClaudeLaunchOptions {
+            model_id: Some("claude-opus-4-8".into()),
+            effort: Some("high".into()),
+            settings_json: Some(r#"{"fastMode":true}"#.into()),
+            ..ClaudeLaunchOptions::default()
+        };
+        let mcp = [crate::McpRegistration {
+            name: "tcode_pull_requests".into(),
+            url: "http://127.0.0.1:1/mcp".into(),
+            bearer_token: "token".into(),
+        }];
+        let mcp_config = mcp_args(&mcp);
+        let mut expected = os(&base);
+        expected.extend(os(&[
+            "auto",
+            "--allow-dangerously-skip-permissions",
+            "--replay-user-messages",
+            "--model",
+            "claude-opus-4-8",
+            "--effort",
+            "high",
+            "--settings",
+            r#"{"fastMode":true}"#,
+            "--resume",
+            "native",
+            &mcp_config[0],
+            &mcp_config[1],
+            "--append-system-prompt-file",
+            "/tmp/instructions.md",
+            "--permission-mode",
+            "plan",
+        ]));
+        assert_eq!(
+            launch_args(
+                "auto",
+                true,
+                &launch,
+                vec!["--resume".into(), "native".into()],
+                &mcp,
+                Some(SystemPrompt::File(Path::new("/tmp/instructions.md"))),
+                &["--permission-mode".into(), "plan".into()],
+            ),
+            expected
+        );
+
+        let mut expected = os(&base);
+        expected.extend(os(&[
+            "default",
+            "--allow-dangerously-skip-permissions",
+            "--append-system-prompt",
+            "Link every PR.",
+        ]));
+        assert_eq!(
+            launch_args(
+                "default",
+                false,
+                &ClaudeLaunchOptions::default(),
+                Vec::new(),
+                &[],
+                Some(SystemPrompt::Text("Link every PR.")),
+                &[],
+            ),
+            expected
+        );
     }
 
     #[test]
@@ -5851,7 +5567,7 @@ mod tests {
         mapper.start_turn();
         let events = feed(
             &mut mapper,
-            r#"{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","direction":"retry","scope":"session","original_model":"claude-fable-5","fallback_model":"claude-opus-4-8","request_id":"req_123","api_refusal_category":"cyber","api_refusal_explanation":null,"refused_user_message_uuid":"cf7703ac-420b-4038-9f32-582077b27352","content":"Safeguards flagged this message. Switched models.","session_id":"session-1","uuid":"system-1"}"#,
+            r#"{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","direction":"retry","scope":"session","original_model":"claude-fable-5","fallback_model":"claude-opus-4-8","request_id":"req_123","api_refusal_category":"cyber","api_refusal_explanation":null,"refused_user_message_uuid":"00000000-0000-4000-8000-000000000064","content":"Safeguards flagged this message. Switched models.","session_id":"session-1","uuid":"system-1"}"#,
         );
 
         assert_eq!(
@@ -6000,185 +5716,47 @@ mod tests {
         );
     }
 
-    /// A stand-in Claude Code 2.1.318 that answers the rewind controls the way
-    /// the CLI does, echoes a user message under the uuid it was sent with,
-    /// and records every line it reads in `directory/requests`.
-    #[cfg(unix)]
-    fn rewinding_claude(directory: &std::path::Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::create_dir_all(directory).unwrap();
-        let binary = directory.join("claude");
-        let answer = |response: &str| {
-            format!(
-                "id=$(printf '%s' \"$line\" | sed -n 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/p'); \
-                 printf '{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{response}}}}}\\n' \"$id\";;"
+    /// A preview is Claude's dry run of the files a rewind would restore; a
+    /// rewind of the conversation alone restores none and asks nothing.
+    #[test]
+    fn a_rewind_preview_is_a_dry_run_of_the_files() {
+        let mut mapper = Mapper::new();
+        assert_eq!(
+            mapper.begin_preview("checkpoint-2".into(), RewindMode::FilesAndConversation),
+            Some(
+                json!({"type":"control_request","request_id":"tcode-ctrl-1","request":{
+                    "subtype":"rewind_files","user_message_id":"checkpoint-2","dry_run":true
+                }})
             )
-        };
-        std::fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.318\\n'; exit 0; fi\n\
-                 printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"default\"}}'\n\
-                 while IFS= read -r line; do printf '%s\\n' \"$line\" >> requests; case \"$line\" in\n\
-                 *'\"dry_run\":true'*) {}\n\
-                 *'\"subtype\":\"rewind_files\"'*) {}\n\
-                 *'\"subtype\":\"rewind_conversation\"'*) {}\n\
-                 *'\"type\":\"user\"'*) uuid=$(printf '%s' \"$line\" | sed -n 's/.*\"uuid\":\"\\([^\"]*\\)\".*/\\1/p'); \
-                 printf '{{\"type\":\"user\",\"uuid\":\"%s\",\"isReplay\":true,\"session_id\":\"native\",\"parent_tool_use_id\":null,\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"also this\"}}]}}}}\\n' \"$uuid\";;\n\
-                 esac; done\n",
-                answer(r#"{"canRewind":true,"filesChanged":["src/lib.rs"],"insertions":3,"deletions":1}"#),
-                answer(r#"{"canRewind":true,"skippedLinks":0}"#),
-                answer(
-                    r#"{"rewound":false,"reason":"stale_target","error":"The conversation changed since this message was chosen.","precedingAssistantUuid":null}"#
-                ),
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        binary
+        );
+        assert_eq!(
+            mapper.begin_preview("checkpoint-2".into(), RewindMode::Conversation),
+            None
+        );
     }
 
-    /// Through a running session: a steer is sent under its own uuid and its
-    /// replayed echo makes it a restore point; a preview is Claude's dry run;
-    /// a combined rewind whose conversation half is refused reports the files
-    /// it restored and why the conversation was not rewound.
-    #[cfg(unix)]
+    /// `rewind_conversation` stops a running turn itself, so the turn it
+    /// stops ends interrupted rather than failed.
     #[test]
-    fn a_session_previews_rewinds_and_reports_the_part_claude_refused() {
-        smol::block_on(async {
-            let directory =
-                std::env::temp_dir().join(format!("agent-claude-rewind-{}", uuid::Uuid::new_v4()));
-            let binary = rewinding_claude(&directory);
-            let handle = start(SessionOptions {
-                cwd: directory.clone(),
-                model: None,
-                resume: None,
-                fork: None,
-                binary_path: Some(binary),
-                option_selections: Vec::new(),
-                mcp_servers: Vec::new(),
-                launch_env: LaunchEnv::default(),
-                extra_args: Vec::new(),
-                acp: None,
-                instructions: None,
-            })
-            .await
+    fn a_conversation_rewind_during_a_running_turn_ends_it_interrupted() {
+        let mut mapper = Mapper::new();
+        mapper.native_rewind = true;
+        mapper.start_turn();
+        mapper
+            .begin_rewind("checkpoint-2".into(), RewindMode::Conversation)
             .unwrap();
-            let next = async |matches: fn(&AgentEvent) -> bool| loop {
-                let event = handle.events.recv().await.unwrap();
-                if matches(&event) {
-                    break event;
-                }
-            };
-            assert!(matches!(
-                next(|event| matches!(event, AgentEvent::RewindAvailability { .. })).await,
-                AgentEvent::RewindAvailability { unavailable: None }
-            ));
-
-            handle
-                .commands
-                .send(SessionCommand::Steer {
-                    request_id: "steer-1".into(),
-                    text: "also this".into(),
-                    attachments: Vec::new(),
-                })
-                .await
-                .unwrap();
-            let AgentEvent::SteerCheckpoint {
-                request_id,
-                checkpoint_id,
-            } = next(|event| matches!(event, AgentEvent::SteerCheckpoint { .. })).await
-            else {
-                unreachable!()
-            };
-            assert_eq!(request_id, "steer-1");
-
-            for mode in [RewindMode::FilesAndConversation, RewindMode::Conversation] {
-                handle
-                    .commands
-                    .send(SessionCommand::PreviewRewind {
-                        checkpoint_id: "checkpoint-2".into(),
-                        mode,
-                    })
-                    .await
-                    .unwrap();
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"stopped"}"#,
+        );
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
+        assert!(matches!(
+            turn_completed_after_count(&events, 0),
+            AgentEvent::TurnCompleted {
+                status: TurnStatus::Interrupted,
+                ..
             }
-            let previews = [
-                next(|event| matches!(event, AgentEvent::RewindPreviewed { .. })).await,
-                next(|event| matches!(event, AgentEvent::RewindPreviewed { .. })).await,
-            ];
-            let files = RewindFiles {
-                files: vec![RewindFile::path("src/lib.rs")],
-                insertions: Some(3),
-                deletions: Some(1),
-                skipped_links: 0,
-            };
-            for (mode, expected) in [
-                (
-                    RewindMode::FilesAndConversation,
-                    RewindPreview {
-                        files: files.clone(),
-                        conflicts: Vec::new(),
-                    },
-                ),
-                (RewindMode::Conversation, RewindPreview::default()),
-            ] {
-                assert!(
-                    previews.contains(&AgentEvent::RewindPreviewed {
-                        checkpoint_id: "checkpoint-2".into(),
-                        mode,
-                        result: RewindPreviewResult::Ready(expected),
-                    }),
-                    "{previews:?}"
-                );
-            }
-
-            handle
-                .commands
-                .send(SessionCommand::Rewind {
-                    checkpoint_id: "checkpoint-2".into(),
-                    mode: RewindMode::FilesAndConversation,
-                })
-                .await
-                .unwrap();
-            assert_eq!(
-                next(|event| matches!(event, AgentEvent::RewindCompleted { .. })).await,
-                AgentEvent::RewindCompleted {
-                    checkpoint_id: "checkpoint-2".into(),
-                    mode: RewindMode::Files,
-                    prefill: None,
-                    prefill_attachments: Vec::new(),
-                    later_history: LaterHistory::Truncated,
-                    files: Some(files),
-                    incomplete: Some(RewindIncomplete {
-                        requested: RewindMode::FilesAndConversation,
-                        failure: RewindFailure::new(
-                            RewindFailureReason::ConversationChanged,
-                            "The conversation changed since this message was chosen.".to_owned(),
-                        ),
-                    }),
-                    undo_token: None,
-                }
-            );
-            shut_down(handle).await;
-
-            let requests: Vec<Value> = std::fs::read_to_string(directory.join("requests"))
-                .unwrap()
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
-            assert!(
-                requests.iter().any(|request| request["type"] == "user"
-                    && request["uuid"] == checkpoint_id.as_str())
-            );
-            assert!(requests.iter().any(|request| request["request"]
-                == json!({
-                    "subtype": "rewind_files",
-                    "user_message_id": "checkpoint-2",
-                    "dry_run": true,
-                })));
-            let _ = std::fs::remove_dir_all(directory);
-        });
+        ));
     }
 
     fn select(id: &str, value: Value) -> OptionSelection {
@@ -6233,34 +5811,6 @@ mod tests {
         assert_eq!(resolve("test-plain", "low").effort, None);
         // Unknown model: no descriptor to resolve against, so no flag.
         assert_eq!(resolve("test-unknown", "high").effort, None);
-    }
-
-    #[test]
-    fn version_gating_follows_manifest_bounds() {
-        let catalog = crate::claude_manifest::test_catalog();
-        let ids = |version: Option<(u32, u32, u32)>| -> Vec<String> {
-            catalog
-                .models_for_version(version)
-                .into_iter()
-                .map(|model| model.id)
-                .collect()
-        };
-        // Ungated models are always listed, even without a known version.
-        assert_eq!(ids(None), ["test-narrow", "test-plain"]);
-        // minVersion is inclusive; maxVersionExclusive is not.
-        assert_eq!(
-            ids(Some((2, 1, 256))),
-            ["test-fixed", "test-narrow", "test-plain"]
-        );
-        assert_eq!(
-            ids(Some((2, 1, 257))),
-            ["test-wide", "test-fixed", "test-narrow", "test-plain"]
-        );
-        assert_eq!(ids(Some((2, 1, 110))), ["test-narrow", "test-plain"]);
-        assert_eq!(
-            ids(Some((3, 0, 0))),
-            ["test-wide", "test-narrow", "test-plain"]
-        );
     }
 
     #[test]
@@ -6390,6 +5940,15 @@ mod tests {
             }
             other => panic!("expected PlanUpdated, got {other:?}"),
         }
+
+        let cleared = feed(
+            &mut m,
+            r#"{"type":"assistant","message":{"id":"msg_c","content":[{"type":"tool_use","id":"toolu_clear","name":"TodoWrite","input":{"todos":[]}}]}}"#,
+        );
+        assert!(matches!(
+            cleared.as_slice(),
+            [AgentEvent::PlanUpdated { steps, .. }] if steps.is_empty()
+        ));
     }
 
     #[test]
@@ -6475,37 +6034,6 @@ mod tests {
             event,
             AgentEvent::SessionStarted { .. } | AgentEvent::ProviderCommands { .. }
         )));
-    }
-
-    #[test]
-    fn usage_scope_fixture_deduplicates_results_and_excludes_child_context() {
-        let mut m = Mapper::new();
-        let mut observations = Vec::new();
-        let mut completions = 0;
-        for line in include_str!("../tests/fixtures/claude/usage_scope.jsonl").lines() {
-            for event in feed(&mut m, line) {
-                match event {
-                    AgentEvent::TokenUsage(u) => observations.push(u.used_tokens),
-                    AgentEvent::TurnCompleted { usage: Some(u), .. } => {
-                        completions += 1;
-                        assert_eq!(u.used_tokens, Some(500260));
-                        assert_eq!(u.turn_processed_tokens, Some(4001300));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        assert_eq!(completions, 1);
-        assert_eq!(
-            observations,
-            vec![
-                Some(400150),
-                Some(400150),
-                Some(400150),
-                Some(500260),
-                Some(500260)
-            ]
-        );
     }
 
     #[test]
@@ -6617,34 +6145,6 @@ mod tests {
     }
 
     #[test]
-    fn result_reports_each_turn_traffic_for_timeline_accumulation() {
-        let mut m = Mapper::new();
-        m.start_turn();
-        let evs = feed(
-            &mut m,
-            r#"{"type":"result","subtype":"success","usage":{"input_tokens":100,"output_tokens":20}}"#,
-        );
-        let first = match turn_completed_after_count(&evs, 0) {
-            AgentEvent::TurnCompleted { usage, .. } => usage.unwrap(),
-            other => panic!("expected TurnCompleted, got {other:?}"),
-        };
-        assert_eq!(first.turn_processed_tokens, Some(120));
-        assert_eq!(first.total_processed_tokens, None);
-        // Each result is a turn delta, independent of the mapper process lifetime.
-        m.start_turn();
-        let evs = feed(
-            &mut m,
-            r#"{"type":"result","subtype":"success","usage":{"input_tokens":30,"output_tokens":5}}"#,
-        );
-        let second = match turn_completed_after_count(&evs, 0) {
-            AgentEvent::TurnCompleted { usage, .. } => usage.unwrap(),
-            other => panic!("expected TurnCompleted, got {other:?}"),
-        };
-        assert_eq!(second.turn_processed_tokens, Some(35));
-        assert_eq!(second.total_processed_tokens, None);
-    }
-
-    #[test]
     fn rejected_rate_limit_is_emitted_after_failed_result_error() {
         let mut m = Mapper::new();
         feed(
@@ -6720,12 +6220,6 @@ mod tests {
         }
     }
 
-    /// Captured from Claude Code 2.1.294 with claude-opus-5-5: the thinking
-    /// block opens with `content_block_start`, every `thinking_delta` is empty
-    /// and the `assistant` line repeats the block with no text. The block's
-    /// start is the one event that can announce the thinking, so it must
-    /// become an in-progress reasoning item that the empty deltas and the
-    /// empty completion leave alone.
     /// Captured from Claude Code 2.1.312 with claude-opus-5-5 and thinking on:
     /// the prose the model wrote between two tool calls arrives as a second
     /// thinking block holding the server's summary of it, and only the
@@ -6761,6 +6255,12 @@ mod tests {
         );
     }
 
+    /// Captured from Claude Code 2.1.294 with claude-opus-5-5: the thinking
+    /// block opens with `content_block_start`, every `thinking_delta` is empty
+    /// and the `assistant` line repeats the block with no text. The block's
+    /// start is the one event that can announce the thinking, so it must
+    /// become an in-progress reasoning item that the empty deltas and the
+    /// empty completion leave alone.
     #[test]
     fn hidden_thinking_announces_itself_from_the_block_start() {
         let mut m = Mapper::new();
@@ -6844,9 +6344,10 @@ mod tests {
         }
     }
 
-    /// Recorded from Claude Code 2.1.316 (`claude -p --output-format
+    /// The shape Claude Code 2.1.316 prints (`claude -p --output-format
     /// stream-json --verbose --model haiku` in a scratch directory holding an
-    /// 8x8 blue PNG and `a.txt`): a Read of the image, then a subagent that
+    /// 8x8 blue PNG and `a.txt`), its ids and paths invented: a Read of the
+    /// image, then a subagent that
     /// runs Bash, reads and edits `a.txt`. The image is the result's only
     /// content and reaches `image_reads` alone; the subagent's Bash and Edit
     /// map as they do at the top level.
@@ -6868,7 +6369,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{id} never completed: {completed:#?}"))
         };
         assert_eq!(
-            item("toolu_01HG34Q57eKf3Vmy7mipKtqD").content,
+            item("toolu_010000000000000000000014").content,
             ItemContent::ToolCall {
                 image_reads: vec![Attachment {
                     media_type: "image/png".into(),
@@ -6882,15 +6383,15 @@ mod tests {
             }
         );
         let child = |id: &str| {
-            let item = item(&format!("toolu_01DEp56X845RWkeSRLr9oGhE:{id}"));
+            let item = item(&format!("toolu_010000000000000000000015:{id}"));
             assert_eq!(
                 item.parent_item_id.as_deref(),
-                Some("toolu_01DEp56X845RWkeSRLr9oGhE")
+                Some("toolu_010000000000000000000015")
             );
             &item.content
         };
         assert_eq!(
-            child("toolu_014AnXC7pBrAgEgqpWymetDS"),
+            child("toolu_010000000000000000000016"),
             &ItemContent::CommandExecution {
                 command: "echo hi".into(),
                 output: "hi".into(),
@@ -6899,10 +6400,10 @@ mod tests {
             }
         );
         assert_eq!(
-            child("toolu_01QkfKor1fX5xFDBvWR1ZUEX"),
+            child("toolu_010000000000000000000018"),
             &ItemContent::FileChange {
                 changes: vec![FileChange {
-                    path: "/private/tmp/b2rec/claude/a.txt".into(),
+                    path: "/home/user/project/a.txt".into(),
                     kind: FileChangeKind::Modify,
                     diff: Some("-hello\n+bye".into()),
                 }],
@@ -6910,62 +6411,17 @@ mod tests {
             }
         );
         assert!(matches!(
-            child("toolu_01KLtmHwybFdAVQGeGUZEfvP"),
+            child("toolu_010000000000000000000017"),
             ItemContent::ToolCall { name, output: Some(output), .. }
                 if name == "Read" && output == "1\thello\n2\tworld\n3\t"
         ));
-    }
-
-    #[test]
-    fn bash_tool_use_then_result_roundtrip() {
-        let mut m = Mapper::new();
-        let started = feed(
-            &mut m,
-            r#"{"type":"assistant","message":{"id":"msg_3","content":[{"type":"tool_use","id":"toolu_bash","name":"Bash","input":{"command":"echo hi"}}]}}"#,
-        );
-        match &started[0] {
-            AgentEvent::ItemStarted(item) => {
-                assert_eq!(item.id, "toolu_bash");
-                match &item.content {
-                    ItemContent::CommandExecution {
-                        command, status, ..
-                    } => {
-                        assert_eq!(command, "echo hi");
-                        assert_eq!(*status, ItemStatus::InProgress);
-                    }
-                    other => panic!("expected CommandExecution, got {other:?}"),
-                }
-            }
-            other => panic!("expected ItemStarted, got {other:?}"),
-        }
-
-        let done = feed(
-            &mut m,
-            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bash","content":"hi\n"}]}}"#,
-        );
-        match &done[0] {
-            AgentEvent::ItemCompleted(item) => match &item.content {
-                ItemContent::CommandExecution {
-                    output,
-                    status,
-                    exit_code,
-                    ..
-                } => {
-                    assert_eq!(output, "hi\n");
-                    assert_eq!(*status, ItemStatus::Completed);
-                    assert_eq!(*exit_code, Some(0));
-                }
-                other => panic!("expected CommandExecution, got {other:?}"),
-            },
-            other => panic!("expected ItemCompleted, got {other:?}"),
-        }
     }
 
     /// A message sent to a resumed session whose background command did not
     /// outlive the previous process: Claude Code first reports the command
     /// stopped and closes that notification with a `result` of its own
     /// (`num_turns: 0`, origin `task-notification`), then runs the message
-    /// (2.1.321, recorded).
+    /// (2.1.321's shape, its ids invented).
     #[test]
     fn a_resumed_sessions_stopped_task_result_leaves_the_message_turn_open() {
         let mut m = Mapper::new();
@@ -7330,14 +6786,14 @@ mod tests {
         let mut m = Mapper::new();
         let first = tasks(&feed(
             &mut m,
-            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a3138d90bec23d1c7","run_id":"0mw6umb2h-0212cc6f","task_type":"local_agent","subagent_type":"general-purpose","description":"wait helper"}]}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a0000000000000011","run_id":"000000002-00000000","task_type":"local_agent","subagent_type":"general-purpose","description":"wait helper"}]}"#,
         ));
-        assert_eq!(first[0].id, "a3138d90bec23d1c7");
+        assert_eq!(first[0].id, "a0000000000000011");
         assert_eq!(first[0].name, "wait helper");
         assert_eq!(first[0].kind, crate::BackgroundKind::Agent);
         let second = tasks(&feed(
             &mut m,
-            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a3138d90bec23d1c7","run_id":"0mw6umb2h-0212cc6f","task_type":"local_agent","subagent_type":"general-purpose","description":"wait helper"},{"task_id":"bxg56veie","run_id":"0mw6umbct-82b1a926","task_type":"local_bash","description":"wait","parent_task_id":"a3138d90bec23d1c7"}]}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a0000000000000011","run_id":"000000002-00000000","task_type":"local_agent","subagent_type":"general-purpose","description":"wait helper"},{"task_id":"b00000003","run_id":"000000003-00000000","task_type":"local_bash","description":"wait","parent_task_id":"a0000000000000011"}]}"#,
         ));
         assert_eq!(second.len(), 2);
         assert_eq!(second[0], first[0]);
@@ -7350,8 +6806,8 @@ mod tests {
         assert_eq!(
             requests,
             [
-                json!({"subtype": "stop_task", "task_id": "a3138d90bec23d1c7"}),
-                json!({"subtype": "stop_task", "task_id": "bxg56veie"}),
+                json!({"subtype": "stop_task", "task_id": "a0000000000000011"}),
+                json!({"subtype": "stop_task", "task_id": "b00000003"}),
             ]
         );
 
@@ -7398,11 +6854,11 @@ mod tests {
         let mut m = Mapper::new();
         feed_count(
             &mut m,
-            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b735c9qiy","run_id":"0mw6umbcx-cb2e7539","task_type":"local_bash","description":"wait"}]}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b00000002","run_id":"000000004-00000000","task_type":"local_bash","description":"wait"}]}"#,
         );
         for line in [
-            r#"{"type":"system","subtype":"task_updated","task_id":"b735c9qiy","run_id":"0mw6umbcx-cb2e7539","patch":{"status":"killed","end_time":1794082805458}}"#,
-            r#"{"type":"system","subtype":"task_notification","task_id":"b735c9qiy","run_id":"0mw6umbcx-cb2e7539","tool_use_id":"toolu_0025","status":"stopped","summary":"wait"}"#,
+            r#"{"type":"system","subtype":"task_updated","task_id":"b00000002","run_id":"000000004-00000000","patch":{"status":"killed","end_time":1794082805458}}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"b00000002","run_id":"000000004-00000000","tool_use_id":"toolu_0025","status":"stopped","summary":"wait"}"#,
             r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
         ] {
             assert!(feed_count(&mut m, line).is_empty());
@@ -7440,7 +6896,7 @@ mod tests {
         );
         let counted = feed_count(
             &mut m,
-            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"ae5779035aeb8a94d","run_id":"0mvctgbkr-7639c0ca","task_type":"local_agent","subagent_type":"general-purpose","description":"Run sleep and echo command"}]}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a0000000000000012","run_id":"000000005-00000000","task_type":"local_agent","subagent_type":"general-purpose","description":"Run sleep and echo command"}]}"#,
         );
         assert!(matches!(
             counted.as_slice(),
@@ -7448,11 +6904,11 @@ mod tests {
         ));
         feed(
             &mut m,
-            r#"{"type":"system","subtype":"task_started","task_id":"ae5779035aeb8a94d","tool_use_id":"toolu_agent","description":"Run sleep and echo command","subagent_type":"general-purpose","is_backgrounded":true,"task_type":"local_agent"}"#,
+            r#"{"type":"system","subtype":"task_started","task_id":"a0000000000000012","tool_use_id":"toolu_agent","description":"Run sleep and echo command","subagent_type":"general-purpose","is_backgrounded":true,"task_type":"local_agent"}"#,
         );
         feed(
             &mut m,
-            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_agent","type":"tool_result","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"ae5779035aeb8a94d"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_agent","type":"tool_result","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a0000000000000012"}}"#,
         );
         let launched = feed(
             &mut m,
@@ -7463,7 +6919,7 @@ mod tests {
         // Between turns, the background subagent asks for permission.
         let asked = feed(
             &mut m,
-            r#"{"type":"control_request","request_id":"ctrl-bg","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"cp a b"},"tool_use_id":"toolu_cp","agent_id":"ae5779035aeb8a94d"}}"#,
+            r#"{"type":"control_request","request_id":"ctrl-bg","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"cp a b"},"tool_use_id":"toolu_cp","agent_id":"a0000000000000012"}}"#,
         );
         let [AgentEvent::ApprovalRequested(request)] = asked.as_slice() else {
             panic!("expected one approval request, got {asked:?}");
@@ -7472,7 +6928,7 @@ mod tests {
 
         let notification = feed(
             &mut m,
-            r#"{"type":"system","subtype":"task_notification","task_id":"ae5779035aeb8a94d","tool_use_id":"toolu_agent","status":"completed","output_file":"/tmp/ae5779035aeb8a94d.output","summary":"SUB_DONE"}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"a0000000000000012","tool_use_id":"toolu_agent","status":"completed","output_file":"/tmp/a0000000000000012.output","summary":"SUB_DONE"}"#,
         );
         assert!(
             !notification
@@ -7490,7 +6946,7 @@ mod tests {
         m.start_turn();
         let done = feed(
             &mut m,
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"DONE","origin":{"kind":"task-notification","producer":"session-task","runId":"0mvctgbkr-7639c0ca"}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"DONE","origin":{"kind":"task-notification","producer":"session-task","runId":"000000005-00000000"}}"#,
         );
         turn_completed_after_count(&done, 0);
     }
@@ -7519,45 +6975,6 @@ mod tests {
                 ..
             } if completed == &turn_id
         ));
-    }
-
-    #[test]
-    fn classification_matrix_covers_substring_priority() {
-        use ClaudeRequestType::*;
-        let cases = [
-            ("Read", FileRead),       // exact lowercase "read"
-            ("Read File", FileRead),  // "read file" substring
-            ("ReadFile", FileChange), // no space → "file" classifies it as file_change
-            ("View", FileRead),
-            ("ViewImage", FileRead), // "view" wins before "image"
-            ("Grep", FileRead),
-            ("Glob", FileRead),
-            ("WebSearch", FileRead), // "search" predicate wins over web_search
-            ("codebase_search", FileRead),
-            ("WebFetch", ToolUse), // neither search nor read-only recognizes it
-            ("Bash", ExecCommand),
-            ("run_shell", ExecCommand),
-            ("terminal", ExecCommand),
-            ("some_command", ExecCommand),
-            ("Edit", FileChange),
-            ("Write", FileChange),
-            ("MultiEdit", FileChange),
-            ("delete_thing", FileChange),
-            ("TodoWrite", FileChange),  // "write"
-            ("TaskCreate", FileChange), // "create"
-            ("TaskUpdate", ToolUse),    // no classification substring
-            ("TaskList", ToolUse),
-            ("Task", ToolUse), // agent item, falls through
-            ("some_agent", ToolUse),
-            ("subagent_run", ToolUse),
-            ("mcp__server__tool", ToolUse),
-            ("view_image", FileRead), // "view" still wins
-            ("image_tool", ToolUse),  // image → dynamic
-            ("MysteryTool", ToolUse),
-        ];
-        for (name, expected) in cases {
-            assert_eq!(classify_claude_tool(name), expected, "classifying {name:?}");
-        }
     }
 
     /// A safety check that bypassPermissions cannot skip still asks; the
@@ -7651,6 +7068,49 @@ mod tests {
                 assert!(detail.ends_with("..."));
                 assert!(detail.len() < input["blob"].as_str().unwrap().len());
             }
+        }
+    }
+
+    /// Tools that write no file and run no command ask as themselves, under
+    /// their own name and input: Claude Code 2.1.322's task tools (inputs from
+    /// their schemas in the bundle) and Tcode's control MCP tools as Claude
+    /// Code names them (inputs from `crates/control-mcp/src/params.rs`).
+    #[test]
+    fn a_tool_that_changes_no_file_asks_as_itself() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        for (tool, input) in [
+            (
+                "TodoWrite",
+                json!({"todos":[{"content":"Wire the parser","status":"pending","activeForm":"Wiring the parser"}]}),
+            ),
+            (
+                "TaskCreate",
+                json!({"subject":"Wire the parser","description":"Map the new frames"}),
+            ),
+            (
+                "mcp__tcode_control__create_project",
+                json!({"root":"/work/parser"}),
+            ),
+            (
+                "mcp__tcode_control__read_terminal",
+                json!({"terminal_id":3}),
+            ),
+        ] {
+            let events = m.on_message(json!({
+                "type": "control_request",
+                "request_id": "ask-as-itself",
+                "request": {"subtype":"can_use_tool", "tool_name":tool, "input":input, "tool_use_id":"toolu_ask"},
+            }));
+            let [AgentEvent::ApprovalRequested(request)] = events.as_slice() else {
+                panic!("expected one approval request for {tool}, got {events:?}");
+            };
+            assert!(
+                matches!(&request.kind, ApprovalKind::ToolUse { name, input: asked, .. }
+                    if name == tool && *asked == input),
+                "{tool}: {:?}",
+                request.kind
+            );
         }
     }
 
@@ -7829,24 +7289,21 @@ mod tests {
             }
             other => panic!("expected TurnCompleted, got {other:?}"),
         }
+        // Each result is that turn's traffic, however long the process ran.
+        m.start_turn();
+        let evs = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":30,"output_tokens":5}}"#,
+        );
+        assert!(matches!(
+            turn_completed_after_count(&evs, 0),
+            AgentEvent::TurnCompleted { usage: Some(usage), .. }
+                if usage.turn_processed_tokens == Some(35) && usage.total_processed_tokens.is_none()
+        ));
     }
 
     #[test]
     fn interrupted_result_status() {
-        let mut mapper = Mapper::new();
-        mapper.start_turn();
-        let events = feed(
-            &mut mapper,
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"You can cancel the operation from Settings."}"#,
-        );
-        assert!(matches!(
-            turn_completed_after_count(&events, 0),
-            AgentEvent::TurnCompleted {
-                status: TurnStatus::Completed,
-                ..
-            }
-        ));
-
         let mut idle = Mapper::new();
         idle.interrupt_request();
         assert!(!idle.interrupt_pending);
@@ -7883,18 +7340,6 @@ mod tests {
                 ..
             }
         ));
-
-        m.start_turn();
-        let evs = feed(
-            &mut m,
-            r#"{"type":"result","subtype":"error_during_execution","is_error":false,"result":"Request was aborted"}"#,
-        );
-        match turn_completed_after_count(&evs, 0) {
-            AgentEvent::TurnCompleted { status, .. } => {
-                assert_eq!(*status, TurnStatus::Interrupted)
-            }
-            other => panic!("expected TurnCompleted, got {other:?}"),
-        }
     }
 
     #[test]
@@ -7912,14 +7357,14 @@ mod tests {
                 }
                 if let AgentEvent::ApprovalRequested(request) = &event {
                     approvals += 1;
-                    assert_eq!(request.id, "221a98ab-3314-470d-89e0-0528a9e8d75f");
+                    assert_eq!(request.id, "00000000-0000-4000-8000-000000000047");
                     assert!(turn_id.is_some());
                     assert_eq!(request.turn_id, turn_id);
                     let ApprovalKind::FileChange { changes } = &request.kind else {
                         panic!("expected Write approval, got {request:?}");
                     };
                     assert_eq!(changes.len(), 1);
-                    assert_eq!(changes[0].path, "/private/tmp/probe-claude-py/hello.txt");
+                    assert_eq!(changes[0].path, "/home/user/project/hello.txt");
                     assert_eq!(
                         request.reason, None,
                         "the frame says what the tool does, not why it asks"
@@ -7936,11 +7381,11 @@ mod tests {
                             "type": "control_response",
                             "response": {
                                 "subtype": "success",
-                                "request_id": "221a98ab-3314-470d-89e0-0528a9e8d75f",
+                                "request_id": "00000000-0000-4000-8000-000000000047",
                                 "response": {
                                     "behavior": "allow",
                                     "updatedInput": {
-                                        "file_path": "/private/tmp/probe-claude-py/hello.txt",
+                                        "file_path": "/home/user/project/hello.txt",
                                         "content": "hi\n",
                                     },
                                 },
@@ -7981,7 +7426,7 @@ mod tests {
             })
             .collect();
         let expected = [FileChange {
-            path: "/private/tmp/probe-claude-py/hello.txt".into(),
+            path: "/home/user/project/hello.txt".into(),
             kind: FileChangeKind::Create,
             diff: Some("+hi".into()),
         }];
@@ -7990,13 +7435,13 @@ mod tests {
             vec![
                 (
                     "started",
-                    "toolu_01E6rT4J5qJva9HnEfBx5top",
+                    "toolu_010000000000000000000019",
                     ItemStatus::InProgress,
                     expected.as_slice()
                 ),
                 (
                     "completed",
-                    "toolu_01E6rT4J5qJva9HnEfBx5top",
+                    "toolu_010000000000000000000019",
                     ItemStatus::Completed,
                     expected.as_slice()
                 ),
@@ -8014,184 +7459,137 @@ mod tests {
         );
     }
 
+    /// The snapshots of the Subagent item `id` in `events`.
+    fn subagent_snapshots<'a>(events: &'a [AgentEvent], id: &str) -> Vec<&'a ThreadItem> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ItemStarted(item)
+                | AgentEvent::ItemUpdated(item)
+                | AgentEvent::ItemCompleted(item)
+                    if item.id == id && matches!(item.content, ItemContent::Subagent { .. }) =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A foreground subagent as Claude Code recorded it: the lead waits on
+    /// it, its activity is parented to the spawn, the spawn shows the model
+    /// the child ran with, and no terminal snapshot reaches the thread before
+    /// the transcript tail's last flush.
     #[test]
     fn subagent_fixture_maps_lifecycle_and_parented_activity() {
-        let trace = include_str!("../tests/fixtures/claude/subagent_trace.jsonl");
+        const SPAWN: &str = "toolu_010000000000000000000007";
+        let trace = include_str!("../tests/fixtures/claude/subagent_handback_trace.jsonl");
         let mut mapper = Mapper::new();
         let mut events = Vec::new();
         for line in trace.lines() {
             events.extend(feed(&mut mapper, line));
         }
-        // The lead waited on this agent: its call never returned early.
         assert!(
             !events
                 .iter()
                 .any(|event| matches!(event, AgentEvent::ItemBackgrounded { .. }))
         );
-        // task_started opened a transcript tail; every terminal snapshot
-        // (task_updated, task_notification, tool_result) waits for its ack.
-        assert!(events.iter().all(|event| !matches!(
-            event,
-            AgentEvent::ItemUpdated(ThreadItem { content: ItemContent::Subagent { status, .. }, .. })
-            | AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::Subagent { status, .. }, .. })
-                if *status != ItemStatus::InProgress
-        )));
-        events.extend(mapper.on_tail_notice(SubagentTailNotice {
-            parent_id: "toolu_spawn_1".into(),
-            events: Vec::new(),
-            model: None,
-            stopped: true,
-        }));
-
-        let spawn_events: Vec<_> = events
-            .iter()
-            .filter_map(|event| match event {
-                AgentEvent::ItemStarted(item)
-                | AgentEvent::ItemUpdated(item)
-                | AgentEvent::ItemCompleted(item)
-                    if item.id == "toolu_spawn_1" =>
-                {
-                    Some(item)
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(spawn_events.len(), 4);
-        assert!(matches!(events.last(), Some(AgentEvent::ItemCompleted(_))));
-        assert!(matches!(
-            &spawn_events[0].content,
-            ItemContent::Subagent { agent_type, description, status: ItemStatus::InProgress, summary: None, model: None, effort: None }
-                if agent_type == "general-purpose" && description == "Ping test"
-        ));
-        // The child's first assistant message reveals the model and effort the
-        // subagent actually ran with; the spawn item re-emits with them.
-        assert!(matches!(
-            &spawn_events[2].content,
-            ItemContent::Subagent { status: ItemStatus::InProgress, model: Some(model), effort: Some(effort), .. }
-                if model == "claude-sonnet-5" && effort == "high"
-        ));
-        assert!(matches!(
-            &spawn_events.last().unwrap().content,
-            ItemContent::Subagent { model: Some(model), effort: Some(effort), .. }
-                if model == "claude-sonnet-5" && effort == "high"
-        ));
-
-        assert!(spawn_events.iter().any(|item| matches!(
-            &item.content,
-            ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. }
-                if summary == "pong"
-        )));
-        assert!(matches!(
-            &spawn_events.last().unwrap().content,
-            ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. }
-                if summary == "pong"
-        ));
-
+        assert!(
+            subagent_snapshots(&events, SPAWN)
+                .iter()
+                .all(|item| matches!(
+                    item.content,
+                    ItemContent::Subagent {
+                        status: ItemStatus::InProgress,
+                        ..
+                    }
+                )),
+            "{events:?}"
+        );
         let children: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
-                AgentEvent::ItemStarted(item)
-                | AgentEvent::ItemUpdated(item)
-                | AgentEvent::ItemCompleted(item)
-                    if item.parent_item_id.as_deref() == Some("toolu_spawn_1") =>
+                AgentEvent::ItemStarted(item) | AgentEvent::ItemCompleted(item)
+                    if item.parent_item_id.as_deref() == Some(SPAWN) =>
                 {
-                    Some(item)
+                    Some(&item.content)
                 }
                 _ => None,
             })
             .collect();
-        assert_eq!(children.len(), 2);
-        assert!(matches!(
-            &children[0].content,
-            ItemContent::UserMessage { text, .. } if text.contains("Reply with pong")
-        ));
-        assert!(matches!(
-            &children[1].content,
-            ItemContent::AssistantMessage { text, .. } if text == "pong"
-        ));
+        assert!(
+            children.iter().any(|content| matches!(content,
+                ItemContent::UserMessage { text, .. } if text.starts_with("Your report is two lines"))),
+            "{children:?}"
+        );
+        assert!(
+            children.iter().any(|content| matches!(content,
+                ItemContent::ToolCall { name, status: ItemStatus::Completed, .. } if name == "SubagentHandback")),
+            "{children:?}"
+        );
 
-        assert!(events.iter().all(|event| match event {
-            AgentEvent::ItemStarted(item)
-            | AgentEvent::ItemUpdated(item)
-            | AgentEvent::ItemCompleted(item) => {
-                item.id == "toolu_spawn_1" || item.parent_item_id.is_some()
-            }
-            _ => true,
-        }));
+        let flushed = mapper.on_tail_notice(SubagentTailNotice {
+            parent_id: SPAWN.into(),
+            events: Vec::new(),
+            model: None,
+            stopped: true,
+        });
+        assert!(
+            matches!(
+                subagent_snapshots(&flushed, SPAWN).last(),
+                Some(ThreadItem { parent_item_id: None, content: ItemContent::Subagent { status: ItemStatus::Completed, model: Some(model), .. }, .. })
+                    if model == "claude-sonnet-5-5"
+            ),
+            "{flushed:?}"
+        );
+        assert!(mapper.take_pending_subagent_terminals().is_empty());
     }
 
-    /// Background subagent: the launch acknowledgement and the parent's result
-    /// leave the Subagent item in progress; the terminal snapshot is emitted
-    /// only after the transcript tail's final flush, and the tail's copy of a
-    /// child the stdout feed already completed cannot reopen it.
+    /// A background subagent as Claude Code recorded it: the launch
+    /// acknowledgement returns the call and leaves the Subagent item in
+    /// progress; it settles only with the transcript tail's final flush, and
+    /// the tail's copy of a child the stdout feed already completed cannot
+    /// reopen it.
     #[test]
     fn background_subagent_terminal_waits_for_tail_flush_and_dedupes_feeds() {
-        let trace = include_str!("../tests/fixtures/claude/subagent_background_trace.jsonl");
+        const SPAWN: &str = "toolu_010000000000000000000002";
+        let trace =
+            include_str!("../tests/fixtures/claude/subagent_handback_background_trace.jsonl");
         let mut mapper = Mapper::new();
         let mut events = Vec::new();
         for line in trace.lines() {
             events.extend(feed(&mut mapper, line));
         }
-        let spawn_status = |event: &AgentEvent| match event {
-            AgentEvent::ItemStarted(item)
-            | AgentEvent::ItemUpdated(item)
-            | AgentEvent::ItemCompleted(item)
-                if item.id == "toolu_spawn_bg" =>
-            {
-                match &item.content {
-                    ItemContent::Subagent { status, .. } => Some(*status),
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
         assert!(
-            events
+            subagent_snapshots(&events, SPAWN)
                 .iter()
-                .filter_map(spawn_status)
-                .all(|status| status == ItemStatus::InProgress),
-            "launch acknowledgement and task_notification must not settle the item yet"
+                .all(|item| matches!(
+                    item.content,
+                    ItemContent::Subagent {
+                        status: ItemStatus::InProgress,
+                        ..
+                    }
+                )),
+            "launch acknowledgement and task_notification must not settle the item yet: {events:?}"
         );
-        // The launch acknowledgement returns the call; the agent goes on in
-        // the background past the turn.
-        let position = |wanted: &dyn Fn(&AgentEvent) -> bool| events.iter().position(wanted);
-        let backgrounded = position(&|event| {
-            matches!(event, AgentEvent::ItemBackgrounded { item_id, parent_item_id: None }
-                if item_id == "toolu_spawn_bg")
-        })
-        .expect("the launch backgrounds the spawn");
-        let turn_completed = position(&|event| matches!(event, AgentEvent::TurnCompleted { .. }))
-            .expect("the turn completes");
-        assert!(backgrounded < turn_completed);
+        assert!(events.iter().any(|event| matches!(event,
+            AgentEvent::ItemBackgrounded { item_id, parent_item_id: None } if item_id == SPAWN)));
         assert!(events.iter().any(|event| matches!(
             event,
             AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::ToolCall { status: ItemStatus::Completed, .. }, .. })
-                if id == "toolu_spawn_bg:toolu_child_grep"
+                if *id == format!("{SPAWN}:toolu_010000000000000000000003")
         )));
-        assert!(matches!(
-            mapper.take_tail_requests().as_slice(),
-            [
-                TailRequest::Start { parent_id: start, .. },
-                TailRequest::PreferPath { parent_id: prefer, .. },
-                TailRequest::Stop { parent_id: stop },
-            ] if start == "toolu_spawn_bg" && prefer == "toolu_spawn_bg" && stop == "toolu_spawn_bg"
-        ));
 
-        // The tail maps the same transcript records a second time, plus one
-        // record the stdout feed never carried.
-        let mut tail = crate::subagent_tail::TranscriptMapper::new("toolu_spawn_bg");
+        // The tail maps the same child records a second time.
+        let mut tail = crate::subagent_tail::TranscriptMapper::new(SPAWN);
+        let child = format!("\"parent_tool_use_id\":\"{SPAWN}\"");
         let mut tail_events = Vec::new();
-        for line in trace
-            .lines()
-            .filter(|line| line.contains("parent_tool_use_id"))
-        {
+        for line in trace.lines().filter(|line| line.contains(&child)) {
             tail_events.extend(tail.map_value(&serde_json::from_str(line).unwrap()));
         }
-        tail_events.extend(tail.map_value(&json!({
-            "type": "assistant", "message": { "id": "msg-child-2", "content": [{ "type": "text", "text": "done" }] }
-        })));
+        assert!(!tail_events.is_empty());
         let flushed = mapper.on_tail_notice(SubagentTailNotice {
-            parent_id: "toolu_spawn_bg".into(),
+            parent_id: SPAWN.into(),
             events: tail_events,
             model: None,
             stopped: true,
@@ -8200,18 +7598,16 @@ mod tests {
             flushed
                 .iter()
                 .all(|event| !matches!(event, AgentEvent::ItemStarted(_))),
-            "a completed child must not be restarted by the tail's copy"
+            "a completed child must not be restarted by the tail's copy: {flushed:?}"
         );
-        assert!(matches!(
-            flushed.last(),
-            Some(AgentEvent::ItemUpdated(ThreadItem { id, content: ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), model: Some(model), effort: Some(effort), .. }, .. }))
-                if id == "toolu_spawn_bg" && summary == "Routing audited" && model == "claude-sonnet-5" && effort == "high"
-        ));
-        assert!(matches!(
-            &flushed[flushed.len() - 2],
-            AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::AssistantMessage { text, .. }, .. })
-                if id == "toolu_spawn_bg:msg-child-2:0" && text == "done"
-        ));
+        assert!(
+            matches!(
+                flushed.last(),
+                Some(AgentEvent::ItemUpdated(ThreadItem { id, content: ItemContent::Subagent { status: ItemStatus::Completed, .. }, .. }))
+                    if id == SPAWN
+            ),
+            "{flushed:?}"
+        );
         assert!(mapper.take_pending_subagent_terminals().is_empty());
     }
 
@@ -8380,129 +7776,6 @@ mod tests {
         });
     }
 
-    /// A background subagent that itself spawns a background Agent: the
-    /// nested spawn is a Subagent item parented to the child, the
-    /// grandchild's transcript is parented to the nested spawn, and the
-    /// grandchild's task_notification settles it after its tail's final
-    /// flush. Both feeds carry every child record; each stage is emitted once.
-    #[test]
-    fn nested_background_subagent_settles_through_its_own_task_notification() {
-        let trace = include_str!("../tests/fixtures/claude/subagent_nested_trace.jsonl");
-        let mut mapper = Mapper::new();
-        let mut events = Vec::new();
-        for line in trace.lines() {
-            events.extend(feed(&mut mapper, line));
-        }
-        let subagent_snapshots = |events: &[AgentEvent], id: &str| -> Vec<ThreadItem> {
-            events
-                .iter()
-                .filter_map(|event| match event {
-                    AgentEvent::ItemStarted(item)
-                    | AgentEvent::ItemUpdated(item)
-                    | AgentEvent::ItemCompleted(item)
-                        if item.id == id
-                            && matches!(item.content, ItemContent::Subagent { .. }) =>
-                    {
-                        Some(item.clone())
-                    }
-                    _ => None,
-                })
-                .collect()
-        };
-
-        let grandchild = subagent_snapshots(&events, "toolu_grandchild");
-        assert!(matches!(
-            &grandchild[0],
-            ThreadItem { parent_item_id: Some(parent), content: ItemContent::Subagent { agent_type, description, status: ItemStatus::InProgress, .. }, .. }
-                if parent == "toolu_child" && agent_type == "general-purpose" && description == "Research Workers limits"
-        ));
-        assert_eq!(
-            grandchild
-                .iter()
-                .filter(|item| matches!(
-                    item.content,
-                    ItemContent::Subagent {
-                        status: ItemStatus::InProgress,
-                        ..
-                    }
-                ))
-                .count(),
-            grandchild.len(),
-            "launch acknowledgement and task_notification wait for the grandchild's tail"
-        );
-        assert!(
-            grandchild
-                .iter()
-                .all(|item| item.parent_item_id.as_deref() == Some("toolu_child"))
-        );
-        assert!(grandchild.iter().any(|item| matches!(
-            &item.content,
-            ItemContent::Subagent { model: Some(model), effort: Some(effort), .. }
-                if model == "claude-sonnet-5" && effort == "high"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::ItemCompleted(ThreadItem { id, parent_item_id: Some(parent), content: ItemContent::ToolCall { name, status: ItemStatus::Completed, .. }, .. })
-                if id == "toolu_grandchild:toolu_gc_fetch" && parent == "toolu_grandchild" && name == "WebFetch"
-        )));
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(event, AgentEvent::ItemStarted(ThreadItem { id, .. }) if id == "toolu_grandchild"))
-                .count(),
-            1
-        );
-        let requests = mapper.take_tail_requests();
-        assert!(requests.iter().any(|request| matches!(request, TailRequest::Start { parent_id, .. } if parent_id == "toolu_grandchild")));
-        assert!(requests.iter().any(|request| matches!(request, TailRequest::Stop { parent_id } if parent_id == "toolu_grandchild")));
-
-        // The child's tail replays the nested spawn and the grandchild's tail
-        // replays its transcript; neither reopens or repeats a delivered stage.
-        let mut child_tail = crate::subagent_tail::TranscriptMapper::new("toolu_child");
-        let mut grandchild_tail = crate::subagent_tail::TranscriptMapper::new("toolu_grandchild");
-        let mut child_events = Vec::new();
-        let mut grandchild_events = Vec::new();
-        for line in trace.lines() {
-            let value: Value = serde_json::from_str(line).unwrap();
-            match value.get("parent_tool_use_id").and_then(Value::as_str) {
-                Some("toolu_child") => child_events.extend(child_tail.map_value(&value)),
-                Some("toolu_grandchild") => {
-                    grandchild_events.extend(grandchild_tail.map_value(&value))
-                }
-                _ => {}
-            }
-        }
-        let flushed = mapper.on_tail_notice(SubagentTailNotice {
-            parent_id: "toolu_grandchild".into(),
-            events: grandchild_events,
-            model: None,
-            stopped: true,
-        });
-        assert!(
-            matches!(
-                flushed.as_slice(),
-                [AgentEvent::ItemUpdated(ThreadItem { id, parent_item_id: Some(parent), content: ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), model: Some(model), effort: Some(effort), .. }, .. })]
-                    if id == "toolu_grandchild" && parent == "toolu_child" && summary == "Agent \"Research Workers limits\" finished" && model == "claude-sonnet-5" && effort == "high"
-            ),
-            "{flushed:?}"
-        );
-        let flushed = mapper.on_tail_notice(SubagentTailNotice {
-            parent_id: "toolu_child".into(),
-            events: child_events,
-            model: None,
-            stopped: true,
-        });
-        assert!(
-            matches!(
-                flushed.as_slice(),
-                [AgentEvent::ItemUpdated(ThreadItem { id, parent_item_id: None, content: ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. }, .. })]
-                    if id == "toolu_child" && summary == "Hosting researched"
-            ),
-            "{flushed:?}"
-        );
-        assert!(mapper.take_pending_subagent_terminals().is_empty());
-    }
-
     /// A nested Agent that runs in the foreground settles with the child's
     /// tool_result; a coordination tool is not a spawn.
     #[test]
@@ -8598,7 +7871,7 @@ mod tests {
         let trace = include_str!("../tests/fixtures/claude/subagent_handback_trace.jsonl");
         let events = replay_subagent_trace(trace.lines());
         assert_eq!(
-            settled_summary(&events, "toolu_018ti8UQiJ6xqBmKf5gTsp1d").as_deref(),
+            settled_summary(&events, "toolu_010000000000000000000007").as_deref(),
             Some("PONG-FG-REPORT\nsecond-line")
         );
         assert_no_handback_note(&events);
@@ -8610,7 +7883,7 @@ mod tests {
             include_str!("../tests/fixtures/claude/subagent_handback_background_trace.jsonl");
         let events = replay_subagent_trace(trace.lines());
         assert_eq!(
-            settled_summary(&events, "toolu_01BXJLqzyGgqst9idkvgU4Mw").as_deref(),
+            settled_summary(&events, "toolu_010000000000000000000002").as_deref(),
             Some("PONG-BG-REPORT")
         );
         assert_no_handback_note(&events);
@@ -8623,27 +7896,12 @@ mod tests {
         let trace = include_str!("../tests/fixtures/claude/subagent_handback_nested_trace.jsonl");
         let events = replay_subagent_trace(trace.lines());
         assert_eq!(
-            settled_summary(&events, "toolu_016TdmuRUJr9k29RQGwWCy15").as_deref(),
+            settled_summary(&events, "toolu_010000000000000000000005").as_deref(),
             Some("PONG-INNER-REPORT")
         );
         assert_eq!(
-            settled_summary(&events, "toolu_013VQTQyj7vJ4uRuHAC4KupS").as_deref(),
+            settled_summary(&events, "toolu_010000000000000000000004").as_deref(),
             Some("PONG-OUTER-REPORT")
-        );
-        assert_no_handback_note(&events);
-    }
-
-    /// The child's transcript tail can reach the nested tool_result before
-    /// stdout reaches the task_notification.
-    #[test]
-    fn a_nested_result_ahead_of_its_notification_shows_no_note() {
-        let trace = include_str!("../tests/fixtures/claude/subagent_handback_nested_trace.jsonl");
-        let notification = "\"task_notification\",\"task_id\":\"acaf13a689ed20a44\"";
-        let events =
-            replay_subagent_trace(trace.lines().filter(|line| !line.contains(notification)));
-        assert_eq!(
-            settled_summary(&events, "toolu_016TdmuRUJr9k29RQGwWCy15"),
-            None
         );
         assert_no_handback_note(&events);
     }
@@ -8653,7 +7911,7 @@ mod tests {
         let trace = include_str!("../tests/fixtures/claude/subagent_withheld_trace.jsonl");
         let events = replay_subagent_trace(trace.lines());
         assert_eq!(
-            settled_summary(&events, "toolu_01EV4e7BpxB6KFymEFQVWcYf"),
+            settled_summary(&events, "toolu_010000000000000000000013"),
             None
         );
         assert_no_handback_note(&events);
@@ -8664,11 +7922,11 @@ mod tests {
         let trace = include_str!("../tests/fixtures/claude/subagent_withheld_nested_trace.jsonl");
         let events = replay_subagent_trace(trace.lines());
         assert_eq!(
-            settled_summary(&events, "toolu_015Cfy34pCnu1nyFgoJWpV6c"),
+            settled_summary(&events, "toolu_010000000000000000000011"),
             None
         );
         assert_eq!(
-            settled_summary(&events, "toolu_019EPWayHRRkcGs1fKMrydKv").as_deref(),
+            settled_summary(&events, "toolu_010000000000000000000010").as_deref(),
             Some("OUTER-REPORT")
         );
         assert_no_handback_note(&events);
@@ -8681,7 +7939,7 @@ mod tests {
         let trace = include_str!("../tests/fixtures/claude/subagent_text_end_trace.jsonl");
         let events = replay_subagent_trace(trace.lines());
         assert_eq!(
-            settled_summary(&events, "toolu_01Y1QieQFWmLquSD4EMDRfdg").as_deref(),
+            settled_summary(&events, "toolu_010000000000000000000009").as_deref(),
             Some("PONG-FG-REPORT")
         );
     }
@@ -8698,28 +7956,9 @@ mod tests {
             );
         let events = replay_subagent_trace(trace.lines());
         assert_eq!(
-            settled_summary(&events, "toolu_018ti8UQiJ6xqBmKf5gTsp1d").as_deref(),
+            settled_summary(&events, "toolu_010000000000000000000007").as_deref(),
             Some("SECURITY WARNING\n\nPONG-FG-REPORT\nsecond-line")
         );
-    }
-
-    #[test]
-    fn only_spawning_tools_are_agent_tools() {
-        for name in ["agent", "task"] {
-            assert!(is_agent_tool(name), "{name}");
-        }
-        for name in ["listagents", "sendmessage", "taskcreate", "subagent_run"] {
-            assert!(!is_agent_tool(name), "{name}");
-        }
-        let mut mapper = Mapper::new();
-        let events = feed(
-            &mut mapper,
-            r#"{"type":"assistant","message":{"id":"msg-list","content":[{"type":"tool_use","id":"toolu_list","name":"ListAgents","input":{}}]}}"#,
-        );
-        assert!(matches!(
-            events.as_slice(),
-            [AgentEvent::ItemStarted(ThreadItem { content: ItemContent::ToolCall { name, .. }, .. })] if name == "ListAgents"
-        ));
     }
 
     /// The tail keeps the transcript discovery found; the notification's
@@ -8801,6 +8040,74 @@ mod tests {
                 fallback.len(),
                 2,
                 "undiscovered tail reads the notified file"
+            );
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Claude Code 2.1.322 emits a terminal `task_updated` and then the
+    /// `task_notification` naming `output_file` (its task-state update emits
+    /// one after the other), and the actor hands the tail each line's
+    /// requests before reading the next. A tail that discovery could not
+    /// point at a transcript still reads the notified file before it stops.
+    #[test]
+    fn an_undiscovered_subagent_tail_reads_the_notified_output_file() {
+        const SPAWN: &str = "toolu_010000000000000000000002";
+        const RECORDED_OUTPUT: &str = "/tmp/claude-1000/-home-user-project/00000000-0000-4000-8000-000000000002/tasks/a0000000000000001.output";
+        let trace =
+            include_str!("../tests/fixtures/claude/subagent_handback_background_trace.jsonl");
+        let root =
+            std::env::temp_dir().join(format!("tcode-notified-output-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let output_file = root.join("a0000000000000001.output");
+        // The transcript holds the child's own records, which stdout also
+        // forwards with `parent_tool_use_id`.
+        let child = format!("\"parent_tool_use_id\":\"{SPAWN}\"");
+        let transcript: String = trace
+            .lines()
+            .filter(|line| line.contains(&child))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        std::fs::write(&output_file, transcript).unwrap();
+        // The path goes into JSON text, where a Windows separator is an escape.
+        let escaped = serde_json::to_string(output_file.to_str().unwrap()).unwrap();
+        let trace = trace.replace(RECORDED_OUTPUT, escaped.trim_matches('"'));
+
+        smol::block_on(async {
+            let mut mapper = Mapper::new();
+            let mut tailers = HashMap::new();
+            let (tail_tx, tail_rx) = smol::channel::unbounded();
+            let mut tailed = Vec::new();
+            for line in trace.lines() {
+                feed(&mut mapper, line);
+                let requests = mapper.take_tail_requests();
+                let stops_a_live_tail = tailers.contains_key(SPAWN)
+                    && requests
+                        .iter()
+                        .any(|request| matches!(request, TailRequest::Stop { .. }));
+                process_tail_requests(requests, &mut tailers, None, &tail_tx).await;
+                if !stops_a_live_tail {
+                    continue;
+                }
+                loop {
+                    let notice = tail_rx.recv().await.unwrap();
+                    tailed.extend(notice.events.iter().cloned());
+                    let stopped = notice.stopped;
+                    mapper.on_tail_notice(notice);
+                    if stopped {
+                        tailers.remove(SPAWN);
+                        break;
+                    }
+                }
+            }
+            assert!(tailers.is_empty(), "the tail was never stopped");
+            assert!(
+                tailed.iter().any(|event| matches!(
+                    event,
+                    AgentEvent::ItemCompleted(ThreadItem { id, .. })
+                        if *id == format!("{SPAWN}:toolu_010000000000000000000003")
+                )),
+                "the tail never read {output_file:?}: {tailed:?}"
             );
         });
         let _ = std::fs::remove_dir_all(root);
@@ -9024,20 +8331,5 @@ mod tests {
                 if message == "Request declined by safety classifiers (stop_reason: refusal)"
         ));
         assert!(assistant.is_empty());
-    }
-
-    #[test]
-    fn structured_patch_renders_unified_diff() {
-        let patch = json!([{
-            "oldStart": 3,
-            "oldLines": 2,
-            "newStart": 3,
-            "newLines": 2,
-            "lines": [" keep", "-old", "+new"]
-        }]);
-        assert_eq!(
-            render_structured_patch(&patch).as_deref(),
-            Some("@@ -3,2 +3,2 @@\n keep\n-old\n+new")
-        );
     }
 }

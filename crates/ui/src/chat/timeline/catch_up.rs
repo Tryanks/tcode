@@ -30,7 +30,7 @@ fn turn(turn: usize, answer: &str) -> Vec<agent::AgentEvent> {
 }
 
 /// A turn of `count` records, alternating a short answer and a command whose
-/// output is about a kilobyte, so 2000 of them are several windows' worth.
+/// output is about five kilobytes, so 400 of them are more than a window.
 fn long_run(turn: usize, count: usize) -> Vec<agent::AgentEvent> {
     let mut events = vec![
         agent::AgentEvent::TurnStarted {
@@ -47,7 +47,7 @@ fn long_run(turn: usize, count: usize) -> Vec<agent::AgentEvent> {
                 parent_item_id: None,
                 content: agent::ItemContent::CommandExecution {
                     command: format!("check {index}"),
-                    output: format!("{index} checked\n").repeat(70),
+                    output: format!("{index} checked\n").repeat(350),
                     exit_code: Some(0),
                     status: agent::ItemStatus::Completed,
                 },
@@ -213,11 +213,11 @@ fn painted(
 /// latest entry on the first frame its window draws, brought there by one
 /// subscription, with nothing in it moving; what arrives live after that
 /// rises in as it always does. So for a run that fits one window (100
-/// records, which the window continues) and for one several windows long
-/// (2000, answered with the thread's tail).
+/// records, which the window continues) and for one longer than a window
+/// (400, answered with the thread's tail).
 #[gpui::test]
 fn a_thread_come_back_to_is_at_its_latest_at_once(cx: &mut TestAppContext) {
-    for (count, continued) in [(100, true), (2000, false)] {
+    for (count, continued) in [(100, true), (400, false)] {
         let mut workspace = Workspace::new(cx);
         let window_state = cx.new(|_| WindowState::default());
         let store = workspace.store.clone();

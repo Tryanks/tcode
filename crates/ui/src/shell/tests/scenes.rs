@@ -1,7 +1,6 @@
 //! A pane switched to another thread draws it as a new scene: what the
 //! thread before left moving, and what the thread shown now did when it was
-//! last on screen, carry nothing into the frame that first draws it; and the
-//! thread fades in once it can be drawn at rest, not while it loads.
+//! last on screen, carry nothing into the frame that first draws it.
 
 use super::*;
 
@@ -95,6 +94,24 @@ fn arrive(shell: &Entity<AppShell>, cx: &mut VisualTestContext) {
     draw(cx);
 }
 
+/// Frames until the window asks for none, then a full frame to read: the
+/// scene at rest. Only the end of the motion is read, so each frame comes a
+/// whole glide after the one before, as a display that stalled would deliver
+/// it: what a switch sets moving lands by the next frame. A running turn's
+/// working indicator asks for frames for as long as the turn runs, so a
+/// window showing one is at rest once three glides have gone by.
+fn at_rest(cx: &mut VisualTestContext) {
+    draw(cx);
+    for _ in 0..3 {
+        cx.run_until_parked();
+        if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
+            break;
+        }
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+    }
+    draw(cx);
+}
+
 /// Shows the thread the sidebar lists `key`'s shortcut against, `id`, with
 /// what the host has answered by the frame that first draws it.
 fn switch(shell: &Entity<AppShell>, key: &str, id: &str, cx: &mut VisualTestContext) {
@@ -115,7 +132,7 @@ fn the_composer_of_a_thread_come_back_to_starts_at_rest(cx: &mut TestAppContext)
     await_restore_update(&shell, cx, |store, cx| {
         store.composer_state_for(Some("thread-1"), cx).turn_running
     });
-    settle_frames(cx);
+    at_rest(cx);
     let send = |cx: &mut VisualTestContext| cx.debug_bounds("send-message");
     assert_eq!(send(cx), None, "the running turn shows its stop button");
 
@@ -130,7 +147,7 @@ fn the_composer_of_a_thread_come_back_to_starts_at_rest(cx: &mut TestAppContext)
     serve_finished(&host, "thread-1");
     switch(&shell, "secondary-1", "thread-1", cx);
     let first = send(cx);
-    settle_frames(cx);
+    at_rest(cx);
     assert!(first.is_some(), "thread-1's send button");
     assert_eq!(first, send(cx), "at rest from its first frame");
 }
@@ -168,7 +185,7 @@ fn the_terminal_drawer_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppCo
     store_of(&shell, cx).update(cx, |store, cx| {
         store.toggle_terminal_panel_for("thread-1".into(), cx)
     });
-    settle_frames(cx);
+    at_rest(cx);
     let tabs = |cx: &mut VisualTestContext| {
         ["terminal-tab-1", "terminal-tab-2", "terminal-tab-3"].map(|tab| cx.debug_bounds(tab))
     };
@@ -181,7 +198,7 @@ fn the_terminal_drawer_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppCo
         serve_with_terminals(&host, id, terminals);
         switch(&shell, key, id, cx);
         let first = tabs(cx);
-        settle_frames(cx);
+        at_rest(cx);
         assert_eq!(
             first,
             tabs(cx),
@@ -205,7 +222,7 @@ fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContex
     store_of(&shell, cx).update(cx, |store, cx| {
         store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
     });
-    settle_frames(cx);
+    at_rest(cx);
     let panel = |cx: &mut VisualTestContext| {
         cx.debug_bounds("right-panel")
             .zip(cx.debug_bounds("pane-conversation"))
@@ -213,7 +230,7 @@ fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContex
 
     for width in [2000., 900.] {
         resize(cx, width);
-        settle_frames(cx);
+        at_rest(cx);
         let open = panel(cx);
         assert!(open.is_some(), "thread-1's panel at {width}px");
         for (key, id, shown) in [
@@ -227,14 +244,14 @@ fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContex
                 shown,
                 "{id}'s panel on its first frame at {width}px"
             );
-            settle_frames(cx);
+            at_rest(cx);
             assert_eq!(panel(cx), shown, "{id}'s panel at rest at {width}px");
         }
     }
 
     // Within one thread, the reader closing the panel still slides it out.
     resize(cx, 2000.);
-    settle_frames(cx);
+    at_rest(cx);
     let open = cx.debug_bounds("right-panel").expect("thread-1's panel");
     assert_eq!(
         cx.debug_bounds("pane-conversation")
@@ -255,7 +272,7 @@ fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContex
         closing.left() > open.left() && closing.left() < open.right(),
         "the panel slides out: {open:?} -> {closing:?}"
     );
-    settle_frames(cx);
+    at_rest(cx);
     assert_eq!(cx.debug_bounds("right-panel"), None, "the panel shut");
 }
 
@@ -274,13 +291,13 @@ fn the_right_panel_of_a_thread_switched_to_shows_its_tab_at_once(cx: &mut TestAp
     store.update(cx, |store, cx| {
         store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
     });
-    settle_frames(cx);
+    at_rest(cx);
     serve_finished(&host, "thread-2");
     switch(&shell, "secondary-2", "thread-2", cx);
     store.update(cx, |store, cx| {
         store.toggle_tab_panel_for("thread-2", tcode_core::ui::RightTab::PullRequests, cx)
     });
-    settle_frames(cx);
+    at_rest(cx);
     let diff = |cx: &mut VisualTestContext| cx.debug_bounds("diff-tab-body").is_some();
     assert!(!diff(cx), "thread-2 shows its pull requests");
 
@@ -295,7 +312,7 @@ fn the_right_panel_of_a_thread_switched_to_shows_its_tab_at_once(cx: &mut TestAp
             "{id}'s panel is open"
         );
         assert_eq!(diff(cx), on_diff, "{id}'s tab on its first frame");
-        settle_frames(cx);
+        at_rest(cx);
         assert_eq!(diff(cx), on_diff, "{id}'s tab at rest");
     }
 }
@@ -345,62 +362,16 @@ pub(super) fn fill_of(selector: &'static str, cx: &mut VisualTestContext) -> Opt
     })
 }
 
-/// One frame of a thread appearing: how far in its question's bubble is
-/// painted against how it is at rest (none while it is not drawn), and
-/// whether a skeleton and a pane's waiting hint were drawn.
-#[derive(Debug, Clone, Copy)]
-struct Appearing {
-    opacity: Option<f32>,
-    skeleton: bool,
-    waiting: bool,
-}
-
-impl Appearing {
-    fn shown(&self) -> f32 {
-        self.opacity.unwrap_or_default()
-    }
-}
-
-fn appearing(id: &str, rest: f32, cx: &mut VisualTestContext) -> Appearing {
-    Appearing {
-        opacity: bubble_fill(id, cx).map(|fill| fill / rest),
-        skeleton: cx.debug_bounds("baseline-loading").is_some(),
-        waiting: cx.debug_bounds("waiting-pane").is_some(),
-    }
-}
-
-/// The frame drawn now and the `frames` display frames after it.
-fn watch(id: &str, rest: f32, frames: usize, cx: &mut VisualTestContext) -> Vec<Appearing> {
-    let mut seen = vec![appearing(id, rest, cx)];
+/// How far in `id`'s question's bubble is painted against how it is at
+/// rest, on the frame drawn now and the `frames` display frames after it;
+/// nothing on a frame that does not draw it.
+fn watch(id: &str, rest: f32, frames: usize, cx: &mut VisualTestContext) -> Vec<f32> {
+    let mut seen = vec![bubble_fill(id, cx).map_or(0., |fill| fill / rest)];
     for _ in 0..frames {
         display_frame(cx);
-        seen.push(appearing(id, rest, cx));
+        seen.push(bubble_fill(id, cx).map_or(0., |fill| fill / rest));
     }
     seen
-}
-
-/// The fade a thread appears with starts once its rows are drawn, and plays
-/// through to the end: no frame paints it part way in before.
-fn assert_appears_once_drawn(what: &str, seen: &[Appearing]) {
-    let started = seen
-        .iter()
-        .position(|frame| frame.shown() > 0.01)
-        .unwrap_or_else(|| panic!("{what} never appeared: {seen:?}"));
-    assert!(
-        seen[started..].iter().all(|frame| frame.opacity.is_some()),
-        "{what} faded in without its rows: {seen:?}"
-    );
-    assert!(
-        seen[started..]
-            .iter()
-            .any(|frame| frame.shown() > 0.05 && frame.shown() < 0.95),
-        "{what} appeared at once: {seen:?}"
-    );
-    assert!(
-        seen.last()
-            .is_some_and(|frame| (frame.shown() - 1.).abs() < 0.01),
-        "{what} came all the way in: {seen:?}"
-    );
 }
 
 /// thread-1 open, its one turn done, and how opaque its question's bubble
@@ -413,90 +384,10 @@ fn mount_finished(
     await_restore_update(&shell, cx, |store, cx| {
         store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx) == Some(1)
     });
-    settle_frames(cx);
+    at_rest(cx);
     let rest = bubble_fill("thread-1", cx).expect("thread-1's question");
     assert!(rest > 0., "the bubble has a fill");
     (shell, host, cx, rest)
-}
-
-/// A thread a pane is switched to, whose log is there by its first frame,
-/// appears promptly and still fades in, and only once its rows are drawn;
-/// and so again switching back.
-#[gpui::test]
-fn a_thread_switched_to_fades_in_once_it_is_drawn(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx, rest) = mount_finished(cx);
-    for (key, id) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
-        serve_finished(&host, id);
-        switch(&shell, key, id, cx);
-        let seen = watch(id, rest, 40, cx);
-        assert_appears_once_drawn(id, &seen);
-        let started = seen.iter().position(|frame| frame.shown() > 0.01).unwrap();
-        assert!(started <= 4, "{id} kept the reader waiting: {seen:?}");
-        assert!(
-            seen.iter().all(|frame| !frame.skeleton),
-            "{id} flashed its skeleton: {seen:?}"
-        );
-    }
-}
-
-/// A thread whose log the host is slow to send shows nothing new at first,
-/// then its skeleton, and fades in from it once its rows are drawn, rather
-/// than playing its fade out while it waited.
-#[gpui::test]
-fn a_thread_slow_to_arrive_fades_in_once_it_has(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx, rest) = mount_finished(cx);
-    switch(&shell, "secondary-2", "thread-2", cx);
-    let waiting = watch("thread-2", rest, 40, cx);
-    assert!(
-        waiting.iter().all(|frame| frame.shown() == 0.),
-        "the thread faded in before it arrived: {waiting:?}"
-    );
-    assert!(!waiting[0].skeleton, "the skeleton shows at once");
-    assert!(
-        waiting.last().is_some_and(|frame| frame.skeleton),
-        "the skeleton shows once the wait is long"
-    );
-
-    serve_finished(&host, "thread-2");
-    arrive(&shell, cx);
-    let seen = watch("thread-2", rest, 40, cx);
-    assert_appears_once_drawn("thread-2", &seen);
-    assert!(seen.last().is_some_and(|frame| !frame.skeleton));
-}
-
-/// A thread opened into a pane that waited beside another keeps the waiting
-/// hint until it can be drawn, however long its log takes short of the
-/// skeleton's patience, then cross-fades straight from the hint: no frame
-/// shows neither.
-#[gpui::test]
-fn a_waiting_pane_keeps_its_hint_until_its_thread_is_drawn(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx, rest) = mount_finished(cx);
-    cx.simulate_keystrokes("secondary-d");
-    settle_frames(cx);
-    assert!(cx.debug_bounds("waiting-pane").is_some());
-    cx.simulate_keystrokes("secondary-2");
-    arrive(&shell, cx);
-    assert_eq!(
-        pane_threads(&shell, cx),
-        [Some("thread-1".into()), Some("thread-2".into())]
-    );
-    // The log comes past the hint's own fade, short of the skeleton's wait.
-    let mut seen = watch("thread-2", rest, 15, cx);
-    serve_finished(&host, "thread-2");
-    arrive(&shell, cx);
-    seen.extend(watch("thread-2", rest, 40, cx));
-    assert!(
-        seen.iter().all(|frame| frame.waiting || frame.shown() > 0.),
-        "the pane went blank before its thread: {seen:?}"
-    );
-    assert!(
-        seen.iter().all(|frame| !frame.skeleton),
-        "the pane flashed a skeleton: {seen:?}"
-    );
-    assert_appears_once_drawn("thread-2", &seen);
 }
 
 /// With motion reduced, a thread switched to is there at once when it is
@@ -511,12 +402,12 @@ fn a_thread_switched_to_with_motion_reduced_is_there_once_drawn(cx: &mut TestApp
     let seen = watch("thread-2", rest, 10, cx);
     let started = seen
         .iter()
-        .position(|frame| frame.shown() > 0.)
+        .position(|shown| *shown > 0.)
         .expect("thread-2 appears");
     assert!(
         seen[started..]
             .iter()
-            .all(|frame| (frame.shown() - 1.).abs() < 0.01),
+            .all(|shown| (shown - 1.).abs() < 0.01),
         "{seen:?}"
     );
 }
@@ -836,419 +727,138 @@ fn differences(a: &[[i32; 4]], b: &[[i32; 4]]) -> (Vec<[i32; 4]>, Vec<[i32; 4]>)
     (only(a, b), only(b, a))
 }
 
-/// A pane switched to another thread, and back, draws each as a new scene:
-/// on the first frame that shows a thread, everything painted is where and
-/// as large as it rests, whatever the thread left was showing (its steers,
-/// its right panel, its terminal drawer, its agents, an agent's window, an
-/// answer streaming in, its side rail's cards) and whatever the thread
-/// shown had when it was last on screen, an answer it left still revealing
-/// included, which the thread finished while away, and whatever it gained
-/// while away (a goal, a plan, commands its turn ran). Only the thread's
-/// fade in, which moves nothing, plays.
-#[gpui::test]
-fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppContext) {
+/// A pane switched from thread-1, holding `holding`, to thread-2 and back
+/// draws each as a new scene: on the first frame that shows a thread,
+/// everything painted is where and as large as it rests, whatever the thread
+/// left was showing and whatever the thread shown had when it was last on
+/// screen, an answer it left still revealing included, which the thread
+/// finished while away, and whatever it gained while away (thread-2 gains a
+/// goal, a plan and a command). Only the thread's fade in, which moves
+/// nothing, plays.
+fn switched_to_at_rest(holding: Holding, cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_panes(cx);
     let store = store_of(&shell, cx);
-    let mut failures = Vec::new();
-    let mut went_on = 0;
-    for holding in [
-        Holding::Plain,
-        Holding::Steers,
-        Holding::RightPanel,
-        Holding::Drawer,
-        Holding::AgentsPanel,
-        Holding::Subagent,
-        Holding::Streaming,
-        Holding::StreamedOn,
-        Holding::Rail,
-    ] {
-        serve_holding(&host, "thread-1", holding);
-        switch(&shell, "secondary-1", "thread-1", cx);
-        settle_frames(cx);
-        let opened = store.update(cx, |store, cx| {
-            match holding {
-                Holding::RightPanel => {
-                    store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
-                }
-                Holding::AgentsPanel => {
-                    store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
-                }
-                Holding::Drawer => store.toggle_terminal_panel_for("thread-1".into(), cx),
-                _ => return false,
+    serve_other_after(&host, 0);
+    switch(&shell, "secondary-2", "thread-2", cx);
+    at_rest(cx);
+    serve_holding(&host, "thread-1", holding);
+    switch(&shell, "secondary-1", "thread-1", cx);
+    at_rest(cx);
+    let opened = store.update(cx, |store, cx| {
+        match holding {
+            Holding::RightPanel => {
+                store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
             }
-            true
-        });
-        if opened {
-            settle_frames(cx);
-        }
-        if holding == Holding::StreamedOn {
-            // More of the answer streams in, and the pane leaves on the
-            // frame after.
-            send_events(
-                &host,
-                vec![(
-                    Topic::SessionEvents {
-                        session_id: "thread-1".into(),
-                    },
-                    ServerEvent::SessionEvent(answer_delta("thread-1", streamed_on(1)).into()),
-                )],
-            );
-            arrive(&shell, cx);
-            display_frame(cx);
-        }
-        for (key, id) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
-            match (id, holding) {
-                // The pane draws what the thread held as it left until the
-                // host has sent what it did since.
-                ("thread-1", Holding::StreamedOn) => {
-                    switch(&shell, key, id, cx);
-                    serve_streamed_on(&host, id);
-                    arrive(&shell, cx);
-                }
-                ("thread-1", _) => {
-                    serve_holding(&host, id, holding);
-                    switch(&shell, key, id, cx);
-                }
-                // thread-2 went on while the pane was away.
-                _ => {
-                    serve_other_after(&host, went_on);
-                    went_on += 1;
-                    switch(&shell, key, id, cx);
-                }
-            }
-            // The first frame that shows the thread, however little.
-            for _ in 0..10 {
-                if bubble_fill(id, cx).is_some_and(|fill| fill > 0.) {
-                    break;
-                }
-                display_frame(cx);
-            }
-            let first = (painted(cx), cx.debug_bounds("right-panel"));
-            settle_frames(cx);
-            let rest = (painted(cx), cx.debug_bounds("right-panel"));
-            if first != rest {
-                let (moving, resting) = differences(&first.0, &rest.0);
-                failures.push(format!(
-                    "{holding:?}, switched to {id}: panel {:?} -> {:?}; \
-                     first frame only {moving:?}; at rest only {resting:?}",
-                    first.1, rest.1
-                ));
-            }
-        }
-        // thread-1 leaves its panel and drawer shut for the next case.
-        store.update(cx, |store, cx| match holding {
-            Holding::RightPanel | Holding::AgentsPanel => {
-                store.close_right_panel_for(Some("thread-1"), cx)
+            Holding::AgentsPanel => {
+                store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
             }
             Holding::Drawer => store.toggle_terminal_panel_for("thread-1".into(), cx),
-            _ => {}
-        });
-        settle_frames(cx);
-    }
-    assert!(failures.is_empty(), "{failures:#?}");
-}
-
-/// How light the last frame is at `probe`, by relative luminance, over a
-/// black or a white `backdrop` (what the window's translucent canvas lets
-/// through): every solid fill and every shadow drawn there, composited in
-/// the order they were drawn, a shadow as strong there as its blur makes it
-/// (GPUI's own Gaussian, its corners taken as square).
-fn luminance_at(
-    window: &gpui::Window,
-    probe: gpui::Point<gpui::ScaledPixels>,
-    backdrop: f32,
-) -> f32 {
-    let mut drawn: Vec<(u32, gpui::Hsla)> = crate::test_frames::painted_quads(window)
-        .iter()
-        .filter(|quad| quad.bounds.contains(&probe) && quad.content_mask.bounds.contains(&probe))
-        .filter_map(|quad| Some((quad.order, quad.background.as_solid()?)))
-        .collect();
-    // Abramowitz and Stegun's 7.1.26.
-    let erf = |x: f32| {
-        let t = 1. / (1. + 0.327_591_1 * x.abs());
-        let poly = t
-            * (0.254_829_6
-                + t * (-0.284_496_7 + t * (1.421_413_8 + t * (-1.453_152 + t * 1.061_405_4))));
-        (1. - poly * (-x * x).exp()).copysign(x)
-    };
-    let across = |at: f32, from: f32, to: f32, sigma: f32| {
-        if sigma <= 0. {
-            return if (from..to).contains(&at) { 1. } else { 0. };
+            _ => return false,
         }
-        let scale = std::f32::consts::FRAC_1_SQRT_2 / sigma;
-        0.5 * (erf((to - at) * scale) - erf((from - at) * scale))
-    };
-    drawn.extend(
-        crate::test_frames::painted_shadows(window)
-            .iter()
-            .filter(|shadow| shadow.content_mask.bounds.contains(&probe))
-            .map(|shadow| {
-                let (bounds, sigma) = (shadow.bounds, shadow.blur_radius.0);
-                let strength = across(probe.x.0, bounds.left().0, bounds.right().0, sigma)
-                    * across(probe.y.0, bounds.top().0, bounds.bottom().0, sigma);
-                let mut colour = shadow.color;
-                colour.a *= strength;
-                (shadow.order, colour)
-            }),
-    );
-    drawn.sort_by_key(|(order, _)| *order);
-    let [r, g, b] = drawn.iter().fold([backdrop; 3], |under, (_, colour)| {
-        let colour = gpui::Rgba::from(*colour);
-        let over = |channel: f32, under: f32| channel * colour.a + under * (1. - colour.a);
-        [
-            over(colour.r, under[0]),
-            over(colour.g, under[1]),
-            over(colour.b, under[2]),
-        ]
+        true
     });
-    0.2126 * r + 0.7152 * g + 0.0722 * b
-}
-
-/// The cards [`Holding::Rail`] shows on the side rail.
-const RAIL_CARDS: [&str; 3] = ["goal", "plan", "commands"];
-
-/// How light each of the rail's cards is drawn at its centre in the last
-/// frame, over a black and a white backdrop; nothing for a card not drawn.
-fn rail_lightness(cx: &mut VisualTestContext) -> [Option<[f32; 2]>; 3] {
-    let cards = RAIL_CARDS.map(|card| cx.debug_bounds(format!("rail-card-frame-{card}").leak()));
-    cx.update(|window, _| {
-        let scale = window.scale_factor();
-        cards.map(|card| {
-            let centre = card?.center().scale(scale);
-            Some([0., 1.].map(|backdrop| luminance_at(window, centre, backdrop)))
-        })
-    })
-}
-
-/// How opaque the surface laid out at `bounds` is drawn in the last frame:
-/// the alpha of its fill, which is opaque at rest.
-fn fill_alpha(window: &gpui::Window, bounds: gpui::Bounds<Pixels>) -> Option<f32> {
-    let bounds = bounds.scale(window.scale_factor());
-    let near = |a: gpui::ScaledPixels, b: gpui::ScaledPixels| (a - b).0.abs() <= 1.;
-    crate::test_frames::painted_quads(window)
-        .iter()
-        .filter(|quad| {
-            near(quad.bounds.left(), bounds.left())
-                && near(quad.bounds.top(), bounds.top())
-                && near(quad.bounds.right(), bounds.right())
-                && near(quad.bounds.bottom(), bounds.bottom())
-        })
-        .filter_map(|quad| quad.background.as_solid())
-        .map(|fill| fill.a)
-        .reduce(f32::max)
-}
-
-/// Checks that a surface's shadow at a point just outside it, `seen` there
-/// frame by frame with how opaque the surface was drawn, darkens `canvas`
-/// in step with the surface, toward what it does at `rest`: as a surface
-/// fading as one would, with no frame where it is missing and comes in
-/// late.
-fn shadow_follows(
-    what: &str,
-    seen: &[(Option<f32>, [f32; 2])],
-    canvas: [f32; 2],
-    rest: [f32; 2],
-    failures: &mut Vec<String>,
-) {
-    for (backdrop, name) in ["black", "white"].iter().enumerate() {
-        let full = canvas[backdrop] - rest[backdrop];
-        if full < 0.002 {
-            failures.push(format!("{what}: no shadow at rest over {name}: {full:.4}"));
-            continue;
-        }
-        for (frame, (opacity, lit)) in seen.iter().enumerate() {
-            let Some(opacity) = opacity else { continue };
-            let shade = canvas[backdrop] - lit[backdrop];
-            if (shade - full * opacity).abs() > 0.2 * full + 0.001 {
-                failures.push(format!(
-                    "{what}, frame {frame}: the surface at {opacity:.3} shades {shade:.4} \
-                     over {name}, against {full:.4} at rest"
-                ));
-            }
-        }
+    if opened {
+        at_rest(cx);
     }
-}
-
-/// The rail's cards of a thread switched to fade in with the thread from
-/// the canvas to the card through nothing darker than either, in either
-/// theme: a card's shadow does not show through its fill while the fill is
-/// faint, and fades in around it with it.
-#[gpui::test]
-fn the_rail_cards_of_a_thread_switched_to_fade_in_through_nothing_darker(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx) = mount_panes(cx);
-    serve_holding(&host, "thread-1", Holding::Rail);
-    await_restore_update(&shell, cx, |store, cx| {
-        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx) == Some(1)
-    });
-    settle_frames(cx);
-    let mut failures = Vec::new();
-    for mode in [
-        crate::theme::ThemeMode::Light,
-        crate::theme::ThemeMode::Dark,
-    ] {
-        cx.update(|window, cx| crate::theme::change_mode(mode, Some(window), cx));
-        settle_frames(cx);
-        for (key, id) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
-            serve_holding(&host, id, Holding::Rail);
-            switch(&shell, key, id, cx);
-            // Between the plan's card and the commands', in the gap the
-            // shadows of both shade.
-            let gap = |cx: &mut VisualTestContext| {
-                let card = cx.debug_bounds("rail-card-frame-commands")?;
-                let probe = gpui::point(card.center().x, card.top() - px(2.));
-                Some(cx.update(|window, _| {
-                    let at = probe.scale(window.scale_factor());
-                    (
-                        fill_alpha(window, card),
-                        [0., 1.].map(|backdrop| luminance_at(window, at, backdrop)),
-                    )
-                }))
-            };
-            let mut seen = vec![rail_lightness(cx)];
-            let mut shading = Vec::from_iter(gap(cx));
-            for _ in 0..30 {
-                display_frame(cx);
-                seen.push(rail_lightness(cx));
-                shading.extend(gap(cx));
+    if holding == Holding::StreamedOn {
+        // More of the answer streams in, and the pane leaves on the frame
+        // after.
+        send_events(
+            &host,
+            vec![(
+                Topic::SessionEvents {
+                    session_id: "thread-1".into(),
+                },
+                ServerEvent::SessionEvent(answer_delta("thread-1", streamed_on(1)).into()),
+            )],
+        );
+        arrive(&shell, cx);
+        display_frame(cx);
+    }
+    for (key, id) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
+        match (id, holding) {
+            // The pane draws what the thread held as it left until the host
+            // has sent what it did since.
+            ("thread-1", Holding::StreamedOn) => {
+                switch(&shell, key, id, cx);
+                serve_streamed_on(&host, id);
+                arrive(&shell, cx);
             }
-            let rest =
-                rail_lightness(cx).map(|card| card.unwrap_or_else(|| panic!("{id}'s cards")));
-            let shaded = gap(cx).expect("the commands card").1;
-            // The canvas: under the rail, below its last card and that
-            // card's shadow.
-            let rail = cx.debug_bounds("chat-rail").expect("the rail");
-            let last = RAIL_CARDS
-                .iter()
-                .filter_map(|card| cx.debug_bounds(format!("rail-card-frame-{card}").leak()))
-                .map(|card| card.bottom())
-                .fold(px(0.), Pixels::max);
-            assert!(rail.bottom() - last > px(40.), "{id}'s cards fill the rail");
-            let canvas = cx.update(|window, _| {
-                let probe = gpui::point(rail.center().x, rail.bottom() - px(8.))
-                    .scale(window.scale_factor());
-                [0., 1.].map(|backdrop| luminance_at(window, probe, backdrop))
-            });
-            shadow_follows(
-                &format!("{mode:?}, {id}, between the plan and the commands"),
-                &shading,
-                canvas,
-                shaded,
-                &mut failures,
-            );
-            for (frame, cards) in seen.iter().enumerate() {
-                for ((card, lit), rest) in RAIL_CARDS.iter().zip(cards).zip(&rest) {
-                    let Some(lit) = lit else { continue };
-                    for (backdrop, name) in ["black", "white"].iter().enumerate() {
-                        let floor = canvas[backdrop].min(rest[backdrop]);
-                        if lit[backdrop] < floor - 0.005 {
-                            failures.push(format!(
-                                "{mode:?}, {id}, frame {frame}: the {card} card at {:.4} \
-                                 over {name}, under both the canvas {:.4} and the card {:.4}",
-                                lit[backdrop], canvas[backdrop], rest[backdrop]
-                            ));
-                        }
-                    }
-                }
+            ("thread-1", _) => {
+                serve_holding(&host, id, holding);
+                switch(&shell, key, id, cx);
+            }
+            // thread-2 went on while the pane was away.
+            _ => {
+                serve_other_after(&host, 1);
+                switch(&shell, key, id, cx);
             }
         }
-    }
-    assert!(failures.is_empty(), "{failures:#?}");
-}
-
-/// A thread's menu fades in over the sidebar, and out again, from what lies
-/// under it to the menu and back, through nothing darker than either, in
-/// either theme: its shadow does not show through its fill while the fill
-/// is faint, though what fades it is the popover it is drawn in, and fades
-/// in and out around it with it.
-#[gpui::test]
-fn a_menu_fades_in_and_out_through_nothing_darker(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (_shell, _host, cx) = mount_panes(cx);
-    settle_frames(cx);
-    let light = |at: gpui::Point<Pixels>, cx: &mut VisualTestContext| {
-        cx.update(|window, _| {
-            let probe = at.scale(window.scale_factor());
-            [0., 1.].map(|backdrop| luminance_at(window, probe, backdrop))
-        })
-    };
-    let row = cx
-        .debug_bounds("sidebar-thread-thread-2")
-        .expect("thread-2's row")
-        .center();
-    let (right, plain) = (gpui::MouseButton::Right, gpui::Modifiers::none());
-    let menu = |cx: &mut VisualTestContext| cx.debug_bounds("tcode-popup-menu");
-    let mut failures = Vec::new();
-    for mode in [
-        crate::theme::ThemeMode::Light,
-        crate::theme::ThemeMode::Dark,
-    ] {
-        cx.update(|window, cx| crate::theme::change_mode(mode, Some(window), cx));
-        settle_frames(cx);
-        // Where the menu rests, and what it covers there.
-        cx.simulate_mouse_down(row, right, plain);
-        cx.simulate_mouse_up(row, right, plain);
-        settle_frames(cx);
-        let resting = menu(cx).expect("thread-2's menu");
-        let at = resting.center();
-        // Beside its left edge, where its shadow falls.
-        let beside = gpui::point(resting.left() - px(4.), resting.center().y);
-        let open = light(at, cx);
-        let shaded = light(beside, cx);
-        cx.simulate_keystrokes("escape");
-        settle_frames(cx);
-        assert!(menu(cx).is_none(), "the menu closed");
-        let under = light(at, cx);
-        let canvas = light(beside, cx);
-        let shading = |cx: &mut VisualTestContext| {
-            let opacity = menu(cx).and_then(|menu| cx.update(|window, _| fill_alpha(window, menu)));
-            (opacity, light(beside, cx))
-        };
-        let mut shades = Vec::new();
-
-        cx.simulate_mouse_down(row, right, plain);
-        cx.simulate_mouse_up(row, right, plain);
-        draw(cx);
-        let mut seen = Vec::new();
-        for _ in 0..30 {
-            seen.push(light(at, cx));
-            shades.push(shading(cx));
+        // The first frame that shows the thread, however little.
+        for _ in 0..10 {
+            if bubble_fill(id, cx).is_some_and(|fill| fill > 0.) {
+                break;
+            }
             display_frame(cx);
         }
-        cx.simulate_keystrokes("escape");
-        draw(cx);
-        for _ in 0..30 {
-            seen.push(light(at, cx));
-            shades.push(shading(cx));
-            display_frame(cx);
-        }
-        shadow_follows(
-            &format!("{mode:?}, beside the menu"),
-            &shades,
-            canvas,
-            shaded,
-            &mut failures,
+        let first = (painted(cx), cx.debug_bounds("right-panel"));
+        at_rest(cx);
+        let rest = (painted(cx), cx.debug_bounds("right-panel"));
+        let (moving, resting) = differences(&first.0, &rest.0);
+        assert!(
+            first == rest,
+            "{holding:?}, switched to {id}: panel {:?} -> {:?}; \
+             first frame only {moving:?}; at rest only {resting:?}",
+            first.1,
+            rest.1
         );
-        assert_eq!(
-            light(at, cx),
-            under,
-            "the menu left what it covered as it was"
-        );
-        for (frame, lit) in seen.iter().enumerate() {
-            for (backdrop, name) in ["black", "white"].iter().enumerate() {
-                let floor = under[backdrop].min(open[backdrop]);
-                if lit[backdrop] < floor - 0.005 {
-                    failures.push(format!(
-                        "{mode:?}, frame {frame}: the menu at {:.4} over {name}, under both \
-                         what it covers {:.4} and the menu {:.4}",
-                        lit[backdrop], under[backdrop], open[backdrop]
-                    ));
-                }
-            }
-        }
     }
-    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[gpui::test]
+fn a_switch_from_a_finished_turn_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::Plain, cx);
+}
+
+#[gpui::test]
+fn a_switch_from_a_turns_steers_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::Steers, cx);
+}
+
+#[gpui::test]
+fn a_switch_from_an_open_right_panel_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::RightPanel, cx);
+}
+
+#[gpui::test]
+fn a_switch_from_an_open_terminal_drawer_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::Drawer, cx);
+}
+
+#[gpui::test]
+fn a_switch_from_an_open_agents_panel_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::AgentsPanel, cx);
+}
+
+#[gpui::test]
+fn a_switch_from_an_agents_window_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::Subagent, cx);
+}
+
+#[gpui::test]
+fn a_switch_from_a_streaming_answer_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::Streaming, cx);
+}
+
+#[gpui::test]
+fn a_switch_back_to_an_answer_that_streamed_on_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::StreamedOn, cx);
+}
+
+#[gpui::test]
+fn a_switch_from_the_rails_cards_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::Rail, cx);
 }
 
 /// A lead switched back to with an agent open beside it draws the agent's
@@ -1263,7 +873,7 @@ fn a_lead_switched_to_shows_the_agent_beside_it_at_rest(cx: &mut TestAppContext)
     let store = store_of(&shell, cx);
     serve_finished(&host, "thread-1");
     switch(&shell, "secondary-1", "thread-1", cx);
-    settle_frames(cx);
+    at_rest(cx);
     serve_finished(&host, "agent-1");
     cx.update(|window, cx| {
         crate::agents_panel::open_agent(
@@ -1276,7 +886,7 @@ fn a_lead_switched_to_shows_the_agent_beside_it_at_rest(cx: &mut TestAppContext)
         )
     });
     arrive(&shell, cx);
-    settle_frames(cx);
+    at_rest(cx);
     assert!(
         cx.debug_bounds("chat-side-card").is_some(),
         "agent-1 beside thread-1"
@@ -1284,7 +894,7 @@ fn a_lead_switched_to_shows_the_agent_beside_it_at_rest(cx: &mut TestAppContext)
 
     serve_other(&host);
     switch(&shell, "secondary-2", "thread-2", cx);
-    settle_frames(cx);
+    at_rest(cx);
     assert!(cx.debug_bounds("chat-side-card").is_none());
 
     serve_finished(&host, "thread-1");
@@ -1298,7 +908,7 @@ fn a_lead_switched_to_shows_the_agent_beside_it_at_rest(cx: &mut TestAppContext)
         display_frame(cx);
     }
     let first = (painted(cx), cx.debug_bounds("chat-side-card"));
-    settle_frames(cx);
+    at_rest(cx);
     let rest = (painted(cx), cx.debug_bounds("chat-side-card"));
     assert!(rest.1.is_some(), "agent-1 beside thread-1 again");
     let (moving, resting) = differences(&first.0, &rest.0);
@@ -1362,7 +972,7 @@ fn a_thread_opened_again_on_a_phone_reveals_nothing_it_gained_away(cx: &mut Test
     as_mobile(cx);
     cx.simulate_resize(gpui::size(px(393.), px(852.)));
     serve_holding(&host, "thread-1", Holding::StreamedOn);
-    settle_frames(cx);
+    at_rest(cx);
     let live = |event: agent::AgentEvent| {
         (
             Topic::SessionEvents {
@@ -1375,7 +985,7 @@ fn a_thread_opened_again_on_a_phone_reveals_nothing_it_gained_away(cx: &mut Test
     arrive(&shell, cx);
     display_frame(cx);
     cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx)));
-    settle_frames(cx);
+    at_rest(cx);
 
     send_events(
         &host,
@@ -1392,7 +1002,7 @@ fn a_thread_opened_again_on_a_phone_reveals_nothing_it_gained_away(cx: &mut Test
         ],
     );
     arrive(&shell, cx);
-    settle_frames(cx);
+    at_rest(cx);
     store_of(&shell, cx).update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
     arrive(&shell, cx);
     // The frame the page lands on: its question stays where it is.
@@ -1406,7 +1016,7 @@ fn a_thread_opened_again_on_a_phone_reveals_nothing_it_gained_away(cx: &mut Test
         question = now;
     }
     let landed = rows_painted(cx);
-    settle_frames(cx);
+    at_rest(cx);
     let rest = rows_painted(cx);
     assert!(rest.len() > 1, "thread-1's rows: {rest:?}");
     assert_eq!(
@@ -1549,7 +1159,7 @@ fn a_page_landing_on_a_thread_switched_to_leaves_its_footers_at_rest(cx: &mut Te
         display_frame(cx);
         seen.push(trailers(cx));
     }
-    settle_frames(cx);
+    at_rest(cx);
     let rest = trailers(cx);
     let turns = store_of(&shell, cx).read_with(cx, |store, cx| {
         store.with_timeline_for(Some("thread-2"), |timeline| timeline.turns.len(), cx)

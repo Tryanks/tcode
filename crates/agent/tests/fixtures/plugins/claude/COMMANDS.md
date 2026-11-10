@@ -1,10 +1,10 @@
 # Claude Code plugin probe — commands
 
-- CLI: `2.1.285 (Claude Code)` (`claude --version`), binary `/Users/me/.local/share/mise/installs/claude/latest/claude` → `2.1.285/claude`. Date 2026-10-03, macOS (Darwin 27.0.0, arm64).
+- CLI: `2.1.285 (Claude Code)` (`claude --version`), binary `~/.local/share/mise/installs/claude/latest/claude` → `2.1.285/claude`. Date 2026-10-03, macOS (Darwin 27.0.0, arm64).
 - Driver: `/tmp/tcode-claude-run/probe.py` + `probe_lib.py` (not in the repo). Every command runs with stdin = `/dev/null`, stdout and stderr captured separately.
 - **Env** (all runs): a clean base of `PATH USER LOGNAME SHELL TMPDIR LANG` only. The probe itself runs inside a Tcode-launched Claude Code session; its `CLAUDECODE`/`CLAUDE_CODE_*` variables are deliberately *not* inherited. Adding them back one at a time to an otherwise accepted `--accept-command` install showed that `CLAUDECODE` and `CLAUDE_CODE_CHILD_SESSION` each make the CLI refuse it ("--accept-command is ignored inside a Claude Code session"); `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID`, `CLAUDE_CODE_EXECPATH`, `AI_AGENT`, `CLAUDE_CODE_SESSION_ATTENDED` and `CLAUDE_CODE_MESSAGING_SOCKET` do not. Those recordings are not kept.
   - `iso` = base + `HOME=/tmp/tcode-probe/claude-home` + `CLAUDE_CONFIG_DIR=/tmp/tcode-probe/claude-home/.claude` (CLAUDE_CONFIG_DIR is not in `claude --help`; it is honoured — all state landed under it).
-  - `real` = base + `HOME=/Users/me` (read-only commands and the one `--plugin-dir` session only).
+  - `home` = base + the user's own `HOME` (read-only commands and the one `--plugin-dir` session only). Its output is not kept as recorded: `user-home-marketplace-list.json` has the shape that command printed, with an invented home (`/home/user`).
 - Paths: marketplace `/tmp/tcode-probe/mkt` (the `manifests/mkt` files below), command-source output dir `/tmp/tcode-probe/gamma-src` (the `manifests/gamma-src` files below), project `/tmp/tcode-probe/proj` (macOS realpath `/private/tmp/tcode-probe/proj`), non-project cwd `/tmp/tcode-probe/outside`.
 
 ## Authored manifests
@@ -152,7 +152,7 @@ Only the runs whose output is kept here are listed; the numbering is the probe's
 
 | # | step | argv (after the binary) | cwd | env | exit | stdout | stderr |
 |---|---|---|---|---|---|---|---|
-| 2 | `real-marketplace-list` | `plugin marketplace list --json` | `/tmp/tcode-probe/outside` | real | 0 | `real-home-marketplace-list.json` | (empty) |
+| 2 | `home-marketplace-list` | `plugin marketplace list --json` | `/tmp/tcode-probe/outside` | home | 0 | `user-home-marketplace-list.json` | (empty) |
 | 9 | `04-marketplace-list` | `plugin marketplace list --json` | `/tmp/tcode-probe/proj` | iso | 0 | `marketplace-list.json` | (empty) |
 | 11 | `06-install-alpha-user` | `plugin install alpha@tcode-probe --scope user --json` | `/tmp/tcode-probe/proj` | iso | 0 | `install-user.json` | (empty) |
 | 17 | `09c-plugin-list-available-after-install` | `plugin list --json --available` | `/tmp/tcode-probe/proj` | iso | 0 | `plugin-list-available-after-install.json` | (empty) |
@@ -168,7 +168,7 @@ Only the runs whose output is kept here are listed; the numbering is the probe's
 
 Notes:
 
-- 2 `real-marketplace-list`: REAL home, read-only.
+- 2 `home-marketplace-list`: the user's own home, read-only; the kept file's install location is invented.
 - 21 `11-disable`: No --scope: auto-detect.
 - 23 `12-enable`: No --scope: auto-detect.
 - 32 `16-update`: Before this run alpha version was bumped 1.0.0 -> 1.0.1 in marketplace.json and plugin.json. No --scope.

@@ -611,7 +611,10 @@ mod tests {
     use super::*;
 
     /// Claude Code starts a background shell in a session of its own, out of
-    /// its process group; stopping the harness stops that shell too.
+    /// its process group; stopping the harness stops that shell too. The
+    /// harness and its work each hold the test's pipe until they exit, and
+    /// each waits on stdin, which the test holds open, so neither ends on its
+    /// own while the test runs.
     #[cfg(unix)]
     #[test]
     fn stopping_a_harness_stops_the_work_it_started_out_of_its_group() {
@@ -624,23 +627,24 @@ mod tests {
                     "--quiet",
                     "--nocapture",
                 ])
-                .env(ROLE, role)
-                .stdin(std::process::Stdio::null());
+                .env(ROLE, role);
             child
         };
         let exe = std::env::current_exe().unwrap();
-        let idle = || std::thread::sleep(std::time::Duration::from_secs(120));
+        let wait_for_stdin = || std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
         match std::env::var(ROLE).as_deref() {
-            Ok("work") => return idle(),
+            Ok("work") => {
+                let _ = wait_for_stdin();
+                return;
+            }
             Ok("harness") => {
                 use std::os::unix::process::CommandExt as _;
                 let mut work = this_test(command(exe), "work")
                     .process_group(0)
-                    .stdout(std::process::Stdio::null())
                     .spawn()
                     .unwrap();
                 println!("work {}", work.id());
-                idle();
+                let _ = wait_for_stdin();
                 let _ = work.kill();
                 let _ = work.wait();
                 return;
@@ -650,27 +654,30 @@ mod tests {
 
         let mut harness = ProcessTree::new(
             this_test(harness_command(exe), "harness")
+                .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .spawn()
                 .unwrap(),
         );
-        let work: libc::pid_t = BufReader::new(harness.stdout.take().unwrap())
-            .lines()
-            .find_map(|line| line.unwrap().strip_prefix("work ")?.parse().ok())
+        let _stdin = harness.stdin.take();
+        let mut output = BufReader::new(harness.stdout.take().unwrap()).lines();
+        let work = output
+            .find_map(|line| line.unwrap().strip_prefix("work ")?.parse::<u32>().ok())
             .unwrap();
 
         harness.kill().unwrap();
         harness.wait().unwrap();
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        // SAFETY: probing a process id with no signal.
-        while unsafe { libc::kill(work, 0) } == 0 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the harness's background work {work} outlived it"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        let (closed, everyone_gone) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            output.for_each(drop);
+            let _ = closed.send(());
+        });
+        // Only a failure waits this out; the work then ends once `_stdin`
+        // closes with the test.
+        everyone_gone
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("the harness's background work {work} outlived it"));
     }
 
     #[test]

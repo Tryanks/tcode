@@ -13,7 +13,7 @@ macOS arm64. Findings that cite these files: `tmp/probe-codex-plugins.md`.
 - `HOME=/tmp/tcode-probe/codex-fakehome` (empty) for every recorded run.
   `CODEX_HOME` does not isolate `$HOME/.agents/skills`: an exploratory run
   without this override listed the user's own skills
-  (`/Users/<user>/.agents/skills/*`, scope `user`) in `skills/list`.
+  (`$HOME/.agents/skills/*`, scope `user`) in `skills/list`.
 - Project directory: `/tmp/tcode-probe/codex-proj` (a git repo with one
   commit), not `/tmp/tcode-probe/proj`. A concurrent Claude-plugin probe uses
   `/tmp/tcode-probe/proj` and wiped it in the middle of an exploratory run, so

@@ -387,7 +387,7 @@ pub struct StartThreadParams {
     pub cwd: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "local (the checkout) or worktree. worktree is only for a subagent: when its directory is a Git repository root it runs on branch tcode/<thread-id> in a dedicated worktree, and the response names the path and branch or why it fell back to the plain directory. Omitted, a subagent follows Settings → Control subagent worktree isolation and any other thread is local."
+        description = "local (the checkout) or worktree. worktree is only for a subagent: when its directory is a Git repository root it runs on branch tcode/<thread-id> in a dedicated worktree, and the response names the path and branch; when no worktree can be made the call fails and no thread starts. Omitted, a subagent follows Settings → Control subagent worktree isolation and any other thread is local."
     )]
     pub workspace: Option<Workspace>,
     #[serde(default)]
@@ -836,9 +836,6 @@ pub struct StartThreadResponse {
     /// The branch of a subagent's dedicated worktree, whose path is `cwd`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
-    /// Why a requested worktree fell back to the plain directory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

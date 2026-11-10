@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -157,32 +156,25 @@ pub(super) enum LatestQuery {
     System(super::system_managers::Query),
 }
 
-pub(super) trait Probe: Sync {
-    fn output(&self, command: &UpdateCommand) -> impl Future<Output = Option<String>> + Send;
-    fn canonical(&self, path: &Path) -> Option<PathBuf>;
-    fn read(&self, path: &Path) -> Option<String>;
-    fn which(&self, name: &str, env: &[(String, String)]) -> Option<PathBuf>;
-}
+pub(super) struct SystemProbe;
 
-struct SystemProbe;
-
-impl Probe for SystemProbe {
-    async fn output(&self, command: &UpdateCommand) -> Option<String> {
+impl SystemProbe {
+    pub(super) async fn output(&self, command: &UpdateCommand) -> Option<String> {
         run_process(command, Duration::from_secs(12)).await
     }
 
-    fn canonical(&self, path: &Path) -> Option<PathBuf> {
+    pub(super) fn canonical(&self, path: &Path) -> Option<PathBuf> {
         path.canonicalize().ok()
     }
 
-    fn read(&self, path: &Path) -> Option<String> {
+    pub(super) fn read(&self, path: &Path) -> Option<String> {
         let metadata = std::fs::metadata(path).ok()?;
         (metadata.len() <= 1024 * 1024)
             .then(|| std::fs::read_to_string(path).ok())
             .flatten()
     }
 
-    fn which(&self, name: &str, env: &[(String, String)]) -> Option<PathBuf> {
+    pub(super) fn which(&self, name: &str, env: &[(String, String)]) -> Option<PathBuf> {
         let path = env_value(env, "PATH")?;
         let mut names = Vec::new();
         if cfg!(windows) && Path::new(name).extension().is_none() {
@@ -272,8 +264,8 @@ pub(super) fn env_value(env: &[(String, String)], key: &str) -> Option<String> {
         .or_else(|| std::env::var(key).ok())
 }
 
-pub(super) struct Context<'a, P> {
-    pub probe: &'a P,
+pub(super) struct Context<'a> {
+    pub probe: &'a SystemProbe,
     pub provider: ProviderKind,
     pub binary: PathBuf,
     pub canonical: PathBuf,
@@ -281,7 +273,7 @@ pub(super) struct Context<'a, P> {
     pub env: &'a [(String, String)],
 }
 
-impl<P: Probe> Context<'_, P> {
+impl Context<'_> {
     pub fn command(&self, name: &str, args: &[&str]) -> Option<UpdateCommand> {
         Some(self.at(self.probe.which(name, self.env)?, args))
     }
@@ -346,8 +338,8 @@ pub async fn resolve_installation(
     resolve(&SystemProbe, provider, binary, &env, cwd).await
 }
 
-async fn resolve<P: Probe>(
-    probe: &P,
+async fn resolve(
+    probe: &SystemProbe,
     provider: ProviderKind,
     binary: &Path,
     env: &[(String, String)],
@@ -389,7 +381,7 @@ pub fn latest_version(installation: &Installation) -> Option<String> {
     smol::block_on(latest(&SystemProbe, &installation.latest))
 }
 
-async fn latest<P: Probe>(probe: &P, query: &LatestQuery) -> Option<String> {
+async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Option<String> {
     match query {
         LatestQuery::None => None,
         LatestQuery::Registry(package) => {
@@ -493,7 +485,7 @@ fn binary_name(provider: ProviderKind) -> &'static str {
     provider.harness().binary_name
 }
 
-fn within<P: Probe>(context: &Context<'_, P>, path: &Path, root: &Path) -> bool {
+fn within(context: &Context<'_>, path: &Path, root: &Path) -> bool {
     path.starts_with(root)
         || context
             .probe
@@ -501,7 +493,7 @@ fn within<P: Probe>(context: &Context<'_, P>, path: &Path, root: &Path) -> bool 
             .is_some_and(|root| path.starts_with(root))
 }
 
-async fn mise<P: Probe>(context: &Context<'_, P>) -> Option<Installation> {
+async fn mise(context: &Context<'_>) -> Option<Installation> {
     let data = env_value(context.env, "MISE_DATA_DIR")
         .map(PathBuf::from)
         .or_else(|| {
@@ -659,7 +651,7 @@ fn provider_backend(provider: ProviderKind, backend: &str) -> bool {
     )
 }
 
-async fn version_managers<P: Probe>(context: &Context<'_, P>) -> Option<Installation> {
+async fn version_managers(context: &Context<'_>) -> Option<Installation> {
     let home = context.home()?;
     let volta = env_value(context.env, "VOLTA_HOME")
         .map(PathBuf::from)
@@ -726,7 +718,7 @@ fn brew_name(record: &Value, cask: bool) -> Option<&str> {
         .as_str()
 }
 
-async fn brew<P: Probe>(context: &Context<'_, P>) -> Option<Installation> {
+async fn brew(context: &Context<'_>) -> Option<Installation> {
     let info = context.command("brew", &["info", "--json=v2", "--installed"])?;
     let json: Value = serde_json::from_str(&context.probe.output(&info).await?).ok()?;
     let prefix_command = context.at(info.program.clone(), &["--prefix"]);
@@ -825,7 +817,7 @@ fn recognized_package(provider: ProviderKind, name: &str) -> bool {
 
 /// A node_modules component alone proves nothing. The owning manifest must
 /// name this provider and its declared bin must resolve to the selected file.
-fn package_for_binary<P: Probe>(context: &Context<'_, P>, binary: &Path) -> Option<Package> {
+fn package_for_binary(context: &Context<'_>, binary: &Path) -> Option<Package> {
     for root in binary.ancestors().skip(1) {
         let Some(json) = context.probe.read(&root.join("package.json")) else {
             continue;
@@ -856,7 +848,7 @@ fn package_for_binary<P: Probe>(context: &Context<'_, P>, binary: &Path) -> Opti
     None
 }
 
-async fn javascript<P: Probe>(context: &Context<'_, P>) -> Option<Installation> {
+async fn javascript(context: &Context<'_>) -> Option<Installation> {
     let Some(package) = package_for_binary(context, &context.canonical) else {
         return javascript_windows(context).await;
     };
@@ -930,10 +922,7 @@ async fn javascript<P: Probe>(context: &Context<'_, P>) -> Option<Installation> 
     None
 }
 
-fn bun_global_directory<'a, P: Probe>(
-    context: &Context<'_, P>,
-    package: &'a Package,
-) -> Option<&'a Path> {
+fn bun_global_directory<'a>(context: &Context<'_>, package: &'a Package) -> Option<&'a Path> {
     package
         .root
         .ancestors()
@@ -957,8 +946,8 @@ fn bun_global_directory<'a, P: Probe>(
         })
 }
 
-async fn javascript_plan<P: Probe>(
-    context: &Context<'_, P>,
+async fn javascript_plan(
+    context: &Context<'_>,
     source: InstallSource,
     program: PathBuf,
     root: &Path,
@@ -1062,7 +1051,7 @@ async fn javascript_plan<P: Probe>(
     ))
 }
 
-async fn javascript_windows<P: Probe>(context: &Context<'_, P>) -> Option<Installation> {
+async fn javascript_windows(context: &Context<'_>) -> Option<Installation> {
     if !context
         .canonical
         .extension()
@@ -1194,7 +1183,7 @@ fn windows_relative(from: &Path, to: &Path) -> Option<String> {
     (!relative.contains(['%', '"', '\r', '\n'])).then_some(relative)
 }
 
-fn native<P: Probe>(context: &Context<'_, P>) -> Option<Installation> {
+fn native(context: &Context<'_>) -> Option<Installation> {
     let home = context.home()?;
     match context.provider {
         ProviderKind::ClaudeCode
@@ -1230,10 +1219,7 @@ fn native<P: Probe>(context: &Context<'_, P>) -> Option<Installation> {
     }
 }
 
-fn claude_channel<P: Probe>(
-    context: &Context<'_, P>,
-    home: &Path,
-) -> Option<(LatestQuery, Vec<String>)> {
+fn claude_channel(context: &Context<'_>, home: &Path) -> Option<(LatestQuery, Vec<String>)> {
     let config = env_value(context.env, "CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".claude"));
@@ -1276,558 +1262,6 @@ fn claude_channel<P: Probe>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    #[derive(Default)]
-    struct Fake {
-        paths: HashMap<PathBuf, PathBuf>,
-        files: HashMap<PathBuf, String>,
-        programs: HashMap<String, PathBuf>,
-        outputs: HashMap<Vec<String>, String>,
-        calls: Mutex<Vec<Vec<String>>>,
-    }
-
-    impl Fake {
-        fn path(&mut self, path: &str) {
-            for path in Path::new(path).ancestors() {
-                self.paths.insert(path.into(), path.into());
-            }
-        }
-
-        fn link(&mut self, from: &str, to: &str) {
-            self.path(from);
-            self.path(to);
-            self.paths.insert(from.into(), to.into());
-        }
-
-        fn file(&mut self, path: &str, contents: &str) {
-            self.path(path);
-            self.files.insert(path.into(), contents.into());
-        }
-
-        fn answer(&mut self, program: &str, args: &[&str], output: &str) {
-            let path = PathBuf::from(format!("/tools/{program}"));
-            self.programs.insert(program.into(), path.clone());
-            let mut key = vec![path.to_string_lossy().into_owned()];
-            key.extend(args.iter().map(|arg| (*arg).to_string()));
-            self.outputs.insert(key, output.into());
-        }
-
-        fn package(&mut self, root: &str, name: &str, bin: &str) -> String {
-            self.file(
-                &format!("{root}/package.json"),
-                &serde_json::json!({"name":name,"bin":{"codex":bin}}).to_string(),
-            );
-            let binary = format!("{root}/{bin}");
-            self.path(&binary);
-            binary
-        }
-    }
-
-    impl Probe for Fake {
-        async fn output(&self, command: &UpdateCommand) -> Option<String> {
-            let mut key = vec![command.program.to_string_lossy().into_owned()];
-            key.extend(command.args.iter().cloned());
-            self.calls.lock().unwrap().push(key.clone());
-            self.outputs.get(&key).cloned()
-        }
-
-        fn canonical(&self, path: &Path) -> Option<PathBuf> {
-            self.paths.get(path).cloned()
-        }
-        fn read(&self, path: &Path) -> Option<String> {
-            self.files.get(path).cloned()
-        }
-        fn which(&self, name: &str, _: &[(String, String)]) -> Option<PathBuf> {
-            self.programs.get(name).cloned()
-        }
-    }
-
-    fn resolve_fake(
-        fake: &Fake,
-        provider: ProviderKind,
-        binary: &str,
-        extra: &[(&str, &str)],
-    ) -> Installation {
-        let mut env = vec![
-            ("HOME".into(), "/home/test".into()),
-            ("USERPROFILE".into(), "/home/test".into()),
-            (
-                "MISE_DATA_DIR".into(),
-                "/home/test/.local/share/mise".into(),
-            ),
-            ("VOLTA_HOME".into(), "/home/test/.volta".into()),
-            ("ASDF_DATA_DIR".into(), "/home/test/.asdf".into()),
-        ];
-        env.extend(
-            extra
-                .iter()
-                .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
-        );
-        smol::block_on(resolve(
-            fake,
-            provider,
-            Path::new(binary),
-            &env,
-            "/work".into(),
-        ))
-    }
-
-    #[test]
-    fn mise_owns_nested_npm_packages_and_obeys_its_configured_range() {
-        let mut fake = Fake::default();
-        let root = "/custom/mise/installs/npm-openai-codex/0.154.0";
-        let binary = fake.package(
-            &format!("{root}/node_modules/@openai/codex"),
-            "@openai/codex",
-            "bin/codex.js",
-        );
-        fake.answer(
-            "mise",
-            &["ls", "--json"],
-            &serde_json::json!({
-                "npm:@openai/codex":[{"version":"0.154.0","requested_version":"0.154.0",
-                    "install_path":root,"installed":true,"active":true,
-                    "source":{"path":"/home/test/.config/mise/config.toml"}}]
-            })
-            .to_string(),
-        );
-        fake.answer("mise", &["which", "codex"], &binary);
-        fake.answer(
-            "mise",
-            &["tool", "npm:@openai/codex", "--json"],
-            r#"{"backend":"npm:@openai/codex"}"#,
-        );
-        fake.answer(
-            "mise",
-            &["outdated", "--json", "--", "npm:@openai/codex"],
-            "{}",
-        );
-        let installation = resolve_fake(
-            &fake,
-            ProviderKind::Codex,
-            &binary,
-            &[("MISE_DATA_DIR", "/custom/mise")],
-        );
-        assert_eq!(installation.source, InstallSource::Mise);
-        assert_eq!(
-            installation.update.as_ref().unwrap().args,
-            ["upgrade", "--yes", "--", "npm:@openai/codex"]
-        );
-        assert_eq!(
-            smol::block_on(latest(&fake, &installation.latest)).as_deref(),
-            Some("0.154.0")
-        );
-        assert!(
-            !fake
-                .calls
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|call| call[0].ends_with("/npm"))
-        );
-        fake.answer(
-            "mise",
-            &["outdated", "--json", "--", "npm:@openai/codex"],
-            r#"{"npm:@openai/codex":{"current":"0.154.0","requested":"0.154","latest":"0.154.2"}}"#,
-        );
-        assert_eq!(
-            smol::block_on(latest(&fake, &installation.latest)).as_deref(),
-            Some("0.154.2")
-        );
-    }
-
-    #[test]
-    fn mise_shims_are_resolved_before_canonicalization_and_fail_closed() {
-        let mut fake = Fake::default();
-        let binary = "/custom/mise/shims/claude";
-        let actual = "/custom/mise/installs/claude/2.1.274/claude";
-        fake.link(binary, "/tools/mise");
-        fake.path(actual);
-        fake.answer(
-            "mise",
-            &["ls", "--json"],
-            r#"{"claude":[{
-            "version":"2.1.274","requested_version":"latest","installed":true,"active":true,
-            "install_path":"/custom/mise/installs/claude/2.1.274",
-            "source":{"path":"/home/test/.config/mise/config.toml"}}]}"#,
-        );
-        fake.answer("mise", &["which", "claude"], actual);
-        fake.answer(
-            "mise",
-            &["tool", "claude", "--json"],
-            r#"{"backend":"aqua:anthropics/claude-code"}"#,
-        );
-        let installation = resolve_fake(
-            &fake,
-            ProviderKind::ClaudeCode,
-            binary,
-            &[("MISE_DATA_DIR", "/custom/mise")],
-        );
-        assert_eq!(installation.source, InstallSource::Mise);
-        assert_eq!(installation.update.unwrap().args.last().unwrap(), "claude");
-        fake.answer("mise", &["which", "claude"], "/elsewhere/claude");
-        let failed = resolve_fake(
-            &fake,
-            ProviderKind::ClaudeCode,
-            binary,
-            &[("MISE_DATA_DIR", "/custom/mise")],
-        );
-        assert_eq!(failed.source, InstallSource::Mise);
-        assert!(failed.update.is_none());
-    }
-
-    #[test]
-    fn mise_runtime_alias_does_not_own_its_global_npm_packages() {
-        let mut fake = Fake::default();
-        let root = "/custom/mise/installs/my-node/22";
-        let package_root = if cfg!(windows) {
-            format!("{root}/node_modules")
-        } else {
-            format!("{root}/lib/node_modules")
-        };
-        let binary = fake.package(
-            &format!("{package_root}/@openai/codex"),
-            "@openai/codex",
-            "bin/codex.js",
-        );
-        fake.answer("mise", &["ls", "--json"], &serde_json::json!({"my-node":[{
-            "install_path":root,"active":true,"installed":true,"version":"22","requested_version":"22",
-            "source":{"path":"/home/test/.config/mise/config.toml"}}]}).to_string());
-        fake.answer("mise", &["which", "codex"], &binary);
-        fake.answer(
-            "mise",
-            &["tool", "my-node", "--json"],
-            r#"{"backend":"core:node"}"#,
-        );
-        fake.answer("npm", &["root", "--global"], &package_root);
-        fake.answer("npm", &["prefix", "--global"], root);
-        let installation = resolve_fake(
-            &fake,
-            ProviderKind::Codex,
-            &binary,
-            &[("MISE_DATA_DIR", "/custom/mise")],
-        );
-        assert_eq!(installation.source, InstallSource::Npm);
-        assert_eq!(
-            installation.update.unwrap().args,
-            [
-                "install",
-                "--global",
-                "--prefix",
-                root,
-                "--",
-                "@openai/codex@latest"
-            ]
-        );
-    }
-
-    #[test]
-    fn unknown_wrappers_and_runtime_directory_names_never_authorize_updates() {
-        let mut fake = Fake::default();
-        for path in [
-            "/home/test/.local/bin/claude",
-            "/home/test/.nvm/versions/node/22/bin/codex",
-            "/home/test/.bun/bin/codex",
-            "/random/node_modules/codex",
-            "/opt/homebrew/bin/codex",
-        ] {
-            fake.path(path);
-            let installation = resolve_fake(&fake, ProviderKind::Codex, path, &[]);
-            assert_eq!(installation.source, InstallSource::Unknown, "{path}");
-            assert!(installation.update.is_none(), "{path}");
-        }
-    }
-
-    #[test]
-    fn npm_update_is_bound_to_the_verified_global_prefix() {
-        let mut fake = Fake::default();
-        let root = if cfg!(windows) {
-            "/node-v22/node_modules"
-        } else {
-            "/node-v22/lib/node_modules"
-        };
-        let binary = fake.package(
-            &format!("{root}/@openai/codex"),
-            "@openai/codex",
-            "bin/codex.js",
-        );
-        fake.answer("npm", &["root", "--global"], root);
-        fake.answer("npm", &["prefix", "--global"], "/node-v22\n");
-        let installation = resolve_fake(&fake, ProviderKind::Codex, &binary, &[]);
-        assert_eq!(installation.source, InstallSource::Npm);
-        fake.answer(
-            "npm",
-            &[
-                "view",
-                "@openai/codex@latest",
-                "version",
-                "--json",
-                "--global",
-                "--prefix",
-                "/node-v22",
-            ],
-            "\"0.155.0\"",
-        );
-        assert_eq!(
-            smol::block_on(latest(&fake, &installation.latest)).as_deref(),
-            Some("0.155.0")
-        );
-        assert_eq!(
-            installation.update.unwrap().args,
-            [
-                "install",
-                "--global",
-                "--prefix",
-                "/node-v22",
-                "--",
-                "@openai/codex@latest"
-            ]
-        );
-        fake.answer(
-            "npm",
-            &["root", "--global"],
-            "/different-node/lib/node_modules",
-        );
-        assert!(
-            resolve_fake(&fake, ProviderKind::Codex, &binary, &[])
-                .update
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn bun_binds_independently_configured_package_and_binary_directories() {
-        for package_root in [
-            "/custom/global/node_modules/@openai/codex",
-            "/custom/global/node_modules/.bun/@openai+codex@0.154.0/node_modules/@openai/codex",
-        ] {
-            let mut fake = Fake::default();
-            fake.file(
-                "/custom/global/package.json",
-                r#"{"dependencies":{"@openai/codex":"^0.154.0"}}"#,
-            );
-            let binary = fake.package(package_root, "@openai/codex", "bin/codex.js");
-            fake.link("/custom/global/node_modules/@openai/codex", package_root);
-            fake.link("/custom/launchers/codex", &binary);
-            fake.answer("bun", &["pm", "bin", "--global"], "/custom/launchers");
-            let installation = resolve_fake(&fake, ProviderKind::Codex, &binary, &[]);
-            assert_eq!(installation.source, InstallSource::Bun);
-            let update = installation.update.unwrap();
-            assert_eq!(
-                update.args,
-                ["add", "--global", "--", "@openai/codex@latest"]
-            );
-            assert!(
-                update
-                    .env
-                    .contains(&("BUN_INSTALL_GLOBAL_DIR".into(), "/custom/global".into()))
-            );
-            assert!(
-                update
-                    .env
-                    .contains(&("BUN_INSTALL_BIN".into(), "/custom/launchers".into()))
-            );
-        }
-    }
-
-    #[test]
-    fn windows_global_shims_require_both_manager_metadata_and_the_declared_bin() {
-        // Recorded templates from npm/cmd-shim, pnpm/cmd-shim and Yarn Classic's
-        // @zkochan/cmd-shim. The final target is package.json's declared bin.
-        let cases = [
-            (
-                "npm",
-                InstallSource::Npm,
-                "/windows/npm/node_modules",
-                "/windows/npm",
-                "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n",
-            ),
-            (
-                "pnpm",
-                InstallSource::Pnpm,
-                "/windows/pnpm/global/5/node_modules",
-                "/windows/pnpm",
-                "@SETLOCAL\r\n@IF NOT DEFINED NODE_PATH (\r\n  @SET \"NODE_PATH=%~dp0\\global\\5\\node_modules\"\r\n) ELSE (\r\n  @SET \"NODE_PATH=%~dp0\\global\\5\\node_modules;%NODE_PATH%\"\r\n)\r\n@IF EXIST \"%~dp0\\node.exe\" (\r\n  \"%~dp0\\node.exe\"  \"%~dp0\\global\\5\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n) ELSE (\r\n  @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n  node  \"%~dp0\\global\\5\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n)\r\n",
-            ),
-            (
-                "yarn",
-                InstallSource::Yarn,
-                "/windows/yarn/global/node_modules",
-                "/windows/yarn/bin",
-                "@IF EXIST \"%~dp0\\node.exe\" (\r\n  \"%~dp0\\node.exe\"  \"%~dp0\\..\\global\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n) ELSE (\r\n  @SETLOCAL\r\n  @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n  node  \"%~dp0\\..\\global\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n)",
-            ),
-        ];
-        for (manager, source, root, bin, wrapper) in cases {
-            let mut fake = Fake::default();
-            let launcher = format!("{bin}/codex.cmd");
-            fake.file(&launcher, wrapper);
-            fake.package(
-                &format!("{root}/@openai/codex"),
-                "@openai/codex",
-                "bin/codex.js",
-            );
-            let root_args = if manager == "yarn" {
-                ["global", "dir"]
-            } else {
-                ["root", "--global"]
-            };
-            let root_output = if manager == "yarn" {
-                "/windows/yarn/global"
-            } else {
-                root
-            };
-            let bin_args = match manager {
-                "npm" => ["prefix", "--global"],
-                "yarn" => ["global", "bin"],
-                _ => ["bin", "--global"],
-            };
-            fake.answer(manager, &root_args, root_output);
-            fake.answer(manager, &bin_args, bin);
-            let installation = resolve_fake(&fake, ProviderKind::Codex, &launcher, &[]);
-            assert_eq!(installation.source, source, "{manager}");
-            assert!(
-                installation
-                    .update
-                    .unwrap()
-                    .args
-                    .contains(&"@openai/codex@latest".to_string())
-            );
-            fake.file(&launcher, &format!("{wrapper}\r\necho custom-command\r\n"));
-            assert!(
-                resolve_fake(&fake, ProviderKind::Codex, &launcher, &[])
-                    .update
-                    .is_none(),
-                "{manager} custom wrapper"
-            );
-            fake.file(&launcher, wrapper);
-            fake.file(
-                &format!("{root}/@openai/codex/package.json"),
-                r#"{"name":"@openai/codex","bin":{"codex":"other.js"}}"#,
-            );
-            assert!(
-                resolve_fake(&fake, ProviderKind::Codex, &launcher, &[])
-                    .update
-                    .is_none(),
-                "{manager} mismatched manifest"
-            );
-        }
-    }
-
-    #[test]
-    fn claude_native_updates_use_the_configured_channel_and_exact_executable() {
-        let mut fake = Fake::default();
-        let binary = "/home/test/.local/share/claude/versions/2.1.274";
-        fake.path(binary);
-        fake.file(
-            "/custom/claude/settings.json",
-            r#"{"autoUpdatesChannel":"stable"}"#,
-        );
-        let installation = resolve_fake(
-            &fake,
-            ProviderKind::ClaudeCode,
-            binary,
-            &[
-                ("CLAUDE_CONFIG_DIR", "/custom/claude"),
-                ("ProgramFiles", "/program-files"),
-            ],
-        );
-        assert_eq!(installation.source, InstallSource::Native);
-        assert_eq!(installation.update.unwrap().program, PathBuf::from(binary));
-        assert_eq!(
-            installation.latest,
-            LatestQuery::Claude {
-                channel: "stable".into(),
-                maximum: None
-            }
-        );
-        let disabled = resolve_fake(
-            &fake,
-            ProviderKind::ClaudeCode,
-            binary,
-            &[("DISABLE_UPDATES", "1")],
-        );
-        assert!(disabled.update.is_none());
-    }
-
-    #[test]
-    fn manifest_name_without_matching_bin_is_not_package_ownership() {
-        let mut fake = Fake::default();
-        fake.package(
-            "/node/lib/node_modules/@openai/codex",
-            "@openai/codex",
-            "bin/codex.js",
-        );
-        let impostor = "/node/lib/node_modules/@openai/codex/custom-wrapper";
-        fake.path(impostor);
-        fake.answer("npm", &["root", "--global"], "/node/lib/node_modules");
-        fake.answer("npm", &["prefix", "--global"], "/node");
-        assert!(
-            resolve_fake(&fake, ProviderKind::Codex, impostor, &[])
-                .update
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn volta_project_selection_does_not_authorize_updating_the_global_default() {
-        let mut fake = Fake::default();
-        let actual = fake.package(
-            "/work/node_modules/@openai/codex",
-            "@openai/codex",
-            "bin/codex.js",
-        );
-        let shim = "/home/test/.volta/bin/codex";
-        fake.link(shim, "/tools/volta-shim");
-        fake.answer("volta", &["which", "codex"], &actual);
-        let installation = resolve_fake(&fake, ProviderKind::Codex, shim, &[]);
-        assert_eq!(installation.source, InstallSource::Volta);
-        assert!(installation.update.is_none());
-    }
-
-    #[test]
-    fn brew_preserves_cask_channel_and_formula_tap_and_pins() {
-        let mut fake = Fake::default();
-        let binary = "/custom/brew/Caskroom/claude-code@latest/2.1.274/claude";
-        fake.path(binary);
-        fake.answer("brew", &["--prefix"], "/custom/brew");
-        fake.answer(
-            "brew",
-            &["info", "--json=v2", "--installed"],
-            r#"{
-            "formulae":[],"casks":[{"token":"claude-code@latest","full_token":"claude-code@latest",
-            "installed":"2.1.274","version":"2.1.276","pinned":false}]}"#,
-        );
-        let installation = resolve_fake(&fake, ProviderKind::ClaudeCode, binary, &[]);
-        assert_eq!(installation.source, InstallSource::Brew);
-        assert_eq!(
-            installation.update.unwrap().args,
-            ["upgrade", "--cask", "--", "claude-code@latest"]
-        );
-        let binary = "/custom/brew/Cellar/opencode/1.0.0/bin/opencode";
-        fake.path(binary);
-        fake.answer("brew", &["info", "--json=v2", "--installed"], r#"{
-            "formulae":[{"name":"opencode","full_name":"anomalyco/tap/opencode",
-            "installed":[{"version":"1.0.0"}],"versions":{"stable":"1.1.0"},"pinned":false}],"casks":[]}"#);
-        let installation = resolve_fake(&fake, ProviderKind::OpenCode, binary, &[]);
-        assert_eq!(
-            installation.update.unwrap().args,
-            ["upgrade", "--formula", "--", "anomalyco/tap/opencode"]
-        );
-        fake.answer(
-            "brew",
-            &["info", "--json=v2", "--installed"],
-            r#"{
-            "formulae":[{"name":"opencode","full_name":"anomalyco/tap/opencode",
-            "installed":[{"version":"1.0.0"}],"pinned":true}],"casks":[]}"#,
-        );
-        assert!(
-            resolve_fake(&fake, ProviderKind::OpenCode, binary, &[])
-                .update
-                .is_none()
-        );
-    }
 
     #[test]
     fn display_quotes_paths_and_preserves_ownership_context_without_secrets() {

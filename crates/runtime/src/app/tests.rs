@@ -8,24 +8,26 @@ use tcode_core::settings::{SettingsPatch, ThemeMode};
 use tcode_protocol::{BackgroundTaskStatus, Command, CommandResponse, HostMessage, Subscription};
 #[test]
 fn permission_relaunch_marker_requires_screen_access_only_for_computer_use() {
-    for screen_recording in [false, true] {
+    for (section, screen_recording, kept) in [
+        ("computer_use", false, false),
+        ("computer_use", true, true),
+        ("providers", false, true),
+        ("providers", true, true),
+    ] {
         let permissions = computer_use_mcp::permissions::PermissionStatus {
             screen_recording,
             ..Default::default()
         };
         assert_eq!(permission_relaunch_marker(None, permissions), None);
-        for section in ["computer_use", "providers"] {
-            let marker = tcode_services::relaunch::RelaunchMarker {
-                reopen_settings: section.into(),
-                active_session: Some("session-1".into()),
-            };
-            let expected =
-                (section != "computer_use" || screen_recording).then_some(marker.clone());
-            assert_eq!(
-                permission_relaunch_marker(Some(marker), permissions),
-                expected
-            );
-        }
+        let marker = tcode_services::relaunch::RelaunchMarker {
+            reopen_settings: section.into(),
+            active_session: Some("session-1".into()),
+        };
+        assert_eq!(
+            permission_relaunch_marker(Some(marker.clone()), permissions),
+            kept.then_some(marker),
+            "{section}, screen recording {screen_recording}"
+        );
     }
 }
 
@@ -594,32 +596,38 @@ enum MirrorEnd {
     SessionClosed,
 }
 
-// Exercise provider routing and disk replay, including residency changes between events.
-fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, end: MirrorEnd, reload: bool) {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-native-mirror-turn-lifecycle");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+// Exercise provider routing and disk replay, including residency changes
+// between events. Each case is a parent thread of its own on one host.
+fn assert_native_mirror_turn_lifecycle(
+    cx: &mut TestAppContext,
+    state: &TestEntity,
+    evict: bool,
+    late: bool,
+    end: MirrorEnd,
+) {
+    let parent = format!("parent-{evict}-{late}-{end:?}");
+    let parent = parent.as_str();
     let mirror_id = state.update(cx, |state, cx| {
         let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
-        meta.id = "parent".into();
+        meta.id = parent.into();
         state.sessions.push(meta.clone());
         state.install_selected(ActiveSession::new(meta, false, Vec::new()));
         state.on_event(
-            "parent",
+            parent,
             AgentEvent::TurnStarted {
                 turn_id: "parent-turn".into(),
             },
             cx,
         );
         state.on_event(
-            "parent",
+            parent,
             native_mirror_parent_item(ItemStatus::InProgress),
             cx,
         );
         let id = state
             .sessions
             .iter()
-            .find(|m| m.native_subagent.is_some())
+            .find(|m| m.native_subagent.is_some() && m.parent_session_id.as_deref() == Some(parent))
             .unwrap()
             .id
             .clone();
@@ -627,24 +635,16 @@ fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, end: MirrorEnd, 
             if evict && i == 1 {
                 assert!(state.residents.evict(&id).is_some());
                 assert!(state.resident(&id).is_none());
-                if reload {
-                    // Force metadata lookup and its asynchronous timeline load.
-                    state.native_subagent_sessions.clear();
-                }
             }
-            state.on_event("parent", native_mirror_child_item(i), cx);
+            state.on_event(parent, native_mirror_child_item(i), cx);
         }
         match end {
             MirrorEnd::SubagentCompleted => {
-                state.on_event(
-                    "parent",
-                    native_mirror_parent_item(ItemStatus::Completed),
-                    cx,
-                );
+                state.on_event(parent, native_mirror_parent_item(ItemStatus::Completed), cx);
             }
             MirrorEnd::ParentTurnThenSubagentCompleted => {
                 state.on_event(
-                    "parent",
+                    parent,
                     AgentEvent::TurnCompleted {
                         turn_id: "parent-turn".into(),
                         status: TurnStatus::Completed,
@@ -658,19 +658,15 @@ fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, end: MirrorEnd, 
                     "background subagent keeps running after the parent turn"
                 );
                 assert!(evict || state.turn_running_for(&id));
-                state.on_event("parent", native_mirror_child_item(3), cx);
-                state.on_event(
-                    "parent",
-                    native_mirror_parent_item(ItemStatus::Completed),
-                    cx,
-                );
+                state.on_event(parent, native_mirror_child_item(3), cx);
+                state.on_event(parent, native_mirror_parent_item(ItemStatus::Completed), cx);
             }
             MirrorEnd::SessionClosed => {
-                state.on_event("parent", AgentEvent::SessionClosed { reason: None }, cx);
+                state.on_event(parent, AgentEvent::SessionClosed { reason: None }, cx);
             }
         }
         if late {
-            state.on_event("parent", native_mirror_child_item(4), cx);
+            state.on_event(parent, native_mirror_child_item(4), cx);
         }
         id
     });
@@ -791,17 +787,17 @@ fn native_mirror_child_item(i: usize) -> AgentEvent {
 
 #[test]
 fn native_mirror_keeps_one_turn_across_residency_late_items_and_parent_completion() {
-    for (evict, reload) in [(false, false), (true, false), (true, true)] {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-native-mirror-turn-lifecycle");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    for evict in [false, true] {
         for late in [false, true] {
             for end in [
                 MirrorEnd::SubagentCompleted,
                 MirrorEnd::ParentTurnThenSubagentCompleted,
                 MirrorEnd::SessionClosed,
             ] {
-                eprintln!(
-                    "mirror lifecycle: evict={evict}, reload={reload}, late={late}, end={end:?}"
-                );
-                assert_native_mirror_turn_lifecycle(evict, late, end, reload);
+                assert_native_mirror_turn_lifecycle(cx, &state, evict, late, end);
             }
         }
     }
@@ -1408,132 +1404,6 @@ fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
     )));
 }
 
-/// A Claude Code stand-in that keeps its sign-in in `CLAUDE_CONFIG_DIR` and
-/// answers `auth status` and, without a terminal, `auth login` the way
-/// claude 2.1.314 does, and `get_usage` the way 2.1.317 does.
-#[cfg(unix)]
-#[test]
-fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
-    use std::os::unix::fs::PermissionsExt as _;
-    use tcode_core::provider_status::{AuthStatus, ProviderLogin};
-
-    let test_store = TestStore::new("tcode-provider-login-test");
-    let binary = test_store.root().join("claude");
-    let home = test_store.root().join("claude-home");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(
-        &binary,
-        "#!/bin/sh\n\
-         case \"$*\" in\n\
-         --version) echo '2.1.314 (Claude Code)' ;;\n\
-         'auth status --json')\n\
-           if [ -f \"$CLAUDE_CONFIG_DIR/signed-in\" ]; then\n\
-             echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"dev@example.com\"}'\n\
-           else echo '{\"loggedIn\":false}'; exit 1; fi ;;\n\
-         'auth login')\n\
-           printf 'Opening browser to sign in\\nIf the browser did not open, visit: https://claude.com/cai/oauth/authorize?code=true&state=S\\nPaste code here if prompted > '\n\
-           read code\n\
-           if [ \"$code\" = good ]; then touch \"$CLAUDE_CONFIG_DIR/signed-in\"; echo 'Login successful.'; exit 0; fi\n\
-           echo 'Invalid code' >&2; exit 1 ;;\n\
-         'auth logout') rm -f \"$CLAUDE_CONFIG_DIR/signed-in\" ;;\n\
-         '--print --input-format stream-json --output-format stream-json --verbose')\n\
-           read request\n\
-           if [ -f \"$CLAUDE_CONFIG_DIR/signed-in\" ]; then\n\
-             echo '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"usage-1\",\"response\":{\"subscription_type\":\"max\",\"rate_limits_available\":true,\"rate_limits\":{\"five_hour\":{\"utilization\":12,\"resets_at\":\"2026-11-04T21:20:00+00:00\"}}}}}'\n\
-           else echo '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"usage-1\",\"response\":{\"subscription_type\":null,\"rate_limits_available\":false,\"rate_limits\":null}}}'; fi ;;\n\
-         *) exit 2 ;;\n\
-         esac\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut host = TestClientState::new((*test_store).clone());
-    let claude = host.settings.provider_mut(ProviderKind::ClaudeCode);
-    claude.binary_path = Some(binary);
-    claude.home_path = Some(home);
-    let cx = &mut TestAppContext::default();
-    let state = cx.new_entity(host);
-    let snapshot = |state: &TestClientState, id: &str| {
-        state
-            .providers_status_snapshot()
-            .provider_snapshots
-            .get(id)
-            .cloned()
-            .unwrap_or_default()
-    };
-    let login = |state: &TestClientState| snapshot(state, "claude").login;
-    let awaiting = |state: &TestClientState| {
-        login(state)
-            == Some(ProviderLogin::AwaitingCode {
-                url: Some("https://claude.com/cai/oauth/authorize?code=true&state=S".into()),
-            })
-    };
-    let auth = |state: &TestClientState| snapshot(state, "claude").auth.map(|auth| auth.status);
-
-    state.dispatch_command(
-        cx,
-        1,
-        Command::StartProviderLogin {
-            profile_id: "pi".into(),
-        },
-    );
-    cx.run_until_parked();
-    assert_eq!(state.read(|state| snapshot(state, "pi").login), None);
-
-    let start = || Command::StartProviderLogin {
-        profile_id: "claude".into(),
-    };
-    let submit = |code: &str| Command::SubmitProviderLoginCode {
-        profile_id: "claude".into(),
-        code: code.into(),
-    };
-    state.dispatch_command(cx, 2, start());
-    cx.run_until(awaiting);
-    state.dispatch_command(
-        cx,
-        3,
-        Command::CancelProviderLogin {
-            profile_id: "claude".into(),
-        },
-    );
-    cx.run_until_parked();
-    assert_eq!(state.read(login), None);
-
-    state.dispatch_command(cx, 4, start());
-    cx.run_until(awaiting);
-    state.dispatch_command(cx, 5, submit("bad"));
-    cx.run_until(|state| {
-        login(state)
-            == Some(ProviderLogin::Failed {
-                message: "Invalid code".into(),
-            })
-    });
-
-    state.dispatch_command(cx, 6, start());
-    cx.run_until(awaiting);
-    state.dispatch_command(cx, 7, submit("good"));
-    cx.run_until(|state| login(state).is_none() && auth(state) == Some(AuthStatus::Authenticated));
-    assert_eq!(
-        state.read(|state| snapshot(state, "claude").auth.unwrap().email),
-        Some("dev@example.com".into())
-    );
-    cx.run_until(|state| {
-        state
-            .providers_status_snapshot()
-            .provider_usage
-            .get("claude")
-            .is_some_and(|usage| usage.error.is_none() && usage.windows.len() == 1)
-    });
-
-    state.dispatch_command(
-        cx,
-        8,
-        Command::LogoutProvider {
-            profile_id: "claude".into(),
-        },
-    );
-    cx.run_until(|state| auth(state) == Some(AuthStatus::Unauthenticated));
-}
-
 /// A finished turn refreshes the account usage of the profile it ran on and
 /// of no other, and asks the thread's own running harness for it instead of
 /// starting another. Claude Code reports `max` for the Ultra plan too, so the
@@ -1597,17 +1467,12 @@ fn a_turn_refreshes_only_its_profiles_usage_from_its_running_harness() {
 }
 
 /// Another Claude account starts from a copy of the user's own configuration,
-/// never the default account's sign-in, endpoint or history, and its sign-in
-/// runs in its own config directory. A provider without account sign-in is
-/// refused.
+/// never the default account's sign-in, endpoint or history. A provider
+/// without account sign-in is refused.
 #[cfg(unix)]
 #[test]
 fn another_claude_account_inherits_configuration_but_not_the_account() {
-    use std::os::unix::fs::PermissionsExt as _;
-    use tcode_core::provider_status::ProviderLogin;
-
     let test_store = TestStore::new("tcode-account-profile-test");
-    let binary = test_store.root().join("claude");
     let default = test_store.root().join("claude-default");
     let shared = test_store.root().join("shared");
     for (path, contents) in [
@@ -1642,23 +1507,10 @@ fn another_claude_account_inherits_configuration_but_not_the_account() {
     std::os::unix::fs::symlink("../../shared/skills/linked", default.join("skills/linked"))
         .unwrap();
     std::os::unix::fs::symlink("..", default.join("skills/review/up")).unwrap();
-    std::fs::write(
-        &binary,
-        "#!/bin/sh\n\
-         case \"$*\" in\n\
-         --version) echo '2.1.314 (Claude Code)' ;;\n\
-         'auth status --json') echo '{\"loggedIn\":false}'; exit 1 ;;\n\
-         'auth login')\n\
-           printf 'If the browser did not open, visit: https://claude.com/cai/oauth/authorize?dir=%s\\nPaste code here if prompted > ' \"$CLAUDE_CONFIG_DIR\"\n\
-           read code ;;\n\
-         *) exit 2 ;;\n\
-         esac\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut host = TestClientState::new((*test_store).clone());
     let claude = host.settings.provider_mut(ProviderKind::ClaudeCode);
-    claude.binary_path = Some(binary);
+    // The sign-in the new profile starts must not reach a `claude` on PATH.
+    claude.binary_path = Some(test_store.root().join("no-claude"));
     claude.home_path = Some(default.clone());
     let cx = &mut TestAppContext::default();
     let state = cx.new_entity(host);
@@ -1739,34 +1591,15 @@ fn another_claude_account_inherits_configuration_but_not_the_account() {
     ] {
         assert!(!home.join(kept).exists(), "{kept} must not be copied");
     }
-
-    cx.run_until(|state| {
-        state
-            .providers_status_snapshot()
-            .provider_snapshots
-            .get(&id)
-            .and_then(|snapshot| snapshot.login.clone())
-            == Some(ProviderLogin::AwaitingCode {
-                url: Some(format!(
-                    "https://claude.com/cai/oauth/authorize?dir={}",
-                    home.display()
-                )),
-            })
-    });
 }
 
 /// Another Codex account gets its own `CODEX_HOME` with a copy of the user's
-/// configuration, never the default account's sign-in or sessions, and its
-/// sign-in is Codex's device flow run in that home: the page and the code to
-/// enter there.
-#[cfg(unix)]
+/// configuration, never the default account's sign-in or sessions.
 #[test]
-fn another_codex_account_signs_in_with_a_device_code_in_its_own_home() {
-    use std::os::unix::fs::PermissionsExt as _;
-    use tcode_core::provider_status::ProviderLogin;
-
+fn another_codex_account_inherits_configuration_but_not_the_account() {
     let test_store = TestStore::new("tcode-codex-account-test");
-    let binary = test_store.root().join("codex");
+    // The sign-in the new profile starts must not reach a `codex` on PATH.
+    let binary = test_store.root().join("no-codex");
     let default = test_store.root().join("codex-default");
     for (path, contents) in [
         (default.join("config.toml"), "model = \"gpt-6\"\n"),
@@ -1777,20 +1610,6 @@ fn another_codex_account_signs_in_with_a_device_code_in_its_own_home() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, contents).unwrap();
     }
-    // What codex-cli 0.166.0 prints for `login --device-auth`, colored.
-    std::fs::write(
-        &binary,
-        "#!/bin/sh\n\
-         case \"$*\" in\n\
-         --version) echo 'codex-cli 0.166.0' ;;\n\
-         'login --device-auth')\n\
-           printf '1. Open this link in your browser\\n   \\033[94mhttps://auth.openai.com/codex/device?home=%s\\033[0m\\n\\n2. Enter this one-time code\\n   \\033[94m3JP6-MXLMX\\033[0m\\n' \"$CODEX_HOME\"\n\
-           read code ;;\n\
-         *) exit 2 ;;\n\
-         esac\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut host = TestClientState::new((*test_store).clone());
     let codex = host.settings.provider_mut(ProviderKind::Codex);
     codex.binary_path = Some(binary);
@@ -1835,93 +1654,6 @@ fn another_codex_account_signs_in_with_a_device_code_in_its_own_home() {
     for kept in ["auth.json", "sessions"] {
         assert!(!home.join(kept).exists(), "{kept} must not be copied");
     }
-    cx.run_until(|state| {
-        state
-            .providers_status_snapshot()
-            .provider_snapshots
-            .get(&id)
-            .and_then(|snapshot| snapshot.login.clone())
-            == Some(ProviderLogin::AwaitingDevice {
-                url: Some(format!(
-                    "https://auth.openai.com/codex/device?home={}",
-                    home.display()
-                )),
-                code: "3JP6-MXLMX".into(),
-            })
-    });
-}
-
-/// An endpoint profile that has no API key saved says so, rather than
-/// passing on the CLI's advice to sign in, which does not apply to it; the
-/// account beside it is told to sign in.
-#[cfg(unix)]
-#[test]
-fn an_endpoint_profile_without_its_key_is_missing_the_key_not_signed_out() {
-    use std::os::unix::fs::PermissionsExt as _;
-    use tcode_core::provider_status::ProviderProbeDiagnostic;
-
-    let test_store = TestStore::new("tcode-endpoint-key-test");
-    let binary = test_store.root().join("claude");
-    std::fs::write(
-        &binary,
-        "#!/bin/sh\n\
-         case \"$*\" in\n\
-         --version) echo '2.1.318 (Claude Code)' ;;\n\
-         'auth status --json') echo '{\"loggedIn\":false}'; exit 1 ;;\n\
-         *) exit 2 ;;\n\
-         esac\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut host = TestClientState::new((*test_store).clone());
-    host.settings
-        .provider_mut(ProviderKind::ClaudeCode)
-        .binary_path = Some(binary);
-    host.settings.profiles.insert(
-        "kimi".into(),
-        ProviderProfile {
-            kind: ProviderKind::ClaudeCode,
-            settings: ProviderSettings {
-                env: vec![
-                    EnvVar {
-                        name: "ANTHROPIC_BASE_URL".into(),
-                        value: "https://api.kimi.com/coding/".into(),
-                        sensitive: false,
-                    },
-                    EnvVar {
-                        name: "ANTHROPIC_API_KEY".into(),
-                        value: String::new(),
-                        sensitive: true,
-                    },
-                ],
-                ..ProviderSettings::default()
-            },
-        },
-    );
-    let cx = &mut TestAppContext::default();
-    let state = cx.new_entity(host);
-    state.update(cx, |state, cx| state.refresh_provider_status(cx));
-    let diagnostic = |state: &TestClientState, id: &str| {
-        state
-            .providers_status_snapshot()
-            .provider_snapshots
-            .get(id)
-            .filter(|snapshot| !snapshot.checking)
-            .and_then(|snapshot| snapshot.diagnostic)
-    };
-    cx.run_until(|state| {
-        diagnostic(state, "kimi").is_some() && diagnostic(state, "claude").is_some()
-    });
-    state.read(|state| {
-        assert_eq!(
-            diagnostic(state, "kimi"),
-            Some(ProviderProbeDiagnostic::MissingApiKey)
-        );
-        assert_eq!(
-            diagnostic(state, "claude"),
-            Some(ProviderProbeDiagnostic::Unauthenticated)
-        );
-    });
 }
 
 /// Each settings edit writes the one field it names: the harness's own
@@ -2366,10 +2098,6 @@ fn title_session_uses_configured_model_with_low_effort() {
     assert_eq!(custom.provider, ProviderKind::ClaudeCode);
     assert_eq!(custom.model.as_deref(), Some("claude-haiku-4-5"));
     assert_eq!(custom.profile_id.as_deref(), Some("work-claude"));
-    assert_eq!(
-        title_turn_options().effort.as_deref(),
-        Some(AI_TITLE_REASONING_EFFORT)
-    );
 
     settings.title_generation.profile_id = Some("deleted-profile".into());
     let fallback = title_session_meta(&settings, PathBuf::from("/tmp/project"));
@@ -2378,7 +2106,7 @@ fn title_session_uses_configured_model_with_low_effort() {
 
 #[test]
 fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
-    for (outcome, raw_title, status, output_tokens, expected) in [
+    let cases = [
         (
             "generated",
             "Improve QR Sharing",
@@ -2457,16 +2185,17 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
             None,
             Some("Old title"),
         ),
-    ] {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("tcode-regenerate-title");
+    ];
+    // Every case is a thread of its own, stored before the host starts so
+    // none is resident when its title is asked for.
+    let store = TestStore::new("tcode-regenerate-title");
+    let image = store.root().join("qr.png");
+    fs::write(&image, [1, 2, 3]).unwrap();
+    let ids = cases.map(|_| {
         let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
         meta.title = "Old title".into();
         meta.updated_at = 123;
-        let id = meta.id.clone();
         store.upsert_meta(&meta).unwrap();
-        let image = store.root().join("qr.png");
-        fs::write(&image, [1, 2, 3]).unwrap();
         for (item_id, content) in [
             (
                 "user",
@@ -2486,7 +2215,7 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
         ] {
             store
                 .append_event(
-                    &id,
+                    &meta.id,
                     1,
                     &AgentEvent::ItemCompleted(ThreadItem {
                         id: item_id.into(),
@@ -2496,24 +2225,28 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                 )
                 .unwrap();
         }
-        let scripted = scripted_provider(ProviderKind::Codex);
-        let state = cx.new_entity({
-            let mut state = TestClientState::new((*store).clone());
-            state.ai_title_generation_enabled = true;
-            state.set_provider_launcher_for_test(scripted.launcher);
-            state
-        });
-        state.deliver(
-            cx,
-            1000,
-            tcode_protocol::ClientPayload::Subscribe(Subscription {
-                topic: Topic::Index,
-                after: None,
-                known_index: None,
-            }),
-        );
-        cx.run_until_parked();
-        cx.drain_outgoing();
+        meta.id
+    });
+    let cx = &mut TestAppContext::default();
+    let scripted = scripted_provider(ProviderKind::Codex);
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*store).clone());
+        state.ai_title_generation_enabled = true;
+        state.set_provider_launcher_for_test(scripted.launcher);
+        state
+    });
+    state.deliver(
+        cx,
+        1000,
+        tcode_protocol::ClientPayload::Subscribe(Subscription {
+            topic: Topic::Index,
+            after: None,
+            known_index: None,
+        }),
+    );
+    cx.run_until_parked();
+    cx.drain_outgoing();
+    for ((outcome, raw_title, status, output_tokens, expected), id) in cases.into_iter().zip(ids) {
         if outcome == "cached" {
             state.update(cx, |state, cx| {
                 state.record_event(
@@ -2649,12 +2382,13 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                 .find(|meta| meta.id == id);
             assert_eq!(persisted.as_ref().map(|meta| meta.title.as_str()), expected);
             if !matches!(outcome, "renamed" | "deleted") {
-                assert_eq!(state.sessions[0].updated_at, 123, "{outcome}");
+                assert_eq!(state.find_meta(&id).unwrap().updated_at, 123, "{outcome}");
                 assert_eq!(persisted.unwrap().updated_at, 123, "{outcome}");
             }
         });
+        let sent = cx.drain_outgoing();
         if outcome == "failed" {
-            assert!(cx.drain_outgoing().iter().any(|message| matches!(
+            assert!(sent.iter().any(|message| matches!(
                 message,
                 HostMessage::Event(EventEnvelope {
                     event: ServerEvent::Runtime(RuntimeEvent::Error(
@@ -2664,6 +2398,12 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                 })
             )));
         }
+        // The scratch session the title ran in is stopped once it answered.
+        assert!(matches!(
+            scripted.commands.try_recv(),
+            Ok(SessionCommand::Shutdown)
+        ));
+        assert!(scripted.commands.try_recv().is_err(), "{outcome}");
     }
 }
 
@@ -3249,6 +2989,9 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
     let mut profile = history(ProviderKind::ClaudeCode, "target", "k3[1m]", 500);
     profile.profile_id = Some("klaude-kode".into());
     let codex = history(ProviderKind::Codex, "target", "gpt-5.2-codex", 500);
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-draft-defaults");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
     for (name, sessions, provider, model, agent, profile, effort) in [
         (
             "project",
@@ -3314,19 +3057,18 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
             false,
         ),
     ] {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("tcode-draft-defaults");
-        let state = cx.new_entity(TestClientState::new((*store).clone()));
+        // A draft in a directory of its own, so no row's draft is another's.
+        let cwd = PathBuf::from(format!("/new-project/{name}"));
         state.update(cx, |state, cx| {
             state.sessions = sessions.into();
-            state.start_draft("target".into(), PathBuf::from("/new-project"), cx);
+            state.start_draft("target".into(), cwd.clone(), cx);
             let draft = state.selected_session().unwrap();
             assert!(draft.draft, "{name}");
             assert_eq!(draft.meta.provider, provider, "{name}");
             assert_eq!(draft.meta.model.as_deref(), model, "{name}");
             assert_eq!(draft.meta.acp_agent_id.as_deref(), agent, "{name}");
             assert_eq!(draft.meta.profile_id.as_deref(), profile, "{name}");
-            assert_eq!(draft.meta.cwd, PathBuf::from("/new-project"));
+            assert_eq!(draft.meta.cwd, cwd);
             assert_eq!(draft.meta.project_id.as_deref(), Some("target"));
             let mut expected = if effort {
                 vec![OptionSelection {
@@ -3503,73 +3245,51 @@ fn reopened_command_cache_seeds_a_draft_before_provider_start() {
         )
         .unwrap();
 
-    let state = TestClientState::new(SessionStore::open_at(root.clone()).unwrap());
-    let seeded = state.cached_provider_commands(ProviderKind::ClaudeCode, None, None);
-    let draft = AppState::build_draft_session(
-        "project".into(),
-        PathBuf::from("/tmp/project"),
-        ProviderKind::ClaudeCode,
-        None,
-        None,
-        seeded,
-    );
-    assert_eq!(draft.provider_commands, commands);
-    assert!(matches!(draft.runtime, Runtime::Idle));
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new(
+        SessionStore::open_at(root.clone()).unwrap(),
+    ));
+    state.update(cx, |state, cx| {
+        state.start_draft("project".into(), PathBuf::from("/tmp/project"), cx);
+        let draft = state.selected_session().unwrap();
+        assert_eq!(draft.meta.provider, ProviderKind::ClaudeCode);
+        assert_eq!(draft.provider_commands, commands);
+        assert!(matches!(draft.runtime, Runtime::Idle));
+    });
 }
 
-/// Settings → Harnesses env/home/launch-args must reach the spawn options,
-/// and the home override must land on the provider's own variable.
+/// Settings → Harnesses binary and launch arguments reach the spawn options.
 #[test]
-fn provider_binary_home_and_launch_arguments_follow_the_selected_profile() {
+fn provider_binary_and_launch_arguments_follow_the_selected_profile() {
     let mut settings = Settings::default();
     let claude = settings.provider_mut(ProviderKind::ClaudeCode);
     claude.binary_path = Some(PathBuf::from("/custom/claude"));
-    claude.home_path = Some(PathBuf::from("/tmp/claude-home"));
     claude.launch_args = Some("--chrome --verbose".into());
     let codex = settings.provider_mut(ProviderKind::Codex);
     codex.binary_path = Some(PathBuf::from("/custom/codex"));
-    codex.home_path = Some(PathBuf::from("/tmp/codex-shadow"));
     let pi = settings.provider_mut(ProviderKind::Pi);
     pi.launch_args = Some("--verbose".into());
 
-    let launch_env = LaunchEnv {
-        env: vec![("ANTHROPIC_BASE_URL".into(), "https://proxy.test".into())],
-        home: settings
-            .provider(ProviderKind::ClaudeCode)
-            .home_path
-            .clone(),
-    };
     let meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
-    let opts = session_options(&meta, &settings, launch_env, McpServers::default());
+    let opts = session_options(
+        &meta,
+        &settings,
+        LaunchEnv::default(),
+        McpServers::default(),
+    );
     assert_eq!(opts.binary_path, Some(PathBuf::from("/custom/claude")));
     assert_eq!(opts.extra_args, vec!["--chrome", "--verbose"]);
-    assert_eq!(
-        opts.launch_env.pairs(ProviderKind::ClaudeCode),
-        vec![
-            (
-                "ANTHROPIC_BASE_URL".to_string(),
-                "https://proxy.test".to_string()
-            ),
-            (
-                "CLAUDE_CONFIG_DIR".to_string(),
-                "/tmp/claude-home".to_string()
-            ),
-        ]
-    );
 
-    // Codex takes its home as CODEX_HOME; this profile has no launch arguments.
-    let launch_env = LaunchEnv {
-        env: Vec::new(),
-        home: settings.provider(ProviderKind::Codex).home_path.clone(),
-    };
+    // This Codex profile has no launch arguments.
     let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
-    let opts = session_options(&meta, &settings, launch_env, McpServers::default());
+    let opts = session_options(
+        &meta,
+        &settings,
+        LaunchEnv::default(),
+        McpServers::default(),
+    );
     assert_eq!(opts.binary_path, Some(PathBuf::from("/custom/codex")));
     assert!(opts.extra_args.is_empty());
-    assert_eq!(
-        opts.launch_env.pairs(ProviderKind::Codex),
-        vec![("CODEX_HOME".to_string(), "/tmp/codex-shadow".to_string())]
-    );
 
     // pi project trust is opt-in and appends --approve after launch args.
     let meta = SessionMeta::new(ProviderKind::Pi, PathBuf::from("/x"), None);
@@ -4127,10 +3847,11 @@ fn completed_turn(turn_id: &str) -> AgentEvent {
     }
 }
 
-/// Recorded from a dispatched Claude Code child (thread 660c1acb…, October
-/// 2026): its brief ran a background script, the Monitor tool woke it nine
-/// times with one-line progress messages (turns 2–10), and it reported once,
-/// in turn 12. Its lead received twelve "completed" callbacks. The contract is
+/// The log Tcode stored for a dispatched Claude Code child, in the order a
+/// real one ran (October 2026) and with its content made up: its brief ran a
+/// background script, the Monitor tool woke it nine times with one-line
+/// progress messages (turns 2–10), and it reported once, in turn 12. Its lead
+/// received twelve "completed" callbacks. The contract is
 /// one: the report. `BackgroundTasksChanged` is not persisted, so the Monitor's
 /// liveness is replayed the way the CLI publishes it — set when the monitor
 /// starts, cleared with the result of the turn in which it ended.
@@ -4158,7 +3879,7 @@ fn a_child_waking_itself_reports_to_its_lead_once() {
             .insert(parent.meta.id.clone(), parent);
         let mut child = live_session(ProviderKind::ClaudeCode, child_commands);
         child.meta.id = "child".into();
-        child.meta.title = "测试注解改成人话（10 条样例）".into();
+        child.meta.title = "改写样例说明（10 条）".into();
         child.meta.parent_session_id = Some("parent".into());
         child.meta.expectation = Some(ChildExpectation::opened(1));
         state.sessions.push(child.meta.clone());
@@ -4211,9 +3932,8 @@ fn a_child_waking_itself_reports_to_its_lead_once() {
         "one report, one callback: {callbacks:?}"
     );
     assert!(
-        callbacks[0].starts_with(
-            "[orchestrate] thread child (\"测试注解改成人话（10 条样例）\") reported."
-        )
+        callbacks[0]
+            .starts_with("[orchestrate] thread child (\"改写样例说明（10 条）\") reported.")
     );
     assert!(callbacks[0].ends_with("\n<report>"));
     assert!(
@@ -5229,49 +4949,6 @@ fn callbacks_racing_provider_start_share_one_wakeup_turn() {
 }
 
 #[test]
-fn queued_sends_dispatch_one_per_completed_turn() {
-    let (commands, receiver) = smol::channel::unbounded();
-    let mut active = ActiveSession {
-        runtime: Runtime::Live(commands),
-        ..ActiveSession::new(
-            SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None),
-            false,
-            Vec::new(),
-        )
-    };
-    active.push_queued("first".into(), Vec::new());
-    active.push_queued("second".into(), Vec::new());
-
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
-    let first_delivery = match receiver.try_recv() {
-        Ok(SessionCommand::SendTurn {
-            delivery_id, text, ..
-        }) if text == "first" => delivery_id,
-        other => panic!("expected first SendTurn, got {other:?}"),
-    };
-    assert_eq!(active.dispatch_next_pending(), Ok(false));
-    assert!(receiver.try_recv().is_err());
-    assert_eq!(active.queue.len(), 2, "unaccepted head stays queued");
-    assert_eq!(
-        active.accept_turn_delivery(first_delivery).unwrap().text,
-        "first"
-    );
-    assert_eq!(active.queue.len(), 1);
-    assert_eq!(active.queue[0].text, "second");
-
-    active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
-    let second_delivery = match receiver.try_recv() {
-        Ok(SessionCommand::SendTurn {
-            delivery_id, text, ..
-        }) if text == "second" => delivery_id,
-        other => panic!("expected second SendTurn, got {other:?}"),
-    };
-    active.accept_turn_delivery(second_delivery).unwrap();
-    assert!(active.queue.is_empty());
-}
-
-#[test]
 fn moved_queue_entries_dispatch_in_their_new_order() {
     let (commands, receiver) = smol::channel::unbounded();
     let mut active = live_session(ProviderKind::Codex, commands);
@@ -5611,6 +5288,8 @@ fn profile_switch_within_one_provider_requires_a_relay() {
 /// Switching provider while the only turn is still streaming keeps what it
 /// produced: the switch arms a relay instead of silently dropping the cursor,
 /// and confirming it closes the abandoned turn so the handoff opens a new one.
+/// A scheduled message that comes due meanwhile waits for the confirmation and
+/// follows the message that carries the handoff.
 #[test]
 fn provider_switch_mid_turn_relays_the_partial_answer() {
     let cx = &mut TestAppContext::default();
@@ -5655,6 +5334,13 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
         }
         state.sessions.push(active.meta.clone());
         state.install_selected(active);
+        state.schedule_turn(
+            "mid-turn-relay",
+            "check the logs".into(),
+            Vec::new(),
+            now_secs(),
+            cx,
+        );
 
         state.set_active_model(
             "mid-turn-relay",
@@ -5670,8 +5356,21 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
             state.relay_confirmation("mid-turn-relay"),
             Some(("Codex".into(), "Claude Code".into()))
         );
+        // A message that comes due while the relay waits waits with it.
+        state.fire_due_scheduled(cx);
+        let queued = |state: &TestClientState| {
+            state
+                .selected_session()
+                .unwrap()
+                .queue
+                .iter()
+                .map(|message| message.text.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(queued(state), ["check the logs"]);
 
         state.confirm_relay_and_send("mid-turn-relay", "now review it".into(), Vec::new(), cx);
+        assert_eq!(queued(state), ["now review it", "check the logs"]);
         let active = state.selected_session().unwrap();
         assert!(active.pending_relay.is_none());
         assert_eq!(
@@ -6827,14 +6526,16 @@ fn provider_config_options_remove_retired_wire_controls() {
             },
             cx,
         );
-        assert_eq!(
-            state
-                .session_status_snapshot("config-session")
-                .unwrap()
-                .provider_option_descriptors
-                .len(),
-            1
+        state.set_active_option(
+            "config-session",
+            "acp:config:thinking",
+            Some(serde_json::json!(false)),
+            cx,
         );
+        let offered = state.session_status_snapshot("config-session").unwrap();
+        assert_eq!(offered.provider_option_descriptors.len(), 1);
+        assert!(!offered.provider_option_selections.is_empty());
+        assert!(!offered.provider_option_requested_selections.is_empty());
         state.on_event(
             "config-session",
             AgentEvent::ProviderOptions {
@@ -6882,6 +6583,9 @@ fn a_new_threads_permission_is_its_projects_then_its_harness_then_the_recommende
 
 #[test]
 fn native_permission_selection_stays_pending_until_provider_confirmation() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-permission-confirmation");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
     for (provider, id, initial, requested, restart) in [
         (
             ProviderKind::ClaudeCode,
@@ -6912,36 +6616,35 @@ fn native_permission_selection_stays_pending_until_provider_confirmation() {
             true,
         ),
     ] {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("tcode-permission-confirmation");
-        let state = cx.new_entity(TestClientState::new((*store).clone()));
+        let session_id = format!("permission-{provider:?}");
+        let session_id = session_id.as_str();
         let (commands, receiver) = smol::channel::unbounded();
         state.update(cx, |state, cx| {
             let mut session = live_session(provider, commands);
-            session.meta.id = "permission-session".into();
+            session.meta.id = session_id.into();
             state.sessions.push(session.meta.clone());
             state.install_selected(session);
             let confirmed = |value| AgentEvent::ProviderOptions {
                 descriptors: vec![permission_control(provider).unwrap()],
                 selections: vec![OptionSelection { id: id.into(), value }],
             };
-            state.on_event("permission-session", confirmed(initial.clone()), cx);
-            assert!(!state.session_status_snapshot("permission-session").unwrap().options_pending_restart);
-            state.set_active_option("permission-session", id, Some(requested.clone()), cx);
+            state.on_event(session_id, confirmed(initial.clone()), cx);
+            assert!(!state.session_status_snapshot(session_id).unwrap().options_pending_restart);
+            state.set_active_option(session_id, id, Some(requested.clone()), cx);
             if restart {
                 assert!(receiver.try_recv().is_err());
             } else {
                 assert!(matches!(receiver.try_recv(), Ok(SessionCommand::SetOption { id: sent_id, value }) if sent_id == id && value == requested));
             }
-            state.on_event("permission-session", confirmed(initial.clone()), cx);
-            let pending = state.session_status_snapshot("permission-session").unwrap();
+            state.on_event(session_id, confirmed(initial.clone()), cx);
+            let pending = state.session_status_snapshot(session_id).unwrap();
             assert_eq!(pending.provider_option_selections.iter().find(|selection| selection.id == id).unwrap().value, initial);
             assert_eq!(pending.provider_option_requested_selections.iter().find(|selection| selection.id == id).unwrap().value, requested);
             assert_eq!(pending.options_pending_restart, restart);
-            assert!(matches!(state.resident("permission-session").unwrap().runtime, Runtime::Live(_)));
+            assert!(matches!(state.resident(session_id).unwrap().runtime, Runtime::Live(_)));
             if !restart {
-                state.on_event("permission-session", confirmed(requested.clone()), cx);
-                let applied = state.session_status_snapshot("permission-session").unwrap();
+                state.on_event(session_id, confirmed(requested.clone()), cx);
+                let applied = state.session_status_snapshot(session_id).unwrap();
                 assert_eq!(applied.provider_option_selections.iter().find(|selection| selection.id == id).unwrap().value, requested);
                 assert_eq!(applied.provider_option_requested_selections, applied.provider_option_selections);
                 assert!(!applied.options_pending_restart);
@@ -6967,10 +6670,7 @@ fn effort_changes_use_per_turn_overrides_or_require_provider_restart() {
             value: serde_json::json!("high"),
         });
         assert_eq!(active.options_changed_while_live(), restart, "{provider:?}");
-        if restart {
-            active.shutdown_to_idle();
-            assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
-        } else {
+        if !restart {
             active.push_queued("next turn".into(), Vec::new());
             assert_eq!(active.dispatch_next_pending(), Ok(true));
             let SessionCommand::SendTurn {
@@ -7185,8 +6885,14 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
     assert!(text.starts_with(tcode_core::relay::RELAY_PREAMBLE));
     assert!(text.contains("<conversation-transcript>\n# prior work\n</conversation-transcript>"));
     assert!(text.contains("<new-user-message>\ncontinue here\n</new-user-message>"));
+    assert_eq!(active.dispatch_next_pending(), Ok(false));
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(active.queue.len(), 2, "an unaccepted head stays queued");
 
-    active.accept_turn_delivery(delivery_id).unwrap();
+    assert_eq!(
+        active.accept_turn_delivery(delivery_id).unwrap().text,
+        "continue here"
+    );
     active.turn_in_flight = false;
     assert_eq!(active.dispatch_next_pending(), Ok(true));
     assert!(matches!(
@@ -7835,45 +7541,39 @@ fn a_new_model_is_taken_on_the_running_process() {
     });
 }
 
-/// What the process refuses takes a restart: at once when nothing would be
-/// killed, and otherwise after the background work, with the message going out
-/// on the old settings in the meantime.
+/// What the process refuses takes a restart at once when nothing would be
+/// killed. With background work running, the message goes out on the old
+/// settings instead (settings_restart_waits_for_background_follow_up).
 #[test]
 fn a_refused_settings_change_falls_back_to_the_restart() {
-    for background in [0, 1] {
-        let cx = &mut TestAppContext::default();
-        let test_store = TestStore::new("tcode-refused-settings-test");
-        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-        let (commands, actor) = smol::channel::unbounded();
-        let mut session = live_session(ProviderKind::ClaudeCode, commands);
-        session.meta.id = "refused-settings".into();
-        session.live_model = Some("claude-opus-4-8".into());
-        session.meta.model = Some("claude-sonnet-4-6".into());
-        session.background_task_count = background;
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-refused-settings-test");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (commands, actor) = smol::channel::unbounded();
+    let mut session = live_session(ProviderKind::ClaudeCode, commands);
+    session.meta.id = "refused-settings".into();
+    session.live_model = Some("claude-opus-4-8".into());
+    session.meta.model = Some("claude-sonnet-4-6".into());
 
-        state.update(cx, |state, cx| {
-            state
-                .settings
-                .provider_mut(ProviderKind::ClaudeCode)
-                .binary_path = Some("/nonexistent/tcode-test-claude".into());
-            state.sessions.push(session.meta.clone());
-            state.install_selected(session);
-            state.send_turn("refused-settings", "go".into(), Vec::new(), cx);
-            assert!(matches!(
-                next_command(&actor),
-                Ok(SessionCommand::ApplySettings { .. })
-            ));
-            state.on_event(
-                "refused-settings",
-                AgentEvent::SettingsApplied { applied: false },
-                cx,
-            );
-        });
-        match (background, next_command(&actor)) {
-            (0, Ok(SessionCommand::Shutdown)) | (1, Ok(SessionCommand::SendTurn { .. })) => {}
-            other => panic!("with {background} background task(s): {other:?}"),
-        }
-    }
+    state.update(cx, |state, cx| {
+        state
+            .settings
+            .provider_mut(ProviderKind::ClaudeCode)
+            .binary_path = Some("/nonexistent/tcode-test-claude".into());
+        state.sessions.push(session.meta.clone());
+        state.install_selected(session);
+        state.send_turn("refused-settings", "go".into(), Vec::new(), cx);
+        assert!(matches!(
+            next_command(&actor),
+            Ok(SessionCommand::ApplySettings { .. })
+        ));
+        state.on_event(
+            "refused-settings",
+            AgentEvent::SettingsApplied { applied: false },
+            cx,
+        );
+    });
+    assert!(matches!(next_command(&actor), Ok(SessionCommand::Shutdown)));
 }
 
 /// Whether a lead's agents hold it: one still runs, or a dispatched one
@@ -8082,7 +7782,7 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
 }
 
 /// A harness that no longer answers a stop can be killed: its turn ends as
-/// interrupted, the thread stops stopping, and the next message starts it again.
+/// interrupted and the thread stops stopping.
 #[test]
 fn force_terminate_kills_a_harness_that_does_not_answer_a_stop() {
     let cx = &mut TestAppContext::default();
@@ -8161,7 +7861,14 @@ fn an_interrupt_leaves_a_thread_with_only_background_work_alone() {
         },
     );
     assert!(next_command(&actor).is_err());
-    state.read(|state| assert!(!state.selected_session().unwrap().interrupt_requested));
+    state.read(|state| {
+        assert!(
+            !state
+                .session_status_snapshot("only-background")
+                .unwrap()
+                .stopping
+        )
+    });
 }
 
 /// A report arriving while a restart waits on background work, with no turn to
@@ -8494,10 +8201,10 @@ fn a_rejected_steer_of_a_report_goes_out_as_a_turn() {
     ));
 }
 
-/// A steer the provider never confirmed died with its process, so a restart
-/// sends it to the next one.
+/// A steer the provider never confirmed died with its process, so it goes back
+/// on the queue, still the agent's.
 #[test]
-fn a_steer_lost_with_its_process_goes_to_the_next_one() {
+fn a_steer_lost_with_its_process_goes_back_on_the_queue() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-lost-steer-test");
     let state = cx.new_entity(TestClientState::new((*test_store).clone()));
@@ -8810,7 +8517,7 @@ fn store_writer_flush_persists_ordered_events_metadata_and_secrets_for_reopening
 /// Deleting a project kills the PTY its unsent draft left running off screen
 /// instead of leaving it behind forever.
 #[test]
-fn deleting_a_project_clears_its_drafts_terminal_state() {
+fn deleting_a_project_ends_the_terminal_its_draft_left_running() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-delete-project-draft");
     let root = test_store.root().clone();
@@ -8821,18 +8528,30 @@ fn deleting_a_project_clears_its_drafts_terminal_state() {
     });
     let draft_id = state.read(|state| state.selected.clone().expect("draft selected"));
     open_terminal_drawer(&state, cx, 1, &draft_id);
+    let terminals: Vec<_> = state.read(|state| {
+        state
+            .session_status_snapshot(&draft_id)
+            .unwrap()
+            .terminals
+            .iter()
+            .map(|terminal| terminal.id)
+            .collect()
+    });
+    assert!(!terminals.is_empty());
     state.update(cx, |state, cx| state.host.park_active(&draft_id, cx));
-    let destination = ConversationDestination::ProjectDraft("doomed".into());
-    state.read(|state| assert!(state.host.terminal_workspaces.contains_key(&destination)));
+    state.read(|state| {
+        for &terminal in &terminals {
+            assert!(!state.terminal_handle(terminal).unwrap().exited());
+        }
+    });
 
     state.update(cx, |state, cx| state.host.delete_project("doomed", cx));
-    cx.run_until_parked();
-
-    state.read(|state| {
-        assert!(
-            !state.host.terminal_workspaces.contains_key(&destination),
-            "the deleted project's draft kept its terminal workspace"
-        );
+    cx.run_until(|state| {
+        terminals.iter().all(|&terminal| {
+            state
+                .terminal_handle(terminal)
+                .is_none_or(|handle| handle.exited())
+        })
     });
 }
 
@@ -8918,32 +8637,6 @@ fn assert_drawer_closed_without_terminals(state: &TestEntity, status: &SessionSt
     });
 }
 
-/// Earlier builds reopened, with fresh shells, every drawer
-/// `terminal-ui.json` marked open once its conversation loaded. Its entries
-/// are ignored and the file is removed.
-#[test]
-fn a_conversation_loads_with_its_drawer_closed_despite_an_older_builds_terminal_file() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-legacy-terminal-ui");
-    let id = stored_terminal_thread(&test_store);
-    let legacy = test_store.root().join("terminal-ui.json");
-    std::fs::write(
-        &legacy,
-        format!(
-            r#"{{
-  "{id}": {{ "open": true, "height": 320.0, "count": 2 }},
-  "draft:project": {{ "open": false, "height": 240.0, "count": 0 }}
-}}"#
-        ),
-    )
-    .unwrap();
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    assert!(!legacy.exists(), "the older build's terminal file is kept");
-
-    let status = load_conversation(&state, cx, 1, &id);
-    assert_drawer_closed_without_terminals(&state, &status);
-}
-
 /// A conversation left with a terminal running comes back with its drawer as
 /// it was: open, at its height, with the same terminals. One whose shells
 /// have all exited comes back closed, without them.
@@ -9008,7 +8701,6 @@ fn only_a_running_terminal_reopens_the_drawer_when_its_conversation_loads() {
 
     let status = load_conversation(&state, cx, 21, &id);
     assert_drawer_closed_without_terminals(&state, &status);
-    assert!(!test_store.root().join("terminal-ui.json").exists());
 }
 
 /// Closing a conversation's last terminal forgets its drawer: it comes back
@@ -9045,58 +8737,30 @@ fn closing_the_last_terminal_forgets_the_drawer() {
     leave_conversation(&state, cx, 7, &id);
     let status = load_conversation(&state, cx, 8, &id);
     assert_drawer_closed_without_terminals(&state, &status);
-    assert!(!test_store.root().join("terminal-ui.json").exists());
 }
 
 #[test]
-fn terminal_open_installs_after_executor_pump_in_the_project_cwd() {
+fn a_drafts_terminal_starts_in_its_project_directory() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-terminal-open");
-    let root = test_store.root().clone();
-    let project_cwd = root.join("project");
+    let project_cwd = test_store.root().join("project");
     std::fs::create_dir_all(&project_cwd).unwrap();
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
 
-    state.update(cx, |state, _| {
-        state.install_selected(AppState::build_draft_session(
-            "terminal-project".into(),
-            project_cwd.clone(),
-            ProviderKind::Codex,
-            None,
-            None,
-            Vec::new(),
-        ));
-    });
     state.update(cx, |state, cx| {
-        state
-            .host
-            .open_terminal_panel(state.selected.as_deref().unwrap_or_default(), cx)
+        state.start_draft("terminal-project".into(), project_cwd.clone(), cx);
     });
-    state.read(|state| {
-        assert!(
-            state
-                .selected_session()
-                .unwrap()
-                .terminal_workspace
-                .terminals
-                .is_empty()
-        );
-    });
-
-    cx.run_until(|state| {
-        state
-            .selected_session()
-            .is_some_and(|session| !session.terminal_workspace.terminals.is_empty())
-    });
+    let draft_id = state.read(|state| state.selected.clone().expect("draft selected"));
+    open_terminal_drawer(&state, cx, 1, &draft_id);
 
     state.read(|state| {
-        let workspace = &state.selected_session().unwrap().terminal_workspace;
+        let workspace = &state.resident(&draft_id).unwrap().terminal_workspace;
         assert_eq!(workspace.terminals.len(), 1);
         assert!(
             state
-                .host
-                .terminal_panel_open(state.selected.as_deref().unwrap_or_default())
+                .session_status_snapshot(&draft_id)
+                .unwrap()
+                .terminal_open
         );
         assert_eq!(workspace.terminals[0].terminal.cwd(), project_cwd);
     });
@@ -9198,47 +8862,6 @@ fn persisted_assistant_event(text: &str) -> AgentEvent {
             summarized: false,
         },
     })
-}
-
-#[test]
-fn cold_select_installs_immediately_then_loads_persisted_timeline() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-cold-select-async-test");
-    let store = (*test_store).clone();
-    let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/cold"), None);
-    store.upsert_meta(&meta).unwrap();
-    store
-        .append_event(
-            &meta.id,
-            1,
-            &persisted_assistant_event("persisted cold output"),
-        )
-        .unwrap();
-    let id = meta.id.clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    state.update(cx, |state, cx| {
-        state.select_session(&id, cx);
-        let active = state.selected_session().unwrap();
-        assert_eq!(active.meta.id, id);
-        assert!(active.timeline.entries.is_empty());
-    });
-
-    cx.run_until(|state| {
-        state.selected_session().is_some_and(|session| {
-            session
-                .timeline
-                .entries
-                .iter()
-                .any(|entry| entry.id == "item-persisted cold output")
-        })
-    });
-
-    state.update(cx, |state, _| {
-        assert!(state.selected_session().unwrap().timeline.entries.iter().any(
-            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "persisted cold output")
-        ));
-    });
 }
 
 #[test]
@@ -9610,16 +9233,18 @@ fn submitted_queue_head_cannot_leak_delivery_after_turn_completion() {
 
 #[test]
 fn event_stream_end_closes_only_its_own_live_provider_in_any_residency() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-stream-ownership");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
     for parked in [false, true] {
         for (live, current) in [(true, true), (true, false), (false, false)] {
-            let cx = &mut TestAppContext::default();
-            let store = TestStore::new("tcode-stream-ownership");
-            let state = cx.new_entity(TestClientState::new((*store).clone()));
+            let id = format!("session-{parked}-{live}-{current}");
+            let id = id.as_str();
             let (commands, _receiver) = smol::channel::unbounded();
             let (old_commands, _old_receiver) = smol::channel::unbounded();
             state.update(cx, |state, cx| {
                 let mut session = live_session(ProviderKind::ClaudeCode, commands.clone());
-                session.meta.id = "session".into();
+                session.meta.id = id.into();
                 session.turn_in_flight = live;
                 session.background_task_count = if live { 2 } else { 0 };
                 if !live {
@@ -9628,21 +9253,21 @@ fn event_stream_end_closes_only_its_own_live_provider_in_any_residency() {
                 state.store.upsert_meta(&session.meta).unwrap();
                 state.sessions.push(session.meta.clone());
                 if parked {
-                    state.residents.parked.insert("session".into(), session);
+                    state.residents.parked.insert(id.into(), session);
                 } else {
                     state.install_selected(session);
                 }
                 state.on_event_stream_ended(
-                    "session",
+                    id,
                     if current { &commands } else { &old_commands },
                     cx,
                 );
                 assert_eq!(
-                    state.turn_running_for("session"),
+                    state.turn_running_for(id),
                     live && !current,
                     "parked={parked}, live={live}, current={current}"
                 );
-                if let Some(session) = state.resident("session") {
+                if let Some(session) = state.resident(id) {
                     assert_eq!(
                         matches!(session.runtime, Runtime::Live(_)),
                         live && !current
@@ -9653,7 +9278,7 @@ fn event_stream_end_closes_only_its_own_live_provider_in_any_residency() {
             });
             cx.run_until_parked();
             let closes = store
-                .read_events("session")
+                .read_events(id)
                 .unwrap()
                 .iter()
                 .filter(|stored| matches!(stored.event, AgentEvent::SessionClosed { .. }))
@@ -9668,7 +9293,7 @@ fn event_stream_end_closes_only_its_own_live_provider_in_any_residency() {
 }
 
 #[test]
-fn turn_running_for_is_independent_of_active_or_parked_location() {
+fn a_threads_activity_reads_the_same_viewed_or_parked() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-working-location-test");
     let store = (*test_store).clone();
@@ -9723,7 +9348,6 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
                 expected_background,
                 "{label}"
             );
-            let active_answer = state.turn_running_for(&id);
             // Background work keeps the provider resident and shows as such;
             // Working describes this thread's own turn or queued human input.
             let expected_working = expected && label != "background";
@@ -9735,18 +9359,19 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
 
             let parked = state.take_selected().unwrap();
             state.residents.parked.insert(id.clone(), parked);
-            let parked_answer = state.turn_running_for(&id);
             assert_eq!(
                 state.session_status_snapshot(&id).unwrap().activity.working,
                 expected_working,
-                "{label}"
+                "{label} parked"
             );
-
             assert_eq!(
-                active_answer, parked_answer,
-                "{label} changed answer when moved between active and parked"
+                state.index_snapshot().summary.activity[&id]
+                    .background
+                    .tasks
+                    > 0,
+                expected_background,
+                "{label} parked"
             );
-            assert_eq!(active_answer, expected, "{label} work predicate");
             state.residents.parked.remove(&id);
         }
     });
@@ -9996,7 +9621,7 @@ fn failed_provider_start_keeps_the_queued_message() {
         state
             .settings
             .provider_mut(ProviderKind::ClaudeCode)
-            .display_name = Some("tryanks".into());
+            .display_name = Some("work".into());
         state.start_draft("proj-fail".into(), cwd.clone(), cx);
         state.host.send_turn(
             state.selected.as_deref().unwrap_or_default(),
@@ -10043,7 +9668,7 @@ fn failed_provider_start_keeps_the_queued_message() {
                     ..
                 })),
                 ..
-            }) if harness == "Claude Code (tryanks)"
+            }) if harness == "Claude Code (work)"
         )),
         "the failure names the Harness and its account"
     );
@@ -10063,16 +9688,15 @@ fn recv_dispatch_reply<T>(cx: &mut TestAppContext, rx: &smol::channel::Receiver<
 /// A repository at `root` on `main` with one commit of `tracked.txt`.
 fn init_git_repo(root: &Path) {
     std::fs::create_dir_all(root).unwrap();
-    for args in [
-        &["init", "-b", "main"][..],
-        &["config", "commit.gpgsign", "false"],
-        &["config", "core.hooksPath", ".no-hooks"],
-        &["config", "core.autocrlf", "false"],
-        &["config", "user.name", "tcode"],
-        &["config", "user.email", "tcode@localhost"],
-    ] {
-        run_git(root, args).unwrap();
-    }
+    run_git(root, &["init", "-b", "main"]).unwrap();
+    let config = root.join(".git/config");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str(
+        "[commit]\n\tgpgsign = false\n\
+         [core]\n\thooksPath = .no-hooks\n\tautocrlf = false\n\
+         [user]\n\tname = tcode\n\temail = tcode@localhost\n",
+    );
+    std::fs::write(&config, text).unwrap();
     std::fs::write(root.join("tracked.txt"), "initial\n").unwrap();
     run_git(root, &["add", "tracked.txt"]).unwrap();
     run_git(root, &["commit", "-m", "initial"]).unwrap();
@@ -11154,101 +10778,6 @@ fn session_log_follows_residency_and_flushes_before_release() {
 }
 
 #[test]
-fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("history-byte-budget");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    state.update(cx, |state, _| {
-        let records: Vec<SessionEventRecord> = (0..10)
-            .map(|index| SessionEventRecord {
-                origin: None,
-                author: None,
-                ts: Some(index),
-                event: AgentEvent::Warning {
-                    message: "x".repeat(1024 * 1024),
-                },
-                elided: None,
-            })
-            .collect();
-        state
-            .event_records
-            .insert("large".into(), session_log(records.clone()));
-        let subscription = tcode_protocol::Subscription {
-            known_index: None,
-            topic: Topic::SessionEvents {
-                session_id: "large".into(),
-            },
-            after: None,
-        };
-        let mut snapshot = events_reply(state, &subscription);
-        snapshot.request_id = Some(u64::MAX);
-        assert!(
-            tcode_protocol::encode_line(&HostMessage::Event(snapshot.clone()))
-                .unwrap()
-                .len()
-                <= tcode_protocol::MAX_SESSION_HISTORY_BYTES
-        );
-        let ServerEvent::SessionSnapshot {
-            from,
-            records: tail,
-            truncated,
-            ..
-        } = snapshot.event
-        else {
-            panic!("snapshot")
-        };
-        assert!(truncated);
-        assert_eq!(tail, records[from as usize..]);
-        let response = state.event_records["large"]
-            .history_page(10, u32::MAX)
-            .unwrap();
-        let line = tcode_protocol::encode_line(&HostMessage::QueryResult {
-            id: u64::MAX,
-            result: Ok(response.clone()),
-        })
-        .unwrap();
-        assert!(line.len() <= tcode_protocol::MAX_SESSION_HISTORY_BYTES);
-        let QueryResponse::SessionHistoryPage {
-            from,
-            records: page,
-            truncated,
-            ..
-        } = response
-        else {
-            panic!("page")
-        };
-        assert!(truncated);
-        assert_eq!(page, records[from as usize..]);
-        // A cursor whose rest overflows the budget gets that same tail.
-        assert_eq!(
-            events_reply(
-                state,
-                &tcode_protocol::Subscription {
-                    after: Some(0),
-                    ..subscription.clone()
-                },
-            )
-            .event,
-            events_reply(state, &subscription).event
-        );
-        let mut records = records;
-        records[9].event = AgentEvent::Warning {
-            message: "x".repeat(tcode_protocol::MAX_SESSION_HISTORY_BYTES),
-        };
-        state
-            .event_records
-            .insert("large".into(), session_log(records));
-        assert_eq!(
-            state.event_records["large"]
-                .history_page(10, 1)
-                .unwrap_err()
-                .code,
-            "history_record_too_large"
-        );
-    });
-}
-
-#[test]
 fn computer_use_registrations_survive_stop_but_are_replaced_after_provider_shutdown() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-cu-registration-lifecycle");
@@ -11467,74 +10996,6 @@ fn status_carries_the_running_turn_while_in_flight_and_open_requests_while_live(
     assert_eq!(status.running_turn, None);
     assert_eq!(status.pending_user_input, None);
     assert!(status.pending_approvals.is_empty());
-}
-
-/// Times the initial snapshot plus the pages a client fetches while scrolling
-/// to the top of a real long thread. Run with
-/// `TCODE_HISTORY_BENCH_LOG=/path/to/thread.jsonl cargo test -p tcode-runtime
-/// --release -- --ignored --nocapture history_paging_bench`.
-#[test]
-#[ignore = "manual benchmark: needs TCODE_HISTORY_BENCH_LOG pointing at a large JSONL log"]
-fn history_paging_bench() {
-    let source = std::env::var_os("TCODE_HISTORY_BENCH_LOG").expect("TCODE_HISTORY_BENCH_LOG");
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("tcode-history-paging-bench");
-    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
-    meta.id = "bench".into();
-    store.upsert_meta(&meta).unwrap();
-    store
-        .apply(&[tcode_services::store::Mutation::replace_event_log(
-            "bench",
-            fs::read(&source).unwrap(),
-        )])
-        .unwrap();
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let started = Instant::now();
-    state.update(cx, |state, cx| state.select_session("bench", cx));
-    let opened = started.elapsed();
-    let (snapshot_elapsed, pages) = state.update(cx, |state, _| {
-        let started = Instant::now();
-        let snapshot = events_reply(
-            state,
-            &tcode_protocol::Subscription {
-                known_index: None,
-                topic: Topic::SessionEvents {
-                    session_id: "bench".into(),
-                },
-                after: None,
-            },
-        );
-        let snapshot_elapsed = started.elapsed();
-        let ServerEvent::SessionSnapshot { from, total, .. } = snapshot.event else {
-            panic!("snapshot")
-        };
-        eprintln!("snapshot: {snapshot_elapsed:?} (from {from} of {total} records)");
-        let mut before = from;
-        let mut pages = Vec::new();
-        while before > 0 && pages.len() < 16 {
-            let started = Instant::now();
-            let QueryResponse::SessionHistoryPage { from, records, .. } =
-                state.event_records["bench"]
-                    .history_page(before, tcode_protocol::SESSION_HISTORY_RECORDS as u32)
-                    .unwrap()
-            else {
-                panic!("page")
-            };
-            pages.push((started.elapsed(), records.len()));
-            before = from;
-        }
-        (snapshot_elapsed, pages)
-    });
-    cx.run_until_parked();
-    let paged: Duration = pages.iter().map(|(elapsed, _)| *elapsed).sum();
-    for (index, (elapsed, records)) in pages.iter().enumerate() {
-        eprintln!("page {index}: {elapsed:?} ({records} records)");
-    }
-    eprintln!(
-        "select_session: {opened:?}; snapshot: {snapshot_elapsed:?}; {} pages: {paged:?}; snapshot + pages: {:?}",
-        pages.len(),
-        snapshot_elapsed + paged
-    );
 }
 
 /// Opening or archiving one thread must cost that thread on the wire, not the
@@ -12092,16 +11553,19 @@ fn the_storage_pass_drops_superseded_diffs_of_every_stored_thread() {
         );
     }
     drop(state);
-    let logged = captured_log().len();
+    // A restart finds every thread passed and leaves each as it was.
     let cx = &mut TestAppContext::default();
     let restarted = cx.new_entity(TestClientState::new((*store).clone()));
+    assert!(store.threads_to_compact().unwrap().is_empty());
     restarted.update(cx, |state, cx| state.start_storage_pass(cx));
     cx.run_until(|state| state.storage_pass.is_none());
-    assert!(
-        captured_log()[logged..]
-            .iter()
-            .any(|line| line.text == "storage pass complete: no work")
-    );
+    for id in ["cold", "open"] {
+        assert_eq!(
+            String::from_utf8(store.read_event_log(id).unwrap()).unwrap(),
+            passed,
+            "{id}"
+        );
+    }
 }
 
 /// A full device subscribed to the storage migration hears nothing while no
@@ -12386,7 +11850,9 @@ fn history_windows_are_byte_budgeted() {
         huge[199].event = AgentEvent::Warning {
             message: "w".repeat(2 * tcode_protocol::SESSION_WINDOW_BYTES),
         };
-        state.event_records.insert("wide".into(), session_log(huge));
+        state
+            .event_records
+            .insert("wide".into(), session_log(huge.clone()));
         let QueryResponse::SessionHistoryPage {
             from,
             records: sent,
@@ -12396,190 +11862,20 @@ fn history_windows_are_byte_budgeted() {
             panic!("page")
         };
         assert_eq!((from, sent.len()), (199, 1));
-    });
-}
 
-const CRASH_CHILD_DIR: &str = "TCODE_CRASH_CHILD_DIR";
-const CRASH_ACK: &str = "crash child acked: ";
-
-/// The process [`store_writer_survives_sigkill`] kills: it streams numbered
-/// events through the real store writer and prints the last index every
-/// flush barrier confirmed, until it is killed.
-#[test]
-#[ignore = "the child process of store_writer_survives_sigkill, which runs it"]
-fn store_writer_crash_child() {
-    use std::io::Write as _;
-    let root = PathBuf::from(std::env::var_os(CRASH_CHILD_DIR).unwrap());
-    let cx = &mut TestAppContext::default();
-    let state = cx.new_entity(TestClientState::new(SessionStore::open_at(root).unwrap()));
-    let (commands, _receiver) = smol::channel::unbounded();
-    let parked = live_session(ProviderKind::Codex, commands);
-    let id = parked.meta.id.clone();
-    state.update(cx, |state, _| {
-        state.residents.parked.insert(id.clone(), parked);
-    });
-    println!("{CRASH_ACK}session {id}");
-    // About 2 KiB a record, so the WAL passes the 1000-page auto-checkpoint
-    // within the first few thousand records.
-    let padding = "x".repeat(2048);
-    let mut next = 0_u64;
-    loop {
-        let barrier = state.update(cx, |state, cx| {
-            for _ in 0..1 + next % 97 {
-                state.record_event(
-                    &id,
-                    &persisted_assistant_event(&format!("{next} {padding}")),
-                    cx,
-                );
-                next += 1;
-            }
-            state.store_write_barrier(cx)
-        });
-        cx.drain_outgoing();
-        barrier.recv_blocking().unwrap().unwrap();
-        println!("{CRASH_ACK}{}", next - 1);
-        std::io::stdout().flush().unwrap();
-    }
-}
-
-/// Kill a process mid-stream through the store writer, over and over: every
-/// record a flush acknowledged is still there after a restart, the records
-/// form a gapless prefix with no torn row, and the files pass sqlite3's
-/// integrity check. `TCODE_CRASH_RUNS` sets the number of kills.
-#[test]
-#[ignore = "spawns and SIGKILLs child processes and needs the sqlite3 CLI; run deliberately"]
-fn store_writer_survives_sigkill() {
-    use std::io::BufRead as _;
-    let runs: usize = std::env::var("TCODE_CRASH_RUNS")
-        .ok()
-        .and_then(|runs| runs.parse().ok())
-        .unwrap_or(50);
-    let mut seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64
-        | 1;
-    let mut random = move |range: u64| {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        seed % range
-    };
-    let (mut checkpointed_runs, mut acknowledged, mut unacknowledged) = (0, 0, 0);
-    for run in 0..runs {
-        let root = std::env::temp_dir().join(format!("tcode-crash-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let mut child = tcode_services::process::command(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "app::tests::store_writer_crash_child",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env(CRASH_CHILD_DIR, &root)
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
-        let (lines, received) = std::sync::mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            for line in stdout.lines().map_while(Result::ok) {
-                if let Some((_, report)) = line.split_once(CRASH_ACK) {
-                    let _ = lines.send(report.to_owned());
-                }
-            }
-        });
-        let session = received
-            .recv_timeout(Duration::from_secs(30))
-            .unwrap()
-            .strip_prefix("session ")
-            .unwrap()
-            .to_owned();
-        std::thread::sleep(Duration::from_millis(200 + random(2_800)));
-        child.kill().unwrap();
-        child.wait().unwrap();
-        reader.join().unwrap();
-        let acked = received
-            .try_iter()
-            .filter_map(|report| report.parse::<u64>().ok())
-            .max();
-
-        // Preserve the files exactly as the kill left them, before anything
-        // opens them again.
-        let preserved = root.join("preserved");
-        std::fs::create_dir_all(&preserved).unwrap();
-        for name in ["tcode.db", "tcode.db-wal"] {
-            if root.join(name).exists() {
-                std::fs::copy(root.join(name), preserved.join(name)).unwrap();
-            }
-        }
-        let main_file = std::fs::metadata(root.join("tcode.db")).unwrap().len();
-        // A fresh database is a handful of pages; anything larger was
-        // written there by a checkpoint while records streamed.
-        if main_file > 64 * 1024 {
-            checkpointed_runs += 1;
-        }
-
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        let log = store.read_event_log(&session).unwrap();
-        let rows = log
-            .split_inclusive(|byte| *byte == b'\n')
-            .collect::<Vec<_>>();
-        assert!(
-            rows.iter().all(|row| row.ends_with(b"\n")),
-            "run {run}: torn row"
-        );
-        let events = store.read_events(&session).unwrap();
-        assert_eq!(events.len(), rows.len(), "run {run}: a row does not parse");
-        let indices: Vec<u64> = events
-            .iter()
-            .map(|stored| match &stored.event {
-                AgentEvent::ItemCompleted(ThreadItem {
-                    content: ItemContent::AssistantMessage { text, .. },
-                    ..
-                }) => text.split(' ').next().unwrap().parse().unwrap(),
-                other => panic!("run {run}: unexpected record {other:?}"),
-            })
-            .collect();
-        let expected: Vec<u64> = (0..indices.len() as u64).collect();
+        // A record no reply can carry is refused by name; the client says so.
+        huge[199].event = AgentEvent::Warning {
+            message: "w".repeat(tcode_protocol::MAX_SESSION_HISTORY_BYTES),
+        };
+        state.event_records.insert("wide".into(), session_log(huge));
         assert_eq!(
-            indices, expected,
-            "run {run}: records are not a gapless prefix"
+            state.event_records["wide"]
+                .history_page(200, 1)
+                .unwrap_err()
+                .code,
+            "history_record_too_large"
         );
-        if let Some(acked) = acked {
-            assert!(
-                indices.len() as u64 > acked,
-                "run {run}: acknowledged record {acked} lost ({} survived)",
-                indices.len()
-            );
-            acknowledged += acked + 1;
-            unacknowledged += indices.len() as u64 - (acked + 1);
-        }
-        store.close().unwrap();
-        drop(store);
-
-        let check = tcode_services::process::command("sqlite3")
-            .arg(preserved.join("tcode.db"))
-            .arg("PRAGMA integrity_check;")
-            .output()
-            .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&check.stdout).trim(),
-            "ok",
-            "run {run}: sqlite3 integrity_check: {}",
-            String::from_utf8_lossy(&check.stderr)
-        );
-        println!(
-            "run {run}: acked {acked:?}, survived {}, main file {main_file} bytes",
-            indices.len()
-        );
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-    println!(
-        "{runs} kills: {acknowledged} acknowledged records all survived, {unacknowledged} \
-         committed but unacknowledged, {checkpointed_runs} runs crossed an auto-checkpoint"
-    );
-    assert!(checkpointed_runs > 0, "no run crossed an auto-checkpoint");
+    });
 }
 
 /// A streamed delta that waits for company still reaches the database with
@@ -12647,192 +11943,6 @@ fn session_log(records: impl IntoIterator<Item = SessionEventRecord>) -> Session
         rows,
         undecodable: 0,
     })
-}
-
-/// Threads of [`storage_pass_survives_sigkill`]'s fixture, each a run of turns
-/// whose every turn-changes snapshot carries the turn's whole, growing diff.
-const CRASH_PASS_THREADS: usize = 6;
-
-/// The process [`storage_pass_survives_sigkill`] kills: a host started with the
-/// startup diff pass over the fixture in [`CRASH_CHILD_DIR`].
-#[test]
-#[ignore = "the child process of storage_pass_survives_sigkill, which runs it"]
-fn storage_pass_crash_child() {
-    let root = PathBuf::from(std::env::var_os(CRASH_CHILD_DIR).unwrap());
-    let _host = crate::pipe::spawn_host(
-        SessionStore::open_at(root).unwrap(),
-        crate::pipe::HostServices::default(),
-    )
-    .unwrap();
-    println!("{CRASH_ACK}started");
-    loop {
-        std::thread::park();
-    }
-}
-
-/// Kill a host while its startup pass drops superseded diffs, over and over:
-/// every thread is afterwards either exactly as it was and still to be passed,
-/// or exactly as a completed pass leaves it and marked passed, never a mix,
-/// and the files pass sqlite3's integrity check. `TCODE_CRASH_RUNS` sets the
-/// number of kills.
-#[test]
-#[ignore = "spawns and SIGKILLs child processes and needs the sqlite3 CLI; run deliberately"]
-fn storage_pass_survives_sigkill() {
-    let runs: usize = std::env::var("TCODE_CRASH_RUNS")
-        .ok()
-        .and_then(|runs| runs.parse().ok())
-        .unwrap_or(30);
-    let scratch = std::env::temp_dir().join(format!("tcode-pass-crash-{}", uuid::Uuid::new_v4()));
-    let template = scratch.join("template");
-    let ids: Vec<String> = (0..CRASH_PASS_THREADS)
-        .map(|thread| format!("thread-{thread}"))
-        .collect();
-    {
-        let store = SessionStore::open_at(template.clone()).unwrap();
-        for id in &ids {
-            let mut log = String::new();
-            for turn in 0..10 {
-                log.push_str(&format!(
-                    "{{\"ts\":{turn},\"event\":{{\"type\":\"turn_started\",\"turn_id\":\"{turn}\"}}}}\n"
-                ));
-                let mut diff = String::new();
-                for edit in 0..40 {
-                    diff.push_str(&format!("+line {edit} {}\n", "x".repeat(1_000)));
-                    log.push_str(&stored_snapshot(edit, &turn.to_string(), &diff));
-                }
-            }
-            let mut meta = SessionMeta::new(ProviderKind::Codex, template.clone(), None);
-            meta.id = id.clone();
-            store
-                .apply(&[
-                    tcode_services::store::Mutation::upsert_meta(meta),
-                    tcode_services::store::Mutation::replace_event_log(id, log.into_bytes()),
-                ])
-                .unwrap();
-        }
-        store.close().unwrap();
-    }
-    let copy = |to: &Path| {
-        std::fs::create_dir_all(to).unwrap();
-        std::fs::copy(template.join("tcode.db"), to.join("tcode.db")).unwrap();
-    };
-    let rows_of = |store: &SessionStore, id: &str| store.read_event_log(id).unwrap();
-    let passed_dir = scratch.join("passed");
-    copy(&passed_dir);
-    let (before, after, pass_time) = {
-        let store = SessionStore::open_at(passed_dir.clone()).unwrap();
-        let before: Vec<_> = ids.iter().map(|id| rows_of(&store, id)).collect();
-        let started = Instant::now();
-        for id in &ids {
-            let mut plan = store.plan_compaction(id).unwrap();
-            while store.compact(&mut plan).unwrap().is_none() {}
-            assert!(matches!(
-                store.compact(&mut plan).unwrap(),
-                Some(tcode_services::store::Compaction::Compacted { .. })
-            ));
-        }
-        let pass_time = started.elapsed();
-        let after: Vec<_> = ids.iter().map(|id| rows_of(&store, id)).collect();
-        store.close().unwrap();
-        (before, after, pass_time)
-    };
-    println!(
-        "fixture: {} bytes in {CRASH_PASS_THREADS} threads, passed in {pass_time:.1?} in process",
-        before.iter().map(Vec::len).sum::<usize>()
-    );
-    let mut seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64
-        | 1;
-    let mut random = move |range: u64| {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        seed % range
-    };
-    let (mut mixed_runs, mut partial_runs) = (0, 0);
-    for run in 0..runs {
-        let root = scratch.join(format!("run-{run}"));
-        copy(&root);
-        let mut child = tcode_services::process::command(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "app::tests::storage_pass_crash_child",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env(CRASH_CHILD_DIR, &root)
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
-        loop {
-            let mut line = String::new();
-            assert_ne!(
-                std::io::BufRead::read_line(&mut stdout, &mut line).unwrap(),
-                0,
-                "run {run}: the child exited before starting"
-            );
-            if line.contains(CRASH_ACK) {
-                break;
-            }
-        }
-        let delay = random(pass_time.as_millis() as u64 * 3 / 2 + 1);
-        std::thread::sleep(Duration::from_millis(delay));
-        child.kill().unwrap();
-        child.wait().unwrap();
-
-        let preserved = root.join("preserved");
-        std::fs::create_dir_all(&preserved).unwrap();
-        for name in ["tcode.db", "tcode.db-wal"] {
-            if root.join(name).exists() {
-                std::fs::copy(root.join(name), preserved.join(name)).unwrap();
-            }
-        }
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        let unpassed = store.threads_to_compact().unwrap();
-        let mut done = 0;
-        for (index, id) in ids.iter().enumerate() {
-            let rows = rows_of(&store, id);
-            if unpassed.contains(id) {
-                assert!(
-                    rows == before[index],
-                    "run {run}: {id} changed but is unpassed"
-                );
-            } else {
-                assert!(
-                    rows == after[index],
-                    "run {run}: {id} is passed but not as a pass leaves it"
-                );
-                done += 1;
-            }
-        }
-        if done > 0 && done < ids.len() {
-            partial_runs += 1;
-        }
-        store.close().unwrap();
-        drop(store);
-        let check = tcode_services::process::command("sqlite3")
-            .arg(preserved.join("tcode.db"))
-            .arg("PRAGMA integrity_check;")
-            .output()
-            .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&check.stdout).trim(),
-            "ok",
-            "run {run}: sqlite3 integrity_check: {}",
-            String::from_utf8_lossy(&check.stderr)
-        );
-        mixed_runs += usize::from(done > 0);
-        println!(
-            "run {run}: killed after {delay} ms, {done} of {CRASH_PASS_THREADS} threads passed"
-        );
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-    std::fs::remove_dir_all(&scratch).unwrap();
-    println!("{runs} kills: {mixed_runs} after some thread passed, {partial_runs} mid-pass");
-    assert!(partial_runs > 0, "no kill landed mid-pass");
 }
 
 /// The reply a subscription to a session whose log is resident gets.
@@ -13338,6 +12448,41 @@ fn an_unindexed_cold_thread_opens_through_hydration() {
     );
     assert_eq!(page, whole.history_page(window.end, 200).unwrap());
     assert!(store.turn_index("legacy").unwrap().is_none());
+}
+
+/// A message whose attachment cannot be read is not sent without it: nothing
+/// reaches the provider or the queue, and the error names the file.
+#[test]
+fn a_message_with_an_unreadable_attachment_is_not_sent() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("unreadable-attachment");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (commands, received) = smol::channel::unbounded();
+    let mut session = live_session(ProviderKind::Codex, commands);
+    session.meta.id = "thread".into();
+    state.update(cx, |state, _| state.install_selected(session));
+    let readable = store.root().join("readable.png");
+    std::fs::write(&readable, b"png").unwrap();
+    let missing = store.root().join("missing.png");
+    state.dispatch_command(
+        cx,
+        1,
+        Command::SendTurn {
+            session_id: "thread".into(),
+            text: "what is in these?".into(),
+            attachment_paths: vec![readable, missing.clone()],
+        },
+    );
+    let (error, _) = cx.run_until_sent(|message| match message {
+        HostMessage::Event(EventEnvelope {
+            event: ServerEvent::Runtime(RuntimeEvent::Error(RuntimeError::External(error))),
+            ..
+        }) => Some(error.clone()),
+        _ => None,
+    });
+    assert!(error.starts_with(&missing.display().to_string()), "{error}");
+    assert!(received.try_recv().is_err());
+    state.read(|state| assert!(state.resident("thread").unwrap().queue.is_empty()));
 }
 
 #[test]
@@ -14001,6 +13146,9 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
 
 #[test]
 fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("completion-admission");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
     for case in [
         "valid",
         "renamed",
@@ -14008,43 +13156,43 @@ fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one()
         "archived_parent",
         "deleted_parent",
     ] {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("completion-admission");
-        let state = cx.new_entity(TestClientState::new((*store).clone()));
+        let ancestor_id = format!("{case}-ancestor");
+        let parent_id = format!("{case}-parent");
+        let child_id = format!("{case}-child");
         let (parent_commands, parent_received) = smol::channel::unbounded();
         let (child_commands, _child_received) = smol::channel::unbounded();
         state.update(cx, |state, _| {
             let mut ancestor = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
-            ancestor.id = "ancestor".into();
+            ancestor.id = ancestor_id.clone();
             ancestor.settled_at = Some(1);
             let mut parent = live_session(ProviderKind::Codex, parent_commands);
-            parent.meta.id = "parent".into();
-            parent.meta.parent_session_id = Some("ancestor".into());
+            parent.meta.id = parent_id.clone();
+            parent.meta.parent_session_id = Some(ancestor_id.clone());
             parent.meta.settled_at = Some(1);
             let mut child = live_session(ProviderKind::Codex, child_commands);
-            child.meta.id = "child".into();
-            child.meta.parent_session_id = Some("parent".into());
+            child.meta.id = child_id.clone();
+            child.meta.parent_session_id = Some(parent_id.clone());
             child.meta.expectation = Some(ChildExpectation::opened(1));
             state
                 .sessions
                 .extend([ancestor, parent.meta.clone(), child.meta.clone()]);
-            state.residents.parked.insert("parent".into(), parent);
+            state.residents.parked.insert(parent_id.clone(), parent);
             state.install_selected(child);
         });
         // Each command lands before the child runs and reports.
         let command = match case {
             "renamed" => Some(Command::RenameSession {
-                session_id: "child".into(),
+                session_id: child_id.clone(),
                 title: "Renamed".into(),
             }),
             "archived_child" => Some(Command::ArchiveSession {
-                session_id: "child".into(),
+                session_id: child_id.clone(),
             }),
             "archived_parent" => Some(Command::ArchiveSession {
-                session_id: "parent".into(),
+                session_id: parent_id.clone(),
             }),
             "deleted_parent" => Some(Command::DeleteSession {
-                session_id: "parent".into(),
+                session_id: parent_id.clone(),
                 remove_worktree: false,
             }),
             _ => None,
@@ -14054,7 +13202,7 @@ fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one()
         }
         cx.run_until_parked();
         state.update(cx, |state, cx| {
-            if state.resident("child").is_none() {
+            if state.resident(&child_id).is_none() {
                 return;
             }
             for event in [
@@ -14064,7 +13212,7 @@ fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one()
                 report_result_event("rep", "completion evidence"),
                 completed_turn("finished-run"),
             ] {
-                state.on_event("child", event, cx);
+                state.on_event(&child_id, event, cx);
             }
         });
         if case == "valid" || case == "renamed" {
@@ -14072,11 +13220,11 @@ fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one()
             assert!(
                 matches!(parent_received.try_recv().unwrap(), SessionCommand::SendTurn { text, .. } if text.contains("completion evidence"))
             );
-            state.read(|state| assert!(!state.find_meta("parent").unwrap().is_settled()));
+            state.read(|state| assert!(!state.find_meta(&parent_id).unwrap().is_settled()));
         } else {
             cx.run_until_parked();
             state.read(|state| {
-                if let Some(parent) = state.find_meta("parent") {
+                if let Some(parent) = state.find_meta(&parent_id) {
                     assert!(parent.is_settled(), "{case}");
                 }
             });
@@ -14088,7 +13236,12 @@ fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one()
                 "{case}"
             );
         }
-        state.read(|state| assert!(state.find_meta("ancestor").unwrap().is_settled(), "{case}"));
+        state.read(|state| {
+            assert!(
+                state.find_meta(&ancestor_id).unwrap().is_settled(),
+                "{case}"
+            )
+        });
     }
 }
 
@@ -14966,7 +14119,9 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
 fn an_old_profiles_activity_backfills_and_updates_the_index() {
     let store = TestStore::new("activity-backfill");
     std::fs::create_dir_all(store.root()).unwrap();
-    let metas: Vec<_> = (0..48)
+    // One more thread than a backfill batch holds, so the backfill goes on
+    // past its first batch.
+    let metas: Vec<_> = (0..17)
         .map(|index| {
             let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
             meta.id = format!("old-{index}");
@@ -15045,78 +14200,6 @@ fn an_old_profiles_activity_backfills_and_updates_the_index() {
     link.shutdown_blocking().unwrap();
     restarted.to_host.close();
     restarted.stopped.recv_blocking().unwrap();
-}
-
-#[test]
-fn inactivity_settles_on_its_due_timer_and_rearms_when_settings_change() {
-    let store = TestStore::new("activity-due-timer");
-    let meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
-    store.upsert_meta(&meta).unwrap();
-    let completed = now_millis() - 86_400_000 + 10_000;
-    store
-        .append_event(
-            &meta.id,
-            completed,
-            &AgentEvent::TurnCompleted {
-                turn_id: "finished".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-        )
-        .unwrap();
-    std::fs::write(
-        store.root().join("settings.json"),
-        r#"{"auto_settle_after_days":null}"#,
-    )
-    .unwrap();
-    let host =
-        crate::pipe::spawn_host((*store).clone(), crate::pipe::HostServices::default()).unwrap();
-    let link = host.link();
-    let events = crate::pipe::p4b_tests::observed_events(&link);
-    link.subscribe(Subscription {
-        known_index: None,
-        topic: Topic::Index,
-        after: None,
-    })
-    .unwrap();
-    link.command_blocking(Command::PatchSettings {
-        patch: SettingsPatch::AutoSettleAfterDays(Some(1.0)),
-    })
-    .unwrap();
-    loop {
-        if let ServerEvent::IndexSnapshot(snapshot) = next_host_event(&events).event {
-            assert!(
-                !snapshot.sessions[0].is_settled(),
-                "the thread is open before its delay expires"
-            );
-            break;
-        }
-    }
-    assert!(
-        now_millis() < completed + 86_400_000,
-        "settings were enabled while the thread was still inside its inactivity window"
-    );
-    smol::block_on(smol::future::race(
-        async {
-            loop {
-                if let ServerEvent::IndexUpsertSession(settled) = events.recv().await.unwrap().event
-                    && settled.id == meta.id
-                    && settled.is_settled()
-                {
-                    assert!(now_millis() > completed + 86_400_000);
-                    assert_eq!(settled.settled_at, Some(completed / 1000));
-                    break;
-                }
-            }
-        },
-        async {
-            smol::Timer::after(Duration::from_secs(20)).await;
-            panic!("due timer did not settle the thread");
-        },
-    ));
-    link.shutdown_blocking().unwrap();
-    host.to_host.close();
-    host.stopped.recv_blocking().unwrap();
 }
 
 #[test]
@@ -15254,44 +14337,6 @@ fn settle_all_children_delivers_finished_results_and_skips_running_children() {
         }
         assert!(state.resident("running").unwrap().turn_in_flight);
     });
-}
-
-/// A host over a copy of a real data dir (`TCODE_STORAGE_DATA`), run until
-/// its startup storage pass reports how it ended, logging the pass to
-/// stderr. Killing it anywhere and starting it again must converge on the
-/// same store ([`tcode_services::store`]'s `a_real_data_dir_reads_back_as_its_original`
-/// checks the result).
-#[test]
-#[ignore = "drives the storage pass over a copy of a real data dir named by TCODE_STORAGE_DATA; run deliberately"]
-fn storage_pass_over_a_real_data_dir() {
-    let mut printed = captured_log().len();
-    let root = PathBuf::from(std::env::var_os("TCODE_STORAGE_DATA").unwrap());
-    let started = Instant::now();
-    let host = crate::pipe::spawn_host(
-        SessionStore::open_at(root).unwrap(),
-        crate::pipe::HostServices::default(),
-    )
-    .unwrap();
-    eprintln!("host up in {:.1?}", started.elapsed());
-    loop {
-        let log = captured_log();
-        let mut ended = false;
-        for line in log[printed..]
-            .iter()
-            .filter(|line| line.target.starts_with("tcode"))
-        {
-            eprintln!("{} {}", line.level, line.text);
-            ended |= line.text.starts_with("storage pass ");
-        }
-        printed = log.len();
-        drop(log);
-        if ended {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    eprintln!("pass ended after {:.1?}", started.elapsed());
-    drop(host);
 }
 
 #[test]

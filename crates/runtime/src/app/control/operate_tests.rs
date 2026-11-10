@@ -312,7 +312,9 @@ fn a_subagent_is_a_child_that_owes_its_caller_a_report() {
         });
     }
 
-    // The setting isolates a subagent by default; the project root is not a Git repository.
+    // The setting isolates a subagent by default; the project root is not a Git repository,
+    // so no subagent starts, in the shared checkout or anywhere else.
+    let before = state.read(|state| started(state).len());
     let (reply, response) = smol::channel::bounded(1);
     state.update(cx, |state, cx| {
         state.settings.subagents.child_worktrees = true;
@@ -322,16 +324,12 @@ fn a_subagent_is_a_child_that_owes_its_caller_a_report() {
         state.handle_control_op("caller".into(), ControlOp::StartThread(params), reply, cx);
     });
     cx.run_until(|_| !response.is_empty());
-    let isolated = response.try_recv().unwrap().unwrap();
+    let refused = response.try_recv().unwrap().unwrap_err();
     assert!(
-        isolated["warning"]
-            .as_str()
-            .unwrap()
-            .contains("is not a Git repository root"),
-        "{isolated}"
+        refused.contains("is not a Git repository root"),
+        "{refused}"
     );
-    assert_eq!(isolated["cwd"], root.display().to_string());
-    assert!(isolated.get("worktree_branch").is_none());
+    assert_eq!(state.read(|state| started(state).len()), before);
 }
 
 /// An untitled `start_thread` thread is titled from its first message once the provider

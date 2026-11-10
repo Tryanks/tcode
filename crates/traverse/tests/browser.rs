@@ -1,5 +1,7 @@
 //! The browser listener over loopback: static bundle, password login and the
 //! `/ws` hello, as `crates/web` speaks them.
+#[path = "common/host.rs"]
+mod real_host;
 
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
@@ -9,7 +11,7 @@ use std::time::Duration;
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
 use tcode_traverse::HostMux;
-use tcode_traverse::browser::{BrowserConfig, BrowserServer, serve, set_password};
+use tcode_traverse::browser::{BrowserConfig, serve};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -34,57 +36,43 @@ impl Drop for TestDir {
     }
 }
 
-fn fake_host() -> HostMux {
-    let (to_host, host_rx) =
-        async_channel::unbounded::<tcode_client::attachment::AttachmentMessage>();
-    let (host_tx, from_host) = async_channel::unbounded::<String>();
-    std::thread::spawn(move || {
-        while let Ok(message) = host_rx.recv_blocking() {
-            let line = message.line;
-            let request = tcode_protocol::decode_client_line(&line).unwrap();
-            let id = request.id;
-            if let tcode_protocol::ClientPayload::Subscribe(subscription) = &request.payload {
-                let snapshot = tcode_protocol::HostMessage::Event(tcode_protocol::EventEnvelope {
-                    request_id: Some(id),
-                    topic: subscription.topic.clone(),
-                    event: tcode_protocol::ServerEvent::IndexSnapshot(
-                        tcode_protocol::IndexSnapshot {
-                            summary: tcode_protocol::IndexSummary::default(),
-                            sessions: Vec::new(),
-                            projects: Vec::new(),
-                        },
-                    ),
-                });
-                host_tx
-                    .send_blocking(tcode_protocol::encode_line(&snapshot).unwrap())
-                    .unwrap();
-            }
-            let mut response = tcode_protocol::CommandResponse::Unit;
-            if let tcode_protocol::ClientPayload::Command(
-                tcode_protocol::Command::CreateProject { root },
-            ) = &request.payload
-            {
-                let broadcast = tcode_protocol::HostMessage::Event(tcode_protocol::EventEnvelope {
-                    request_id: None, topic: tcode_protocol::Topic::Index,
-                    event: serde_json::from_value(json!({"type":"index_upsert_project","content":{"id":"project","name":"Shared","root":root,"created_at":1}})).unwrap(),
-                });
-                host_tx
-                    .send_blocking(tcode_protocol::encode_line(&broadcast).unwrap())
-                    .unwrap();
-                response = tcode_protocol::CommandResponse::ProjectId(Some("project".into()));
-            }
-            host_tx
-                .send_blocking(
-                    tcode_protocol::encode_line(&tcode_protocol::HostMessage::Ack {
-                        id,
-                        result: Ok(response),
-                    })
-                    .unwrap(),
-                )
-                .unwrap();
-        }
-    });
-    HostMux::new(to_host, from_host)
+/// A machine whose host is never asked anything: what these tests read is
+/// answered by the listener itself.
+struct Silent {
+    mux: HostMux,
+    _host: (
+        async_channel::Receiver<tcode_client::attachment::AttachmentMessage>,
+        async_channel::Sender<String>,
+    ),
+}
+
+fn silent_host() -> Silent {
+    let (to_host, host_rx) = async_channel::unbounded();
+    let (host_tx, from_host) = async_channel::unbounded();
+    Silent {
+        mux: HostMux::new(to_host, from_host),
+        _host: (host_rx, host_tx),
+    }
+}
+
+/// `remote.json` as `AuthStore` writes it, with `password` hashed in a
+/// single PBKDF2 iteration: a login verifies with the count stored beside the
+/// hash, so these tests pay for no production-strength hashing.
+fn configure_password(data_dir: &std::path::Path, password: &str) {
+    let salt = [7_u8; 16];
+    let mut hash = [0_u8; 32];
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_bytes(), &salt, 1, &mut hash);
+    std::fs::write(
+        data_dir.join("remote.json"),
+        json!({
+            "host_id": "00000000-0000-4000-8000-000000000001",
+            "host_name": "Test Host",
+            "devices": [],
+            "password": {"salt": salt, "hash": hash, "iterations": 1},
+        })
+        .to_string(),
+    )
+    .unwrap();
 }
 
 fn config(data_dir: PathBuf) -> BrowserConfig {
@@ -172,16 +160,6 @@ fn hello(token: &str, device_name: &str) -> Value {
     json!({"type":"hello","protocol_version":tcode_protocol::PROTOCOL_VERSION,"token":token,"device":{"name":device_name,"platform":"macOS"}})
 }
 
-fn setup(server: &BrowserServer, password: &str) {
-    let (status, _) = http(
-        server.local_addr(),
-        "POST",
-        "/auth/setup",
-        &json!({"password": password}).to_string(),
-    );
-    assert_eq!(status, "HTTP/1.1 200 OK");
-}
-
 #[test]
 fn static_bundle_get_and_head_share_headers() {
     let dir = TestDir::new("static");
@@ -191,7 +169,8 @@ fn static_bundle_get_and_head_share_headers() {
         ("/tcode_web_bg.wasm", b"\0asm"),
     ];
     config.static_bundle = Some(BUNDLE);
-    let server = serve(fake_host(), config).unwrap();
+    let silent = silent_host();
+    let server = serve(silent.mux.clone(), config).unwrap();
     for (path, status, content_type, length) in [
         ("/", "200 OK", "text/html; charset=utf-8", 18),
         ("/index.html", "200 OK", "text/html; charset=utf-8", 18),
@@ -228,9 +207,12 @@ fn static_bundle_get_and_head_share_headers() {
 #[test]
 fn two_browsers_get_their_own_acks_and_shared_broadcasts() {
     let dir = TestDir::new("two");
-    let server = serve(fake_host(), config(dir.0.clone())).unwrap();
+    let (runtime, mux) = real_host::spawn(&dir.0, Default::default(), |_| {});
+    configure_password(&dir.0, "secret password");
+    let server = serve(mux.clone(), config(dir.0.clone())).unwrap();
     let addr = server.local_addr();
-    setup(&server, "secret password");
+    let shared = dir.0.join("shared");
+    std::fs::create_dir_all(&shared).unwrap();
     let tokens: Vec<String> = ["Chrome", "Firefox"]
         .into_iter()
         .map(|name| {
@@ -252,7 +234,7 @@ fn two_browsers_get_their_own_acks_and_shared_broadcasts() {
             kinds.sort();
             assert_eq!(kinds, ["ack", "event"]);
         }
-        one.send(json!({"id":8,"payload":{"type":"command","content":{"type":"create_project","content":{"root":"/tmp/shared"}}}}))
+        one.send(json!({"id":8,"payload":{"type":"command","content":{"type":"create_project","content":{"root":shared}}}}))
             .await;
         let mut seen = [one.recv().await, one.recv().await];
         seen.sort_by_key(|value| value["type"].as_str().unwrap().to_owned());
@@ -282,6 +264,7 @@ fn two_browsers_get_their_own_acks_and_shared_broadcasts() {
         }
     });
     server.shutdown();
+    real_host::stop(runtime, &mux);
 }
 
 /// A browser following the hosting state hears of another browser coming
@@ -289,9 +272,10 @@ fn two_browsers_get_their_own_acks_and_shared_broadcasts() {
 #[test]
 fn a_browser_following_hosting_hears_another_connect() {
     let dir = TestDir::new("follow");
-    let server = serve(fake_host(), config(dir.0.clone())).unwrap();
+    configure_password(&dir.0, "secret password");
+    let silent = silent_host();
+    let server = serve(silent.mux.clone(), config(dir.0.clone())).unwrap();
     let addr = server.local_addr();
-    setup(&server, "secret password");
     let token = |name| {
         login(addr, "secret password", name).1["token"]
             .as_str()
@@ -332,7 +316,8 @@ fn a_browser_following_hosting_hears_another_connect() {
 #[test]
 fn a_bind_beyond_loopback_needs_a_password_first() {
     let dir = TestDir::new("lan");
-    let mux = fake_host();
+    let silent = silent_host();
+    let mux = silent.mux.clone();
     let lan = || BrowserConfig {
         listen: "0.0.0.0:0".parse().unwrap(),
         ..config(dir.0.clone())
@@ -352,7 +337,7 @@ fn a_bind_beyond_loopback_needs_a_password_first() {
         Err(std::io::ErrorKind::InvalidInput),
         "the same rule answers before anything is started"
     );
-    set_password(&dir.0, "secret password", false).unwrap();
+    configure_password(&dir.0, "secret password");
     tcode_traverse::browser::check_bind(lan().listen, &dir.0).unwrap();
     let server = serve(mux, lan()).unwrap();
     assert!(server.password_configured());

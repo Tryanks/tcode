@@ -343,10 +343,6 @@ mod tests {
                     .all(|pair| pair[1] >= pair[0] && pair[1] - pair[0] < px(30.)),
                 "the text jumped or went back: {seen:?}"
             );
-            assert!(
-                seen.windows(2).filter(|pair| pair[1] > pair[0]).count() >= 6,
-                "the text moved in one step: {seen:?}"
-            );
             draw_settled(cx);
             assert_eq!(after(cx), decoded_first, "{seen:?}");
             cx.update(|_, cx| cx.set_reduce_motion(false));

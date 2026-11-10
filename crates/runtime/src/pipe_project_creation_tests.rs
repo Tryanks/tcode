@@ -1,41 +1,10 @@
 use super::*;
 use tcode_services::user_files::UserDirectories;
 
-fn fixture(documents: bool, legacy_scratch: bool) -> (SpawnedHost, std::path::PathBuf) {
+fn fixture(documents: bool) -> (SpawnedHost, std::path::PathBuf) {
     let root =
         std::env::temp_dir().join(format!("tcode-project-creation-{}", uuid::Uuid::new_v4()));
-    if legacy_scratch {
-        let scratch = root.join(if documents {
-            "documents/Tcode"
-        } else {
-            "home/Documents/Tcode"
-        });
-        std::fs::create_dir_all(root.join("data")).unwrap();
-        let project = tcode_core::project::Project::from_root(scratch.clone());
-        let mut session = tcode_core::project::SessionMeta::new(
-            agent::ProviderKind::Codex,
-            scratch.join("2026-01-01"),
-            None,
-        );
-        session.id = "existing-quick-chat".into();
-        session.project_id = Some(project.id.clone());
-        let mut project = serde_json::to_value(project).unwrap();
-        project.as_object_mut().unwrap().remove("quick_chat");
-        std::fs::write(
-            root.join("data/sessions.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "projects": [project], "sessions": [session]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-    }
     let store = SessionStore::open_at(root.join("data")).unwrap();
-    if legacy_scratch {
-        store
-            .migrate(|_| {}, &std::sync::atomic::AtomicBool::new(false))
-            .unwrap();
-    }
     let host = spawn_host(
         store,
         HostServices {
@@ -52,7 +21,7 @@ fn fixture(documents: bool, legacy_scratch: bool) -> (SpawnedHost, std::path::Pa
 
 #[test]
 fn create_new_project_creates_and_registers_a_host_directory() {
-    let (host, root) = fixture(true, false);
+    let (host, root) = fixture(true);
     let link = host.link();
     let events = super::p4b_tests::observed_events(&link);
     link.subscribe(Subscription {
@@ -131,7 +100,7 @@ fn create_new_project_creates_and_registers_a_host_directory() {
 /// and `..` folds, so every way of writing one folder names one project.
 #[test]
 fn create_project_reads_the_root_as_a_host_path() {
-    let (host, root) = fixture(true, false);
+    let (host, root) = fixture(true);
     let link = host.link();
     let events = super::p4b_tests::observed_events(&link);
     link.subscribe(Subscription {
@@ -174,8 +143,8 @@ fn create_project_reads_the_root_as_a_host_path() {
 
 #[test]
 fn scratch_draft_uses_todays_host_documents_directory_and_reuses_the_draft() {
-    for (documents, legacy) in [(true, false), (false, false), (true, true), (false, true)] {
-        let (host, root) = fixture(documents, legacy);
+    for documents in [true, false] {
+        let (host, root) = fixture(documents);
         let link = host.link();
         let events = super::p4b_tests::observed_events(&link);
         link.subscribe(Subscription {
@@ -184,31 +153,9 @@ fn scratch_draft_uses_todays_host_documents_directory_and_reuses_the_draft() {
             after: None,
         })
         .unwrap();
-        let snapshot = super::tests::next_event(&events, |event| {
+        super::tests::next_event(&events, |event| {
             matches!(&event.event, ServerEvent::IndexSnapshot(_))
         });
-        let ServerEvent::IndexSnapshot(snapshot) = snapshot.event else {
-            unreachable!()
-        };
-        let legacy_project = if legacy {
-            let project = snapshot
-                .projects
-                .iter()
-                .find(|project| {
-                    snapshot.sessions.iter().any(|session| {
-                        session.id == "existing-quick-chat"
-                            && session.project_id.as_deref() == Some(project.id.as_str())
-                    })
-                })
-                .unwrap();
-            assert!(
-                project.quick_chat,
-                "existing scratch threads are replicated as quick chats"
-            );
-            Some(project.clone())
-        } else {
-            None
-        };
         let started = chrono::Local::now().date_naive();
         let CommandResponse::SessionId(Some(id)) =
             link.command_blocking(Command::StartScratchDraft).unwrap()
@@ -220,15 +167,12 @@ fn scratch_draft_uses_todays_host_documents_directory_and_reuses_the_draft() {
         } else {
             "home/Documents/Tcode"
         });
-        let project = legacy_project.unwrap_or_else(|| {
-            let event = super::tests::next_event(&events, |event| {
-                matches!(&event.event, ServerEvent::IndexUpsertProject(_))
-            });
-            let ServerEvent::IndexUpsertProject(project) = event.event else {
-                unreachable!()
-            };
-            project
+        let event = super::tests::next_event(&events, |event| {
+            matches!(&event.event, ServerEvent::IndexUpsertProject(_))
         });
+        let ServerEvent::IndexUpsertProject(project) = event.event else {
+            unreachable!()
+        };
         assert_eq!(project.root, project_root);
         assert!(
             project.quick_chat,
@@ -273,12 +217,13 @@ fn scratch_draft_uses_todays_host_documents_directory_and_reuses_the_draft() {
 /// files, and the files leave with the thread while the day's folder stays.
 #[test]
 fn uploads_land_in_the_scratch_directory_and_leave_with_their_thread() {
-    let (host, root) = fixture(true, false);
+    let (host, root) = fixture(true);
     let link = host.link();
-    let session_id = smol::block_on(host.update_state_for_test(|state, cx| {
-        state.start_draft("uploads".into(), std::env::temp_dir(), cx)
-    }))
-    .unwrap();
+    let CommandResponse::SessionId(Some(session_id)) =
+        link.command_blocking(Command::StartScratchDraft).unwrap()
+    else {
+        panic!("expected session id");
+    };
     let query = |query| smol::block_on(link.query(query));
     let begin = |name: &str| {
         let Ok(QueryResponse::UploadBegun(path)) = query(Query::BeginUpload {
@@ -351,12 +296,10 @@ fn uploads_land_in_the_scratch_directory_and_leave_with_their_thread() {
     );
     assert!(!discarded.parent().unwrap().exists());
 
-    smol::block_on(host.update_state_for_test({
-        let session_id = session_id.clone();
-        move |state, cx| {
-            state.delete_session(&session_id, false, cx);
-        }
-    }))
+    link.command_blocking(Command::DeleteSession {
+        session_id: session_id.clone(),
+        remove_worktree: false,
+    })
     .unwrap();
     let uploads = today.join("uploads").join(&session_id);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

@@ -134,21 +134,29 @@ impl AppState {
         }
     }
 
-    /// Assemble the provider-bound message at the runtime boundary. Unreadable
-    /// attachment files are skipped, matching the composer's previous behavior.
+    /// Assemble the provider-bound message at the runtime boundary, or report
+    /// the attachment that cannot be read, which sends nothing.
     pub(super) fn assemble_user_message(
-        &self,
+        &mut self,
         target_id: &str,
         text: String,
         attachment_paths: Vec<PathBuf>,
-    ) -> (String, Vec<Attachment>) {
+        cx: &mut HostCx,
+    ) -> Option<(String, Vec<Attachment>)> {
+        let attachments = match read_attachments(attachment_paths) {
+            Ok(attachments) => attachments,
+            Err(error) => {
+                self.report_error(RuntimeError::External(error), cx);
+                return None;
+            }
+        };
         let terminal_contexts = self
             .resident(target_id)
             .map(|active| active.terminal_workspace.contexts.as_slice())
             .unwrap_or_default();
         let text = append_terminal_contexts_to_prompt(&text, terminal_contexts);
         let text = append_review_comments_to_prompt(&text, self.review_comments(target_id));
-        (text, read_attachments(attachment_paths))
+        Some((text, attachments))
     }
 
     pub(super) fn clear_consumed_draft_context(&mut self, target_id: &str, cx: &mut HostCx) {
@@ -269,22 +277,23 @@ impl AppState {
                             format!("{} is not a directory on this host", destination.display()),
                         ));
                     }
-                    if let Err(error) = tcode_services::worktree::repair(&destination, &worktrees) {
-                        log::warn!(
-                            "could not repair the worktrees of {}: {error}",
-                            destination.display()
-                        );
-                    }
-                    Ok(())
+                    Ok(tcode_services::worktree::repair(&destination, &worktrees))
                 })
                 .await;
-            changed.map_err(project_root_error)?;
-            host.enqueue_and_wait(move |app, cx| app.apply_project_root(&project_id, root, cx))
-                .await
-                .map_err(|_| ProtocolError {
-                    code: "transport_closed".into(),
-                    message: "Host stopped before the project root changed.".into(),
-                })?
+            let repaired = changed.map_err(project_root_error)?;
+            host.enqueue_and_wait(move |app, cx| {
+                // The directory is in place whether or not Git took the
+                // worktrees along, so the root changes either way.
+                if let Err(error) = repaired {
+                    app.report_error(RuntimeError::External(error.to_string()), cx);
+                }
+                app.apply_project_root(&project_id, root, cx)
+            })
+            .await
+            .map_err(|_| ProtocolError {
+                code: "transport_closed".into(),
+                message: "Host stopped before the project root changed.".into(),
+            })?
         })
     }
 
@@ -2502,13 +2511,14 @@ fn project_directory_error(error: std::io::Error) -> ProtocolError {
     }
 }
 
-/// Images at `paths` as message attachments; an unreadable path is left out.
-pub(super) fn read_attachments(paths: Vec<PathBuf>) -> Vec<Attachment> {
+/// Images at `paths` as message attachments, or the path that cannot be read
+/// and why.
+pub(super) fn read_attachments(paths: Vec<PathBuf>) -> Result<Vec<Attachment>, String> {
     paths
         .into_iter()
-        .filter_map(|path| {
-            let bytes = fs::read(&path).ok()?;
-            Some(Attachment {
+        .map(|path| {
+            let bytes = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+            Ok(Attachment {
                 media_type: mime_from_path(&path),
                 data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
                 source_path: Some(path.to_string_lossy().into_owned()),

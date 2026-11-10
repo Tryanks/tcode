@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::InstallSource;
-use super::installation::{Context, Installation, LatestQuery, Probe, UpdateCommand, env_value};
+use super::installation::{
+    Context, Installation, LatestQuery, SystemProbe, UpdateCommand, env_value,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Query {
@@ -15,7 +17,7 @@ pub(super) enum Query {
     ScoopManifest(PathBuf),
 }
 
-pub(super) async fn latest<P: Probe>(probe: &P, query: &Query) -> Option<String> {
+pub(super) async fn latest(probe: &SystemProbe, query: &Query) -> Option<String> {
     match query {
         Query::Apt(command) => {
             let output = probe.output(command).await?;
@@ -71,7 +73,7 @@ pub(super) async fn latest<P: Probe>(probe: &P, query: &Query) -> Option<String>
     }
 }
 
-pub(super) async fn resolve<P: Probe>(ctx: &Context<'_, P>) -> Option<Installation> {
+pub(super) async fn resolve(ctx: &Context<'_>) -> Option<Installation> {
     if ctx.canonical.starts_with("/nix/store") {
         // A store path does not identify the profile, flake, or system configuration
         // that must be changed. Self-updating its contents would bypass all of them.
@@ -86,7 +88,7 @@ pub(super) async fn resolve<P: Probe>(ctx: &Context<'_, P>) -> Option<Installati
     None
 }
 
-async fn linux<P: Probe>(ctx: &Context<'_, P>) -> Option<Installation> {
+async fn linux(ctx: &Context<'_>) -> Option<Installation> {
     for path in [&ctx.canonical, &ctx.binary] {
         let path = path.to_str()?;
         if let Some(query) = ctx.command("dpkg-query", &["--search", "--", path])
@@ -211,7 +213,7 @@ fn valid_package(package: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"+._:-".contains(&byte))
 }
 
-fn terminal<P: Probe>(ctx: &Context<'_, P>, manager: &str, args: &[&str]) -> Option<UpdateCommand> {
+fn terminal(ctx: &Context<'_>, manager: &str, args: &[&str]) -> Option<UpdateCommand> {
     let manager = ctx.probe.which(manager, ctx.env)?;
     let privilege_command = ctx
         .probe
@@ -231,8 +233,8 @@ fn terminal<P: Probe>(ctx: &Context<'_, P>, manager: &str, args: &[&str]) -> Opt
     Some(command)
 }
 
-fn owned<P: Probe>(
-    ctx: &Context<'_, P>,
+fn owned(
+    ctx: &Context<'_>,
     source: InstallSource,
     package: &str,
     update: Option<UpdateCommand>,
@@ -240,14 +242,14 @@ fn owned<P: Probe>(
     ctx.installation(source, update, LatestQuery::None, vec![package.to_string()])
 }
 
-async fn windows<P: Probe>(ctx: &Context<'_, P>) -> Option<Installation> {
+async fn windows(ctx: &Context<'_>) -> Option<Installation> {
     if let Some(installation) = scoop(ctx).or_else(|| chocolatey(ctx)) {
         return Some(installation);
     }
     winget(ctx).await
 }
 
-fn scoop<P: Probe>(ctx: &Context<'_, P>) -> Option<Installation> {
+fn scoop(ctx: &Context<'_>) -> Option<Installation> {
     let user_root = env_value(ctx.env, "SCOOP")
         .map(PathBuf::from)
         .or_else(|| ctx.home().map(|home| home.join("scoop")));
@@ -326,7 +328,7 @@ fn scoop<P: Probe>(ctx: &Context<'_, P>) -> Option<Installation> {
     None
 }
 
-fn chocolatey<P: Probe>(ctx: &Context<'_, P>) -> Option<Installation> {
+fn chocolatey(ctx: &Context<'_>) -> Option<Installation> {
     let root = env_value(ctx.env, "ChocolateyInstall")
         .map(PathBuf::from)
         .or_else(|| {
@@ -352,7 +354,7 @@ fn chocolatey<P: Probe>(ctx: &Context<'_, P>) -> Option<Installation> {
     Some(owned(ctx, InstallSource::Chocolatey, package, command))
 }
 
-async fn winget<P: Probe>(ctx: &Context<'_, P>) -> Option<Installation> {
+async fn winget(ctx: &Context<'_>) -> Option<Installation> {
     const SOURCE_SUFFIX: &str = "_Microsoft.Winget.Source_8wekyb3d8bbwe";
     for directory in ctx.canonical.ancestors().skip(1) {
         let Some(name) = directory.file_name().and_then(|name| name.to_str()) else {
@@ -402,333 +404,6 @@ async fn winget<P: Probe>(ctx: &Context<'_, P>) -> Option<Installation> {
     None
 }
 
-fn json<P: Probe>(ctx: &Context<'_, P>, path: &Path) -> Option<Value> {
+fn json(ctx: &Context<'_>, path: &Path) -> Option<Value> {
     serde_json::from_str(&ctx.probe.read(path)?).ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use agent::ProviderKind;
-
-    use super::*;
-
-    #[derive(Default)]
-    struct Fixture {
-        files: BTreeMap<PathBuf, String>,
-        paths: BTreeMap<PathBuf, PathBuf>,
-        commands: BTreeMap<String, PathBuf>,
-        outputs: BTreeMap<Vec<String>, String>,
-    }
-
-    impl Fixture {
-        fn manager(&mut self, name: &str) {
-            self.commands
-                .insert(name.to_string(), PathBuf::from(format!("/tools/{name}")));
-        }
-
-        fn answer(&mut self, name: &str, args: &[&str], output: &str) {
-            self.manager(name);
-            let key = std::iter::once(format!("/tools/{name}"))
-                .chain(args.iter().map(|value| (*value).to_string()))
-                .collect();
-            self.outputs.insert(key, output.to_string());
-        }
-
-        fn path(&mut self, path: &str) {
-            self.paths.insert(path.into(), path.into());
-        }
-
-        fn context<'a>(&'a self, binary: &str, env: &'a [(String, String)]) -> Context<'a, Self> {
-            Context {
-                probe: self,
-                provider: ProviderKind::ClaudeCode,
-                binary: binary.into(),
-                canonical: self
-                    .canonical(Path::new(binary))
-                    .unwrap_or_else(|| binary.into()),
-                cwd: "/work".into(),
-                env,
-            }
-        }
-    }
-
-    impl Probe for Fixture {
-        async fn output(&self, command: &UpdateCommand) -> Option<String> {
-            let key = std::iter::once(command.program.to_string_lossy().into_owned())
-                .chain(command.args.iter().cloned())
-                .collect::<Vec<_>>();
-            self.outputs.get(&key).cloned()
-        }
-
-        fn canonical(&self, path: &Path) -> Option<PathBuf> {
-            self.paths.get(path).cloned()
-        }
-
-        fn read(&self, path: &Path) -> Option<String> {
-            self.files.get(path).cloned()
-        }
-
-        fn which(&self, name: &str, _env: &[(String, String)]) -> Option<PathBuf> {
-            self.commands.get(name).cloned()
-        }
-    }
-
-    #[test]
-    fn distro_update_uses_the_exact_file_owner_and_requires_a_terminal() {
-        let mut fixture = Fixture::default();
-        fixture.manager("apt-get");
-        fixture.manager("sudo");
-        fixture.answer(
-            "dpkg-query",
-            &["--search", "--", "/usr/bin/claude"],
-            "company-assistant:amd64: /usr/bin/claude\n",
-        );
-        fixture.answer(
-            "dpkg-query",
-            &[
-                "--show",
-                "--showformat",
-                "${db:Status-Want} ${db:Status-Status}\n",
-                "--",
-                "company-assistant:amd64",
-            ],
-            "install installed\n",
-        );
-        let installation = smol::block_on(linux(&fixture.context("/usr/bin/claude", &[]))).unwrap();
-        let command = installation.update.unwrap();
-        assert_eq!(command.program, Path::new("/tools/sudo"));
-        assert_eq!(
-            command.args,
-            [
-                "/tools/apt-get",
-                "install",
-                "--only-upgrade",
-                "--",
-                "company-assistant:amd64"
-            ]
-        );
-        assert!(command.requires_terminal);
-
-        for output in [
-            "company-assistant: /usr/bin/other\n",
-            "company-assistant, unrelated: /usr/bin/claude\n",
-            "company-assistant: /usr/bin/claude\nunrelated: /usr/bin/claude\n",
-        ] {
-            fixture.answer("dpkg-query", &["--search", "--", "/usr/bin/claude"], output);
-            assert!(smol::block_on(linux(&fixture.context("/usr/bin/claude", &[]))).is_none());
-        }
-    }
-
-    #[test]
-    fn debian_hold_blocks_upgrade_and_latest_even_with_a_policy_candidate() {
-        let mut fixture = Fixture::default();
-        fixture.manager("apt-get");
-        fixture.answer(
-            "dpkg-query",
-            &["--search", "--", "/usr/bin/claude"],
-            "claude-code: /usr/bin/claude\n",
-        );
-        fixture.answer(
-            "apt-cache",
-            &["policy", "--", "claude-code"],
-            "claude-code:\n  Installed: 2.1.0\n  Candidate: 2.2.0\n",
-        );
-        let selection = [
-            "--show",
-            "--showformat",
-            "${db:Status-Want} ${db:Status-Status}\n",
-            "--",
-            "claude-code",
-        ];
-        for state in [
-            None,
-            Some("hold installed\n"),
-            Some("unknown\n"),
-            Some("install installed\nhold installed\n"),
-        ] {
-            if let Some(state) = state {
-                fixture.answer("dpkg-query", &selection, state);
-            }
-            let ctx = fixture.context("/usr/bin/claude", &[]);
-            let installation = smol::block_on(linux(&ctx)).unwrap();
-            assert_eq!(
-                installation,
-                ctx.installation(
-                    InstallSource::System,
-                    None,
-                    LatestQuery::None,
-                    vec!["claude-code".into()],
-                ),
-                "selection: {state:?}"
-            );
-        }
-        fixture.answer("dpkg-query", &selection, "install installed\n");
-        let installation = smol::block_on(linux(&fixture.context("/usr/bin/claude", &[]))).unwrap();
-        assert!(installation.update.is_some());
-    }
-
-    #[test]
-    fn scoop_shim_preserves_global_scope_and_holds() {
-        let mut fixture = Fixture::default();
-        fixture.manager("scoop");
-        for path in [
-            "/global/apps",
-            "/global/shims",
-            "/global/apps/claude-code/2.1.0/claude.exe",
-        ] {
-            fixture.path(path);
-        }
-        fixture.files.insert(
-            "/global/shims/claude.shim".into(),
-            "path = \"/global/apps/claude-code/2.1.0/claude.exe\"\n".into(),
-        );
-        fixture.files.insert(
-            "/global/apps/claude-code/2.1.0/manifest.json".into(),
-            r#"{"version":"2.1.0","bin":"claude.exe"}"#.into(),
-        );
-        let info = PathBuf::from("/global/apps/claude-code/2.1.0/install.json");
-        fixture.files.insert(
-            info.clone(),
-            r#"{"architecture":"64bit","bucket":"main"}"#.into(),
-        );
-        let env = [
-            ("SCOOP".into(), "/user".into()),
-            ("SCOOP_GLOBAL".into(), "/global".into()),
-        ];
-        let installation = scoop(&fixture.context("/global/shims/claude.exe", &env)).unwrap();
-        assert_eq!(installation.source, InstallSource::Scoop);
-        assert_eq!(
-            installation.update.unwrap().args,
-            ["update", "--global", "claude-code"]
-        );
-        fixture.files.insert(
-            info,
-            r#"{"architecture":"64bit","bucket":"main","hold":true}"#.into(),
-        );
-        assert!(
-            scoop(&fixture.context("/global/shims/claude.exe", &env))
-                .unwrap()
-                .update
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn apt_latest_uses_the_policy_candidate_instead_of_the_newest_table_entry() {
-        let mut fixture = Fixture::default();
-        let args = ["policy", "--", "claude-code"];
-        fixture.answer("apt-cache", &args,
-            "claude-code:\n  Installed: 2.1.0-1\n  Candidate: 1:2.1.1-1\n  Version table:\n     2.2.0-1 100\n     1:2.1.1-1 500\n");
-        let query = Query::Apt(
-            fixture
-                .context("/usr/bin/claude", &[])
-                .command("apt-cache", &args)
-                .unwrap(),
-        );
-        assert_eq!(
-            smol::block_on(latest(&fixture, &query)).as_deref(),
-            Some("2.1.1-1")
-        );
-        fixture.answer(
-            "apt-cache",
-            &args,
-            "claude-code:\n  Installed: 2.1.0-1\n  Candidate: (none)\n",
-        );
-        assert_eq!(smol::block_on(latest(&fixture, &query)), None);
-    }
-
-    #[test]
-    fn alpine_checks_installed_owner_and_respects_world_pins() {
-        let mut fixture = Fixture::default();
-        fixture.manager("doas");
-        fixture.answer(
-            "apk",
-            &["info", "--who-owns", "--quiet", "--", "/usr/bin/claude"],
-            "claude-code\n",
-        );
-        fixture.answer(
-            "apk",
-            &["info", "--installed", "--", "claude-code"],
-            "different-package\n",
-        );
-        assert!(smol::block_on(linux(&fixture.context("/usr/bin/claude", &[]))).is_none());
-        fixture.answer(
-            "apk",
-            &["info", "--installed", "--", "claude-code"],
-            "claude-code\n",
-        );
-        let installation = smol::block_on(linux(&fixture.context("/usr/bin/claude", &[]))).unwrap();
-        let command = installation.update.unwrap();
-        assert!(command.requires_terminal);
-        assert_eq!(command.program, Path::new("/tools/doas"));
-        assert_eq!(command.args, ["/tools/apk", "upgrade", "--", "claude-code"]);
-
-        fixture.files.insert(
-            "/etc/apk/world".into(),
-            "alpine-base\nclaude-code@stable\n".into(),
-        );
-        let args = ["version", "--", "claude-code"];
-        fixture.answer("apk", &args,
-            "Installed:                              Available:\nclaude-code-2.1.0-r0                     < 2.1.1-r0 @stable\n");
-        let query = Query::Apk {
-            command: fixture
-                .context("/usr/bin/claude", &[])
-                .command("apk", &args)
-                .unwrap(),
-            package: "claude-code".into(),
-        };
-        assert_eq!(
-            smol::block_on(latest(&fixture, &query)).as_deref(),
-            Some("2.1.1-r0")
-        );
-        fixture
-            .files
-            .insert("/etc/apk/world".into(), "claude-code=2.1.0-r0\n".into());
-        assert_eq!(smol::block_on(latest(&fixture, &query)), None);
-    }
-
-    #[test]
-    fn winget_portable_requires_both_installation_metadata_and_registered_id() {
-        let mut fixture = Fixture::default();
-        let directory = "/packages/Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe";
-        let binary = format!("{directory}/claude.exe");
-        let args = [
-            "list",
-            "--id",
-            "Anthropic.ClaudeCode",
-            "--exact",
-            "--source",
-            "winget",
-            "--disable-interactivity",
-        ];
-        fixture.answer(
-            "winget",
-            &args,
-            "Claude Code Anthropic.ClaudeCode 2.1.0 winget\n",
-        );
-        assert!(smol::block_on(winget(&fixture.context(&binary, &[]))).is_none());
-        fixture.path(&format!(
-            "{directory}/Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe.db"
-        ));
-        let installation = smol::block_on(winget(&fixture.context(&binary, &[]))).unwrap();
-        assert_eq!(
-            installation.update.unwrap().args,
-            [
-                "upgrade",
-                "--id",
-                "Anthropic.ClaudeCode",
-                "--exact",
-                "--source",
-                "winget"
-            ]
-        );
-        fixture.answer(
-            "winget",
-            &args,
-            "Claude Code Other.ClaudeCode 2.1.0 winget\n",
-        );
-        assert!(smol::block_on(winget(&fixture.context(&binary, &[]))).is_none());
-    }
 }

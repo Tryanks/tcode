@@ -155,7 +155,7 @@ pub(super) struct Api {
     store: SettingsStore,
     environment: BTreeMap<String, String>,
     hosts: RwLock<BTreeMap<String, HostSettings>>,
-    pub(super) agent: ureq::Agent,
+    agent: ureq::Agent,
     /// az's token, which is its signed-in account's for every organization.
     az: Mutex<Option<Cached<Option<String>>>>,
     rate_limits: Mutex<crate::forge::RateLimits>,
@@ -604,25 +604,14 @@ pub(super) fn messages(body: &[u8]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     /// A saved token belongs to its organization alone. `AZURE_DEVOPS_EXT_PAT` goes only to the
-    /// organization `AZURE_DEVOPS_ORG` names, however it is written, and nowhere without it;
-    /// az's token goes as a bearer to an organization with neither. A token is sent as Basic
-    /// with an empty user.
-    #[cfg(unix)]
+    /// organization `AZURE_DEVOPS_ORG` names, however it is written, and nowhere without it. A
+    /// token is sent as Basic with an empty user.
     #[test]
     fn a_token_goes_only_to_the_organization_it_is_for() {
         use super::*;
         use base64::Engine as _;
-        use std::os::unix::fs::PermissionsExt as _;
         let root = std::env::temp_dir().join(format!("tcode-azure-token-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let az = root.join("az");
-        std::fs::write(
-            &az,
-            "#!/bin/sh\n[ \"$1 $2 $4\" = \"account get-access-token 499b84ac-1321-427f-aa17-267ca6975798\" ] && echo az-secret\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&az, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = ("PATH".to_owned(), root.to_string_lossy().into_owned());
         let store = SettingsStore::new(root.clone());
         let read = |api: &Api, authority: &str| {
             api.credential(authority)
@@ -642,16 +631,11 @@ mod tests {
             },
             basic("env-secret"),
         ));
-        let cli = Some((
-            CredentialSource::Cli { tool: "az".into() },
-            "Bearer az-secret".to_owned(),
-        ));
         let unnamed = Api::new(store.clone(), [pat.clone()]);
         assert_eq!(read(&unnamed, "dev.azure.com/fabrikam"), None);
         let named = Api::new(
             store.clone(),
             [
-                path,
                 pat,
                 (
                     ENV_ORGANIZATION.to_owned(),
@@ -660,7 +644,7 @@ mod tests {
             ],
         );
         assert_eq!(read(&named, "dev.azure.com/fabrikam"), env);
-        assert_eq!(read(&named, "dev.azure.com/contoso"), cli);
+        assert_eq!(read(&named, "dev.azure.com/contoso"), None);
         store
             .set_token(
                 HostKind::Azure,
@@ -673,7 +657,7 @@ mod tests {
             Some((CredentialSource::Saved, basic("contoso-secret")))
         );
         assert_eq!(read(&named, "dev.azure.com/fabrikam"), env);
-        assert_eq!(read(&named, "dev.azure.com/tailspin"), cli);
+        assert_eq!(read(&named, "dev.azure.com/tailspin"), None);
         // A host that is no organization's never gets one, whatever the key carries.
         for elsewhere in [
             "dev.azure.com:x@evil.test",

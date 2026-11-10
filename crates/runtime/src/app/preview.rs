@@ -78,15 +78,6 @@ impl AppState {
     }
 
     pub(crate) fn route_preview(&mut self, broker: preview_mcp::BrokerRequest, cx: &mut HostCx) {
-        self.route_preview_with_timeout(broker, Duration::from_secs(60), cx);
-    }
-
-    pub(crate) fn route_preview_with_timeout(
-        &mut self,
-        broker: preview_mcp::BrokerRequest,
-        timeout: Duration,
-        cx: &mut HostCx,
-    ) {
         let session_id = broker.session_id;
         // The agent's thread need not be on anyone's screen. Without a
         // client that can render it, waiting out the timeout only delays the
@@ -135,7 +126,7 @@ impl AppState {
         }));
         let host = cx.clone();
         cx.spawn_detached(async move {
-            smol::Timer::after(timeout).await;
+            smol::Timer::after(Duration::from_secs(60)).await;
             host.enqueue(move |state, cx| {
                 state.resolve_preview(
                     request_id,

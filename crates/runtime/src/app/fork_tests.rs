@@ -17,10 +17,10 @@ fn host(store: &TestStore, cx: &mut TestAppContext) -> TestEntity {
     cx.new_entity(TestClientState::new((**store).clone()))
 }
 
-/// A thread of `provider`, persisted and resident.
-fn install(state: &mut AppState, provider: ProviderKind, cwd: PathBuf, cx: &mut HostCx) {
+/// A thread `id` of `provider`, persisted and resident.
+fn install(state: &mut AppState, id: &str, provider: ProviderKind, cwd: PathBuf, cx: &mut HostCx) {
     let mut meta = SessionMeta::new(provider, cwd, None);
-    meta.id = SOURCE.into();
+    meta.id = id.into();
     meta.title = "The source".into();
     meta.resume_cursor = Some(agent::ResumeCursor(json!({ "session_id": "native" })));
     state.sessions.push(meta.clone());
@@ -31,7 +31,14 @@ fn install(state: &mut AppState, provider: ProviderKind, cwd: PathBuf, cx: &mut 
         .insert(meta.id.clone(), ActiveSession::new(meta, false, Vec::new()));
 }
 
-fn turn(state: &mut AppState, cx: &mut HostCx, index: usize, prompt: &str, attachments: &[&str]) {
+fn turn(
+    state: &mut AppState,
+    id: &str,
+    cx: &mut HostCx,
+    index: usize,
+    prompt: &str,
+    attachments: &[&str],
+) {
     let turn_id = format!("turn-{index}");
     for event in [
         AgentEvent::ItemCompleted(ThreadItem {
@@ -64,7 +71,7 @@ fn turn(state: &mut AppState, cx: &mut HostCx, index: usize, prompt: &str, attac
             usage: None,
         },
     ] {
-        state.record_event(SOURCE, &event, cx);
+        state.record_event(id, &event, cx);
     }
 }
 
@@ -97,9 +104,9 @@ fn send(
     .0
 }
 
-fn fork_at(turn: usize, checkpoint: &str) -> Value {
+fn fork_at(id: &str, turn: usize, checkpoint: &str) -> Value {
     json!({"type": "fork_thread", "content": {
-        "id": SOURCE, "at": {"turn": turn, "checkpoint_id": checkpoint},
+        "id": id, "at": {"turn": turn, "checkpoint_id": checkpoint},
     }})
 }
 
@@ -112,8 +119,12 @@ fn forked(response: Result<CommandResponse, ProtocolError>) -> String {
 }
 
 fn open_branch(turn: usize, checkpoint: &str) -> Value {
+    open_branch_of(SOURCE, turn, checkpoint)
+}
+
+fn open_branch_of(id: &str, turn: usize, checkpoint: &str) -> Value {
     json!({"type": "open_rewound_branch", "content": {
-        "session_id": SOURCE, "turn": turn, "checkpoint_id": checkpoint,
+        "session_id": id, "turn": turn, "checkpoint_id": checkpoint,
     }})
 }
 
@@ -163,10 +174,10 @@ fn a_fork_through_a_turn_holds_it_and_what_came_before_and_leaves_the_source_alo
         state
     });
     state.update(cx, |state, cx| {
-        install(state, ProviderKind::ClaudeCode, cwd.clone(), cx);
-        turn(state, cx, 0, "first", &[]);
-        turn(state, cx, 1, "second", &["/images/second.png"]);
-        turn(state, cx, 2, "third", &[]);
+        install(state, SOURCE, ProviderKind::ClaudeCode, cwd.clone(), cx);
+        turn(state, SOURCE, cx, 0, "first", &[]);
+        turn(state, SOURCE, cx, 1, "second", &["/images/second.png"]);
+        turn(state, SOURCE, cx, 2, "third", &[]);
         state.record_event(
             SOURCE,
             &AgentEvent::TurnStarted {
@@ -178,7 +189,7 @@ fn a_fork_through_a_turn_holds_it_and_what_came_before_and_leaves_the_source_alo
     cx.run_until_parked();
     let source_log = store.read_event_log(SOURCE).unwrap();
 
-    let session_id = forked(send(&state, cx, 1, fork_at(1, "checkpoint-1")));
+    let session_id = forked(send(&state, cx, 1, fork_at(SOURCE, 1, "checkpoint-1")));
     settled(cx, &session_id);
 
     state.read(|state| {
@@ -245,25 +256,34 @@ fn a_fork_through_a_turn_holds_it_and_what_came_before_and_leaves_the_source_alo
 /// Harness that forks through a turn.
 #[test]
 fn a_fork_through_the_latest_turn_is_the_whole_session() {
-    for provider in [
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-fork-latest");
+    let cwd = store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let state = host(&store, cx);
+    for (case, provider) in [
         ProviderKind::ClaudeCode,
         ProviderKind::Codex,
         ProviderKind::Pi,
         ProviderKind::OpenCode,
         ProviderKind::Grok,
-    ] {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("tcode-fork-latest");
-        let cwd = store.root().join("project");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let state = host(&store, cx);
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("source-{case}");
         state.update(cx, |state, cx| {
-            install(state, provider, cwd, cx);
-            turn(state, cx, 0, "first", &[]);
-            turn(state, cx, 1, "second", &[]);
+            install(state, &id, provider, cwd.clone(), cx);
+            turn(state, &id, cx, 0, "first", &[]);
+            turn(state, &id, cx, 1, "second", &[]);
         });
         cx.run_until_parked();
-        let fork = forked(send(&state, cx, 1, fork_at(1, "checkpoint-1")));
+        let fork = forked(send(
+            &state,
+            cx,
+            case as u64 + 1,
+            fork_at(&id, 1, "checkpoint-1"),
+        ));
         settled(cx, &fork);
         state.read(|state| {
             let fork = &state.residents.live[&fork];
@@ -290,7 +310,12 @@ fn a_fork_through_a_turn_goes_only_where_the_harness_can() {
         InFlight,
     }
     const RUNNING: Then = Then::Prompt { point: true };
-    for (provider, turn_index, checkpoint, then, forks) in [
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-fork-at-refused");
+    let cwd = store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let state = host(&store, cx);
+    for (case, (provider, turn_index, checkpoint, then, forks)) in [
         (
             ProviderKind::ClaudeCode,
             0,
@@ -329,19 +354,19 @@ fn a_fork_through_a_turn_goes_only_where_the_harness_can() {
             Then::InFlight,
             false,
         ),
-    ] {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("tcode-fork-at-refused");
-        let cwd = store.root().join("project");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let state = host(&store, cx);
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("source-{case}");
+        let id = id.as_str();
         state.update(cx, |state, cx| {
-            install(state, provider, cwd, cx);
-            turn(state, cx, 0, "first", &[]);
-            turn(state, cx, 1, "second", &[]);
+            install(state, id, provider, cwd.clone(), cx);
+            turn(state, id, cx, 0, "first", &[]);
+            turn(state, id, cx, 1, "second", &[]);
             match then {
                 Then::Nothing => {}
-                Then::InFlight => state.resident_mut(SOURCE).unwrap().turn_in_flight = true,
+                Then::InFlight => state.resident_mut(id).unwrap().turn_in_flight = true,
                 Then::Prompt { point } => {
                     let prompt = AgentEvent::ItemCompleted(ThreadItem {
                         id: "user-2".into(),
@@ -352,23 +377,28 @@ fn a_fork_through_a_turn_goes_only_where_the_harness_can() {
                             attachments: Vec::new(),
                         },
                     });
-                    state.record_event(SOURCE, &prompt, cx);
+                    state.record_event(id, &prompt, cx);
                     let started = AgentEvent::TurnStarted {
                         turn_id: "turn-2".into(),
                     };
-                    state.record_event(SOURCE, &started, cx);
+                    state.record_event(id, &started, cx);
                     if point {
                         let checkpoint = AgentEvent::TurnCheckpoint {
                             turn_id: "turn-2".into(),
                             checkpoint_id: "checkpoint-2".into(),
                         };
-                        state.record_event(SOURCE, &checkpoint, cx);
+                        state.record_event(id, &checkpoint, cx);
                     }
                 }
             }
         });
         cx.run_until_parked();
-        match send(&state, cx, 1, fork_at(turn_index, checkpoint)) {
+        match send(
+            &state,
+            cx,
+            case as u64 + 1,
+            fork_at(id, turn_index, checkpoint),
+        ) {
             Ok(CommandResponse::SessionId(Some(_))) => assert!(forks, "{provider:?} {turn_index}"),
             Err(error) => {
                 assert!(!forks, "{provider:?} {turn_index}");
@@ -391,18 +421,18 @@ fn a_fork_after_a_rewind_holds_what_the_rewind_left() {
     std::fs::create_dir_all(&cwd).unwrap();
     let state = host(&store, cx);
     state.update(cx, |state, cx| {
-        install(state, ProviderKind::ClaudeCode, cwd, cx);
-        turn(state, cx, 0, "first", &[]);
-        turn(state, cx, 1, "taken out", &[]);
+        install(state, SOURCE, ProviderKind::ClaudeCode, cwd.clone(), cx);
+        turn(state, SOURCE, cx, 0, "first", &[]);
+        turn(state, SOURCE, cx, 1, "taken out", &[]);
         state.record_event(
             SOURCE,
             &rewound("checkpoint-1", agent::LaterHistory::Truncated, None),
             cx,
         );
-        turn(state, cx, 2, "sent again", &[]);
+        turn(state, SOURCE, cx, 2, "sent again", &[]);
     });
     cx.run_until_parked();
-    let session_id = forked(send(&state, cx, 1, fork_at(0, "checkpoint-0")));
+    let session_id = forked(send(&state, cx, 1, fork_at(SOURCE, 0, "checkpoint-0")));
     settled(cx, &session_id);
     state.read(|state| {
         let fork = &state.residents.live[&session_id];
@@ -414,27 +444,27 @@ fn a_fork_after_a_rewind_holds_what_the_rewind_left() {
         );
     });
 
-    for (later_history, undo, forks) in [
+    for (case, (later_history, undo, forks)) in [
         (agent::LaterHistory::Truncated, None, true),
         (
             agent::LaterHistory::HiddenUntilNextSend,
             Some("revert"),
             false,
         ),
-    ] {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("tcode-fork-after-rewind-unsent");
-        let cwd = store.root().join("project");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let state = host(&store, cx);
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("unsent-{case}");
+        let id = id.as_str();
         state.update(cx, |state, cx| {
-            install(state, ProviderKind::ClaudeCode, cwd, cx);
-            turn(state, cx, 0, "first", &[]);
-            turn(state, cx, 1, "taken out", &[]);
-            state.record_event(SOURCE, &rewound("checkpoint-1", later_history, undo), cx);
+            install(state, id, ProviderKind::ClaudeCode, cwd.clone(), cx);
+            turn(state, id, cx, 0, "first", &[]);
+            turn(state, id, cx, 1, "taken out", &[]);
+            state.record_event(id, &rewound("checkpoint-1", later_history, undo), cx);
         });
         cx.run_until_parked();
-        let answer = send(&state, cx, 1, fork_at(0, "checkpoint-0"));
+        let answer = send(&state, cx, case as u64 + 2, fork_at(id, 0, "checkpoint-0"));
         assert_eq!(answer.is_ok(), forks, "{later_history:?}");
     }
 }
@@ -450,12 +480,12 @@ fn a_fork_of_a_fork_not_started_keeps_its_point() {
     std::fs::create_dir_all(&cwd).unwrap();
     let state = host(&store, cx);
     state.update(cx, |state, cx| {
-        install(state, ProviderKind::ClaudeCode, cwd, cx);
-        turn(state, cx, 0, "first", &[]);
-        turn(state, cx, 1, "second", &[]);
+        install(state, SOURCE, ProviderKind::ClaudeCode, cwd, cx);
+        turn(state, SOURCE, cx, 0, "first", &[]);
+        turn(state, SOURCE, cx, 1, "second", &[]);
     });
     cx.run_until_parked();
-    let session_id = forked(send(&state, cx, 1, fork_at(0, "checkpoint-0")));
+    let session_id = forked(send(&state, cx, 1, fork_at(SOURCE, 0, "checkpoint-0")));
     settled(cx, &session_id);
     let again = [
         json!({"type": "fork_thread", "content": {"id": session_id}}),
@@ -489,10 +519,10 @@ fn the_branch_a_rewind_left_opens_as_a_thread_of_its_own_after_the_next_send() {
     std::fs::create_dir_all(&cwd).unwrap();
     let state = host(&store, cx);
     state.update(cx, |state, cx| {
-        install(state, ProviderKind::Pi, cwd, cx);
-        turn(state, cx, 0, "first", &[]);
-        turn(state, cx, 1, "second", &[]);
-        turn(state, cx, 2, "third", &[]);
+        install(state, SOURCE, ProviderKind::Pi, cwd, cx);
+        turn(state, SOURCE, cx, 0, "first", &[]);
+        turn(state, SOURCE, cx, 1, "second", &[]);
+        turn(state, SOURCE, cx, 2, "third", &[]);
         state.record_event(
             SOURCE,
             &rewound("checkpoint-1", agent::LaterHistory::Branch, Some(LEFT)),
@@ -505,8 +535,8 @@ fn the_branch_a_rewind_left_opens_as_a_thread_of_its_own_after_the_next_send() {
     assert_eq!(refused.code, "rewind_unavailable", "the undo is still open");
 
     state.update(cx, |state, cx| {
-        turn(state, cx, 3, "second, edited", &[]);
-        turn(state, cx, 4, "and on", &[]);
+        turn(state, SOURCE, cx, 3, "second, edited", &[]);
+        turn(state, SOURCE, cx, 4, "and on", &[]);
     });
     cx.run_until_parked();
     let source_log = store.read_event_log(SOURCE).unwrap();
@@ -543,7 +573,7 @@ fn the_branch_a_rewind_left_opens_as_a_thread_of_its_own_after_the_next_send() {
         CommandResponse::SessionId(Some(branch.clone())),
     );
 
-    let session_id = forked(send(&state, cx, 4, fork_at(1, "checkpoint-3")));
+    let session_id = forked(send(&state, cx, 4, fork_at(SOURCE, 1, "checkpoint-3")));
     settled(cx, &session_id);
     state.read(|state| {
         let carried = state.residents.live[&session_id]
@@ -561,24 +591,35 @@ fn the_branch_a_rewind_left_opens_as_a_thread_of_its_own_after_the_next_send() {
 /// the branch of a rewind that left one, never another's.
 #[test]
 fn a_rewind_that_left_no_branch_opens_nothing() {
-    for (later_history, undo) in [
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-no-branch");
+    let cwd = store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let state = host(&store, cx);
+    for (case, (later_history, undo)) in [
         (agent::LaterHistory::Truncated, None),
         (agent::LaterHistory::HiddenUntilNextSend, Some("revert")),
-    ] {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("tcode-no-branch");
-        let cwd = store.root().join("project");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let state = host(&store, cx);
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("source-{case}");
+        let id = id.as_str();
         state.update(cx, |state, cx| {
-            install(state, ProviderKind::OpenCode, cwd, cx);
-            turn(state, cx, 0, "first", &[]);
-            turn(state, cx, 1, "second", &[]);
-            state.record_event(SOURCE, &rewound("checkpoint-1", later_history, undo), cx);
-            turn(state, cx, 2, "again", &[]);
+            install(state, id, ProviderKind::OpenCode, cwd.clone(), cx);
+            turn(state, id, cx, 0, "first", &[]);
+            turn(state, id, cx, 1, "second", &[]);
+            state.record_event(id, &rewound("checkpoint-1", later_history, undo), cx);
+            turn(state, id, cx, 2, "again", &[]);
         });
         cx.run_until_parked();
-        let refused = send(&state, cx, 1, open_branch(1, "checkpoint-1")).unwrap_err();
+        let refused = send(
+            &state,
+            cx,
+            case as u64 + 1,
+            open_branch_of(id, 1, "checkpoint-1"),
+        )
+        .unwrap_err();
         assert_eq!(refused.code, "rewind_unavailable");
     }
 }
@@ -599,10 +640,10 @@ fn a_branch_opened_after_two_rewinds_cannot_return_to_the_earlier_one() {
     std::fs::create_dir_all(&cwd).unwrap();
     let state = host(&store, cx);
     state.update(cx, |state, cx| {
-        install(state, ProviderKind::Pi, cwd, cx);
-        turn(state, cx, 0, "first", &[]);
-        turn(state, cx, 1, "second", &[]);
-        turn(state, cx, 2, "third", &[]);
+        install(state, SOURCE, ProviderKind::Pi, cwd, cx);
+        turn(state, SOURCE, cx, 0, "first", &[]);
+        turn(state, SOURCE, cx, 1, "second", &[]);
+        turn(state, SOURCE, cx, 2, "third", &[]);
         state.record_event(
             SOURCE,
             &rewound("checkpoint-2", agent::LaterHistory::Branch, Some(EARLIER)),
@@ -613,7 +654,7 @@ fn a_branch_opened_after_two_rewinds_cannot_return_to_the_earlier_one() {
             &rewound("checkpoint-1", agent::LaterHistory::Branch, Some(LATER)),
             cx,
         );
-        turn(state, cx, 3, "second, edited", &[]);
+        turn(state, SOURCE, cx, 3, "second, edited", &[]);
     });
     cx.run_until_parked();
 
@@ -685,15 +726,15 @@ fn the_branch_a_branch_thread_left_opens_again_as_a_thread_of_its_own() {
     std::fs::create_dir_all(&cwd).unwrap();
     let state = host(&store, cx);
     state.update(cx, |state, cx| {
-        install(state, ProviderKind::Pi, cwd, cx);
-        turn(state, cx, 0, "first", &[]);
-        turn(state, cx, 1, "second", &[]);
+        install(state, SOURCE, ProviderKind::Pi, cwd, cx);
+        turn(state, SOURCE, cx, 0, "first", &[]);
+        turn(state, SOURCE, cx, 1, "second", &[]);
         state.record_event(
             SOURCE,
             &rewound("checkpoint-1", agent::LaterHistory::Branch, Some(LEFT)),
             cx,
         );
-        turn(state, cx, 2, "second, edited", &[]);
+        turn(state, SOURCE, cx, 2, "second, edited", &[]);
     });
     cx.run_until_parked();
     let CommandResponse::SessionId(Some(branch)) =
@@ -787,20 +828,20 @@ fn background_work_open_at_a_fork_point_ends_as_interrupted_in_the_fork() {
             })
             .unwrap()
     }
-    let forks = [
-        json!({"type": "fork_thread", "content": {"id": SOURCE}}),
-        fork_at(0, "checkpoint-0"),
-    ];
-    for command in forks {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("tcode-fork-background");
-        let cwd = store.root().join("project");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let state = host(&store, cx);
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-fork-background");
+    let cwd = store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let state = host(&store, cx);
+    for (case, id) in ["whole", "through"].into_iter().enumerate() {
+        let command = match id {
+            "whole" => json!({"type": "fork_thread", "content": {"id": id}}),
+            _ => fork_at(id, 0, "checkpoint-0"),
+        };
         state.update(cx, |state, cx| {
-            install(state, ProviderKind::ClaudeCode, cwd, cx);
+            install(state, id, ProviderKind::ClaudeCode, cwd.clone(), cx);
             state.record_event(
-                SOURCE,
+                id,
                 &AgentEvent::ItemCompleted(ThreadItem {
                     id: "user-0".into(),
                     parent_item_id: None,
@@ -840,14 +881,14 @@ fn background_work_open_at_a_fork_point_ends_as_interrupted_in_the_fork() {
                     usage: None,
                 },
             ] {
-                state.record_event(SOURCE, &event, cx);
+                state.record_event(id, &event, cx);
             }
-            turn(state, cx, 1, "second", &[]);
+            turn(state, id, cx, 1, "second", &[]);
         });
         cx.run_until_parked();
-        let source_log = store.read_event_log(SOURCE).unwrap();
+        let source_log = store.read_event_log(id).unwrap();
 
-        let fork = forked(send(&state, cx, 1, command));
+        let fork = forked(send(&state, cx, case as u64 + 1, command));
         settled(cx, &fork);
 
         state.read(|state| {
@@ -856,12 +897,12 @@ fn background_work_open_at_a_fork_point_ends_as_interrupted_in_the_fork() {
                 (ItemStatus::Interrupted, true)
             );
             assert_eq!(
-                status(&state.residents.live[SOURCE]),
+                status(&state.residents.live[id]),
                 (ItemStatus::InProgress, false),
                 "the source's work goes on"
             );
             assert!(state.residents.live[&fork].meta.pending_fork.is_some());
         });
-        assert_eq!(store.read_event_log(SOURCE).unwrap(), source_log);
+        assert_eq!(store.read_event_log(id).unwrap(), source_log);
     }
 }

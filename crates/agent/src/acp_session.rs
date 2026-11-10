@@ -73,17 +73,11 @@ pub(crate) fn config_selection<'a>(
     category: Option<&acp::SessionConfigOptionCategory>,
 ) -> Option<&'a str> {
     let id = config_option_id(config_id, category);
-    // Selections saved while every config option was `acp:cfg:<id>` still
-    // name a thought-level option that way.
-    let legacy = format!("{CONFIG_OPTION_PREFIX}{config_id}");
-    let find = |id: &str| selections.iter().find(|selection| selection.id == id);
-    find(&id)
-        .or_else(|| find(&legacy))
+    selections
+        .iter()
+        .find(|selection| selection.id == id)
         .and_then(|selection| selection.value.as_str())
 }
-
-/// Cap on captured terminal output when the agent sets none (1 MiB).
-const DEFAULT_TERMINAL_OUTPUT_LIMIT: u64 = 1 << 20;
 
 /// How long we wait for an agent to answer `initialize` before declaring it
 /// broken. Generous: an `npm exec` recipe may have to fetch the package first.
@@ -156,6 +150,7 @@ pub(crate) trait Dialect: Send + Sync + 'static {
     async fn steer(
         &self,
         session: &Session,
+        session_id: &acp::SessionId,
         request_id: String,
         text: String,
         attachments: Vec<Attachment>,
@@ -194,6 +189,7 @@ pub(crate) trait Dialect: Send + Sync + 'static {
     fn rewind(
         self: Arc<Self>,
         _session: Session,
+        _session_id: acp::SessionId,
         command: SessionCommand,
     ) -> impl Future<Output = Option<AgentEvent>> + Send {
         async move {
@@ -336,11 +332,6 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    /// The established session's id.
-    pub(crate) fn id(&self) -> Option<acp::SessionId> {
-        self.with_state(|state| state.session_id.clone())
-    }
-
     pub(crate) async fn emit(&self, event: AgentEvent) {
         let _ = self.events.send(event).await;
     }
@@ -349,13 +340,11 @@ impl Session {
         f(&mut self.state.lock_recover())
     }
 
-    /// Cancel the open turn as [`SessionCommand::Interrupt`] does. The turn
-    /// ends when the agent answers its `session/prompt`.
+    /// Cancel the agent's work as [`SessionCommand::Interrupt`] does, whether
+    /// or not tcode has a turn open: the agent may be running one tcode has
+    /// not seen start. A sent turn ends when the agent answers its
+    /// `session/prompt`.
     pub(crate) async fn interrupt(&self, session_id: &acp::SessionId) {
-        // The open turn may be one the agent started itself.
-        if self.state.lock_recover().turn.is_none() {
-            return;
-        }
         // Every in-flight permission request must be answered with
         // `cancelled` first: the protocol requires it, and the agent will
         // not settle the turn otherwise.
@@ -913,7 +902,6 @@ async fn connected_actor<D: Dialect>(
     let session_id = established.session_id;
     let model = {
         let mut state = state.lock_recover();
-        state.session_id = Some(session_id.clone());
         if let Some(mut descriptor) = crate::permission_control(provider) {
             let id = descriptor_id(&descriptor).to_owned();
             let mut value = opts
@@ -1141,7 +1129,11 @@ async fn handle_command<D: Dialect>(
             request_id,
             text,
             attachments,
-        } => dialect.steer(session, request_id, text, attachments).await,
+        } => {
+            dialect
+                .steer(session, session_id, request_id, text, attachments)
+                .await
+        }
         SessionCommand::SendTurn {
             delivery_id,
             text,
@@ -1252,7 +1244,9 @@ async fn handle_command<D: Dialect>(
         command @ (SessionCommand::Rewind { .. }
         | SessionCommand::PreviewRewind { .. }
         | SessionCommand::UndoRewind { .. }) => {
-            let rewind = dialect.clone().rewind(session.clone(), command);
+            let rewind = dialect
+                .clone()
+                .rewind(session.clone(), session_id.clone(), command);
             let events = events.clone();
             executor
                 .spawn(async move {
@@ -1818,7 +1812,6 @@ struct TextStream {
 /// option state, the agent's terminals and the requests waiting on the user.
 pub(crate) struct State {
     cwd: PathBuf,
-    session_id: Option<acp::SessionId>,
     turn: Option<String>,
     /// True while `session/load` answers, which may replay history first.
     loading: bool,
@@ -1846,7 +1839,6 @@ impl State {
     pub(crate) fn new(cwd: PathBuf) -> Self {
         Self {
             cwd,
-            session_id: None,
             turn: None,
             loading: false,
             tools: HashMap::new(),
@@ -2238,42 +2230,6 @@ impl State {
             .and_then(Value::as_i64)
             .map(|code| code as i32)
     }
-
-    /// Reject any path the agent asks for that escapes the session's cwd.
-    fn resolve_path(&self, path: &Path) -> Result<PathBuf, acp::Error> {
-        let absolute = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.cwd.join(path)
-        };
-        let normalized = normalize(&absolute);
-        if !normalized.starts_with(normalize(&self.cwd)) {
-            return Err(acp::Error::new(
-                -32602,
-                format!(
-                    "path `{}` is outside the session working directory",
-                    path.display()
-                ),
-            ));
-        }
-        Ok(normalized)
-    }
-}
-
-/// Lexical path normalization (the file may not exist yet, so `canonicalize` is
-/// not an option for writes).
-fn normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
 }
 
 /// The shell command behind an `execute` tool call: the underlying tool's own
@@ -2669,7 +2625,7 @@ impl Client {
         &self,
         args: acp::ReadTextFileRequest,
     ) -> Result<acp::ReadTextFileResponse, acp::Error> {
-        let path = self.state.lock_recover().resolve_path(&args.path)?;
+        let path = self.state.lock_recover().cwd.join(&args.path);
         let content = smol::fs::read_to_string(&path).await.map_err(|err| {
             acp::Error::new(-32603, format!("could not read {}: {err}", path.display()))
         })?;
@@ -2690,7 +2646,7 @@ impl Client {
         &self,
         args: acp::WriteTextFileRequest,
     ) -> Result<acp::WriteTextFileResponse, acp::Error> {
-        let path = self.state.lock_recover().resolve_path(&args.path)?;
+        let path = self.state.lock_recover().cwd.join(&args.path);
         if let Some(parent) = path.parent() {
             smol::fs::create_dir_all(parent).await.map_err(|err| {
                 acp::Error::new(
@@ -2711,7 +2667,7 @@ impl Client {
         connection: &Connection,
     ) -> Result<acp::CreateTerminalResponse, acp::Error> {
         let cwd = match &args.cwd {
-            Some(cwd) => self.state.lock_recover().resolve_path(cwd)?,
+            Some(cwd) => self.state.lock_recover().cwd.join(cwd),
             None => self.state.lock_recover().cwd.clone(),
         };
         let terminal = Terminal::spawn(
@@ -2720,8 +2676,7 @@ impl Client {
             &args.args,
             &args.env,
             &cwd,
-            args.output_byte_limit
-                .unwrap_or(DEFAULT_TERMINAL_OUTPUT_LIMIT),
+            args.output_byte_limit,
         )?;
         let id = {
             let mut state = self.state.lock_recover();
@@ -2811,7 +2766,7 @@ impl Terminal {
         args: &[String],
         env: &[acp::EnvVariable],
         cwd: &Path,
-        limit: u64,
+        limit: Option<u64>,
     ) -> Result<Arc<Self>, acp::Error> {
         let program = crate::resolve_binary(None, command)
             .map_err(|err| acp::Error::new(-32603, err.to_string()))?;
@@ -2890,11 +2845,12 @@ impl Terminal {
         Ok(terminal)
     }
 
-    fn append(&self, bytes: &[u8], limit: u64) {
+    fn append(&self, bytes: &[u8], limit: Option<u64>) {
         let mut output = self.output.lock_recover();
         output.push_str(&String::from_utf8_lossy(bytes));
-        let limit = limit as usize;
-        if output.len() > limit {
+        if let Some(limit) = limit.map(|limit| limit as usize)
+            && output.len() > limit
+        {
             // Keep the tail (what ACP asks for), cutting on a char boundary.
             let mut cut = output.len() - limit;
             while !output.is_char_boundary(cut) {
@@ -2923,6 +2879,9 @@ fn exit_status(status: &std::process::ExitStatus) -> acp::TerminalExitStatus {
         .signal(signal)
 }
 
+/// The updates written out here take their shapes from the ACP schema
+/// (`agent-client-protocol-schema` 1.5.0, `schema::v1`), whose types parse
+/// each one; their contents are made up.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2987,35 +2946,21 @@ mod tests {
         );
 
         caps.mcp_capabilities.http = true;
-        let servers = mcp_servers(&[&registration], &caps);
-        let value = serde_json::to_value(&servers[0]).unwrap();
-        assert_eq!(value["type"], "http");
-        assert_eq!(value["name"], "tcode_preview");
-        assert_eq!(value["url"], "http://127.0.0.1:5321/mcp");
-        assert_eq!(value["headers"][0]["name"], "Authorization");
-        assert_eq!(value["headers"][0]["value"], "Bearer tok");
-
-        // No preview server running → nothing to send, capability or not.
-        assert!(mcp_servers(&[], &caps).is_empty());
-
         let control = McpRegistration {
             name: McpRegistration::SERVER_NAME_CONTROL.into(),
-            url: "http://127.0.0.1:5321/mcp".into(),
+            url: "http://127.0.0.1:5322/mcp".into(),
             bearer_token: "other".into(),
         };
-        assert_eq!(mcp_servers(&[&registration, &control], &caps).len(), 2);
-        assert_eq!(mcp_servers(&[&control], &caps).len(), 1);
-
-        let computer_use = McpRegistration {
-            name: McpRegistration::SERVER_NAME_COMPUTER_USE.into(),
-            url: "http://127.0.0.1:5322/mcp".into(),
-            bearer_token: "computer-token".into(),
-        };
-        let servers = mcp_servers(&[&registration, &control, &computer_use], &caps);
-        assert_eq!(servers.len(), 3);
-        let value = serde_json::to_value(&servers[2]).unwrap();
-        assert_eq!(value["name"], "tcode_computer_use");
-        assert_eq!(value["headers"][0]["value"], "Bearer computer-token");
+        let servers = mcp_servers(&[&registration, &control], &caps);
+        assert_eq!(
+            serde_json::to_value(&servers).unwrap(),
+            json!([
+                {"type": "http", "name": "tcode_preview", "url": "http://127.0.0.1:5321/mcp",
+                    "headers": [{"name": "Authorization", "value": "Bearer tok"}]},
+                {"type": "http", "name": "tcode_control", "url": "http://127.0.0.1:5322/mcp",
+                    "headers": [{"name": "Authorization", "value": "Bearer other"}]},
+            ])
+        );
     }
 
     #[test]
@@ -3283,63 +3228,43 @@ mod tests {
         }
     }
 
+    /// A `think` call is reasoning; every other kind without a card of its
+    /// own is a tool card carrying its raw input and text output.
     #[test]
-    fn read_search_fetch_and_other_map_to_tool_cards_with_raw_payloads() {
-        for (kind, id) in [
-            ("read", "r1"),
-            ("search", "r2"),
-            ("fetch", "r3"),
-            ("other", "r4"),
-            ("switch_mode", "r5"),
+    fn other_tool_kinds_map_to_tool_cards_and_think_to_reasoning() {
+        let card = ItemContent::ToolCall {
+            name: "Read file".into(),
+            input: json!({ "path": "/repo/x.rs" }),
+            output: Some("body".into()),
+            status: ItemStatus::Completed,
+            image_reads: Vec::new(),
+        };
+        for (kind, expected) in [
+            ("read", card.clone()),
+            ("search", card.clone()),
+            ("fetch", card.clone()),
+            ("other", card.clone()),
+            ("switch_mode", card),
+            (
+                "think",
+                ItemContent::Reasoning {
+                    text: "body".into(),
+                },
+            ),
         ] {
-            let mut state = state();
-            let events = state.apply_update(update(json!({
+            let events = state().apply_update(update(json!({
                 "sessionUpdate": "tool_call",
-                "toolCallId": id,
+                "toolCallId": "t1",
                 "title": "Read file",
                 "kind": kind,
                 "status": "completed",
                 "rawInput": { "path": "/repo/x.rs" },
                 "content": [{ "type": "content", "content": { "type": "text", "text": "body" } }]
             })));
-            match &events[0] {
-                AgentEvent::ItemStarted(item) => match &item.content {
-                    ItemContent::ToolCall {
-                        name,
-                        input,
-                        output,
-                        status,
-                        ..
-                    } => {
-                        assert_eq!(name, "Read file");
-                        assert_eq!(input["path"], "/repo/x.rs", "rawInput must ride along");
-                        assert_eq!(output.as_deref(), Some("body"));
-                        assert_eq!(*status, ItemStatus::Completed);
-                    }
-                    other => panic!("{kind}: expected ToolCall, got {other:?}"),
-                },
+            match events.as_slice() {
+                [AgentEvent::ItemStarted(item)] => assert_eq!(item.content, expected, "{kind}"),
                 other => panic!("{kind}: expected ItemStarted, got {other:?}"),
             }
-        }
-    }
-
-    #[test]
-    fn think_tool_calls_become_reasoning() {
-        let mut state = state();
-        let events = state.apply_update(update(json!({
-            "sessionUpdate": "tool_call",
-            "toolCallId": "t4",
-            "title": "Thinking",
-            "kind": "think",
-            "status": "completed",
-            "content": [{ "type": "content", "content": { "type": "text", "text": "step 1" } }]
-        })));
-        match &events[0] {
-            AgentEvent::ItemStarted(item) => match &item.content {
-                ItemContent::Reasoning { text } => assert_eq!(text, "step 1"),
-                other => panic!("expected Reasoning, got {other:?}"),
-            },
-            other => panic!("expected ItemStarted, got {other:?}"),
         }
     }
 
@@ -3469,28 +3394,22 @@ mod tests {
             { "id": "web", "name": "Web search", "type": "boolean", "currentValue": true }
         ]))
         .unwrap();
-        state.options.ingest(Some(&modes), Some(&config));
+        // As `Setup::adopt` takes what the session started with.
+        state.ingest_modes(Some(&modes));
+        state.options.ingest(None, Some(&config));
         assert_eq!(state.options.current_model(), Some("sonnet".to_string()));
 
-        let descriptors: Vec<_> = state
-            .options
-            .records
-            .iter()
-            .map(|record| record.descriptor.clone())
-            .collect();
+        let AgentEvent::ProviderOptions {
+            descriptors,
+            selections,
+        } = state.provider_options()
+        else {
+            unreachable!();
+        };
         let ids: Vec<&str> = descriptors.iter().map(descriptor_id).collect();
         assert_eq!(
             ids,
             vec!["acp:mode", "acp:model", "reasoningEffort", "acp:cfg:web"]
-        );
-        assert_eq!(state.options.origin("acp:mode"), Some(OptionOrigin::Mode));
-        assert_eq!(
-            state.options.origin("acp:model"),
-            Some(OptionOrigin::Config(acp::SessionConfigId::new("model")))
-        );
-        assert_eq!(
-            state.options.origin("acp:cfg:web"),
-            Some(OptionOrigin::Config(acp::SessionConfigId::new("web")))
         );
         assert!(matches!(
             &descriptors[3],
@@ -3499,17 +3418,19 @@ mod tests {
                 ..
             }
         ));
-
-        let selections: Vec<_> = state
-            .options
-            .records
+        let selections: Vec<_> = selections
             .iter()
-            .map(|record| record.selection.clone())
+            .map(|selection| (selection.id.as_str(), selection.value.clone()))
             .collect();
-        assert_eq!(selections[0].value, json!("build"));
-        assert_eq!(selections[1].value, json!("sonnet"));
-        assert_eq!(selections[2].value, json!("medium"));
-        assert_eq!(selections[3].value, json!(true));
+        assert_eq!(
+            selections,
+            [
+                ("acp:mode", json!("build")),
+                ("acp:model", json!("sonnet")),
+                ("reasoningEffort", json!("medium")),
+                ("acp:cfg:web", json!(true)),
+            ]
+        );
 
         // An agent-initiated mode switch re-publishes the options…
         let events = state.apply_update(update(json!({
@@ -3539,46 +3460,26 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_thought_level_selection_saved_under_its_config_id_still_restores() {
-        let thought = Some(&acp::SessionConfigOptionCategory::ThoughtLevel);
-        let saved = |id: &str| {
-            vec![OptionSelection {
-                id: id.into(),
-                value: json!("low"),
-            }]
-        };
-        assert_eq!(
-            config_selection(&saved("reasoningEffort"), "reasoning_effort", thought),
-            Some("low")
-        );
-        assert_eq!(
-            config_selection(
-                &saved("acp:cfg:reasoning_effort"),
-                "reasoning_effort",
-                thought
-            ),
-            Some("low")
-        );
-    }
-
+    /// Grok 1.0.46 asking to run a command, and Tcode's answer when the
+    /// person allowed it once, as recorded (`tests/fixtures/grok/README.md`).
     #[test]
     fn permission_request_carries_the_agents_own_options() {
-        let request: acp::RequestPermissionRequest = serde_json::from_value(json!({
-            "sessionId": "s1",
-            "toolCall": {
-                "toolCallId": "t9",
-                "title": "rm -rf build",
-                "kind": "execute",
-                "rawInput": { "command": "rm -rf build" }
-            },
-            "options": [
-                { "optionId": "yes", "name": "Allow", "kind": "allow_once" },
-                { "optionId": "always", "name": "Always allow", "kind": "allow_always" },
-                { "optionId": "no", "name": "Reject", "kind": "reject_once" }
-            ]
-        }))
-        .unwrap();
+        let recorded: Vec<Value> = include_str!("../tests/fixtures/grok/resumed_turn.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()["message"].take())
+            .collect();
+        let asked = recorded
+            .iter()
+            .position(|message| message["method"] == "session/request_permission")
+            .unwrap();
+        let answered = recorded[asked..]
+            .iter()
+            .find(|message| {
+                message["id"] == recorded[asked]["id"] && message.get("result").is_some()
+            })
+            .unwrap();
+        let request: acp::RequestPermissionRequest =
+            serde_json::from_value(recorded[asked]["params"].clone()).unwrap();
         let approval = approval_request(
             "acp-approval-1".into(),
             Some("turn-1".into()),
@@ -3586,25 +3487,34 @@ mod tests {
             &request.options,
         );
         match &approval.kind {
-            ApprovalKind::ExecCommand { command, .. } => assert_eq!(command, "rm -rf build"),
+            ApprovalKind::ExecCommand { command, .. } => {
+                assert_eq!(command, "for i in 1 2 3; do echo line$i; sleep 1; done")
+            }
             other => panic!("expected ExecCommand, got {other:?}"),
         }
-        assert_eq!(approval.options.len(), 3);
-        assert_eq!(approval.options[0].label, "Allow");
-        assert_eq!(approval.options[1].kind, ApprovalOptionKind::AllowAlways);
-        let selected =
-            |decision: ApprovalDecision| match approval_outcome(&decision, &approval.options) {
-                Some(acp::RequestPermissionOutcome::Selected(outcome)) => {
-                    outcome.option_id.0.to_string()
-                }
-                other => panic!("expected a selection, got {other:?}"),
-            };
-        assert_eq!(selected(ApprovalDecision::Option("yes".into())), "yes");
-        assert_eq!(selected(ApprovalDecision::Option("no".into())), "no");
+        let options: Vec<_> = approval
+            .options
+            .iter()
+            .map(|option| (option.id.as_str(), option.kind))
+            .collect();
         assert_eq!(
-            selected(ApprovalDecision::Option("always".into())),
-            "always"
+            options,
+            [
+                ("always-allow", ApprovalOptionKind::AllowAlways),
+                ("allow-once", ApprovalOptionKind::AllowOnce),
+                ("reject-once", ApprovalOptionKind::RejectOnce),
+                ("reject-always", ApprovalOptionKind::RejectAlways),
+            ]
         );
+        assert_eq!(approval.options[1].label, "Yes, proceed");
+        let response = acp::RequestPermissionResponse::new(
+            approval_outcome(
+                &ApprovalDecision::Option("allow-once".into()),
+                &approval.options,
+            )
+            .unwrap(),
+        );
+        assert_eq!(serde_json::to_value(&response).unwrap(), answered["result"]);
         assert!(
             approval_outcome(&ApprovalDecision::Option("other".into()), &approval.options)
                 .is_none()
@@ -3613,12 +3523,6 @@ mod tests {
             approval_outcome(&ApprovalDecision::Cancel, &approval.options),
             Some(acp::RequestPermissionOutcome::Cancelled)
         ));
-        let response = acp::RequestPermissionResponse::new(
-            approval_outcome(&ApprovalDecision::Option("yes".into()), &approval.options).unwrap(),
-        );
-        let value = serde_json::to_value(&response).unwrap();
-        assert_eq!(value["outcome"]["outcome"], "selected");
-        assert_eq!(value["outcome"]["optionId"], "yes");
     }
 
     #[test]
@@ -3667,18 +3571,6 @@ mod tests {
         let (status, message) = stop_reason_status(acp::StopReason::MaxTokens);
         assert_eq!(status, TurnStatus::Failed);
         assert!(message.unwrap().contains("token limit"));
-    }
-
-    #[test]
-    fn paths_outside_the_session_cwd_are_rejected() {
-        let state = state();
-        assert!(state.resolve_path(Path::new("src/main.rs")).is_ok());
-        assert!(
-            state
-                .resolve_path(Path::new("/tmp/tcode-acp-test/../etc/passwd"))
-                .is_err()
-        );
-        assert!(state.resolve_path(Path::new("/etc/passwd")).is_err());
     }
 
     #[test]

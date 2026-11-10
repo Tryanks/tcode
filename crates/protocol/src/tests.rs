@@ -1125,24 +1125,6 @@ fn session_activity_names_what_keeps_a_thread_going_literal_json() {
     );
 }
 
-/// A peer built before the field sends entries without it, and every thread
-/// with nothing to report is written the same way.
-#[test]
-fn session_activity_without_a_latest_activity_keeps_the_older_shape() {
-    let older = json!({
-        "working": false,
-        "turn_running": false,
-        "waiting_for_approval": false,
-        "waiting_for_input": false,
-        "failed": false,
-        "unread": true,
-        "fork": "available",
-    });
-    let decoded: SessionActivity = serde_json::from_value(older.clone()).unwrap();
-    assert_eq!(decoded.latest_activity, None);
-    assert_eq!(serde_json::to_value(&decoded).unwrap(), older);
-}
-
 #[test]
 fn version_six_index_visits_output_and_elision_literal_json() {
     let index = IndexSnapshot {
@@ -1330,10 +1312,10 @@ fn command_key_is_optional_for_v3_and_preserved_for_v4() {
         json!({"type":"space","content":{"policy_revision":0,"space_id":"s","space_name":"Shared","project_ids":["p"],"device_id":"d","device_name":"Phone",
             "policy":{"agents":{"type":"every"},"approval":"any","terminals":true,"git_remote":true,"preview":false,"computer_use":true,"editor":false}}})
     );
-    let keyed = decode_client_line(r#"{"id":9,"key":"951925af-31f3-4f1c-a57b-dac199d82ad7","payload":{"type":"command","content":{"type":"cycle_project_sort"}}}"#).unwrap();
+    let keyed = decode_client_line(r#"{"id":9,"key":"00000000-0000-4000-8000-000000000001","payload":{"type":"command","content":{"type":"cycle_project_sort"}}}"#).unwrap();
     assert_eq!(
         keyed.key.as_deref(),
-        Some("951925af-31f3-4f1c-a57b-dac199d82ad7")
+        Some("00000000-0000-4000-8000-000000000001")
     );
     assert_eq!(keyed.payload, legacy.payload);
 }

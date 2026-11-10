@@ -71,11 +71,8 @@ pub async fn list_models(
         let mut server = Server::spawn(binary_path.as_deref(), &cwd, &launch_env, &[], &[])?;
         let result = (|| {
             let models = server.http.get("/api/model")?;
-            let default = server.http.get("/api/model/default").ok();
-            Ok(map_models(
-                &models["data"],
-                default.as_ref().map(|default| &default["data"]),
-            ))
+            let default = server.http.get("/api/model/default")?;
+            Ok(map_models(&models["data"], &default["data"]))
         })();
         server.stop();
         result
@@ -195,6 +192,9 @@ async fn run_actor(
             commands: setup.commands,
         })
         .await;
+    for message in setup.warnings {
+        actor.events.emit(AgentEvent::Warning { message }).await;
+    }
     if opts.launch_env.home.is_some() {
         actor
             .events
@@ -206,7 +206,7 @@ async fn run_actor(
             .await;
     }
     if ready.send(Ok(())).await.is_err() {
-        actor.shutdown().await;
+        actor.shutdown();
         return;
     }
     actor::run(actor, &commands).await;
@@ -223,6 +223,8 @@ struct SessionSetup {
     commands: Vec<ProviderCommand>,
     context_windows: HashMap<String, u64>,
     mcp_servers: Vec<String>,
+    /// The reads that failed, for the session to report once it starts.
+    warnings: Vec<String>,
 }
 
 fn open_session(http: &Http, opts: &SessionOptions) -> Result<SessionSetup, AgentError> {
@@ -297,6 +299,7 @@ fn open_session(http: &Http, opts: &SessionOptions) -> Result<SessionSetup, Agen
         }
         None => http.clone(),
     };
+    let mut warnings = Vec::new();
     let mut model = ModelRef::from_wire(&session["model"]);
     if let Some(requested) = requested_model
         && model.as_ref() != Some(&requested)
@@ -310,10 +313,12 @@ fn open_session(http: &Http, opts: &SessionOptions) -> Result<SessionSetup, Agen
     if model.is_none() {
         // A session without its own model runs on the server default; knowing
         // it lets a per-turn variant be applied to it.
-        model = http
-            .get("/api/model/default")
-            .ok()
-            .and_then(|default| ModelRef::from_wire(&default["data"]));
+        model = optional(
+            http.get("/api/model/default")
+                .map(|default| ModelRef::from_wire(&default["data"])),
+            "default model",
+            &mut warnings,
+        );
     }
     let mut agent = session["agent"].as_str().map(str::to_owned);
     if let Some(requested) = requested_agent
@@ -334,21 +339,39 @@ fn open_session(http: &Http, opts: &SessionOptions) -> Result<SessionSetup, Agen
         None => http.delete(&entry)?,
     };
     Ok(SessionSetup {
-        commands: discover_commands(&http),
-        agents: http
-            .get("/api/agent")
-            .map(|agents| map_agents(&agents["data"]))
-            .unwrap_or_default(),
-        context_windows: http
-            .get("/api/model")
-            .map(|models| context_windows(&models["data"]))
-            .unwrap_or_default(),
-        mcp_servers: mcp_servers(&http),
+        commands: optional(discover_commands(&http), "commands", &mut warnings),
+        agents: optional(
+            http.get("/api/agent")
+                .map(|agents| map_agents(&agents["data"])),
+            "agents",
+            &mut warnings,
+        ),
+        context_windows: optional(
+            http.get("/api/model")
+                .map(|models| context_windows(&models["data"])),
+            "models",
+            &mut warnings,
+        ),
+        mcp_servers: optional(mcp_servers(&http), "MCP servers", &mut warnings),
+        warnings,
         session_id,
         http,
         model,
         agent,
     })
+}
+
+/// A read the session runs without: its failure is told, and the session
+/// starts as if it had read nothing.
+fn optional<T: Default>(read: Result<T, AgentError>, what: &str, warnings: &mut Vec<String>) -> T {
+    read.unwrap_or_else(|err| {
+        warnings.push(read_failure(what, &err));
+        T::default()
+    })
+}
+
+fn read_failure(what: &str, err: &AgentError) -> String {
+    format!("failed to read OpenCode {what}: {err}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,24 +442,23 @@ fn map_agents(agents: &Value) -> Vec<AgentInfo> {
 }
 
 /// The MCP servers configured for the session's location, Tcode's included.
-fn mcp_servers(http: &Http) -> Vec<String> {
-    http.get("/api/mcp")
-        .ok()
-        .and_then(|servers| servers["data"].as_array().cloned())
-        .unwrap_or_default()
-        .iter()
+fn mcp_servers(http: &Http) -> Result<Vec<String>, AgentError> {
+    Ok(http.get("/api/mcp")?["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(|server| server["name"].as_str().map(str::to_owned))
-        .collect()
+        .collect())
 }
 
-fn discover_commands(http: &Http) -> Vec<ProviderCommand> {
-    let listed = |path: &str| {
-        http.get(path)
-            .ok()
-            .and_then(|value| value["data"].as_array().cloned())
-            .unwrap_or_default()
+fn discover_commands(http: &Http) -> Result<Vec<ProviderCommand>, AgentError> {
+    let listed = |path: &str| -> Result<Vec<Value>, AgentError> {
+        Ok(http.get(path)?["data"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
     };
-    let mut commands: Vec<ProviderCommand> = listed("/api/command")
+    let mut commands: Vec<ProviderCommand> = listed("/api/command")?
         .iter()
         .filter_map(|command| {
             let name = command["name"].as_str()?.trim();
@@ -448,7 +470,7 @@ fn discover_commands(http: &Http) -> Vec<ProviderCommand> {
         })
         .collect();
     // A skill is invoked by its id; its display name may contain spaces.
-    commands.extend(listed("/api/skill").iter().filter_map(|skill| {
+    commands.extend(listed("/api/skill")?.iter().filter_map(|skill| {
         let id = skill["id"].as_str()?.trim();
         (!id.is_empty()).then(|| ProviderCommand {
             name: id.to_owned(),
@@ -456,11 +478,11 @@ fn discover_commands(http: &Http) -> Vec<ProviderCommand> {
             kind: ProviderCommandKind::Skill,
         })
     }));
-    commands
+    Ok(commands)
 }
 
-fn map_models(models: &Value, default: Option<&Value>) -> Vec<ModelSpec> {
-    let default = default.and_then(ModelRef::from_wire);
+fn map_models(models: &Value, default: &Value) -> Vec<ModelSpec> {
+    let default = ModelRef::from_wire(default);
     models
         .as_array()
         .into_iter()
@@ -699,10 +721,10 @@ impl SessionActor for OpenCodeActor {
         item: Result<Transport, smol::channel::RecvError>,
     ) -> TransportOutcome {
         match item {
-            Ok(Transport::Event(event)) => {
-                self.handle_event(&event).await;
-                TransportOutcome::Continue
-            }
+            Ok(Transport::Event(event)) => match self.handle_event(&event).await {
+                Ok(()) => TransportOutcome::Continue,
+                Err(err) => TransportOutcome::Fatal(err),
+            },
             Ok(Transport::ShellOutput { item_id, text }) => {
                 let events = self.mapper.shell_output(&item_id, text);
                 for event in events {
@@ -718,7 +740,7 @@ impl SessionActor for OpenCodeActor {
     }
 
     async fn teardown(mut self, reason: Option<String>) -> Option<String> {
-        self.shutdown().await;
+        self.shutdown();
         reason.map(|reason| self.server.tail.append_to(reason, "\nserver output:\n"))
     }
 }
@@ -1123,7 +1145,7 @@ impl OpenCodeActor {
             .map_err(rewind_failure)
     }
 
-    async fn handle_event(&mut self, event: &Value) {
+    async fn handle_event(&mut self, event: &Value) -> Result<(), String> {
         let data = &event["data"];
         match event["type"].as_str().unwrap_or_default() {
             "permission.asked" => self.permission_asked(data).await,
@@ -1181,7 +1203,7 @@ impl OpenCodeActor {
             // Plugins register commands, skills and agents after the server
             // is ready; these announce each change.
             "command.updated" | "skill.updated" => self.refresh_commands().await,
-            "mcp.status.changed" => self.mapper.mcp_servers = mcp_servers(&self.http),
+            "mcp.status.changed" => self.refresh_mcp_servers().await,
             "agent.updated" => self.refresh_agents().await,
             // Moved by `MoveTo` or by the model's own `session_move`: requests
             // follow the session, and so does what OpenCode scopes to a location.
@@ -1198,7 +1220,7 @@ impl OpenCodeActor {
                         .await;
                     self.refresh_commands().await;
                     self.refresh_agents().await;
-                    self.mapper.mcp_servers = mcp_servers(&self.http);
+                    self.refresh_mcp_servers().await;
                 }
             }
             "session.step.started" if data["sessionID"] == self.mapper.root.as_str() => {
@@ -1222,21 +1244,14 @@ impl OpenCodeActor {
             }
             _ => {}
         }
-        let mapped = self.mapper.on_event(event);
-        let turn_completed = mapped
-            .events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }));
+        let mapped = self.mapper.on_event(event)?;
         for event in mapped.events {
             self.events.emit(event).await;
         }
         for action in mapped.actions {
             self.perform(action).await;
         }
-        if turn_completed {
-            let root = self.mapper.root.clone();
-            self.cancel_forms(Some(&root)).await;
-        }
+        Ok(())
     }
 
     async fn perform(&mut self, action: Action) {
@@ -1262,45 +1277,72 @@ impl OpenCodeActor {
                     stop.store(true, Ordering::Relaxed);
                 }
             }
-            Action::FetchDiff => match self.http.get(&self.session_path("diff")) {
-                Ok(diff) => {
-                    self.events
-                        .emit(AgentEvent::TurnChangesUpdated {
-                            turn_id: self.mapper.turn_id(),
-                            changes: file_diffs(&diff["data"]),
-                            completeness: ChangeCompleteness::Exact,
-                        })
-                        .await;
+            Action::FetchDiff => {
+                // A step ends only inside an execution, which names a turn.
+                let Some(turn_id) = self.mapper.turn_id() else {
+                    return;
+                };
+                match self.http.get(&self.session_path("diff")) {
+                    Ok(diff) => {
+                        self.events
+                            .emit(AgentEvent::TurnChangesUpdated {
+                                turn_id,
+                                changes: file_diffs(&diff["data"]),
+                                completeness: ChangeCompleteness::Exact,
+                            })
+                            .await;
+                    }
+                    Err(err) => {
+                        self.events
+                            .emit(AgentEvent::Warning {
+                                message: format!("failed to fetch OpenCode turn diff: {err}"),
+                            })
+                            .await;
+                    }
                 }
-                Err(err) => {
-                    self.events
-                        .emit(AgentEvent::Warning {
-                            message: format!("failed to fetch OpenCode turn diff: {err}"),
-                        })
-                        .await;
-                }
-            },
+            }
         }
     }
 
     async fn refresh_commands(&mut self) {
-        let commands = discover_commands(&self.http);
-        if commands != self.commands {
-            self.commands = commands.clone();
-            self.events
-                .emit(AgentEvent::ProviderCommands { commands })
-                .await;
+        match discover_commands(&self.http) {
+            Ok(commands) if commands != self.commands => {
+                self.commands = commands.clone();
+                self.events
+                    .emit(AgentEvent::ProviderCommands { commands })
+                    .await;
+            }
+            Ok(_) => {}
+            Err(err) => self.read_failed("commands", &err).await,
         }
     }
 
     async fn refresh_agents(&mut self) {
-        if let Ok(agents) = self.http.get("/api/agent") {
-            let agents = map_agents(&agents["data"]);
-            if agents != self.agents {
-                self.agents = agents;
-                self.emit_options().await;
+        match self.http.get("/api/agent") {
+            Ok(agents) => {
+                let agents = map_agents(&agents["data"]);
+                if agents != self.agents {
+                    self.agents = agents;
+                    self.emit_options().await;
+                }
             }
+            Err(err) => self.read_failed("agents", &err).await,
         }
+    }
+
+    async fn refresh_mcp_servers(&mut self) {
+        match mcp_servers(&self.http) {
+            Ok(servers) => self.mapper.mcp_servers = servers,
+            Err(err) => self.read_failed("MCP servers", &err).await,
+        }
+    }
+
+    async fn read_failed(&self, what: &str, err: &AgentError) {
+        self.events
+            .emit(AgentEvent::Warning {
+                message: read_failure(what, err),
+            })
+            .await;
     }
 
     async fn permission_asked(&mut self, data: &Value) {
@@ -1395,47 +1437,9 @@ impl OpenCodeActor {
             .await;
     }
 
-    /// Cancels the forms still open in `session` (every session when `None`).
-    async fn cancel_forms(&mut self, session: Option<&str>) {
-        let pending: Vec<String> = self
-            .forms
-            .iter()
-            .filter(|(_, form)| session.is_none_or(|session| form.session_id == session))
-            .map(|(id, _)| id.clone())
-            .collect();
-        for form_id in pending {
-            let Some(form) = self.forms.remove(&form_id) else {
-                continue;
-            };
-            if let Err(err) = self
-                .http
-                .delete(&format!("/api/session/{}/form/{form_id}", form.session_id))
-            {
-                self.events
-                    .emit(AgentEvent::Warning {
-                        message: format!("failed to cancel OpenCode question {form_id}: {err}"),
-                    })
-                    .await;
-            }
-            self.events
-                .emit(AgentEvent::UserInputResolved {
-                    request_id: form_id,
-                    answers: Map::new(),
-                })
-                .await;
-        }
-    }
-
-    async fn shutdown(&mut self) {
+    fn shutdown(&mut self) {
         for stop in self.shell_polls.values() {
             stop.store(true, Ordering::Relaxed);
-        }
-        self.cancel_forms(None).await;
-        for (request_id, session_id) in std::mem::take(&mut self.permissions) {
-            let _ = self.http.post_empty(
-                &format!("/api/session/{session_id}/permission/{request_id}/reply"),
-                &json!({ "decision": "reject", "message": "Tcode session closed" }),
-            );
         }
         self.server.stop();
     }
@@ -1704,7 +1708,6 @@ struct Mapper {
     context_windows: HashMap<String, u64>,
     served_model: Option<String>,
     context_window: Option<u64>,
-    turn_counter: u64,
     active_turn: Option<String>,
     /// The root's inbox items not yet delivered → whether the item is a move.
     undelivered: HashMap<String, bool>,
@@ -1730,7 +1733,6 @@ impl Mapper {
             context_windows,
             served_model: None,
             context_window: None,
-            turn_counter: 0,
             active_turn: None,
             undelivered: HashMap::new(),
             held_turn: None,
@@ -1765,14 +1767,11 @@ impl Mapper {
         Some(AgentEvent::TurnStarted { turn_id })
     }
 
-    fn turn_id(&self) -> String {
-        self.active_turn
-            .clone()
-            .or_else(|| self.last_turn.clone())
-            .unwrap_or_else(|| "opencode-turn".into())
+    fn turn_id(&self) -> Option<String> {
+        self.active_turn.clone().or_else(|| self.last_turn.clone())
     }
 
-    fn on_event(&mut self, event: &Value) -> Mapped {
+    fn on_event(&mut self, event: &Value) -> Result<Mapped, String> {
         let kind = event["type"].as_str().unwrap_or_default();
         let data = &event["data"];
         let mut mapped = Mapped::default();
@@ -1783,13 +1782,13 @@ impl Mapper {
             {
                 self.children.insert(session_id.to_owned(), None);
             }
-            return mapped;
+            return Ok(mapped);
         }
         let Some(session_id) = data["sessionID"].as_str() else {
-            return mapped;
+            return Ok(mapped);
         };
         let Some(parent_item_id) = self.scope(session_id) else {
-            return mapped;
+            return Ok(mapped);
         };
         let root = session_id == self.root;
         let message_id = data["assistantMessageID"].as_str().unwrap_or_default();
@@ -1814,10 +1813,9 @@ impl Mapper {
                 if self.active_turn.is_none() && self.held_turn.is_none() {
                     // The event's id, unique across the session's servers, names
                     // the turn: a counter restarts with every server.
-                    let turn_id = event["id"].as_str().map(str::to_owned).unwrap_or_else(|| {
-                        self.turn_counter += 1;
-                        format!("opencode-turn-{}", self.turn_counter)
-                    });
+                    let Some(turn_id) = event["id"].as_str().map(str::to_owned) else {
+                        return Err("OpenCode started an execution without an event id".into());
+                    };
                     self.turn_usage = None;
                     self.turn_failed = false;
                     // A move delivered on its own runs an execution with no
@@ -2014,7 +2012,7 @@ impl Mapper {
                 let item_id = tool_item_id(message_id, data);
                 let metadata = &data["metadata"];
                 let Some(tool) = self.tools.get_mut(&item_id) else {
-                    return mapped;
+                    return Ok(mapped);
                 };
                 if tool.name == "shell"
                     && let Some(shell_id) = metadata["shellID"].as_str()
@@ -2041,7 +2039,7 @@ impl Mapper {
                     item_id: item_id.clone(),
                 });
                 let Some(tool) = self.tools.get_mut(&item_id) else {
-                    return mapped;
+                    return Ok(mapped);
                 };
                 let success = kind == "session.tool.success";
                 if success
@@ -2058,7 +2056,7 @@ impl Mapper {
                         mapped.events.push(AgentEvent::ItemUpdated(item));
                         mapped.events.push(backgrounded);
                     }
-                    return mapped;
+                    return Ok(mapped);
                 }
                 if tool.name == "todowrite" {
                     let todos = data
@@ -2072,7 +2070,7 @@ impl Mapper {
                         });
                     }
                     self.tools.remove(&item_id);
-                    return mapped;
+                    return Ok(mapped);
                 }
                 let status = if success {
                     ItemStatus::Completed
@@ -2109,7 +2107,7 @@ impl Mapper {
             }),
             _ => {}
         }
-        mapped
+        Ok(mapped)
     }
 
     fn shell_output(&mut self, item_id: &str, text: String) -> Vec<AgentEvent> {
@@ -2610,11 +2608,10 @@ impl Server {
     }
 
     fn subscribe(&self) -> Result<(Receiver<Transport>, Sender<Transport>), AgentError> {
-        // The event stream idles between turns (with a heartbeat every 15 s),
-        // so it gets its own agent without the REST read timeout.
+        // The event stream idles between turns, so it gets its own agent
+        // without the REST read timeout; stopping the server ends the read.
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(1))
-            .timeout_read(Duration::from_secs(24 * 60 * 60))
             .build();
         let response = agent
             .get(&format!("{}/api/event", self.http.base))
@@ -2897,15 +2894,10 @@ async fn wait_for_server_connected(events: &Receiver<Transport>) -> Result<(), A
     .await
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::io::Write as _;
-    use std::net::{TcpListener, TcpStream};
-    use std::sync::{Condvar, Mutex};
-
     use super::*;
-    use crate::{McpRegistration, TurnOptions};
+    use crate::McpRegistration;
 
     const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/opencode");
 
@@ -2921,1462 +2913,380 @@ mod tests {
             .collect()
     }
 
-    /// One step of the fake server's event stream.
-    enum Step {
-        Frame(Value),
-        /// Holds the stream until the client has made `count` requests of
-        /// this kind (`METHOD /path?query`), as the real server answers them.
-        After(String, usize),
-    }
-
-    /// The recorded frames, the stream held before a frame of each listed type
-    /// until the request that caused it on the real server has been made.
-    fn script(name: &str, waits: &[(&str, &str, usize)]) -> Vec<Step> {
-        let mut steps = Vec::new();
-        let mut seen: HashMap<String, usize> = HashMap::new();
-        for frame in frames(name) {
-            let kind = frame["type"].as_str().unwrap().to_owned();
-            let occurrence = seen.entry(kind.clone()).or_default();
-            *occurrence += 1;
-            for (before, request, count) in waits {
-                // The `count`-th request precedes the `count`-th such frame.
-                if kind == *before && *occurrence == *count {
-                    steps.push(Step::After((*request).into(), *count));
-                }
-            }
-            steps.push(Step::Frame(frame));
-        }
-        steps
-    }
-
-    const PROMPT: &str = "POST /api/session/ses_root/prompt";
-
-    #[derive(Debug, Clone)]
-    struct Request {
-        key: String,
-        body: Value,
-        /// `x-opencode-directory`, as sent.
-        directory: String,
-    }
-
-    #[derive(Default)]
-    struct State {
-        requests: Vec<Request>,
-        routes: HashMap<String, VecDeque<(u16, String)>>,
-    }
-
-    /// Stands in for `opencode serve`: answers routes from recorded
-    /// responses, plays a recorded event stream and records every request.
-    struct FakeServer {
-        url: String,
-        state: Arc<(Mutex<State>, std::sync::Condvar)>,
-    }
-
-    impl FakeServer {
-        fn start(steps: Vec<Step>, routes: Vec<(&str, u16, String)>) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let url = format!("http://{}", listener.local_addr().unwrap());
-            let mut state = State::default();
-            for (key, status, body) in routes {
-                state
-                    .routes
-                    .entry(key.into())
-                    .or_default()
-                    .push_back((status, body));
-            }
-            let state = Arc::new((Mutex::new(state), Condvar::new()));
-            let shared = state.clone();
-            let steps = Arc::new(Mutex::new(Some(steps)));
-            std::thread::spawn(move || {
-                for stream in listener.incoming() {
-                    let Ok(stream) = stream else { return };
-                    let shared = shared.clone();
-                    let steps = steps.clone();
-                    std::thread::spawn(move || serve(stream, &shared, &steps));
-                }
-            });
-            Self { url, state }
-        }
-
-        fn requests(&self) -> Vec<Request> {
-            self.state.0.lock().unwrap().requests.clone()
-        }
-
-        /// The requests that are not reads, in order.
-        fn writes(&self) -> Vec<(String, Value)> {
-            self.requests()
-                .into_iter()
-                .filter(|request| !request.key.starts_with("GET "))
-                .map(|request| (request.key, request.body))
-                .collect()
-        }
-    }
-
-    fn serve(
-        mut stream: TcpStream,
-        state: &(Mutex<State>, Condvar),
-        steps: &Mutex<Option<Vec<Step>>>,
-    ) {
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            return;
-        }
-        let mut parts = line.split_whitespace();
-        let method = parts.next().unwrap_or_default().to_owned();
-        let path = parts.next().unwrap_or_default().to_owned();
-        let mut length = 0;
-        let mut directory = String::new();
-        loop {
-            let mut header = String::new();
-            if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
-                break;
-            }
-            let (name, value) = header.split_once(':').unwrap_or_default();
-            match name.to_ascii_lowercase().as_str() {
-                "content-length" => length = value.trim().parse().unwrap(),
-                "x-opencode-directory" => value.trim().clone_into(&mut directory),
-                _ => {}
-            }
-        }
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body).unwrap();
-        if path == "/api/event" {
-            let connected = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"id\":\"evt_connected\",\"type\":\"server.connected\",\"data\":{}}\n\n";
-            stream.write_all(connected).unwrap();
-            for step in steps.lock().unwrap().take().unwrap_or_default() {
-                match step {
-                    Step::Frame(frame) => {
-                        if stream
-                            .write_all(format!("data: {frame}\n\n").as_bytes())
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Step::After(key, count) => {
-                        let guard = state.0.lock().unwrap();
-                        let (_guard, wait) = state
-                            .1
-                            .wait_timeout_while(guard, Duration::from_secs(10), |state| {
-                                state.requests.iter().filter(|r| r.key == key).count() < count
-                            })
-                            .unwrap();
-                        if wait.timed_out() {
-                            // The client never asked; the test sees the stream stall.
-                            return;
-                        }
-                    }
-                }
-            }
-            // Hold the stream open until the client goes away.
-            let _ = reader.read(&mut [0; 1]);
-            return;
-        }
-        let key = format!("{method} {path}");
-        let (status, response) = {
-            let mut guard = state.0.lock().unwrap();
-            if path != "/api/info" {
-                guard.requests.push(Request {
-                    key: key.clone(),
-                    body: serde_json::from_slice(&body).unwrap_or(Value::Null),
-                    directory,
-                });
-                state.1.notify_all();
-            }
-            match guard.routes.get_mut(&key) {
-                Some(queue) if queue.len() > 1 => queue.pop_front().unwrap(),
-                Some(queue) => queue.front().cloned().unwrap(),
-                None if method == "GET" => (200, r#"{"data":[]}"#.into()),
-                None => (204, String::new()),
-            }
-        };
-        let reason = match status {
-            204 => "No Content",
-            404 => "Not Found",
-            _ => "OK",
-        };
-        let _ = stream.write_all(
-            format!(
-                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
-                response.len()
-            )
-            .as_bytes(),
+    /// The session's mapper fed a recorded stream: each event it emits, as
+    /// wire JSON, followed by what it asks the actor to do for that frame.
+    fn replay(name: &str, mcp_servers: &[&str]) -> Vec<Value> {
+        let mut mapper = Mapper::new(
+            "ses_root".into(),
+            mcp_servers
+                .iter()
+                .map(|server| (*server).to_owned())
+                .collect(),
+            HashMap::new(),
         );
-    }
-
-    /// A stand-in `opencode` that reports `TCODE_TEST_OPENCODE_VERSION`, keeps
-    /// the inline config it was started with in `config`, and announces the
-    /// fake server the way `serve --stdio` does.
-    fn fake_opencode(directory: &Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::create_dir_all(directory).unwrap();
-        let binary = directory.join("opencode");
-        std::fs::write(
-            &binary,
-            r#"#!/bin/sh
-if [ "$1" = --version ]; then printf '%s\n' "$TCODE_TEST_OPENCODE_VERSION"; exit 0; fi
-printf '%s' "$OPENCODE_CONFIG_CONTENT" > "$TCODE_TEST_OPENCODE_DIR/config"
-if [ -n "$TCODE_TEST_OPENCODE_FAIL" ]; then printf '%s\n' "$TCODE_TEST_OPENCODE_FAIL" >&2; exit 1; fi
-printf '{"url":"%s"}\n' "$TCODE_TEST_OPENCODE_URL"
-cat > /dev/null
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        binary
-    }
-
-    struct Fixture {
-        directory: PathBuf,
-        server: FakeServer,
-        options: SessionOptions,
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.directory);
+        let mut out = Vec::new();
+        for frame in frames(name) {
+            let mapped = mapper.on_event(&frame).unwrap();
+            out.extend(
+                mapped
+                    .events
+                    .iter()
+                    .map(|event| serde_json::to_value(event).unwrap()),
+            );
+            out.extend(mapped.actions.into_iter().map(|action| match action {
+                Action::PollShell {
+                    item_id,
+                    shell_id,
+                    directory,
+                } => json!({"action": "poll_shell", "item_id": item_id, "shell_id": shell_id, "directory": directory}),
+                Action::StopShell { item_id } => {
+                    json!({"action": "stop_shell", "item_id": item_id})
+                }
+                Action::FetchDiff => json!({"action": "fetch_diff"}),
+            }));
         }
+        out
     }
 
-    /// The created session, as `POST /api/session` answered it.
-    const SESSION: &str = r#"{"data":{"id":"ses_root","projectID":"5bbc9219e3603f1ec4d88b8dc971434e6571740d","agent":"build","model":{"id":"deepseek-v4.1-flash-free","providerID":"opencode","variant":"low"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1793562629343,"updated":1793562629343},"location":{"directory":"/work/project"}}}"#;
-
-    fn fixture(steps: Vec<Step>, mut routes: Vec<(&str, u16, String)>) -> Fixture {
-        let directory =
-            std::env::temp_dir().join(format!("agent-opencode-{}", uuid::Uuid::new_v4()));
-        let binary = fake_opencode(&directory);
-        routes.push(("POST /api/session", 200, SESSION.into()));
-        let server = FakeServer::start(steps, routes);
-        let options = SessionOptions {
-            cwd: directory.clone(),
-            model: Some("opencode/deepseek-v4.1-flash-free".into()),
-            resume: None,
-            fork: None,
-            binary_path: Some(binary),
-            option_selections: vec![OptionSelection {
-                id: EFFORT.into(),
-                value: json!("low"),
-            }],
-            mcp_servers: Vec::new(),
-            launch_env: LaunchEnv {
-                env: vec![
-                    ("TCODE_TEST_OPENCODE_VERSION".into(), "2.2.5".into()),
-                    ("TCODE_TEST_OPENCODE_URL".into(), server.url.clone()),
-                    (
-                        "TCODE_TEST_OPENCODE_DIR".into(),
-                        directory.to_string_lossy().into_owned(),
-                    ),
-                ],
-                home: None,
-            },
-            extra_args: Vec::new(),
-            acp: None,
-            instructions: None,
-        };
-        Fixture {
-            directory,
-            server,
-            options,
-        }
-    }
-
-    /// A user prompt's admission, as the server answers `POST …/prompt`.
-    fn inbox(id: &str) -> String {
-        format!(
-            r#"{{"data":{{"id":"{id}","sessionID":"ses_root","time":{{"created":1793562692083}},"type":"user","payload":{{"text":"t"}},"delivery":"queue"}}}}"#
-        )
-    }
-
-    async fn recv(handle: &SessionHandle) -> AgentEvent {
-        future::race(async { handle.events.recv().await.unwrap() }, async {
-            smol::Timer::after(Duration::from_secs(10)).await;
-            panic!("no event within 10 s")
-        })
-        .await
-    }
-
-    /// Starts a session and drains its three startup events.
-    async fn open(options: SessionOptions) -> SessionHandle {
-        let handle = start(options).await.unwrap();
-        for _ in 0..3 {
-            recv(&handle).await;
-        }
-        handle
-    }
-
-    /// Events up to and including the first one `last` accepts, as wire JSON.
-    async fn until(handle: &SessionHandle, last: impl Fn(&AgentEvent) -> bool) -> Vec<Value> {
-        let mut events = Vec::new();
-        loop {
-            let event = recv(handle).await;
-            let done = last(&event);
-            events.push(serde_json::to_value(&event).unwrap());
-            if done {
-                return events;
-            }
-        }
-    }
-
-    fn turn_completed(event: &AgentEvent) -> bool {
-        matches!(event, AgentEvent::TurnCompleted { .. })
-    }
-
-    async fn send(handle: &SessionHandle, command: SessionCommand) {
-        handle.commands.send(command).await.unwrap();
-    }
-
-    fn turn(text: &str) -> SessionCommand {
-        SessionCommand::SendTurn {
-            delivery_id: 1,
-            text: text.into(),
-            options: None,
-            attachments: Vec::new(),
-        }
-    }
-
-    async fn shut_down(handle: SessionHandle) {
-        send(&handle, SessionCommand::Shutdown).await;
-        while let Ok(event) = handle.events.recv().await {
-            if matches!(event, AgentEvent::SessionClosed { .. }) {
-                break;
-            }
-        }
-    }
-
-    /// The events a turn's bookkeeping adds around its items.
-    fn items_only(events: Vec<Value>) -> Vec<Value> {
-        events
-            .into_iter()
-            .filter(|event| {
+    /// The events a turn's bookkeeping adds around its items, and the
+    /// actor's side effects, left out.
+    fn items_only(out: Vec<Value>) -> Vec<Value> {
+        out.into_iter()
+            .filter(|out| {
                 !matches!(
-                    event["type"].as_str(),
-                    Some("token_usage" | "turn_accepted" | "turn_started" | "turn_checkpoint")
+                    out["type"].as_str(),
+                    None | Some("token_usage" | "turn_started" | "served_model")
                 )
             })
             .collect()
     }
 
     #[test]
-    fn a_1x_opencode_is_refused_at_start_naming_the_2_0_requirement() {
-        smol::block_on(async {
-            let fixture = fixture(Vec::new(), Vec::new());
-            let mut options = fixture.options.clone();
-            options.launch_env.env[0].1 = "1.19.5".into();
-            let Err(error) = start(options.clone()).await else {
-                panic!("a 1.x server must not start");
-            };
-            assert_eq!(
-                error.to_string(),
-                format!(
-                    "provider reported error: OpenCode 2.0 or later is required, but `{}` is \
-                     version 1.19.5. Update OpenCode to use it with Tcode.",
-                    options.binary_path.unwrap().display()
-                )
-            );
-            assert!(!fixture.directory.join("config").exists(), "no server ran");
-        });
-    }
-
-    #[test]
-    fn a_server_that_exits_during_startup_reports_its_own_output() {
-        smol::block_on(async {
-            let fixture = fixture(Vec::new(), Vec::new());
-            let mut options = fixture.options.clone();
-            options.launch_env.env.push((
-                "TCODE_TEST_OPENCODE_FAIL".into(),
-                "database is locked".into(),
-            ));
-            let Err(error) = start(options).await else {
-                panic!("the server exited");
-            };
-            assert_eq!(
-                error.to_string(),
-                "provider reported error: OpenCode server exited during startup\n\
-                 server output:\ndatabase is locked"
-            );
-        });
-    }
-
-    #[test]
     fn a_text_turn_streams_the_reply_and_reports_its_usage() {
-        smol::block_on(async {
-            let fixture = fixture(
-                script("text_turn.jsonl", &[("session.inbox.enqueued", PROMPT, 1)]),
-                vec![(PROMPT, 200, inbox("msg_198aac9f2001K4cb8mDh24jTzH"))],
-            );
-            let mut options = fixture.options.clone();
-            options.instructions =
-                Some("<pull_request_linking>\nLink every PR.\n</pull_request_linking>\n\n".into());
-            let handle = start(options).await.unwrap();
-            let mut startup = Vec::new();
-            for _ in 0..3 {
-                startup.push(serde_json::to_value(recv(&handle).await).unwrap());
-            }
-            assert_eq!(
-                startup,
-                vec![
-                    json!({"type": "session_started", "provider_session_id": "ses_root", "resume": {"session_id": "ses_root"}, "model": "opencode/deepseek-v4.1-flash-free"}),
-                    json!({"type": "provider_options", "descriptors": [crate::permission_control(ProviderKind::OpenCode)], "selections": [{"id": "permission_mode", "value": "normal"}]}),
-                    json!({"type": "provider_commands", "commands": []}),
-                ]
-            );
-            send(&handle, turn("Reply with exactly: PONG")).await;
-            assert_eq!(
-                until(&handle, turn_completed).await,
-                vec![
-                    json!({"type": "turn_accepted", "delivery_id": 1}),
-                    json!({"type": "turn_started", "turn_id": "evt_198aac9f5002tcru464AZ7pzsT"}),
-                    json!({"type": "turn_checkpoint", "turn_id": "evt_198aac9f5002tcru464AZ7pzsT", "checkpoint_id": "msg_198aac9f2001K4cb8mDh24jTzH"}),
-                    json!({"type": "item_started", "id": "msg_198aaca0a001IZCSKwcEekLiz8:text:0", "content": {"kind": "assistant_message", "text": ""}}),
-                    json!({"type": "delta", "item_id": "msg_198aaca0a001IZCSKwcEekLiz8:text:0", "kind": "assistant_text", "text": "PONG"}),
-                    json!({"type": "item_completed", "id": "msg_198aaca0a001IZCSKwcEekLiz8:text:0", "content": {"kind": "assistant_message", "text": "PONG"}}),
-                    json!({"type": "token_usage", "freshness": "current", "turn_processed_tokens": null, "input_tokens": 6335, "cached_input_tokens": 3328, "output_tokens": 4, "used_tokens": 9667, "context_window": null, "total_processed_tokens": null, "cost_usd": null, "duration_ms": null}),
-                    json!({"type": "turn_completed", "turn_id": "evt_198aac9f5002tcru464AZ7pzsT", "status": "completed", "usage": {"freshness": "current", "turn_processed_tokens": 9667, "input_tokens": 6335, "cached_input_tokens": 3328, "output_tokens": 4, "used_tokens": 9667, "context_window": null, "total_processed_tokens": null, "cost_usd": 0.0, "duration_ms": null}}),
-                ]
-            );
-            shut_down(handle).await;
-            assert_eq!(
-                fixture.server.writes(),
-                vec![
-                    (
-                        "POST /api/session".into(),
-                        json!({"model": {"providerID": "opencode", "id": "deepseek-v4.1-flash-free", "variant": "low"}})
-                    ),
-                    (
-                        "PUT /api/experimental/session/ses_root/instructions/entries/tcode".into(),
-                        json!({"value": "<pull_request_linking>\nLink every PR.\n</pull_request_linking>\n\n"})
-                    ),
-                    (
-                        PROMPT.into(),
-                        json!({"text": "Reply with exactly: PONG", "delivery": "queue"})
-                    ),
-                ]
-            );
-        });
+        assert_eq!(
+            replay("text_turn.jsonl", &[]),
+            vec![
+                json!({"type": "turn_started", "turn_id": "evt_198aac9f500200000000000325"}),
+                json!({"type": "served_model", "model": "opencode/deepseek-v4.1-flash-free", "reason": null}),
+                json!({"type": "item_started", "id": "msg_198aaca0a00100000000000328:text:0", "content": {"kind": "assistant_message", "text": ""}}),
+                json!({"type": "delta", "item_id": "msg_198aaca0a00100000000000328:text:0", "kind": "assistant_text", "text": "PONG"}),
+                json!({"type": "item_completed", "id": "msg_198aaca0a00100000000000328:text:0", "content": {"kind": "assistant_message", "text": "PONG"}}),
+                json!({"type": "token_usage", "freshness": "current", "turn_processed_tokens": null, "input_tokens": 6335, "cached_input_tokens": 3328, "output_tokens": 4, "used_tokens": 9667, "context_window": null, "total_processed_tokens": null, "cost_usd": null, "duration_ms": null}),
+                json!({"type": "turn_completed", "turn_id": "evt_198aac9f500200000000000325", "status": "completed", "usage": {"freshness": "current", "turn_processed_tokens": 9667, "input_tokens": 6335, "cached_input_tokens": 3328, "output_tokens": 4, "used_tokens": 9667, "context_window": null, "total_processed_tokens": null, "cost_usd": 0.0, "duration_ms": null}}),
+            ]
+        );
     }
 
+    /// The call's output is polled from the shell its progress names, until
+    /// the call ends with its output and exit code.
     #[test]
-    fn a_shell_call_streams_its_output_and_reports_its_exit_code() {
-        smol::block_on(async {
-            const OUTPUT: &str = "GET /api/shell/sh_198ac475f001twGtiLgjWLI7iQ/output";
-            let fixture = fixture(
-                script(
-                    "shell_turn.jsonl",
-                    &[
-                        ("session.inbox.enqueued", PROMPT, 1),
-                        // Each page reaches the actor before the poller asks for the next.
-                        ("shell.exited", &format!("{OUTPUT}?cursor=8"), 1),
-                    ],
-                ),
-                vec![
-                    (PROMPT, 200, inbox("msg_198ac3fd6001psMVlt0sBx0Lni")),
-                    (
-                        &format!("{OUTPUT}?cursor=0"),
-                        200,
-                        r#"{"location":{"directory":"/work/project"},"data":{"output":"one\n","cursor":4,"size":4,"truncated":false}}"#.into(),
-                    ),
-                    (
-                        &format!("{OUTPUT}?cursor=4"),
-                        200,
-                        r#"{"location":{"directory":"/work/project"},"data":{"output":"two\n","cursor":8,"size":8,"truncated":false}}"#.into(),
-                    ),
-                ],
-            );
-            let handle = open(fixture.options.clone()).await;
-            send(&handle, turn("Run echo one; sleep 6; echo two")).await;
-            let id = "msg_198ac3fdc0015DUJhtvxNwLad4:chatcmpl-tool-91184514ce90f973";
-            assert_eq!(
-                items_only(until(&handle, turn_completed).await),
-                vec![
-                    json!({"type": "item_started", "id": id, "content": {"kind": "command_execution", "command": "", "output": "", "exit_code": null, "status": "in_progress"}}),
-                    json!({"type": "item_updated", "id": id, "content": {"kind": "command_execution", "command": "echo one; sleep 6; echo two", "output": "", "exit_code": null, "status": "in_progress"}}),
-                    json!({"type": "delta", "item_id": id, "kind": "command_output", "text": "one\n"}),
-                    json!({"type": "delta", "item_id": id, "kind": "command_output", "text": "two\n"}),
-                    json!({"type": "item_completed", "id": id, "content": {"kind": "command_execution", "command": "echo one; sleep 6; echo two", "output": "one\ntwo\n", "exit_code": 0, "status": "completed"}}),
-                    json!({"type": "item_started", "id": "msg_198ac5ee50018mgQBTDX0Qzgxm:text:0", "content": {"kind": "assistant_message", "text": ""}}),
-                    json!({"type": "delta", "item_id": "msg_198ac5ee50018mgQBTDX0Qzgxm:text:0", "kind": "assistant_text", "text": "DONE"}),
-                    json!({"type": "item_completed", "id": "msg_198ac5ee50018mgQBTDX0Qzgxm:text:0", "content": {"kind": "assistant_message", "text": "DONE"}}),
-                    json!({"type": "turn_completed", "turn_id": "evt_198ac3fd8001s3nuRIcz3LxsHw", "status": "completed", "usage": {"freshness": "current", "turn_processed_tokens": 20463, "input_tokens": 125, "cached_input_tokens": 10112, "output_tokens": 4, "used_tokens": 10241, "context_window": null, "total_processed_tokens": null, "cost_usd": 0.0, "duration_ms": null}}),
-                ]
-            );
-            shut_down(handle).await;
-        });
+    fn a_shell_call_polls_its_shell_and_reports_its_exit_code() {
+        let id = "msg_198ac3fdc00100000000000232:chatcmpl-tool-0000000000000009";
+        assert_eq!(
+            items_only(replay("shell_turn.jsonl", &[]))[..5],
+            [
+                json!({"type": "item_started", "id": id, "content": {"kind": "command_execution", "command": "", "output": "", "exit_code": null, "status": "in_progress"}}),
+                json!({"type": "item_updated", "id": id, "content": {"kind": "command_execution", "command": "echo one; sleep 6; echo two", "output": "", "exit_code": null, "status": "in_progress"}}),
+                json!({"type": "item_completed", "id": id, "content": {"kind": "command_execution", "command": "echo one; sleep 6; echo two", "output": "one\ntwo\n", "exit_code": 0, "status": "completed"}}),
+                json!({"type": "item_started", "id": "msg_198ac5ee500100000000000245:text:0", "content": {"kind": "assistant_message", "text": ""}}),
+                json!({"type": "delta", "item_id": "msg_198ac5ee500100000000000245:text:0", "kind": "assistant_text", "text": "DONE"}),
+            ]
+        );
+        let shell: Vec<Value> = replay("shell_turn.jsonl", &[])
+            .into_iter()
+            .filter(|out| out["action"].is_string() || out["type"] == "item_completed")
+            .take(3)
+            .collect();
+        assert_eq!(
+            shell,
+            [
+                json!({"action": "poll_shell", "item_id": id, "shell_id": "sh_198ac475f00100000000000238", "directory": "/work/project"}),
+                json!({"type": "item_completed", "id": id, "content": {"kind": "command_execution", "command": "echo one; sleep 6; echo two", "output": "one\ntwo\n", "exit_code": 0, "status": "completed"}}),
+                json!({"action": "stop_shell", "item_id": id}),
+            ]
+        );
     }
 
+    /// Each file tool carries its own diff, the todo list is the plan, and
+    /// every step that changed files has the turn's diff read again.
     #[test]
-    fn file_tools_carry_their_own_diffs_todos_set_the_plan_and_the_turn_diff_is_exact() {
-        smol::block_on(async {
-            const DIFF: &str = "GET /api/session/ses_root/diff";
-            let recorded_diff = r#"{"data":[{"file":"notes2.txt","patch":"diff --git a/notes2.txt b/notes2.txt\nnew file mode 100644\nindex 0000000..a5b73ed\n--- /dev/null\n+++ b/notes2.txt\n@@ -0,0 +1 @@\n+green\n","additions":1,"deletions":0,"status":"added"}]}"#;
-            let fixture = fixture(
-                script("files_turn.jsonl", &[("session.inbox.enqueued", PROMPT, 1)]),
-                vec![
-                    (PROMPT, 200, inbox("msg_198b17718001R9iMtgnHHDzIX7")),
-                    (DIFF, 200, recorded_diff.into()),
-                ],
-            );
-            let handle = open(fixture.options.clone()).await;
-            send(&handle, turn("Record todos, create notes2.txt, edit it")).await;
-            let write = "msg_198b17ffc001GbWFSCOl8PceDQ:chatcmpl-tool-900118863147ca5c";
-            let edit = "msg_198b183de001BRg89zKzkJddrX:chatcmpl-tool-abdddfec25b4b5cb";
-            let turn_diff = json!({"type": "turn_changes_updated", "turn_id": "evt_198b1771a001fVaE42MZK8jx3H", "changes": [{"path": "notes2.txt", "kind": "create", "diff": "diff --git a/notes2.txt b/notes2.txt\nnew file mode 100644\nindex 0000000..a5b73ed\n--- /dev/null\n+++ b/notes2.txt\n@@ -0,0 +1 @@\n+green\n"}], "completeness": "exact"});
-            let mut events = items_only(until(&handle, turn_completed).await);
-            events.pop();
-            assert_eq!(
-                events,
-                vec![
-                    json!({"type": "item_started", "id": "msg_198b17729001BfnSeHTUEw26zm:text:0", "content": {"kind": "assistant_message", "text": ""}}),
-                    json!({"type": "delta", "item_id": "msg_198b17729001BfnSeHTUEw26zm:text:0", "kind": "assistant_text", "text": "I'll do these in order.\n\n"}),
-                    json!({"type": "item_completed", "id": "msg_198b17729001BfnSeHTUEw26zm:text:0", "content": {"kind": "assistant_message", "text": "I'll do these in order.\n\n"}}),
-                    json!({"type": "plan_updated", "turn_id": "evt_198b1771a001fVaE42MZK8jx3H", "explanation": null, "steps": [{"step": "Write code", "status": "inProgress"}, {"step": "Test code", "status": "pending"}]}),
-                    json!({"type": "item_started", "id": write, "content": {"kind": "file_change", "changes": [], "status": "in_progress"}}),
-                    json!({"type": "item_updated", "id": write, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "modify", "diff": null}], "status": "in_progress"}}),
-                    json!({"type": "item_completed", "id": write, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "create", "diff": "+blue"}], "status": "completed"}}),
-                    turn_diff.clone(),
-                    json!({"type": "item_started", "id": edit, "content": {"kind": "file_change", "changes": [], "status": "in_progress"}}),
-                    json!({"type": "item_updated", "id": edit, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "modify", "diff": null}], "status": "in_progress"}}),
-                    json!({"type": "item_completed", "id": edit, "content": {"kind": "file_change", "changes": [{"path": "notes2.txt", "kind": "modify", "diff": "Index: notes2.txt\n===================================================================\n--- notes2.txt\n+++ notes2.txt\n@@ -1,1 +1,1 @@\n-blue\n+green\n"}], "status": "completed"}}),
-                    turn_diff,
-                    json!({"type": "item_started", "id": "msg_198b18977001VDeVULdbXIIY47:text:0", "content": {"kind": "assistant_message", "text": ""}}),
-                    json!({"type": "delta", "item_id": "msg_198b18977001VDeVULdbXIIY47:text:0", "kind": "assistant_text", "text": "DONE"}),
-                    json!({"type": "item_completed", "id": "msg_198b18977001VDeVULdbXIIY47:text:0", "content": {"kind": "assistant_message", "text": "DONE"}}),
-                ]
-            );
-            shut_down(handle).await;
-        });
+    fn file_tools_carry_their_own_diffs_todos_set_the_plan_and_changed_steps_read_the_turn_diff() {
+        let write = "msg_198b17ffc00100000000000031:chatcmpl-tool-0000000000000002";
+        let edit = "msg_198b183de00100000000000040:chatcmpl-tool-0000000000000003";
+        let fetch_diff = json!({"action": "fetch_diff"});
+        let events: Vec<Value> = replay("files_turn.jsonl", &[])
+            .into_iter()
+            .filter(|out| {
+                !matches!(
+                    out["type"].as_str(),
+                    Some("token_usage" | "turn_started" | "served_model" | "turn_completed")
+                ) && out["action"] != "stop_shell"
+            })
+            .collect();
+        assert_eq!(
+            events,
+            vec![
+                json!({"type": "item_started", "id": "msg_198b1772900100000000000017:text:0", "content": {"kind": "assistant_message", "text": ""}}),
+                json!({"type": "delta", "item_id": "msg_198b1772900100000000000017:text:0", "kind": "assistant_text", "text": "I'll do these in order.\n\n"}),
+                json!({"type": "item_completed", "id": "msg_198b1772900100000000000017:text:0", "content": {"kind": "assistant_message", "text": "I'll do these in order.\n\n"}}),
+                json!({"type": "plan_updated", "turn_id": "evt_198b1771a00100000000000013", "explanation": null, "steps": [{"step": "Write code", "status": "inProgress"}, {"step": "Test code", "status": "pending"}]}),
+                json!({"type": "item_started", "id": write, "content": {"kind": "file_change", "changes": [], "status": "in_progress"}}),
+                json!({"type": "item_updated", "id": write, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "modify", "diff": null}], "status": "in_progress"}}),
+                json!({"type": "item_completed", "id": write, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "create", "diff": "+blue"}], "status": "completed"}}),
+                fetch_diff.clone(),
+                json!({"type": "item_started", "id": edit, "content": {"kind": "file_change", "changes": [], "status": "in_progress"}}),
+                json!({"type": "item_updated", "id": edit, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "modify", "diff": null}], "status": "in_progress"}}),
+                json!({"type": "item_completed", "id": edit, "content": {"kind": "file_change", "changes": [{"path": "notes2.txt", "kind": "modify", "diff": "Index: notes2.txt\n===================================================================\n--- notes2.txt\n+++ notes2.txt\n@@ -1,1 +1,1 @@\n-blue\n+green\n"}], "status": "completed"}}),
+                fetch_diff,
+                json!({"type": "item_started", "id": "msg_198b1897700100000000000049:text:0", "content": {"kind": "assistant_message", "text": ""}}),
+                json!({"type": "delta", "item_id": "msg_198b1897700100000000000049:text:0", "kind": "assistant_text", "text": "DONE"}),
+                json!({"type": "item_completed", "id": "msg_198b1897700100000000000049:text:0", "content": {"kind": "assistant_message", "text": "DONE"}}),
+            ]
+        );
     }
 
     #[test]
     fn a_subagents_activity_nests_under_the_call_that_spawned_it() {
-        smol::block_on(async {
-            let fixture = fixture(
-                script(
-                    "subagent_turn.jsonl",
-                    &[("session.inbox.enqueued", PROMPT, 1)],
-                ),
-                vec![(PROMPT, 200, inbox("msg_198acc1d60017L93dqVLD4mt2r"))],
-            );
-            let handle = open(fixture.options.clone()).await;
-            send(&handle, turn("Ask a subagent to reply KIWI")).await;
-            let spawn = "msg_198acc1db0013V4MEKRcfmYvtt:chatcmpl-tool-b5f7774ecdb70d58";
-            let child = "msg_198accaf2001JTZdDPBbxetEk2:text:0";
-            let reply = "msg_198accd89001hG3ffj4MheRnb9:text:0";
-            let events = until(&handle, turn_completed).await;
-            assert_eq!(
-                events
-                    .iter()
-                    .filter(|event| event["type"] == "turn_completed")
-                    .count(),
-                1,
-                "the child's execution is not a turn of its own"
-            );
-            assert_eq!(
-                items_only(events)[..9],
-                [
-                    json!({"type": "item_started", "id": spawn, "content": {"kind": "subagent", "agent_type": "", "description": "", "status": "in_progress", "summary": null}}),
-                    json!({"type": "item_updated", "id": spawn, "content": {"kind": "subagent", "agent_type": "general", "description": "Reply with KIWI", "status": "in_progress", "summary": null}}),
-                    json!({"type": "item_updated", "id": spawn, "content": {"kind": "subagent", "agent_type": "general", "description": "Reply with KIWI", "status": "in_progress", "summary": null, "model": "opencode/deepseek-v4.1-flash-free"}}),
-                    json!({"type": "item_started", "id": child, "parent_item_id": spawn, "content": {"kind": "assistant_message", "text": ""}}),
-                    json!({"type": "delta", "item_id": child, "kind": "assistant_text", "text": "KIWI"}),
-                    json!({"type": "item_completed", "id": child, "parent_item_id": spawn, "content": {"kind": "assistant_message", "text": "KIWI"}}),
-                    json!({"type": "item_completed", "id": spawn, "content": {"kind": "subagent", "agent_type": "general", "description": "Reply with KIWI", "status": "completed", "summary": "KIWI", "model": "opencode/deepseek-v4.1-flash-free"}}),
-                    json!({"type": "item_started", "id": reply, "content": {"kind": "assistant_message", "text": ""}}),
-                    json!({"type": "delta", "item_id": reply, "kind": "assistant_text", "text": "The subagent said: KIWI"}),
-                ]
-            );
-            shut_down(handle).await;
-        });
+        let spawn = "msg_198acc1db00100000000000290:chatcmpl-tool-0000000000000011";
+        let child = "msg_198accaf200100000000000303:text:0";
+        let reply = "msg_198accd8900100000000000315:text:0";
+        let out = replay("subagent_turn.jsonl", &[]);
+        assert_eq!(
+            out.iter()
+                .filter(|out| out["type"] == "turn_completed")
+                .count(),
+            1,
+            "the child's execution is not a turn of its own"
+        );
+        assert_eq!(
+            items_only(out)[..9],
+            [
+                json!({"type": "item_started", "id": spawn, "content": {"kind": "subagent", "agent_type": "", "description": "", "status": "in_progress", "summary": null}}),
+                json!({"type": "item_updated", "id": spawn, "content": {"kind": "subagent", "agent_type": "general", "description": "Reply with KIWI", "status": "in_progress", "summary": null}}),
+                json!({"type": "item_updated", "id": spawn, "content": {"kind": "subagent", "agent_type": "general", "description": "Reply with KIWI", "status": "in_progress", "summary": null, "model": "opencode/deepseek-v4.1-flash-free"}}),
+                json!({"type": "item_started", "id": child, "parent_item_id": spawn, "content": {"kind": "assistant_message", "text": ""}}),
+                json!({"type": "delta", "item_id": child, "kind": "assistant_text", "text": "KIWI"}),
+                json!({"type": "item_completed", "id": child, "parent_item_id": spawn, "content": {"kind": "assistant_message", "text": "KIWI"}}),
+                json!({"type": "item_completed", "id": spawn, "content": {"kind": "subagent", "agent_type": "general", "description": "Reply with KIWI", "status": "completed", "summary": "KIWI", "model": "opencode/deepseek-v4.1-flash-free"}}),
+                json!({"type": "item_started", "id": reply, "content": {"kind": "assistant_message", "text": ""}}),
+                json!({"type": "delta", "item_id": reply, "kind": "assistant_text", "text": "The subagent said: KIWI"}),
+            ]
+        );
     }
 
     #[test]
     fn an_image_read_carries_the_image_it_read() {
-        smol::block_on(async {
-            let fixture = fixture(
-                script("image_turn.jsonl", &[("session.inbox.enqueued", PROMPT, 1)]),
-                vec![(PROMPT, 200, inbox("msg_198ad1762001jqZO7WLpW7kvOb"))],
-            );
-            let handle = open(fixture.options.clone()).await;
-            send(&handle, turn("Read blue.png")).await;
-            let read = "msg_198ad1767001iy9JUcC3DFxDk1:chatcmpl-tool-9abf3cdf50e4c7d9";
-            assert_eq!(
-                items_only(until(&handle, turn_completed).await)[..3],
-                [
-                    json!({"type": "item_started", "id": read, "content": {"kind": "tool_call", "name": "read", "input": {}, "output": null, "status": "in_progress"}}),
-                    json!({"type": "item_updated", "id": read, "content": {"kind": "tool_call", "name": "read", "input": {"path": "blue.png"}, "output": null, "status": "in_progress"}}),
-                    json!({"type": "item_completed", "id": read, "content": {"kind": "tool_call", "image_reads": [{"media_type": "image/png", "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg=="}], "name": "read", "input": {"path": "blue.png"}, "output": "Image read successfully", "status": "completed"}}),
-                ]
-            );
-            shut_down(handle).await;
-        });
+        let read = "msg_198ad176700100000000000062:chatcmpl-tool-0000000000000004";
+        assert_eq!(
+            items_only(replay("image_turn.jsonl", &[]))[..3],
+            [
+                json!({"type": "item_started", "id": read, "content": {"kind": "tool_call", "name": "read", "input": {}, "output": null, "status": "in_progress"}}),
+                json!({"type": "item_updated", "id": read, "content": {"kind": "tool_call", "name": "read", "input": {"path": "blue.png"}, "output": null, "status": "in_progress"}}),
+                json!({"type": "item_completed", "id": read, "content": {"kind": "tool_call", "image_reads": [{"media_type": "image/png", "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg=="}], "name": "read", "input": {"path": "blue.png"}, "output": "Image read successfully", "status": "completed"}}),
+            ]
+        );
     }
 
+    /// The session's MCP servers are what `/api/mcp` lists; the recorded
+    /// call is of the `tcode_probe` server's `echo_upper`.
     #[test]
     fn an_mcp_call_names_its_server_and_tool_and_carries_its_text_and_images() {
-        smol::block_on(async {
-            let fixture = fixture(
-                script("mcp_turn.jsonl", &[("session.inbox.enqueued", PROMPT, 1)]),
-                vec![
-                    (
-                        "GET /api/mcp",
-                        200,
-                        r#"{"location":{"directory":"/work/project"},"data":[{"name":"tcode_probe","status":{"status":"connected"}}]}"#.into(),
-                    ),
-                    (PROMPT, 200, inbox("msg_198d2d16b001pV9qJ5Qo7JvzVe")),
-                ],
-            );
-            let handle = open(fixture.options.clone()).await;
-            send(&handle, turn("Call echo_upper with hello")).await;
-            let call = "msg_198d2e71d001VpxRG5X5z2lMvh:chatcmpl-tool-a75c2f7c0101d202";
-            let completed = until(&handle, |event| {
-                matches!(event, AgentEvent::ItemCompleted(ThreadItem { id, .. }) if id == call)
-            })
-            .await;
-            assert_eq!(
-                completed.last(),
-                Some(
-                    &json!({"type": "item_completed", "id": call, "content": {"kind": "tool_call", "image_reads": [{"media_type": "image/png", "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAEElEQVR4nGP4z8AARwzEcQCukw/x0F8jngAAAABJRU5ErkJggg=="}], "name": "tcode_probe/echo_upper", "input": {"text": "hello"}, "output": "HELLO", "status": "completed"}})
-                )
-            );
-            shut_down(handle).await;
-        });
+        let call = "msg_198d2e71d00100000000000123:chatcmpl-tool-0000000000000007";
+        let completed: Vec<Value> = replay("mcp_turn.jsonl", &["tcode_probe"])
+            .into_iter()
+            .filter(|out| out["type"] == "item_completed" && out["id"] == call)
+            .collect();
+        assert_eq!(
+            completed,
+            [
+                json!({"type": "item_completed", "id": call, "content": {"kind": "tool_call", "image_reads": [{"media_type": "image/png", "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAEElEQVR4nGP4z8AARwzEcQCukw/x0F8jngAAAABJRU5ErkJggg=="}], "name": "tcode_probe/echo_upper", "input": {"text": "hello"}, "output": "HELLO", "status": "completed"}})
+            ]
+        );
     }
 
+    /// The approval card shows the command of the call that asks.
     #[test]
-    fn permission_requests_offer_native_options_and_each_answer_reaches_the_asking_session() {
-        const REQUEST: &str = "per_198adfe110010MaNqr8j5fFdKI";
-        let reply = format!("POST /api/session/ses_root/permission/{REQUEST}/reply");
-        let asked = json!({"type": "approval_requested", "id": REQUEST, "turn_id": "evt_198adf559002Wm9xfuCNpOnQpw", "kind": {"kind": "exec_command", "command": "echo hi", "cwd": null}, "options": [
-            {"id": "once", "label": "Allow once", "kind": "allow_once"},
-            {"id": "always", "label": "Always allow", "kind": "allow_always"},
-            {"id": "reject", "label": "Reject", "kind": "reject_once"},
-        ]});
-        for (mode, decision, body) in [
-            (
-                "normal",
-                Some(ApprovalDecision::Option("once".into())),
-                json!({"decision": "once"}),
-            ),
-            (
-                "normal",
-                Some(ApprovalDecision::Feedback("Use printf instead".into())),
-                json!({"decision": "reject", "message": "Use printf instead"}),
-            ),
-            ("auto", None, json!({"decision": "once"})),
-        ] {
-            smol::block_on(async {
-                let fixture = fixture(
-                    script(
-                        "permission_turn.jsonl",
-                        &[
-                            ("session.inbox.enqueued", PROMPT, 1),
-                            ("permission.replied", &reply, 1),
-                        ],
-                    ),
-                    vec![(PROMPT, 200, inbox("msg_198adf558001Nw9Cn3CZxbyQHB"))],
-                );
-                let mut options = fixture.options.clone();
-                options.option_selections.push(OptionSelection {
-                    id: PERMISSION_MODE.into(),
-                    value: json!(mode),
-                });
-                let handle = open(options).await;
-                send(&handle, turn("Run echo hi")).await;
-                let events = until(&handle, |event| {
-                    matches!(
-                        event,
-                        AgentEvent::ApprovalRequested(_) | AgentEvent::ApprovalResolved { .. }
-                    )
-                })
-                .await;
-                let resolved = match decision {
-                    Some(decision) => {
-                        assert_eq!(events.last(), Some(&asked));
-                        send(
-                            &handle,
-                            SessionCommand::RespondApproval {
-                                request_id: REQUEST.into(),
-                                decision: decision.clone(),
-                            },
-                        )
-                        .await;
-                        until(&handle, |event| {
-                            matches!(event, AgentEvent::ApprovalResolved { .. })
-                        })
-                        .await
-                        .pop()
-                        .unwrap()
-                    }
-                    None => events.last().cloned().unwrap(),
-                };
-                assert_eq!(resolved["type"], "approval_resolved");
-                let rest = until(&handle, turn_completed).await;
-                assert!(
-                    !rest
-                        .iter()
-                        .any(|event| event["type"] == "approval_resolved"),
-                    "OpenCode's own echo of the reply resolves nothing twice"
-                );
-                shut_down(handle).await;
-                let replies: Vec<Value> = fixture
-                    .server
-                    .writes()
-                    .into_iter()
-                    .filter(|(key, _)| *key == reply)
-                    .map(|(_, body)| body)
-                    .collect();
-                assert_eq!(replies, vec![body], "{mode}");
-            });
+    fn a_permission_request_shows_the_command_it_would_run() {
+        let mut mapper = Mapper::new("ses_root".into(), Vec::new(), HashMap::new());
+        let mut asked = None;
+        for frame in frames("permission_turn.jsonl") {
+            if frame["type"] == "permission.asked" {
+                asked = Some(mapper.approval_kind(&frame["data"]));
+                break;
+            }
+            mapper.on_event(&frame).unwrap();
         }
+        assert_eq!(
+            serde_json::to_value(asked.unwrap()).unwrap(),
+            json!({"kind": "exec_command", "command": "echo hi", "cwd": null})
+        );
     }
 
+    /// A question tool's form is a question per field, and the answer goes
+    /// back as OpenCode recorded it.
     #[test]
-    fn a_question_arrives_as_a_form_and_the_answer_replies_to_it() {
-        smol::block_on(async {
-            const FORM: &str = "frm_198ad5065001DTwIUpRmyj3Mio";
-            let reply = format!("POST /api/session/ses_root/form/{FORM}/reply");
-            let fixture = fixture(
-                script(
-                    "question_turn.jsonl",
-                    &[
-                        ("session.inbox.enqueued", PROMPT, 1),
-                        ("form.replied", &reply, 1),
-                    ],
-                ),
-                vec![(PROMPT, 200, inbox("msg_198ad4c4f001xLFAPnNiNafuXE"))],
-            );
-            let handle = open(fixture.options.clone()).await;
-            send(&handle, turn("Ask me which color I prefer")).await;
-            let asked = until(&handle, |event| {
-                matches!(event, AgentEvent::UserInputRequested { .. })
-            })
-            .await;
-            assert_eq!(
-                asked.last(),
-                Some(
-                    &json!({"type": "user_input_requested", "request_id": FORM, "questions": [{
-                        "id": "q0", "header": "Preferred color", "question": "Which color do you prefer?",
-                        "options": [{"label": "Red", "description": "Prefer red"}, {"label": "Blue", "description": "Prefer blue"}],
-                        "multi_select": false,
-                    }]})
-                )
-            );
-            let answers = Map::from_iter([("q0".to_owned(), json!("Blue"))]);
-            send(
-                &handle,
-                SessionCommand::RespondUserInput {
-                    request_id: FORM.into(),
-                    answers,
-                },
-            )
-            .await;
-            let rest = until(&handle, turn_completed).await;
-            assert_eq!(
-                rest.iter()
-                    .filter(|event| event["type"] == "user_input_resolved")
-                    .collect::<Vec<_>>(),
-                [
-                    &json!({"type": "user_input_resolved", "request_id": FORM, "answers": {"q0": "Blue"}})
-                ]
-            );
-            shut_down(handle).await;
-            assert!(
-                fixture
-                    .server
-                    .writes()
-                    .contains(&(reply, json!({"answer": {"q0": "Blue"}})))
-            );
-        });
-    }
-
-    #[test]
-    fn a_steer_joins_the_running_turn_once_opencode_delivers_it() {
-        smol::block_on(async {
-            let fixture = fixture(
-                script(
-                    "steer_turn.jsonl",
-                    &[
-                        ("session.inbox.enqueued", PROMPT, 1),
-                        ("session.inbox.enqueued", PROMPT, 2),
-                    ],
-                ),
-                vec![
-                    (PROMPT, 200, inbox("msg_198ae70f20011oI4C5n83g0YJ4")),
-                    (PROMPT, 200, inbox("msg_198ae7cda001l18XtdGE8aDbE0")),
-                ],
-            );
-            let handle = open(fixture.options.clone()).await;
-            send(&handle, turn("Run sleep 6, then reply DONE")).await;
-            until(&handle, |event| matches!(event, AgentEvent::ItemUpdated(_))).await;
-            send(
-                &handle,
-                SessionCommand::Steer {
-                    request_id: "steer-1".into(),
-                    text: "Ignore the earlier request and reply PONG only.".into(),
-                    attachments: Vec::new(),
-                },
-            )
-            .await;
-            let events = until(&handle, turn_completed).await;
-            let accepted = events
-                .iter()
-                .position(|event| {
-                    *event == json!({"type": "steer_accepted", "request_id": "steer-1"})
-                })
-                .expect("the delivered steer is accepted");
-            let reply = events
-                .iter()
-                .position(|event| event["type"] == "delta" && event["text"] == "PONG")
-                .unwrap();
-            assert!(accepted < reply, "accepted before the reply it caused");
-            shut_down(handle).await;
-            assert_eq!(
-                fixture.server.writes()[3],
+    fn a_question_arrives_as_a_form_and_the_answer_is_what_opencode_recorded() {
+        let frames = frames("question_turn.jsonl");
+        let event =
+            |kind: &str| &frames.iter().find(|frame| frame["type"] == kind).unwrap()["data"];
+        let fields = event("form.created")["form"]["fields"].as_array().unwrap();
+        assert_eq!(
+            serde_json::to_value(fields.iter().filter_map(form_question).collect::<Vec<_>>())
+                .unwrap(),
+            json!([{
+                "id": "q0", "header": "Preferred color", "question": "Which color do you prefer?",
+                "options": [{"label": "Red", "description": "Prefer red"}, {"label": "Blue", "description": "Prefer blue"}],
+                "multi_select": false,
+            }])
+        );
+        let kinds: Vec<(String, String)> = fields
+            .iter()
+            .map(|field| {
                 (
-                    PROMPT.into(),
-                    json!({"text": "Ignore the earlier request and reply PONG only.", "delivery": "steer"})
+                    field["key"].as_str().unwrap().to_owned(),
+                    field["type"].as_str().unwrap().to_owned(),
                 )
-            );
-        });
-    }
-
-    #[test]
-    fn an_interrupt_stops_the_running_call_and_turn() {
-        smol::block_on(async {
-            let interrupt = "POST /api/session/ses_root/interrupt";
-            let fixture = fixture(
-                script(
-                    "interrupt_turn.jsonl",
-                    &[
-                        ("session.inbox.enqueued", PROMPT, 1),
-                        ("shell.exited", interrupt, 1),
-                    ],
-                ),
-                vec![
-                    (PROMPT, 200, inbox("msg_198ae3e26001hGwkRovRB1DaDH")),
-                    (interrupt, 200, r#"{"interrupted":true}"#.into()),
-                ],
-            );
-            let handle = open(fixture.options.clone()).await;
-            send(&handle, turn("Run sleep 30")).await;
-            until(&handle, |event| {
-                matches!(event, AgentEvent::ItemUpdated(ThreadItem { content: ItemContent::CommandExecution { command, .. }, .. }) if command == "sleep 30")
             })
-            .await;
-            send(&handle, SessionCommand::Interrupt).await;
-            let id = "msg_198ae3e2d001J0cOFv8lV738Bg:chatcmpl-tool-be126f07a96b3c6d";
-            assert_eq!(
-                until(&handle, turn_completed).await,
-                vec![
-                    json!({"type": "item_completed", "id": id, "content": {"kind": "command_execution", "command": "sleep 30", "output": "", "exit_code": null, "status": "interrupted"}}),
-                    json!({"type": "turn_completed", "turn_id": "evt_198ae3e27001B11JrPf6Fy7Nv1", "status": "interrupted", "usage": null}),
-                ]
-            );
-            shut_down(handle).await;
-        });
+            .collect();
+        assert_eq!(
+            Value::Object(form_answer(
+                &kinds,
+                &Map::from_iter([("q0".to_owned(), json!("Blue"))])
+            )),
+            event("form.replied")["answer"]
+        );
     }
 
-    const STAGE: &str = "POST /api/session/ses_root/revert/stage";
-    const SESSION_GET: &str = "GET /api/session/ses_root";
-
-    /// `GET …/message/{id}` for a user prompt with an image Tcode sent inline
-    /// and a file attached by path.
-    fn user_message(id: &str, text: &str) -> String {
-        format!(
-            r#"{{"data":{{"type":"user","id":"{id}","text":"{text}","time":{{"created":1793562692083}},"files":[{{"data":"aGk=","mime":"image/png","source":{{"type":"uri","uri":"data:image/png;base64,aGk="}},"name":"shot.png"}},{{"data":"aGk=","mime":"image/png","source":{{"type":"uri","uri":"file:///work/project/shot%20one.png"}},"name":"shot one.png"}},{{"data":"aGk=","mime":"text/plain","source":{{"type":"uri","uri":"file:///work/project/notes%20one.txt"}},"name":"notes one.txt"}}]}}}}"#
-        )
-    }
-
-    /// `GET /api/session/{id}`, with the revert it has staged.
-    fn session_with_revert(message_id: Option<&str>) -> String {
-        let revert = message_id
-            .map(|id| format!(r#","revert":{{"messageID":"{id}"}}"#))
-            .unwrap_or_default();
-        format!(r#"{{"data":{{"id":"ses_root"{revert}}}}}"#)
-    }
-
-    /// A fork from a message names it as `before`, and a whole fork names
-    /// nothing (`POST /api/session/{id}/fork`, 2.2.5). The session goes on in
-    /// the one the server made.
     #[test]
-    fn a_fork_copies_what_came_before_the_message_it_names() {
-        smol::block_on(async {
-            const FORK: &str = "POST /api/session/ses_source/fork";
-            for (point, body) in [
-                (
-                    ForkPoint::Before {
-                        checkpoint_id: "msg_prompt".into(),
-                    },
-                    json!({"before": "msg_prompt"}),
-                ),
-                (ForkPoint::Tail, json!({})),
-            ] {
-                let source = (
-                    "GET /api/session/ses_source",
-                    200,
-                    session_with_revert(None),
-                );
-                let mut fixture = fixture(Vec::new(), vec![source, (FORK, 200, SESSION.into())]);
-                fixture.options.resume = Some(ResumeCursor(json!({"session_id": "ses_source"})));
-                fixture.options.fork = Some(point);
-                let handle = open(fixture.options.clone()).await;
-                let fork = fixture
-                    .server
-                    .requests()
-                    .into_iter()
-                    .find(|request| request.key == FORK)
-                    .unwrap();
-                assert_eq!(fork.body, body);
-                send(&handle, SessionCommand::Shutdown).await;
-            }
-        });
-    }
-
-    /// A rewind left staged only hides the messages it removes, so a whole
-    /// fork stops where the rewind did instead of copying them back.
-    #[test]
-    fn a_whole_fork_leaves_out_what_a_staged_rewind_removed() {
-        smol::block_on(async {
-            const FORK: &str = "POST /api/session/ses_source/fork";
-            let source = (
-                "GET /api/session/ses_source",
-                200,
-                session_with_revert(Some("msg_rewound")),
-            );
-            let mut fixture = fixture(Vec::new(), vec![source, (FORK, 200, SESSION.into())]);
-            fixture.options.resume = Some(ResumeCursor(json!({"session_id": "ses_source"})));
-            fixture.options.fork = Some(ForkPoint::Tail);
-            let handle = open(fixture.options.clone()).await;
-            let fork = fixture
-                .server
-                .requests()
-                .into_iter()
-                .find(|request| request.key == FORK)
-                .unwrap();
-            assert_eq!(fork.body, json!({"before": "msg_rewound"}));
-            send(&handle, SessionCommand::Shutdown).await;
-        });
-    }
-
-    /// A rewind stages OpenCode's revert and leaves it staged, as its /undo
-    /// does: hidden and undoable until the next prompt commits it, which
-    /// OpenCode does itself. A refusal keeps OpenCode's words; an undo clears
-    /// the staged revert.
-    #[test]
-    fn a_rewind_stays_staged_and_is_undone_by_clearing_it() {
-        smol::block_on(async {
-            const PROMPT_ID: &str = "msg_198aac9f2001K4cb8mDh24jTzH";
-            let fixture = fixture(
-                script("text_turn.jsonl", &[("session.inbox.enqueued", PROMPT, 1)]),
-                vec![
-                    (PROMPT, 200, inbox(PROMPT_ID)),
-                    (
-                        &format!("GET /api/session/ses_root/message/{PROMPT_ID}"),
-                        200,
-                        user_message(PROMPT_ID, "Reply with exactly: PONG"),
-                    ),
-                    (SESSION_GET, 200, session_with_revert(None)),
-                    (SESSION_GET, 200, session_with_revert(None)),
-                    (SESSION_GET, 200, session_with_revert(Some(PROMPT_ID))),
-                    (
-                        STAGE,
-                        409,
-                        r#"{"_tag":"SessionBusyError","sessionID":"ses_root","message":"Session is busy"}"#.into(),
-                    ),
-                    (
-                        STAGE,
-                        200,
-                        format!(
-                            r#"{{"data":{{"messageID":"{PROMPT_ID}","snapshot":"4b825dc","files":[{{"file":"notes.txt","patch":"@@","additions":1,"deletions":2,"status":"modified"}}]}}}}"#
-                        ),
-                    ),
-                ],
-            );
-            let handle = open(fixture.options.clone()).await;
-            send(&handle, turn("Reply with exactly: PONG")).await;
-            until(&handle, turn_completed).await;
-            let rewind = SessionCommand::Rewind {
-                checkpoint_id: PROMPT_ID.into(),
-                mode: RewindMode::FilesAndConversation,
-            };
-            send(&handle, rewind.clone()).await;
-            assert_eq!(
-                serde_json::to_value(recv(&handle).await).unwrap(),
-                json!({"type": "rewind_failed", "checkpoint_id": PROMPT_ID, "mode": "files_and_conversation", "failure": {"reason": "busy", "detail": "provider reported error: OpenCode HTTP 409: Session is busy"}})
-            );
-            send(&handle, rewind).await;
-            assert_eq!(
-                serde_json::to_value(recv(&handle).await).unwrap(),
-                json!({
-                    "type": "rewind_completed",
-                    "checkpoint_id": PROMPT_ID,
-                    "mode": "files_and_conversation",
-                    "prefill": "Reply with exactly: PONG",
-                    "prefill_attachments": ["/work/project/shot one.png"],
-                    "later_history": "hidden_until_next_send",
-                    "files": {"files": [{"path": "notes.txt", "insertions": 1, "deletions": 2}]},
-                    "undo_token": PROMPT_ID,
-                })
-            );
-            send(
-                &handle,
-                SessionCommand::UndoRewind {
-                    checkpoint_id: PROMPT_ID.into(),
-                    undo_token: PROMPT_ID.into(),
-                },
-            )
-            .await;
-            assert_eq!(
-                serde_json::to_value(recv(&handle).await).unwrap(),
-                json!({"type": "rewind_undone", "checkpoint_id": PROMPT_ID})
-            );
-            shut_down(handle).await;
-            assert_eq!(
-                fixture.server.writes()[3..],
-                [
-                    (STAGE.into(), json!({"messageID": PROMPT_ID, "files": true})),
-                    (STAGE.into(), json!({"messageID": PROMPT_ID, "files": true})),
-                    ("DELETE /api/session/ses_root/revert".into(), Value::Null),
-                ]
-            );
-        });
-    }
-
-    /// OpenCode refuses to stage a revert while a turn runs; like its /undo,
-    /// the rewind interrupts the turn and waits for its end, which reaches
-    /// the thread before the rewind's answer.
-    #[test]
-    fn a_rewind_during_a_turn_interrupts_it_first() {
-        smol::block_on(async {
-            const PROMPT_ID: &str = "msg_198ae3e26001hGwkRovRB1DaDH";
-            let interrupt = "POST /api/session/ses_root/interrupt";
-            let fixture = fixture(
-                script(
-                    "interrupt_turn.jsonl",
-                    &[
-                        ("session.inbox.enqueued", PROMPT, 1),
-                        ("shell.exited", interrupt, 1),
-                    ],
-                ),
-                vec![
-                    (PROMPT, 200, inbox(PROMPT_ID)),
-                    (interrupt, 200, r#"{"interrupted":true}"#.into()),
-                    (
-                        &format!("GET /api/session/ses_root/message/{PROMPT_ID}"),
-                        200,
-                        user_message(PROMPT_ID, "Run sleep 30"),
-                    ),
-                    (SESSION_GET, 200, session_with_revert(None)),
-                    (
-                        STAGE,
-                        200,
-                        format!(r#"{{"data":{{"messageID":"{PROMPT_ID}"}}}}"#),
-                    ),
-                ],
-            );
-            let handle = open(fixture.options.clone()).await;
-            send(&handle, turn("Run sleep 30")).await;
-            until(&handle, |event| {
-                matches!(event, AgentEvent::ItemUpdated(ThreadItem { content: ItemContent::CommandExecution { command, .. }, .. }) if command == "sleep 30")
+    fn an_interrupted_call_and_turn_end_interrupted() {
+        let id = "msg_198ae3e2d00100000000000084:chatcmpl-tool-0000000000000005";
+        let out: Vec<Value> = replay("interrupt_turn.jsonl", &[])
+            .into_iter()
+            .filter(|out| out["type"].is_string())
+            .collect();
+        let running = out
+            .iter()
+            .position(|out| {
+                out["type"] == "item_updated" && out["content"]["command"] == "sleep 30"
             })
-            .await;
-            send(
-                &handle,
-                SessionCommand::Rewind {
-                    checkpoint_id: PROMPT_ID.into(),
-                    mode: RewindMode::Conversation,
-                },
-            )
-            .await;
-            let events = until(&handle, |event| {
-                matches!(event, AgentEvent::RewindCompleted { .. })
-            })
-            .await;
-            let kinds: Vec<_> = events
-                .iter()
-                .map(|event| event["type"].as_str().unwrap())
-                .filter(|kind| *kind != "token_usage")
-                .collect();
-            assert_eq!(
-                kinds,
-                ["item_completed", "turn_completed", "rewind_completed"]
-            );
-            assert_eq!(events.last().unwrap()["files"], Value::Null);
-            shut_down(handle).await;
-            assert_eq!(
-                fixture.server.writes()[3..],
-                [
-                    (interrupt.into(), json!({})),
-                    (
-                        STAGE.into(),
-                        json!({"messageID": PROMPT_ID, "files": false})
-                    ),
-                ]
-            );
-        });
+            .unwrap();
+        assert_eq!(
+            out[running + 1..],
+            [
+                json!({"type": "item_completed", "id": id, "content": {"kind": "command_execution", "command": "sleep 30", "output": "", "exit_code": null, "status": "interrupted"}}),
+                json!({"type": "turn_completed", "turn_id": "evt_198ae3e2700100000000000081", "status": "interrupted", "usage": null}),
+            ]
+        );
     }
 
     #[test]
-    fn a_manual_compaction_runs_natively_and_reports_its_progress() {
-        smol::block_on(async {
-            let compact = "POST /api/session/ses_root/compact";
-            let fixture = fixture(
-                script(
-                    "compact_turn.jsonl",
-                    &[("session.inbox.enqueued", compact, 1)],
-                ),
-                Vec::new(),
-            );
-            let handle = open(fixture.options.clone()).await;
-            send(&handle, SessionCommand::Compact).await;
-            assert_eq!(
-                until(&handle, turn_completed).await,
-                vec![
-                    json!({"type": "turn_started", "turn_id": "evt_198b05ab80022gwehZCwzMKLQq"}),
-                    json!({"type": "context_compacted", "in_progress": true, "trigger": "manual", "pre_tokens": null, "post_tokens": null, "dropped_tokens": null, "duration_ms": null}),
-                    json!({"type": "context_compacted", "in_progress": false, "trigger": "manual", "pre_tokens": null, "post_tokens": null, "dropped_tokens": null, "duration_ms": null}),
-                    json!({"type": "turn_completed", "turn_id": "evt_198b05ab80022gwehZCwzMKLQq", "status": "completed", "usage": null}),
-                ]
-            );
-            shut_down(handle).await;
-            assert_eq!(
-                fixture.server.writes()[1..],
-                [
-                    // Without instructions, an entry an earlier start left is removed.
-                    (
-                        "DELETE /api/experimental/session/ses_root/instructions/entries/tcode"
-                            .into(),
-                        Value::Null
-                    ),
-                    (compact.into(), json!({})),
-                ]
-            );
-        });
+    fn a_compaction_reports_its_progress_in_a_turn_of_its_own() {
+        assert_eq!(
+            replay("compact_turn.jsonl", &[]),
+            vec![
+                json!({"type": "turn_started", "turn_id": "evt_198b05ab800200000000000003"}),
+                json!({"type": "context_compacted", "in_progress": true, "trigger": "manual", "pre_tokens": null, "post_tokens": null, "dropped_tokens": null, "duration_ms": null}),
+                json!({"type": "context_compacted", "in_progress": false, "trigger": "manual", "pre_tokens": null, "post_tokens": null, "dropped_tokens": null, "duration_ms": null}),
+                json!({"type": "turn_completed", "turn_id": "evt_198b05ab800200000000000003", "status": "completed", "usage": null}),
+            ]
+        );
     }
 
+    /// OpenCode 2.2.6 delivers a queued move in an execution of its own,
+    /// which is no turn; the prompt after it runs as an ordinary one.
     #[test]
-    fn commands_run_through_their_route_and_skill_mentions_attach_the_skill() {
-        smol::block_on(async {
-            let commands = r#"{"location":{"directory":"/work/project"},"data":[{"name":"review","description":"review changes [commit|branch|pr], defaults to uncommitted"}]}"#;
-            let skills = r##"{"location":{"directory":"/work/project"},"data":[{"id":"opencode","name":"OpenCode","description":"Use this skill for any question about OpenCode itself.","path":"/builtin/opencode.md","content":"# OpenCode"}]}"##;
-            let fixture = fixture(
-                vec![Step::Frame(
-                    serde_json::from_str(r#"{"id":"evt_198b0ff530020lZiK9TNv08sop","created":1793563098963,"type":"command.updated","location":{"directory":"/work/project"},"data":{}}"#).unwrap(),
-                )],
-                vec![
-                    // Plugins register commands only after the session opened.
-                    ("GET /api/command", 200, r#"{"data":[]}"#.into()),
-                    ("GET /api/command", 200, commands.into()),
-                    ("GET /api/skill", 200, skills.into()),
-                    (PROMPT, 200, inbox("msg_198ae70f20011oI4C5n83g0YJ4")),
-                ],
-            );
-            let handle = open(fixture.options.clone()).await;
-            let review = json!({"name": "review", "description": "review changes [commit|branch|pr], defaults to uncommitted", "kind": "command"});
-            let skill = json!({"name": "opencode", "description": "Use this skill for any question about OpenCode itself.", "kind": "skill"});
-            assert_eq!(
-                serde_json::to_value(recv(&handle).await).unwrap(),
-                json!({"type": "provider_commands", "commands": [review, skill]})
-            );
-            send(&handle, turn("/review the last commit")).await;
-            send(&handle, turn("$opencode how do agents work?")).await;
-            recv(&handle).await;
-            recv(&handle).await;
-            shut_down(handle).await;
-            assert_eq!(
-                fixture.server.writes()[2..],
-                [
-                    (
-                        "POST /api/session/ses_root/command".into(),
-                        json!({"name": "review", "text": "the last commit", "delivery": "queue"})
-                    ),
-                    (
-                        PROMPT.into(),
-                        json!({"text": "$opencode how do agents work?", "delivery": "queue", "skills": [{"id": "opencode", "mention": {"start": 0, "end": 9, "text": "$opencode"}}]})
-                    ),
-                ]
-            );
-        });
+    fn an_execution_that_only_moves_the_session_is_no_turn() {
+        let text = "msg_1c19cb82100100000000000162:text:0";
+        let turn_id = "evt_1c19cb81700100000000000159";
+        assert_eq!(
+            replay("move_turn.jsonl", &[]),
+            vec![
+                json!({"type": "turn_started", "turn_id": turn_id}),
+                json!({"type": "served_model", "model": "opencode/iceman-free", "reason": null}),
+                json!({"type": "item_started", "id": text, "content": {"kind": "assistant_message", "text": ""}}),
+                json!({"type": "delta", "item_id": text, "kind": "assistant_text", "text": "PONG"}),
+                json!({"type": "item_completed", "id": text, "content": {"kind": "assistant_message", "text": "PONG"}}),
+                json!({"type": "token_usage", "freshness": "current", "turn_processed_tokens": null, "input_tokens": 4325, "cached_input_tokens": 4096, "output_tokens": 46, "used_tokens": 8467, "context_window": null, "total_processed_tokens": null, "cost_usd": null, "duration_ms": null}),
+                json!({"type": "turn_completed", "turn_id": turn_id, "status": "completed", "usage": {"freshness": "current", "turn_processed_tokens": 8467, "input_tokens": 4325, "cached_input_tokens": 4096, "output_tokens": 46, "used_tokens": 8467, "context_window": null, "total_processed_tokens": null, "cost_usd": 0.0, "duration_ms": null}}),
+            ]
+        );
     }
 
-    const MOVE: &str = "POST /api/session/ses_root/move";
-
-    /// A move reaches OpenCode queued behind what the session runs (2.2.6),
-    /// and the execution that only delivers it is no turn. Once OpenCode
-    /// reports the session moved, requests address the new location and the
-    /// next prompt runs there as an ordinary turn.
+    /// What `MoveTo` posts to `…/move`: queued behind what the session runs,
+    /// as the recorded move's inbox item was delivered.
     #[test]
-    fn a_move_is_queued_in_opencode_and_the_session_follows_it_without_a_turn() {
-        smol::block_on(async {
-            let mut steps: Vec<Step> = frames("move_turn.jsonl")
-                .into_iter()
-                .map(Step::Frame)
-                .collect();
-            let prompt = steps
-                .iter()
-                .rposition(|step| {
-                    matches!(step, Step::Frame(frame) if frame["type"] == "session.inbox.enqueued")
-                })
-                .unwrap();
-            steps.insert(prompt, Step::After(PROMPT.into(), 1));
-            steps.insert(0, Step::After(MOVE.into(), 1));
-            let fixture = fixture(
-                steps,
-                vec![(PROMPT, 200, inbox("msg_1c19cb4c8001MhVuEeuVlViJsq"))],
-            );
-            let handle = open(fixture.options.clone()).await;
-            send(
-                &handle,
-                SessionCommand::MoveTo {
-                    cwd: "/work/feature".into(),
-                },
-            )
-            .await;
-            assert_eq!(
-                serde_json::to_value(recv(&handle).await).unwrap(),
-                json!({"type": "session_moved", "from": "/work/project", "to": "/work/feature"})
-            );
-            send(&handle, turn("Reply with exactly: PONG")).await;
-            let text = "msg_1c19cb8210017is3TIDIiyQxE8:text:0";
-            let turn_id = "evt_1c19cb817001IpfqEDCmLwzQJL";
-            assert_eq!(
-                until(&handle, turn_completed).await,
-                vec![
-                    json!({"type": "turn_accepted", "delivery_id": 1}),
-                    json!({"type": "turn_started", "turn_id": turn_id}),
-                    json!({"type": "turn_checkpoint", "turn_id": turn_id, "checkpoint_id": "msg_1c19cb4c8001MhVuEeuVlViJsq"}),
-                    json!({"type": "served_model", "model": "opencode/iceman-free", "reason": null}),
-                    json!({"type": "item_started", "id": text, "content": {"kind": "assistant_message", "text": ""}}),
-                    json!({"type": "delta", "item_id": text, "kind": "assistant_text", "text": "PONG"}),
-                    json!({"type": "item_completed", "id": text, "content": {"kind": "assistant_message", "text": "PONG"}}),
-                    json!({"type": "token_usage", "freshness": "current", "turn_processed_tokens": null, "input_tokens": 4325, "cached_input_tokens": 4096, "output_tokens": 46, "used_tokens": 8467, "context_window": null, "total_processed_tokens": null, "cost_usd": null, "duration_ms": null}),
-                    json!({"type": "turn_completed", "turn_id": turn_id, "status": "completed", "usage": {"freshness": "current", "turn_processed_tokens": 8467, "input_tokens": 4325, "cached_input_tokens": 4096, "output_tokens": 46, "used_tokens": 8467, "context_window": null, "total_processed_tokens": null, "cost_usd": 0.0, "duration_ms": null}}),
-                ]
-            );
-            shut_down(handle).await;
-            assert_eq!(
-                fixture.server.writes()[2..],
-                [
-                    (
-                        MOVE.into(),
-                        json!({"directory": "/work/feature", "delivery": "queue"})
-                    ),
-                    (
-                        PROMPT.into(),
-                        json!({"text": "Reply with exactly: PONG", "delivery": "queue"})
-                    ),
-                ]
-            );
-            let requests = fixture.server.requests();
-            let moved = requests
-                .iter()
-                .position(|request| request.key == MOVE)
-                .unwrap();
-            let addressed = |key: &str| {
-                requests[moved..]
-                    .iter()
-                    .filter(|request| request.key == key)
-                    .map(|request| request.directory.as_str())
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(addressed("GET /api/command"), ["%2Fwork%2Ffeature"]);
-            assert_eq!(addressed("GET /api/skill"), ["%2Fwork%2Ffeature"]);
-            assert_eq!(addressed("GET /api/agent"), ["%2Fwork%2Ffeature"]);
-            assert_eq!(addressed("GET /api/mcp"), ["%2Fwork%2Ffeature"]);
-            assert_eq!(addressed(PROMPT), ["%2Fwork%2Ffeature"]);
-        });
-    }
-
-    /// A thread that moved while no server ran resumes its session and sends
-    /// it where the thread went.
-    #[test]
-    fn a_session_resumed_in_another_directory_is_moved_there() {
-        smol::block_on(async {
-            let mut fixture = fixture(Vec::new(), vec![(SESSION_GET, 200, SESSION.into())]);
-            fixture.options.resume = Some(ResumeCursor(json!({"session_id": "ses_root"})));
-            let handle = open(fixture.options.clone()).await;
-            shut_down(handle).await;
-            assert_eq!(
-                fixture.server.writes(),
-                [
-                    (
-                        MOVE.into(),
-                        json!({"directory": fixture.directory, "delivery": "queue"})
-                    ),
-                    (
-                        "DELETE /api/experimental/session/ses_root/instructions/entries/tcode"
-                            .into(),
-                        Value::Null
-                    ),
-                ]
-            );
-        });
-    }
-
-    /// A new model goes to the running session through the route that sets
-    /// its variant, keeping the variant; a request for the server's default
-    /// cannot be made there and takes a restart. Verified against 2.2.5 with
-    /// a stand-in provider: the next prompt runs on the new model.
-    #[test]
-    fn a_new_model_is_set_on_the_running_session() {
-        smol::block_on(async {
-            let fixture = fixture(Vec::new(), Vec::new());
-            let handle = open(fixture.options.clone()).await;
-            let effort = OptionSelection {
-                id: EFFORT.into(),
-                value: json!("high"),
-            };
-            for model in [Some("opencode/deepseek-v4.2"), None] {
-                send(
-                    &handle,
-                    SessionCommand::ApplySettings {
-                        model: model.map(str::to_owned),
-                        option_selections: vec![effort.clone()],
-                    },
-                )
-                .await;
-                let applied = recv(&handle).await;
-                assert!(
-                    matches!(applied, AgentEvent::SettingsApplied { applied } if applied == model.is_some()),
-                    "{model:?}: {applied:?}"
-                );
-            }
-            shut_down(handle).await;
-            assert_eq!(
-                fixture.server.writes()[2..],
-                [(
-                    "POST /api/session/ses_root/model".into(),
-                    json!({"model": {"providerID": "opencode", "id": "deepseek-v4.2", "variant": "high"}})
-                )]
-            );
-        });
-    }
-
-    #[test]
-    fn an_effort_change_switches_the_session_models_variant_before_the_prompt() {
-        smol::block_on(async {
-            let fixture = fixture(
-                Vec::new(),
-                vec![(PROMPT, 200, inbox("msg_198aac9f2001K4cb8mDh24jTzH"))],
-            );
-            let handle = open(fixture.options.clone()).await;
-            for _ in 0..2 {
-                send(
-                    &handle,
-                    SessionCommand::SendTurn {
-                        delivery_id: 1,
-                        text: "Think harder".into(),
-                        options: Some(TurnOptions {
-                            effort: Some("max".into()),
-                        }),
-                        attachments: Vec::new(),
-                    },
-                )
-                .await;
-                recv(&handle).await;
-            }
-            shut_down(handle).await;
-            assert_eq!(
-                fixture.server.writes()[2..],
-                [
-                    (
-                        "POST /api/session/ses_root/model".into(),
-                        json!({"model": {"providerID": "opencode", "id": "deepseek-v4.1-flash-free", "variant": "max"}})
-                    ),
-                    (
-                        PROMPT.into(),
-                        json!({"text": "Think harder", "delivery": "queue"})
-                    ),
-                    (
-                        PROMPT.into(),
-                        json!({"text": "Think harder", "delivery": "queue"})
-                    ),
-                ]
-            );
-        });
+    fn a_move_waits_in_the_inbox_behind_the_running_execution() {
+        let enqueued = &frames("move_turn.jsonl")[0]["data"]["item"];
+        let body = move_body(Path::new("/work/feature"));
+        assert_eq!(body["delivery"], enqueued["delivery"]);
+        assert_eq!(
+            body["directory"],
+            enqueued["payload"]["location"]["directory"]
+        );
     }
 
     #[test]
     fn tcode_mcp_servers_join_the_inline_config_as_tools_of_their_own() {
-        smol::block_on(async {
-            let fixture = fixture(Vec::new(), Vec::new());
-            let mut options = fixture.options.clone();
-            options.launch_env.env.push((
+        let launch_env = LaunchEnv {
+            env: vec![(
                 "OPENCODE_CONFIG_CONTENT".into(),
                 r#"{"experimental":{"todo":true},"mcp":{"servers":{"docs":{"type":"local","command":["docs-mcp"]}}}}"#.into(),
-            ));
-            options.mcp_servers = vec![McpRegistration {
-                name: McpRegistration::SERVER_NAME_PREVIEW.into(),
-                url: "http://127.0.0.1:53211/mcp".into(),
-                bearer_token: "token".into(),
-            }];
-            let handle = open(options).await;
-            shut_down(handle).await;
-            let config: Value = serde_json::from_str(
-                &std::fs::read_to_string(fixture.directory.join("config")).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                config,
-                json!({"experimental": {"todo": true}, "mcp": {"servers": {
-                    "docs": {"type": "local", "command": ["docs-mcp"]},
-                    "tcode_preview": {"type": "remote", "url": "http://127.0.0.1:53211/mcp", "headers": {"Authorization": "Bearer token"}, "codemode": false},
-                }}})
-            );
-        });
+            )],
+            home: None,
+        };
+        let preview = McpRegistration {
+            name: McpRegistration::SERVER_NAME_PREVIEW.into(),
+            url: "http://127.0.0.1:53211/mcp".into(),
+            bearer_token: "token".into(),
+        };
+        let config: Value =
+            serde_json::from_str(&config_content(&launch_env, &[&preview]).unwrap().unwrap())
+                .unwrap();
+        assert_eq!(
+            config,
+            json!({"experimental": {"todo": true}, "mcp": {"servers": {
+                "docs": {"type": "local", "command": ["docs-mcp"]},
+                "tcode_preview": {"type": "remote", "url": "http://127.0.0.1:53211/mcp", "headers": {"Authorization": "Bearer token"}, "codemode": false},
+            }}})
+        );
     }
 
     #[test]
     fn the_model_catalog_offers_each_model_with_its_variants_in_opencodes_order() {
-        smol::block_on(async {
-            let fixture = fixture(
-                Vec::new(),
-                vec![
-                    ("GET /api/model", 200, fixture_text("model_list.json")),
-                    (
-                        "GET /api/model/default",
-                        200,
-                        fixture_text("model_default.json"),
-                    ),
-                ],
-            );
-            let models = list_models(
-                fixture.options.binary_path.clone(),
-                fixture.options.launch_env.clone(),
-            )
-            .await
-            .unwrap();
-            let effort = |variants: &[&str]| json!([{"kind": "select", "id": "reasoningEffort", "label": "Thinking", "options": variants.iter().map(|variant| json!({"value": variant, "label": title_case(variant), "description": null, "unavailable": null})).collect::<Vec<_>>(), "default_value": null, "role": "model", "apply": "live", "recommended": null, "permissive": null}]);
-            assert_eq!(
-                serde_json::to_value(&models).unwrap(),
-                json!([
-                    {"id": "openai/gpt-6.1-terra", "display_name": "GPT-6.1 Terra", "is_default": true, "options": effort(&["none", "low", "medium", "high", "xhigh", "max"])},
-                    {"id": "opencode/big-pickle", "display_name": "Big Pickle", "is_default": false, "options": []},
-                ])
-            );
-        });
+        let data =
+            |name: &str| serde_json::from_str::<Value>(&fixture_text(name)).unwrap()["data"].take();
+        let models = map_models(&data("model_list.json"), &data("model_default.json"));
+        let effort = |variants: &[(&str, &str)]| json!([{"kind": "select", "id": "reasoningEffort", "label": "Thinking", "options": variants.iter().map(|(value, label)| json!({"value": value, "label": label, "description": null, "unavailable": null})).collect::<Vec<_>>(), "default_value": null, "role": "model", "apply": "live", "recommended": null, "permissive": null}]);
+        assert_eq!(
+            serde_json::to_value(&models).unwrap(),
+            json!([
+                {"id": "openai/gpt-6.1-terra", "display_name": "GPT-6.1 Terra", "is_default": true, "options": effort(&[("none", "None"), ("low", "Low"), ("medium", "Medium"), ("high", "High"), ("xhigh", "Xhigh"), ("max", "Max")])},
+                {"id": "opencode/big-pickle", "display_name": "Big Pickle", "is_default": false, "options": []},
+            ])
+        );
     }
 
-    /// A thread's fold finds a turn by its id, so a provider started again on
-    /// the same session (after the idle grace let the last one go) must not
-    /// name its turns as the earlier process did: its restore points and
-    /// changes would land on the earlier turns.
+    /// A process that writes a line to stderr and exits before announcing
+    /// an address, whatever it is asked.
+    #[cfg(unix)]
     #[test]
-    fn turns_of_a_restarted_server_are_named_apart_from_earlier_ones() {
-        let turn_ids = |fixture: &str| -> Vec<String> {
-            let mut mapper = Mapper::new("ses_root".into(), Vec::new(), HashMap::new());
-            frames(fixture)
-                .iter()
-                .flat_map(|frame| mapper.on_event(frame).events)
-                .filter_map(|event| match event {
-                    AgentEvent::TurnStarted { turn_id } => Some(turn_id),
-                    _ => None,
-                })
-                .collect()
+    fn a_server_that_exits_during_startup_reports_its_own_output() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory =
+            std::env::temp_dir().join(format!("agent-opencode-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let binary = directory.join("exits-at-start");
+        std::fs::write(&binary, "#!/bin/sh\necho 'cannot start' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let spawned = Server::spawn(Some(&binary), &directory, &LaunchEnv::default(), &[], &[]);
+        std::fs::remove_dir_all(&directory).unwrap();
+        let Err(error) = spawned else {
+            panic!("the server exited");
         };
-        let first = turn_ids("text_turn.jsonl");
-        let later = turn_ids("files_turn.jsonl");
-        assert_eq!((first.len(), later.len()), (1, 1));
-        assert_ne!(first, later);
+        assert_eq!(
+            error.to_string(),
+            "provider reported error: OpenCode server exited during startup\n\
+             server output:\ncannot start"
+        );
     }
 }

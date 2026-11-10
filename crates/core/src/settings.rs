@@ -2176,7 +2176,7 @@ mod harness_settings_tests {
     #[test]
     fn the_default_account_is_named_for_its_email_beside_another() {
         let mut settings = Settings::default();
-        let email = Some("tryanks@example.com");
+        let email = Some("user@example.com");
         assert_eq!(
             settings.profile_display_name_as("claude", email),
             "Claude Code"
@@ -2190,7 +2190,7 @@ mod harness_settings_tests {
         );
         assert_eq!(
             settings.profile_display_name_as("claude", email),
-            "Claude Code (tryanks)"
+            "Claude Code (user)"
         );
         assert_eq!(
             settings.profile_display_name_as("claude", None),

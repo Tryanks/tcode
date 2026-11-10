@@ -7,7 +7,7 @@
 
 mod updates;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests;
 
 use std::path::PathBuf;
@@ -345,6 +345,7 @@ impl Dialect for Cursor {
     async fn steer(
         &self,
         _session: &Session,
+        _session_id: &acp::SessionId,
         _request_id: String,
         _text: String,
         _attachments: Vec<Attachment>,
@@ -364,15 +365,9 @@ impl Dialect for Cursor {
         method: String,
         params: Value,
     ) -> Result<Value, acp::Error> {
-        // None of these is sent while `session/load` replays, but a replay
-        // must never put a question to the user.
-        let replaying = session.with_state(|state| state.loading());
         match method.as_str() {
             ASK_QUESTION => {
                 let questions = Questions::parse(&params)?;
-                if replaying {
-                    return Ok(json!({ "outcome": { "outcome": "cancelled" } }));
-                }
                 let answers = session.ask_user(questions.canonical()).await;
                 let (reply, unsent) = questions.reply(answers);
                 if !unsent.is_empty() {
@@ -388,9 +383,6 @@ impl Dialect for Cursor {
                 Ok(reply)
             }
             CREATE_PLAN => {
-                if replaying {
-                    return Ok(json!({"outcome": {"outcome": "cancelled"}}));
-                }
                 let decision = session
                     .ask_plan(
                         &params,
@@ -405,29 +397,23 @@ impl Dialect for Cursor {
                     ApprovalDecision::Option(id) if id == "accept" => {
                         json!({"outcome": {"outcome": "accepted"}})
                     }
-                    ApprovalDecision::Option(id) if id == "reject" => {
-                        json!({"outcome": {"outcome": "rejected"}})
-                    }
+                    ApprovalDecision::Option(_) => json!({"outcome": {"outcome": "rejected"}}),
                     ApprovalDecision::Feedback(reason) => {
                         json!({"outcome": {"outcome": "rejected", "reason": reason}})
                     }
-                    ApprovalDecision::Option(_) | ApprovalDecision::Cancel => {
-                        json!({"outcome": {"outcome": "cancelled"}})
-                    }
+                    ApprovalDecision::Cancel => json!({"outcome": {"outcome": "cancelled"}}),
                 })
             }
             UPDATE_TODOS => {
-                if !replaying {
-                    let steps = self.update_todos(&params);
-                    let turn_id = session.with_state(|state| state.turn().map(str::to_owned));
-                    session
-                        .emit(AgentEvent::PlanUpdated {
-                            turn_id,
-                            explanation: None,
-                            steps,
-                        })
-                        .await;
-                }
+                let steps = self.update_todos(&params);
+                let turn_id = session.with_state(|state| state.turn().map(str::to_owned));
+                session
+                    .emit(AgentEvent::PlanUpdated {
+                        turn_id,
+                        explanation: None,
+                        steps,
+                    })
+                    .await;
                 Ok(json!({}))
             }
             // Sent once the task or image tool has finished; Cursor ignores
@@ -495,7 +481,8 @@ async fn select_model(
 
 /// Re-select the model parameters this session chose before: a new process
 /// starts on the parameters Cursor last saved for the model, which another
-/// session may have changed. A choice the model no longer offers is dropped.
+/// session may have changed. Cursor judges a choice the model no longer
+/// offers.
 async fn restore_parameters(
     setup: &Setup<'_>,
     session_id: &acp::SessionId,
@@ -503,9 +490,9 @@ async fn restore_parameters(
 ) {
     for option in config_options {
         let id = option.id.0.as_ref();
-        let acp::SessionConfigKind::Select(select) = &option.kind else {
+        if !matches!(option.kind, acp::SessionConfigKind::Select(_)) {
             continue;
-        };
+        }
         let Some(chosen) = acp_session::config_selection(
             &setup.opts.option_selections,
             id,
@@ -513,17 +500,7 @@ async fn restore_parameters(
         ) else {
             continue;
         };
-        let offered = match &select.options {
-            acp::SessionConfigSelectOptions::Ungrouped(options) => options
-                .iter()
-                .any(|option| option.value.0.as_ref() == chosen),
-            acp::SessionConfigSelectOptions::Grouped(groups) => groups
-                .iter()
-                .flat_map(|group| &group.options)
-                .any(|option| option.value.0.as_ref() == chosen),
-            _ => false,
-        };
-        if id == MODEL_CONFIG_ID || select_value(option) == Some(chosen) || !offered {
+        if id == MODEL_CONFIG_ID || select_value(option) == Some(chosen) {
             continue;
         }
         if let Err(err) = set_config_option(setup, session_id, id, chosen).await {

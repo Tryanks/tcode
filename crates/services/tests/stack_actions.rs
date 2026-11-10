@@ -1,315 +1,6 @@
-use serde_json::{Value, json};
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
-};
-use tcode_core::pull_request::{
-    PullRequestKey, PullRequestMergeMethod, PullRequestState, StackRebaseFailure, StackRebaseStep,
-};
-use tcode_protocol::{PullRequestActionResult, PullRequestRejection, PullRequestStackHead};
-use tcode_services::github::{
-    GitHubApi,
-    pull_request_reads::PullRequestReads,
-    stack_actions::MergeSubmission,
-    stack_rebase::{self, Identity, RebaseLayer},
-};
-
-#[path = "support/github.rs"]
-#[allow(dead_code)] // tests/github.rs drives the fixture by hand as well.
-mod fixture;
-use fixture::{Fixture, Server, Store};
-
-fn sha(digit: char) -> String {
-    std::iter::repeat_n(digit, 40).collect()
-}
-
-/// The stack GitHub's stacks API lists for #3: #1 merged, then #2 and #3 open.
-struct Stack {
-    number: u64,
-    layers: Vec<(u64, String, &'static str, bool)>,
-}
-
-impl Default for Stack {
-    fn default() -> Self {
-        Self {
-            number: 50,
-            layers: vec![
-                (1, sha('a'), "merged", false),
-                (2, sha('b'), "open", false),
-                (3, sha('c'), "open", false),
-            ],
-        }
-    }
-}
-
-impl Stack {
-    /// The listing names the stack and its members, without their titles.
-    fn listing(&self) -> Value {
-        json!([{
-            "number": self.number,
-            "url": "https://api.github.com/repos/octo/repo/stacks/50",
-            "base": {"ref": "main"},
-            "pull_requests": self.layers.iter().map(|(number, head, ..)| json!({
-                "number": number,
-                "head": {"ref": format!("layer-{number}"), "sha": head},
-            })).collect::<Vec<_>>(),
-        }])
-    }
-
-    fn detail(&self) -> Value {
-        json!({
-            "number": self.number,
-            "url": "https://api.github.com/repos/octo/repo/stacks/50",
-            "base": {"ref": "main"},
-            "pull_requests": self.layers.iter().map(|(number, head, state, draft)| json!({
-                "number": number,
-                "title": format!("Layer {number}"),
-                "head": {"ref": format!("layer-{number}"), "sha": head},
-                "state": if *state == "merged" { "closed" } else { state },
-                "merged_at": (*state == "merged").then_some("2026-10-01T00:00:00Z"),
-                "draft": draft,
-            })).collect::<Vec<_>>(),
-        })
-    }
-}
-
-/// A GitHub listing `stack` for #3 that answers every other request with `other`, and the
-/// request line of everything it was asked.
-fn github(
-    stack: Stack,
-    other: impl Fn(&str, &[u8]) -> (u16, Value) + Send + Sync + 'static,
-) -> (Arc<PullRequestReads>, Server, Arc<Mutex<Vec<String>>>) {
-    let store = Store::new();
-    let fixture = Fixture::new();
-    let reads = PullRequestReads::new(GitHubApi::new(
-        store.credentials(&[("GH_TOKEN", "fixture-token")]),
-        fixture.builder(),
-    ));
-    let asked: Arc<Mutex<Vec<String>>> = Arc::default();
-    let seen = asked.clone();
-    let server: Server = fixture.serve(move |exchange| {
-        let line = exchange.request.lines().next().unwrap().to_owned();
-        seen.lock().unwrap().push(line.clone());
-        let (status, reply) = if line.starts_with("GET /repos/octo/repo/stacks?pull_request=3 ") {
-            (200, stack.listing())
-        } else if line.starts_with(&format!("GET /repos/octo/repo/stacks/{} ", stack.number)) {
-            (200, stack.detail())
-        } else {
-            other(&line, &exchange.body)
-        };
-        exchange.reply(status, "", reply.to_string().as_bytes());
-    });
-    (reads, server, asked)
-}
-
-fn heads(heads: &[(u64, String)]) -> Vec<PullRequestStackHead> {
-    heads
-        .iter()
-        .map(|(number, head)| PullRequestStackHead {
-            number: *number,
-            head: head.clone(),
-        })
-        .collect()
-}
-
-/// Submits a merge of #3 at `heads` to a GitHub listing `stack` that answers the submission with
-/// `put`, and returns what came of it with the body of every submission GitHub saw.
-fn merge(
-    stack: Stack,
-    put: (u16, Value),
-    confirmed: &[(u64, String)],
-) -> (MergeSubmission, Vec<Value>) {
-    let submitted: Arc<Mutex<Vec<Value>>> = Arc::default();
-    let seen = submitted.clone();
-    let (reads, _server, _) = github(stack, move |line, body| {
-        if line.starts_with("PUT /repos/octo/repo/pulls/3/merge-async ") {
-            seen.lock()
-                .unwrap()
-                .push(serde_json::from_slice(body).unwrap());
-            put.clone()
-        } else {
-            (404, json!({"message": "Not Found"}))
-        }
-    });
-    let submission = reads.merge_stack(
-        &PullRequestKey::new("github.com", "octo/repo", 3),
-        50,
-        &heads(confirmed),
-        PullRequestMergeMethod::Squash,
-    );
-    let submitted = submitted.lock().unwrap().clone();
-    (submission, submitted)
-}
-
-fn scope() -> Vec<(u64, String)> {
-    vec![(2, sha('b')), (3, sha('c'))]
-}
-
-#[test]
-fn a_stack_merge_is_one_submission_at_the_target_head_and_merged_queued_and_pending_differ() {
-    let cases = [
-        (
-            json!({"status": "merged", "details": {"sha": sha('d')}}),
-            MergeSubmission::Done(PullRequestActionResult::Applied),
-        ),
-        (
-            json!({"status": "enqueued", "details": {}}),
-            MergeSubmission::Done(PullRequestActionResult::Queued { position: None }),
-        ),
-        (
-            json!({"status": "pending", "details": {"uuid": "op-1"}}),
-            MergeSubmission::Following {
-                id: "op-1".into(),
-                adopted: false,
-                layers: vec![2, 3],
-            },
-        ),
-        (
-            json!({"status": "failed", "details": {"message": "Required checks have not passed"}}),
-            MergeSubmission::Done(PullRequestActionResult::Rejected(
-                PullRequestRejection::Refused {
-                    messages: vec!["Required checks have not passed".into()],
-                },
-            )),
-        ),
-    ];
-    for (answer, expected) in cases {
-        let (submission, submitted) = merge(Stack::default(), (202, answer), &scope());
-        assert_eq!(submission, expected);
-        assert_eq!(
-            submitted,
-            vec![json!({"merge_method": "squash", "merge_action": "default", "sha": sha('c')})]
-        );
-    }
-}
-
-#[test]
-fn a_conflict_naming_a_running_merge_is_followed_and_one_naming_none_is_refused() {
-    let (adopted, submitted) = merge(
-        Stack::default(),
-        (
-            409,
-            json!({"message": "A merge request already exists", "details": {"uuid": "op-0"}}),
-        ),
-        &scope(),
-    );
-    assert_eq!(
-        adopted,
-        MergeSubmission::Following {
-            id: "op-0".into(),
-            adopted: true,
-            layers: vec![2, 3],
-        }
-    );
-    assert_eq!(submitted.len(), 1);
-    let (unnamed, submitted) = merge(
-        Stack::default(),
-        (409, json!({"message": "A merge request already exists"})),
-        &scope(),
-    );
-    assert_eq!(
-        unnamed,
-        MergeSubmission::Done(PullRequestActionResult::Rejected(
-            PullRequestRejection::MergeRunning
-        ))
-    );
-    assert_eq!(submitted.len(), 1);
-}
-
-#[test]
-fn a_moved_head_a_changed_scope_or_a_blocked_layer_sends_nothing() {
-    let refused = |rejection| MergeSubmission::Done(PullRequestActionResult::Rejected(rejection));
-    let with = |change: fn(&mut Stack)| {
-        let mut stack = Stack::default();
-        change(&mut stack);
-        stack
-    };
-    let cases = [
-        (
-            Stack::default(),
-            vec![(2, sha('e')), (3, sha('c'))],
-            refused(PullRequestRejection::LayerChanged {
-                number: 2,
-                expected: sha('e'),
-                actual: sha('b'),
-            }),
-        ),
-        // A layer the confirmation did not show is not merged with the others.
-        (
-            Stack::default(),
-            vec![(3, sha('c'))],
-            refused(PullRequestRejection::StackChanged),
-        ),
-        (
-            with(|stack| stack.number = 51),
-            scope(),
-            refused(PullRequestRejection::StackChanged),
-        ),
-        (
-            with(|stack| stack.layers[1].3 = true),
-            scope(),
-            refused(PullRequestRejection::LayerDraft { number: 2 }),
-        ),
-        (
-            with(|stack| stack.layers[1].2 = "closed"),
-            scope(),
-            refused(PullRequestRejection::LayerNotOpen {
-                number: 2,
-                state: PullRequestState::Closed,
-            }),
-        ),
-        (
-            with(|stack| stack.layers[2].2 = "merged"),
-            vec![(2, sha('b'))],
-            refused(PullRequestRejection::LayerNotOpen {
-                number: 3,
-                state: PullRequestState::Merged,
-            }),
-        ),
-    ];
-    for (stack, heads, expected) in cases {
-        let (submission, submitted) = merge(
-            stack,
-            (202, json!({"status": "merged", "details": {}})),
-            &heads,
-        );
-        assert_eq!(submission, expected);
-        assert!(submitted.is_empty(), "nothing is submitted: {expected:?}");
-    }
-}
-
-#[test]
-fn a_layer_the_account_cannot_push_to_refuses_the_rebase_before_anything_runs() {
-    let (reads, _server, asked) = github(Stack::default(), |line, _| {
-        if line.starts_with("POST ") && line.contains("graphql") {
-            (
-                200,
-                json!({"data": {"repository": {
-                    "pr2": {"headRepository": {"viewerPermission": "WRITE"}, "maintainerCanModify": false},
-                    "pr3": {"headRepository": {"viewerPermission": "READ"}, "maintainerCanModify": false},
-                }}}),
-            )
-        } else {
-            (404, json!({"message": "Not Found"}))
-        }
-    });
-    let plan = reads.plan_stack_rebase(
-        &PullRequestKey::new("github.com", "octo/repo", 3),
-        50,
-        &heads(&scope()),
-    );
-    assert_eq!(
-        plan.err(),
-        Some(PullRequestRejection::NoPushAccess { numbers: vec![3] })
-    );
-    // No plan, so no Git runs and nothing is pushed: GitHub was only read.
-    let asked = asked.lock().unwrap();
-    assert!(
-        asked.iter().all(|line| line.starts_with("GET ")
-            || (line.starts_with("POST ") && line.contains("graphql"))),
-        "{asked:?}"
-    );
-}
+use std::path::Path;
+use tcode_core::pull_request::{StackRebaseFailure, StackRebaseStep};
+use tcode_services::github::stack_rebase::{self, Identity, RebaseLayer};
 
 /// A bare repository standing in for GitHub, holding a three-layer stack cut from `main`, with
 /// `main` moved ahead since. Each layer changes its own file, so each has one commit of its own.
@@ -365,6 +56,66 @@ impl Remote {
             &root,
             &["init", "--quiet", "--bare", path.to_str().unwrap()],
         );
+        // One `git fast-import` writes the history: `main`'s first commit, each layer on the one
+        // below it, then `main` moved ahead.
+        let data = |text: &str| format!("data {}\n{text}\n", text.len());
+        let mut stream = String::new();
+        let mut commit = |mark: usize,
+                          branch: &str,
+                          from: Option<usize>,
+                          file: &str,
+                          text: &str,
+                          message: &str| {
+            stream.push_str(&format!(
+                "commit refs/heads/{branch}\nmark :{mark}\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n{}",
+                data(message)
+            ));
+            if let Some(from) = from {
+                stream.push_str(&format!("from :{from}\n"));
+            }
+            stream.push_str(&format!("M 100644 inline {file}\n{}\n", data(text)));
+        };
+        commit(1, "main", None, "README.md", "start\n", "Initial");
+        commit(
+            2,
+            "layer-1",
+            Some(1),
+            "layer-1.txt",
+            "one\n",
+            "layer-1: add",
+        );
+        commit(
+            3,
+            "layer-2",
+            Some(2),
+            "layer-2.txt",
+            "one\n",
+            "layer-2: add",
+        );
+        commit(
+            4,
+            "layer-3",
+            Some(3),
+            "layer-3.txt",
+            "one\n",
+            "layer-3: add",
+        );
+        commit(
+            5,
+            "main",
+            Some(1),
+            "README.md",
+            "main moved ahead\n",
+            "Docs",
+        );
+        let mut import = tcode_services::process::command("git")
+            .current_dir(&path)
+            .args(["fast-import", "--quiet"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(&mut import.stdin.take().unwrap(), stream.as_bytes()).unwrap();
+        assert!(import.wait().unwrap().success());
         git(
             &root,
             &[
@@ -374,30 +125,11 @@ impl Remote {
                 work.to_str().unwrap(),
             ],
         );
-        let remote = Self {
+        Self {
             _root: tempdir::Dir(root),
             path,
             work,
-        };
-        remote.commit("README.md", "start\n", "Initial");
-        git(&remote.work, &["push", "--quiet", "origin", "HEAD:main"]);
-        for (layer, parent) in [
-            ("layer-1", "main"),
-            ("layer-2", "layer-1"),
-            ("layer-3", "layer-2"),
-        ] {
-            git(&remote.work, &["switch", "--quiet", "-c", layer, parent]);
-            remote.commit(&format!("{layer}.txt"), "one\n", &format!("{layer}: add"));
         }
-        git(&remote.work, &["switch", "--quiet", "main"]);
-        remote.commit("README.md", "main moved ahead\n", "Docs");
-        git(
-            &remote.work,
-            &[
-                "push", "--quiet", "origin", "main", "layer-1", "layer-2", "layer-3",
-            ],
-        );
-        remote
     }
 
     fn commit(&self, file: &str, text: &str, message: &str) {

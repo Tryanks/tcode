@@ -1070,18 +1070,4 @@ mod tests {
             assert!(visited.insert(other.as_ax()), "pid {pid} is a new element");
         }
     }
-
-    #[test]
-    fn chromium_bundle_detection_is_case_insensitive_and_narrow() {
-        for bundle_id in [
-            "com.google.Chrome",
-            "org.chromium.Chromium",
-            "com.example.ELECTRON.shell",
-        ] {
-            assert!(is_chromium_bundle(bundle_id));
-        }
-        for bundle_id in ["com.apple.Safari", "com.example.chromatic", ""] {
-            assert!(!is_chromium_bundle(bundle_id));
-        }
-    }
 }

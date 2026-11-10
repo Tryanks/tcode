@@ -152,7 +152,7 @@ pub(super) struct Api {
     store: SettingsStore,
     environment: BTreeMap<String, String>,
     hosts: RwLock<BTreeMap<String, HostSettings>>,
-    pub(super) agent: ureq::Agent,
+    agent: ureq::Agent,
     /// Until when, and for which credential's fingerprint: Bitbucket limits each credential, and
     /// anonymous reads by address, apart.
     rate_limits: Mutex<crate::forge::RateLimits>,

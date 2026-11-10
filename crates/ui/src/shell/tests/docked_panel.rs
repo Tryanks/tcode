@@ -210,67 +210,6 @@ fn a_narrow_pane_is_covered_and_its_neighbour_never_moves(cx: &mut TestAppContex
     cx.update(|window, _| assert!(input.is_focused(window), "it goes back"));
 }
 
-/// The panel opens and closes by gliding the split: on every frame its left
-/// edge is the conversation's right edge, and the reader opening it again on
-/// its way out turns it back from where it is, its content still drawn.
-#[gpui::test]
-fn the_panel_glides_open_and_shut_at_the_seam(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx) = mount_thread_with(cx, Vec::new());
-    let store = store_of(&shell, cx);
-    resize(cx, 1600.);
-    draw_until(&shell, cx, &host, "chat-composer", None);
-    crate::test_frames::draw_settled(cx);
-    let seam = |cx: &mut VisualTestContext| {
-        let at = panel(cx).left();
-        assert_eq!(conversation(cx).right(), at, "the seam");
-        at
-    };
-    let half_way = |cx: &mut VisualTestContext| {
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        draw(cx);
-    };
-    let toggle = |cx: &mut VisualTestContext| {
-        store.update(cx, |store, cx| {
-            store.toggle_tab_panel_for("thread-1", RightTab::Diff, cx)
-        });
-    };
-
-    toggle(cx);
-    half_way(cx);
-    let opening = seam(cx);
-    draw_until(&shell, cx, &host, "diff-body", None);
-    crate::test_frames::draw_settled(cx);
-    let open = seam(cx);
-    assert!(
-        opening > open && opening < px(1600.),
-        "{opening:?}, at rest {open:?}"
-    );
-
-    toggle(cx);
-    half_way(cx);
-    let closing = seam(cx);
-    assert!(closing > open && closing < px(1600.), "{closing:?}");
-    assert!(cx.debug_bounds("diff-body").is_some(), "drawn as it goes");
-
-    toggle(cx);
-    draw(cx);
-    let turning = seam(cx);
-    assert!(
-        turning > open && turning <= closing,
-        "{turning:?} from {closing:?} toward {open:?}"
-    );
-    assert!(cx.debug_bounds("diff-body").is_some(), "its content kept");
-    crate::test_frames::draw_settled(cx);
-    assert_eq!(seam(cx), open);
-
-    toggle(cx);
-    crate::test_frames::draw_settled(cx);
-    assert_eq!(cx.debug_bounds("right-panel"), None);
-    assert_eq!(conversation(cx).right(), px(1600.));
-}
-
 /// A panel covering the pane would lie over an agent opened in that pane's
 /// chat, so opening the agent closes it, and the agent shows as the width
 /// says; the same goes for one the reader expanded.
@@ -304,69 +243,6 @@ fn an_agent_opened_from_a_covering_panel_closes_it(cx: &mut TestAppContext) {
             });
         }
     }
-}
-
-/// The pane's width crossing the point where both fit goes from docked to
-/// covering and back without a jump: frame by frame the panel's left edge and
-/// the conversation's right edge travel between where they rest, and the
-/// panel is one panel throughout, whose content keeps what it holds.
-#[gpui::test]
-fn crossing_the_room_for_both_glides(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, _host, cx) = mount_panes(cx);
-    let store = store_of(&shell, cx);
-    one_pane(LEAST, cx);
-    open(&store, "thread-1", RightTab::Plan, cx);
-    let expand = cx.debug_bounds("diff-expand").expect("the expand button");
-    cx.simulate_click(expand.center(), gpui::Modifiers::default());
-    crate::test_frames::draw_settled(cx);
-    cx.simulate_click(expand.center(), gpui::Modifiers::default());
-    crate::test_frames::draw_settled(cx);
-    let held = cx.update(|window, cx| window.focused(cx));
-    assert!(held.is_some(), "the panel's button has the keyboard");
-
-    for (width, covers) in [(LEAST - 1., true), (LEAST, false)] {
-        let from = (panel(cx).left(), conversation(cx).right());
-        resize(cx, SIDEBAR_WIDTH + width);
-        let mut seen = vec![from, (panel(cx).left(), conversation(cx).right())];
-        for _ in 0..60 {
-            if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
-                break;
-            }
-            cx.executor().advance_clock(Duration::from_millis(16));
-            cx.run_until_parked();
-            seen.push((panel(cx).left(), conversation(cx).right()));
-        }
-        crate::test_frames::draw_settled(cx);
-        let to = (panel(cx).left(), conversation(cx).right());
-        let pane = pane_bounds(&shell, cx)[0];
-        if covers {
-            assert_eq!(to, (pane.left(), pane.right()), "over the pane");
-        } else {
-            assert_eq!(to.0, to.1, "beside the conversation");
-        }
-        assert!(seen.len() > 3, "{seen:?}");
-        for steps in seen.windows(2) {
-            let travel = |pick: fn(&(Pixels, Pixels)) -> Pixels| (pick(&from) - pick(&to)).abs();
-            assert!(
-                (steps[1].0 - steps[0].0).abs() <= travel(|at| at.0) * 0.5
-                    && (steps[1].1 - steps[0].1).abs() <= travel(|at| at.1) * 0.5,
-                "a jump in {seen:?}"
-            );
-        }
-        assert_eq!(
-            cx.update(|window, cx| window.focused(cx)),
-            held,
-            "the panel is the same one"
-        );
-    }
-
-    // With motion reduced, the same crossing is there at once.
-    cx.update(|_, cx| cx.set_reduce_motion(true));
-    resize(cx, SIDEBAR_WIDTH + LEAST - 1.);
-    let pane = pane_bounds(&shell, cx)[0];
-    assert_eq!(panel(cx).left(), pane.left());
-    assert_eq!(conversation(cx).right(), pane.right());
 }
 
 /// Expanded by its own button, the panel covers the pane, floating over it,

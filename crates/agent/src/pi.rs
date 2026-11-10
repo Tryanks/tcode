@@ -11,8 +11,6 @@ use std::process::{Child, ChildStdin, Stdio};
 use serde_json::{Value, json};
 use smol::channel::{Receiver, Sender};
 
-#[cfg(test)]
-use crate::TurnStatus;
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
 use crate::process::{ChildOutput, ProcessTree, send_json as write_json, spawn_line_reader};
 use crate::{
@@ -613,10 +611,6 @@ impl SessionActor for PiActor {
         }
     }
 
-    async fn settle_shutdown(&mut self) {
-        let _ = self.cancel_pending_ui();
-    }
-
     async fn teardown(mut self, reason: Option<String>) -> Option<String> {
         self.stop();
         reason.map(|base| self.stderr_tail.append_to(base, "\nstderr:\n"))
@@ -697,25 +691,35 @@ impl PiActor {
             &mut self.stdin,
             &json!({"id":"tcode-entries","type":"get_entries"}),
         )?;
+        // `wait_response` reports pi refusing a request as
+        // `AgentError::Provider`; the session itself has started. Any other
+        // error means pi is gone.
         match self.wait_response("tcode-entries").await {
             Ok(response) => self.entries_cursor = last_entry_id(&response),
-            Err(err) => log::debug!("pi get_entries unavailable: {err}"),
+            Err(AgentError::Provider(err)) => {
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message: format!("pi get_entries failed: {err}"),
+                    })
+                    .await;
+            }
+            Err(err) => return Err(err),
         }
 
         send_json(
             &mut self.stdin,
             &json!({"id":"tcode-commands","type":"get_commands"}),
         )?;
-        let commands = match self.wait_response("tcode-commands").await {
-            Ok(response) => map_commands(&response),
-            Err(err) => {
-                log::debug!("pi get_commands unavailable: {err}");
-                Vec::new()
-            }
+        let event = match self.wait_response("tcode-commands").await {
+            Ok(response) => AgentEvent::ProviderCommands {
+                commands: map_commands(&response),
+            },
+            Err(AgentError::Provider(err)) => AgentEvent::Warning {
+                message: format!("pi get_commands failed: {err}"),
+            },
+            Err(err) => return Err(err),
         };
-        self.events
-            .emit(AgentEvent::ProviderCommands { commands })
-            .await;
+        self.events.emit(event).await;
         Ok(())
     }
 
@@ -730,11 +734,11 @@ impl PiActor {
                         ensure_success(&message)?;
                         return Ok(message);
                     }
-                    // Extensions load before this handshake completes, so the
-                    // one notification that explains a broken extension arrives
-                    // while we are still here. Everything else that lands early
-                    // belongs to the mapper, not to startup.
-                    if let Some(warning) = extension_warning(&message) {
+                    // Extensions load before this handshake completes, so a
+                    // notification such as one explaining a broken extension
+                    // arrives while we are still here. Everything else that
+                    // lands early belongs to the mapper, not to startup.
+                    if let Some(warning) = extension_notice(&message) {
                         self.events
                             .emit(AgentEvent::Warning { message: warning })
                             .await;
@@ -818,9 +822,11 @@ impl PiActor {
         match request {
             PiRequest::Entries { turn } => {
                 if !success {
-                    // The cursor names an entry this session lacks: start over.
-                    log::debug!("pi get_entries failed: {}", response_error(message));
-                    self.entries_cursor = None;
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: format!("pi get_entries failed: {}", response_error(message)),
+                        })
+                        .await;
                     return;
                 }
                 if let Some(cursor) = last_entry_id(message) {
@@ -981,28 +987,20 @@ impl PiActor {
                 self.settle_request(request, &message).await;
                 return;
             }
-            let success = message
-                .get("success")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if success {
-                if let Some(request_id) = message
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .and_then(|id| self.pending_steers.remove(id))
-                {
-                    self.events
-                        .emit(AgentEvent::SteerAccepted { request_id })
-                        .await;
-                }
-            } else {
-                self.events
-                    .emit(AgentEvent::Error {
-                        message: response_error(&message),
-                        fatal: false,
-                    })
-                    .await;
-            }
+            let steer = message
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| self.pending_steers.remove(id));
+            let event = match (success, steer) {
+                (true, Some(request_id)) => AgentEvent::SteerAccepted { request_id },
+                (true, None) => return,
+                (false, Some(request_id)) => AgentEvent::SteerRejected { request_id },
+                (false, None) => AgentEvent::Error {
+                    message: response_error(&message),
+                    fatal: false,
+                },
+            };
+            self.events.emit(event).await;
             return;
         }
         if message.get("type").and_then(Value::as_str) == Some("extension_ui_request") {
@@ -1048,7 +1046,7 @@ impl PiActor {
             return;
         }
         if method != "confirm" {
-            if let Some(warning) = extension_warning(message) {
+            if let Some(warning) = extension_notice(message) {
                 self.events
                     .emit(AgentEvent::Warning { message: warning })
                     .await;
@@ -1080,46 +1078,27 @@ impl PiActor {
                 .await;
             return;
         };
-        let payload: Value = message
-            .get("message")
-            .and_then(Value::as_str)
-            .and_then(|text| serde_json::from_str(text).ok())
-            .unwrap_or(Value::Null);
-        let tool_name = payload
-            .get("toolName")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_owned();
         self.pending_approvals.insert(id.to_owned());
-        let kind = if payload.is_null() {
-            ApprovalKind::ToolUse {
-                name: message
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Confirmation")
-                    .to_owned(),
-                input: Value::Null,
-                detail: message
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-            }
-        } else {
-            approval_kind(&tool_name, &payload)
-        };
         self.events
             .emit(AgentEvent::ApprovalRequested(ApprovalRequest {
                 id: id.to_owned(),
                 parent_item_id: None,
                 turn_id: self.mapper.current_turn.clone(),
-                // A tool's reason is already its detail.
-                reason: (!matches!(kind, ApprovalKind::ToolUse { .. }))
-                    .then(|| payload.get("reason").and_then(Value::as_str))
-                    .flatten()
-                    .map(str::to_owned),
+                reason: None,
                 blocked_path: None,
-                kind,
+                kind: ApprovalKind::ToolUse {
+                    name: message
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Confirmation")
+                        .to_owned(),
+                    input: Value::Null,
+                    detail: message
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                },
                 options: vec![
                     ApprovalOption {
                         id: "confirm".into(),
@@ -1237,10 +1216,9 @@ struct PiMapper {
     interrupt_pending: bool,
     failed: bool,
     tool_items: HashMap<String, PiTool>,
-    finalized_messages: HashSet<String>,
     /// Item ids of this turn's assistant messages, keyed by the message
     /// `timestamp` (the only field present from `message_start` through
-    /// `turn_end`), with a count so two messages stamped in the same
+    /// `message_end`), with a count so two messages stamped in the same
     /// millisecond still get distinct ids.
     assistant_ids: HashMap<u64, (String, u32)>,
     /// Id of the assistant message being streamed. `message_update` carries
@@ -1267,7 +1245,6 @@ impl PiMapper {
             interrupt_pending: false,
             failed: false,
             tool_items: HashMap::new(),
-            finalized_messages: HashSet::new(),
             assistant_ids: HashMap::new(),
             streaming_assistant: None,
         }
@@ -1287,9 +1264,6 @@ impl PiMapper {
             }
             "message_update" => self.message_update(message),
             "message_end" => self.message_end(message),
-            // Current pi emits both message_end and turn_end. Treat turn_end as
-            // a reconciliation fallback; usage is de-duplicated by message id.
-            "turn_end" => self.message_end(message),
             "tool_execution_start" => self.tool_event(message, ItemStatus::InProgress, false),
             "tool_execution_update" => self.tool_event(message, ItemStatus::InProgress, true),
             "tool_execution_end" => self.tool_event(
@@ -1387,7 +1361,6 @@ impl PiMapper {
 
     fn complete_turn(&mut self) -> Vec<AgentEvent> {
         self.assistant_ids.clear();
-        self.finalized_messages.clear();
         self.streaming_assistant = None;
         crate::complete_mapped_turn(
             &mut self.current_turn,
@@ -1404,21 +1377,16 @@ impl PiMapper {
             Some("thinking_delta") => DeltaKind::ReasoningText,
             Some("toolcall_end") => {
                 let tool = event.get("toolCall").unwrap_or(&Value::Null);
-                let id = tool
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("pi-tool")
-                    .to_owned();
+                let Some(id) = tool.get("id").and_then(Value::as_str) else {
+                    return Vec::new();
+                };
+                let id = id.to_owned();
                 let name = tool
                     .get("name")
                     .and_then(Value::as_str)
                     .unwrap_or("tool")
                     .to_owned();
-                let input = tool
-                    .get("arguments")
-                    .or_else(|| tool.get("input"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
+                let input = tool.get("arguments").cloned().unwrap_or(Value::Null);
                 let tool = PiTool {
                     name,
                     input,
@@ -1433,29 +1401,16 @@ impl PiMapper {
                     AgentEvent::ItemStarted(item)
                 }];
             }
-            Some("error") => {
-                self.failed = event.get("reason").and_then(Value::as_str) != Some("aborted");
-                return vec![AgentEvent::Error {
-                    message: event
-                        .get("error")
-                        .or_else(|| event.get("message"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("pi assistant stream failed")
-                        .to_owned(),
-                    fatal: false,
-                }];
-            }
             _ => return Vec::new(),
         };
         let delta = event.get("delta").and_then(Value::as_str).unwrap_or("");
         if delta.is_empty() {
             return Vec::new();
         }
-        let index = crate::json_u64(event.get("contentIndex")).unwrap_or(0);
-        let message_id = match &self.streaming_assistant {
-            Some(id) => id.clone(),
-            None => self.assistant_id(message.get("message").unwrap_or(&Value::Null)),
+        let Some(message_id) = &self.streaming_assistant else {
+            return Vec::new();
         };
+        let index = crate::json_u64(event.get("contentIndex")).unwrap_or(0);
         vec![AgentEvent::Delta {
             item_id: format!("{message_id}:{index}"),
             kind,
@@ -1500,12 +1455,26 @@ impl PiMapper {
                 })]
             }
             Some("assistant") => {
-                let mut events = Vec::new();
-                let id = self.assistant_id(message);
-                let first_finalization = self.finalized_messages.insert(id.clone());
-                if first_finalization
-                    && let Some(content) = message.get("content").and_then(Value::as_array)
+                // pi ends a failed provider request with this message, its
+                // `errorMessage` saying why; no `message_update` reports it.
+                let failure = if message.get("stopReason").and_then(Value::as_str) == Some("error")
                 {
+                    self.failed = true;
+                    message
+                        .get("errorMessage")
+                        .and_then(Value::as_str)
+                        .map(|text| AgentEvent::Error {
+                            message: text.to_owned(),
+                            fatal: false,
+                        })
+                } else {
+                    None
+                };
+                let Some(id) = self.assistant_id(message) else {
+                    return Vec::new();
+                };
+                let mut events = Vec::new();
+                if let Some(content) = message.get("content").and_then(Value::as_array) {
                     for (index, block) in content.iter().enumerate() {
                         let item = match block.get("type").and_then(Value::as_str) {
                             Some("text") => Some(ItemContent::AssistantMessage {
@@ -1519,7 +1488,6 @@ impl PiMapper {
                             Some("thinking") => Some(ItemContent::Reasoning {
                                 text: block
                                     .get("thinking")
-                                    .or_else(|| block.get("text"))
                                     .and_then(Value::as_str)
                                     .unwrap_or("")
                                     .to_owned(),
@@ -1535,7 +1503,7 @@ impl PiMapper {
                         }
                     }
                 }
-                if first_finalization && let Some(usage) = map_usage(message.get("usage")) {
+                if let Some(usage) = map_usage(message.get("usage")) {
                     let processed = crate::processed_tokens(usage);
                     self.cumulative_processed = self.cumulative_processed.saturating_add(processed);
                     let usage = TokenUsage {
@@ -1546,9 +1514,7 @@ impl PiMapper {
                     self.turn_usage.get_or_insert_default().merge(usage);
                     events.push(AgentEvent::TokenUsage(usage));
                 }
-                if message.get("stopReason").and_then(Value::as_str) == Some("error") {
-                    self.failed = true;
-                }
+                events.extend(failure);
                 events
             }
             _ => Vec::new(),
@@ -1574,14 +1540,10 @@ impl PiMapper {
         id.clone()
     }
 
-    /// Resolves a completed or reconciled assistant message to the id its
-    /// deltas streamed under, naming it here if `message_start` was missed.
-    fn assistant_id(&mut self, message: &Value) -> String {
+    /// The id the `message_start` of a completed assistant message named.
+    fn assistant_id(&self, message: &Value) -> Option<String> {
         let timestamp = crate::json_u64(message.get("timestamp")).unwrap_or(0);
-        match self.assistant_ids.get(&timestamp) {
-            Some((id, _)) => id.clone(),
-            None => self.allocate_assistant_id(message),
-        }
+        self.assistant_ids.get(&timestamp).map(|(id, _)| id.clone())
     }
 
     fn tool_event(
@@ -1590,11 +1552,10 @@ impl PiMapper {
         status: ItemStatus,
         has_result: bool,
     ) -> Vec<AgentEvent> {
-        let id = event
-            .get("toolCallId")
-            .and_then(Value::as_str)
-            .unwrap_or("pi-tool")
-            .to_owned();
+        let Some(id) = event.get("toolCallId").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let id = id.to_owned();
         let event_name = event.get("toolName").and_then(Value::as_str);
         let event_input = event.get("args").filter(|value| !value.is_null()).cloned();
         let result = if event.get("type").and_then(Value::as_str) == Some("tool_execution_update") {
@@ -1621,9 +1582,6 @@ impl PiMapper {
         if has_result {
             tool.output = output;
             tool.result = result.cloned();
-        }
-        if status == ItemStatus::Failed {
-            self.failed = true;
         }
         let item = tool_item(&id, tool, status);
         vec![match status {
@@ -1710,89 +1668,14 @@ fn tool_item(id: &str, tool: &PiTool, status: ItemStatus) -> ThreadItem {
     }
 }
 
-fn approval_kind(tool_name: &str, payload: &Value) -> ApprovalKind {
-    let input = payload.get("input").cloned().unwrap_or(Value::Null);
-    let reason = payload
-        .get("reason")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    if payload.get("source").and_then(Value::as_str) == Some("extension") {
-        let path = payload
-            .get("extensionPath")
-            .and_then(Value::as_str)
-            .unwrap_or("(unknown path)");
-        let mut source = format!("extension tool from {path}");
-        if payload
-            .get("shadowsBuiltin")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            source.push_str(&format!(" (overrides builtin {tool_name})"));
-        }
-        let detail = match reason {
-            Some(reason) => format!("{reason}; {source}"),
-            None => source,
-        };
-        return ApprovalKind::ToolUse {
-            name: tool_name.to_owned(),
-            input,
-            detail,
-        };
-    }
-    match tool_name {
-        "bash" => ApprovalKind::ExecCommand {
-            command: input
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_owned(),
-            cwd: payload
-                .get("cwd")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            description: None,
-        },
-        "edit" | "write" => ApprovalKind::FileChange {
-            changes: input
-                .get("path")
-                .and_then(Value::as_str)
-                .map(|path| {
-                    vec![FileChange {
-                        path: path.to_owned(),
-                        kind: if tool_name == "write" {
-                            FileChangeKind::Create
-                        } else {
-                            FileChangeKind::Modify
-                        },
-                        diff: None,
-                    }]
-                })
-                .unwrap_or_default(),
-        },
-        _ => ApprovalKind::ToolUse {
-            name: tool_name.to_owned(),
-            detail: reason.unwrap_or_else(|| input.to_string()),
-            input,
-        },
-    }
-}
-
-/// The text of a warning-or-worse `notify` from a pi extension.
+/// The text of a `notify` from a pi extension, at any of its levels.
 ///
 /// pi's fire-and-forget UI methods expect no response, so an extension that
-/// reports trouble this way is otherwise invisible to the user — including a
-/// user's own installed extension explaining why it could not start.
-fn extension_warning(message: &Value) -> Option<String> {
+/// tells the user something this way is otherwise invisible to them.
+fn extension_notice(message: &Value) -> Option<String> {
     if message.get("type").and_then(Value::as_str) != Some("extension_ui_request")
         || message.get("method").and_then(Value::as_str) != Some("notify")
     {
-        return None;
-    }
-    let level = message
-        .get("notifyType")
-        .and_then(Value::as_str)
-        .unwrap_or("info");
-    if !matches!(level, "warning" | "error") {
         return None;
     }
     let text = message.get("message").and_then(Value::as_str)?.trim();
@@ -2018,13 +1901,8 @@ fn ensure_success(message: &Value) -> Result<(), AgentError> {
 fn response_error(message: &Value) -> String {
     message
         .get("error")
-        .and_then(|error| {
-            error
-                .as_str()
-                .map(str::to_owned)
-                .or_else(|| error.get("message")?.as_str().map(str::to_owned))
-        })
-        .or_else(|| message.get("message")?.as_str().map(str::to_owned))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
         .unwrap_or_else(|| {
             format!(
                 "pi rejected {}",
@@ -2040,71 +1918,85 @@ fn send_json(writer: &mut impl Write, value: &Value) -> Result<(), AgentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TurnStatus;
 
     #[test]
-    fn bash_approval_distinguishes_builtin_execution_from_extension_tools() {
-        let input = json!({"command":"x"});
-        let builtin = approval_kind(
-            "bash",
-            &json!({"toolName":"bash", "input":input, "cwd":"/project"}),
+    fn responds_to_pending_extension_dialog_with_value_or_cancellation() {
+        let mut pending = HashSet::from(["dialog".to_owned()]);
+        let mut output = Vec::new();
+        cancel_pending_dialogs(&mut output, &mut pending).unwrap();
+        assert!(pending.is_empty());
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            response,
+            json!({
+                "type":"extension_ui_response",
+                "id":"dialog",
+                "cancelled":true
+            })
         );
-        assert!(
-            matches!(builtin, ApprovalKind::ExecCommand { command, cwd, .. }
-            if command == "x" && cwd.as_deref() == Some("/project"))
+
+        let mut pending = HashSet::from(["dialog".to_owned()]);
+        let answers = serde_json::Map::from_iter([("dialog".into(), json!("custom answer"))]);
+        assert_eq!(
+            take_extension_dialog_response(&mut pending, "dialog", &answers),
+            Some(json!({
+                "type":"extension_ui_response",
+                "id":"dialog",
+                "value":"custom answer"
+            }))
         );
-        for shadows in [false, true] {
-            let approval = approval_kind(
-                "bash",
-                &json!({
-                    "toolName":"bash", "source":"extension", "extensionPath":"/extensions/bash.ts",
-                    "shadowsBuiltin":shadows, "input":input, "reason":"requires confirmation"
-                }),
+        assert!(pending.is_empty());
+
+        for answers in [
+            serde_json::Map::new(),
+            serde_json::Map::from_iter([("dialog".into(), json!(["not", "a string"]))]),
+        ] {
+            pending.insert("dialog".into());
+            assert_eq!(
+                take_extension_dialog_response(&mut pending, "dialog", &answers),
+                Some(json!({
+                    "type":"extension_ui_response",
+                    "id":"dialog",
+                    "cancelled":true
+                }))
             );
-            let ApprovalKind::ToolUse {
-                name,
-                input: actual_input,
-                detail,
-            } = approval
-            else {
-                panic!("extension tools must not inherit builtin command semantics");
-            };
-            assert_eq!(name, "bash");
-            assert_eq!(actual_input, input);
-            assert!(detail.contains("/extensions/bash.ts"));
-            assert!(detail.contains("requires confirmation"));
-            assert_eq!(detail.contains("overrides builtin bash"), shadows);
+            assert!(pending.is_empty());
         }
     }
 
+    /// The `notify` request of pi 1.5.1's `docs/rpc-extension-ui.md`, whose
+    /// `notifyType` is "info", "warning" or "error", "info" when omitted.
     #[test]
-    fn only_warning_notifications_become_session_warnings() {
-        let notify = |level: &str| {
-            json!({
-                "type":"extension_ui_request",
-                "id":"1",
-                "method":"notify",
-                "message":"my-extension could not start",
-                "notifyType":level
-            })
-        };
+    fn notifications_reach_the_user_at_every_level() {
+        let mut notify = json!({
+            "type":"extension_ui_request",
+            "id":"1",
+            "method":"notify",
+            "message":"my-extension synced 3 files"
+        });
         assert_eq!(
-            extension_warning(&notify("warning")).as_deref(),
-            Some("my-extension could not start")
+            extension_notice(&notify).as_deref(),
+            Some("my-extension synced 3 files")
         );
-        assert_eq!(
-            extension_warning(&notify("error")).as_deref(),
-            Some("my-extension could not start")
-        );
-        assert!(extension_warning(&notify("info")).is_none());
+        for level in ["info", "warning", "error"] {
+            notify["notifyType"] = json!(level);
+            assert_eq!(
+                extension_notice(&notify).as_deref(),
+                Some("my-extension synced 3 files"),
+                "{level}"
+            );
+        }
         assert!(
-            extension_warning(&json!({
-                "type":"extension_ui_request","id":"1","method":"setStatus","statusText":"busy"
+            extension_notice(&json!({
+                "type":"extension_ui_request","id":"1","method":"setStatus","statusKey":"sync","statusText":"busy"
             }))
             .is_none()
         );
-        assert!(extension_warning(&json!({"type":"agent_start"})).is_none());
     }
 
+    /// The `select`, `input` and `editor` requests of pi 1.5.1's
+    /// `docs/rpc-extension-ui.md`.
     #[test]
     fn maps_extension_dialog_requests_to_native_user_input() {
         let (id, select) = extension_dialog_question(&json!({
@@ -2156,51 +2048,8 @@ mod tests {
         assert_eq!(editor.prefill.as_deref(), Some("initial text"));
     }
 
-    #[test]
-    fn responds_to_pending_extension_dialog_with_value_or_cancellation() {
-        let mut pending = HashSet::from(["dialog".to_owned()]);
-        let mut output = Vec::new();
-        cancel_pending_dialogs(&mut output, &mut pending).unwrap();
-        assert!(pending.is_empty());
-        let response: Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(
-            response,
-            json!({
-                "type":"extension_ui_response",
-                "id":"dialog",
-                "cancelled":true
-            })
-        );
-
-        let mut pending = HashSet::from(["dialog".to_owned()]);
-        let answers = serde_json::Map::from_iter([("dialog".into(), json!("custom answer"))]);
-        assert_eq!(
-            take_extension_dialog_response(&mut pending, "dialog", &answers),
-            Some(json!({
-                "type":"extension_ui_response",
-                "id":"dialog",
-                "value":"custom answer"
-            }))
-        );
-        assert!(pending.is_empty());
-
-        for answers in [
-            serde_json::Map::new(),
-            serde_json::Map::from_iter([("dialog".into(), json!(["not", "a string"]))]),
-        ] {
-            pending.insert("dialog".into());
-            assert_eq!(
-                take_extension_dialog_response(&mut pending, "dialog", &answers),
-                Some(json!({
-                    "type":"extension_ui_response",
-                    "id":"dialog",
-                    "cancelled":true
-                }))
-            );
-            assert!(pending.is_empty());
-        }
-    }
-
+    /// A model as pi 1.5.1's `docs/models-configuration.md` defines it, with
+    /// its `thinkingLevelMap`.
     #[test]
     fn model_catalog_only_offers_and_defaults_to_supported_thinking_levels() {
         let model = json!({
@@ -2264,6 +2113,108 @@ mod tests {
         }
     }
 
+    /// `CustomMessage` of pi 1.5.1's `docs/message-types.md`: `customType`,
+    /// `content` (text or text and image parts) and `display` are always set.
+    #[test]
+    fn displayed_custom_messages_become_work_log_items() {
+        let mut mapper = PiMapper::new();
+        for message in [
+            json!({"role":"custom","customType":"my-extension","content":"hidden","display":false}),
+            json!({"role":"custom","customType":"my-extension","content":[{"type":"image","data":"ignored"}],"display":true}),
+        ] {
+            assert!(
+                mapper
+                    .on_message(&json!({"type":"message_end","message":message}))
+                    .is_empty()
+            );
+        }
+
+        let plain = mapper.on_message(&json!({
+            "type":"message_end",
+            "message":{
+                "role":"custom",
+                "customType":"my-extension",
+                "content":"plain text",
+                "display":true,
+                "timestamp":1785400000000_u64
+            }
+        }));
+        assert!(matches!(
+            plain.as_slice(),
+            [AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::Other { provider_kind, summary },
+                ..
+            })] if provider_kind == "my-extension" && summary == "plain text"
+        ));
+
+        let parts = mapper.on_message(&json!({
+            "type":"message_end",
+            "message":{
+                "role":"custom",
+                "customType":"my-extension",
+                "content":[
+                    {"type":"text","text":"first"},
+                    {"type":"image","data":"ignored"},
+                    {"type":"text","text":"second"}
+                ],
+                "display":true,
+                "timestamp":1785400000001_u64
+            }
+        }));
+        assert!(matches!(
+            parts.as_slice(),
+            [AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::Other { provider_kind, summary },
+                ..
+            })] if provider_kind == "my-extension" && summary == "first\nsecond"
+        ));
+    }
+
+    /// A provider request that failed, as pi 1.5.1 reports it: pi-agent-core's
+    /// `streamAssistantResponse` turns the stream's `error` event into the
+    /// `message_end` of an `AssistantMessage` (pi-ai `dist/types.d.ts`) whose
+    /// `stopReason` is "error" and whose `errorMessage` the provider set
+    /// (e.g. pi-ai `dist/api/openai-responses.js`), and the run ends.
+    #[test]
+    fn a_failed_provider_request_reaches_the_user_with_its_reason() {
+        let mut mapper = PiMapper::new();
+        let message = json!({
+            "role":"assistant",
+            "content":[],
+            "api":"openai-responses",
+            "provider":"openai",
+            "model":"gpt-test",
+            "usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,
+                     "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},
+            "stopReason":"error",
+            "errorMessage":"429 rate limit reached for gpt-test",
+            "timestamp":1785400000000_u64
+        });
+        let mut events = Vec::new();
+        for line in [
+            json!({"type":"agent_start"}),
+            json!({"type":"message_start","message":message}),
+            json!({"type":"message_end","message":message}),
+            json!({"type":"turn_end","message":message,"toolResults":[]}),
+            json!({"type":"agent_end","messages":[message]}),
+            json!({"type":"agent_settled","aborted":false}),
+        ] {
+            events.extend(mapper.on_message(&line));
+        }
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Error { message, fatal: false }
+                if message == "429 rate limit reached for gpt-test"
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted {
+                status: TurnStatus::Failed,
+                ..
+            })
+        ));
+    }
+
     /// Replays `pi --mode rpc` output recorded from pi 0.85.1 with a scripted
     /// provider: one prompt, an assistant message that thinks and calls
     /// `bash`, then a second assistant message that thinks and answers.
@@ -2292,11 +2243,13 @@ mod tests {
     /// `read` tools returned in a scratch directory (`createToolDefinition(..)
     /// .execute`), in the `tool_execution_*` events `pi --mode rpc` forwards
     /// verbatim. The items keep bash's exit code, edit's unified patch, the
-    /// written text and the read image.
+    /// written text and the read image; the failed bash fails its own item,
+    /// not the turn pi finished.
     #[test]
     fn tool_results_keep_exit_code_patch_and_images() {
         let mut mapper = PiMapper::new();
         let mut completed = Vec::new();
+        mapper.on_message(&json!({"type":"agent_start"}));
         for line in include_str!("../tests/fixtures/pi/tool_results.jsonl").lines() {
             for event in mapper.on_message(&serde_json::from_str(line).unwrap()) {
                 if let AgentEvent::ItemCompleted(item) = event {
@@ -2304,6 +2257,15 @@ mod tests {
                 }
             }
         }
+        assert!(matches!(
+            mapper
+                .on_message(&json!({"type":"agent_settled","aborted":false}))
+                .as_slice(),
+            [AgentEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                ..
+            }]
+        ));
         assert_eq!(
             completed,
             [
@@ -2423,20 +2385,6 @@ mod tests {
             AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::CommandExecution { command, output, .. }, .. })
                 if command == "printf ok" && output == "ok"
         )));
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(
-                    event,
-                    AgentEvent::ItemCompleted(ThreadItem {
-                        content: ItemContent::AssistantMessage { text, .. },
-                        ..
-                    }) if text == "PONG"
-                ))
-                .count(),
-            1,
-            "message_end and turn_end must reconcile the same assistant message"
-        );
         assert!(events.iter().any(|event| matches!(
             event,
             AgentEvent::TokenUsage(TokenUsage {
@@ -2445,490 +2393,19 @@ mod tests {
                 ..
             })
         )));
+        // The turn's two assistant messages used 19 and 27 tokens; each is
+        // reported by its `message_end` and again by its `turn_end`.
         assert!(matches!(
             events.last(),
             Some(AgentEvent::TurnCompleted {
                 status: TurnStatus::Completed,
-                ..
-            })
-        ));
-    }
-
-    /// Two assistant messages stamped in the same millisecond must not share
-    /// an item id, or the second completion overwrites the first entry.
-    #[test]
-    fn same_timestamp_messages_get_distinct_ids() {
-        let mut mapper = PiMapper::new();
-        let mut events = Vec::new();
-        let start = json!({"type":"message_start","message":{"role":"assistant","content":[],"stopReason":"pending","timestamp":1789592281595_u64}});
-        let messages = [
-            json!({"type":"agent_start"}),
-            start.clone(),
-            json!({"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"first"}}),
-            json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"first"}],"stopReason":"toolUse","timestamp":1789592281595_u64,"responseId":"resp-1"}}),
-            json!({"type":"turn_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"first"}],"stopReason":"toolUse","timestamp":1789592281595_u64,"responseId":"resp-1"},"toolResults":[]}),
-            start,
-            json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"second"}}),
-            json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"second"}],"stopReason":"stop","timestamp":1789592281595_u64,"responseId":"resp-2"}}),
-            json!({"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"second"}],"stopReason":"stop","timestamp":1789592281595_u64,"responseId":"resp-2"},"toolResults":[]}),
-            json!({"type":"agent_settled"}),
-        ];
-        for message in messages {
-            events.extend(mapper.on_message(&message));
-        }
-        let lifecycle: Vec<(&str, &str)> = events
-            .iter()
-            .filter_map(|event| match event {
-                AgentEvent::Delta { item_id, text, .. } => Some((item_id.as_str(), text.as_str())),
-                AgentEvent::ItemCompleted(ThreadItem {
-                    id,
-                    content:
-                        ItemContent::Reasoning { text } | ItemContent::AssistantMessage { text, .. },
-                    ..
-                }) => Some((id.as_str(), text.as_str())),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            lifecycle,
-            [
-                ("pi-assistant-1789592281595:0", "first"),
-                ("pi-assistant-1789592281595:0", "first"),
-                ("pi-assistant-1789592281595-2:0", "second"),
-                ("pi-assistant-1789592281595-2:0", "second"),
-            ],
-            "each message streams and completes once under its own id"
-        );
-    }
-
-    #[test]
-    fn multi_message_turn_sums_used_tokens() {
-        let mut mapper = PiMapper::new();
-        mapper.on_message(&json!({"type":"agent_start"}));
-        mapper.on_message(&json!({
-            "type":"message_end",
-            "message":{"role":"assistant","responseId":"one","usage":{"input":10,"output":2,"totalTokens":12},"timestamp":1785400000000_u64}
-        }));
-        mapper.on_message(&json!({
-            "type":"message_end",
-            "message":{"role":"assistant","responseId":"two","usage":{"input":20,"output":3,"totalTokens":23},"timestamp":1785400000001_u64}
-        }));
-        let completed = mapper.on_message(&json!({"type":"agent_settled"}));
-        assert!(matches!(
-            completed.as_slice(),
-            [AgentEvent::TurnCompleted {
                 usage: Some(TokenUsage {
-                    used_tokens: Some(35),
-                    total_processed_tokens: Some(35),
+                    used_tokens: Some(46),
+                    total_processed_tokens: Some(46),
                     ..
                 }),
                 ..
-            }]
-        ));
-    }
-
-    #[test]
-    fn displayed_custom_messages_become_work_log_items() {
-        let mut mapper = PiMapper::new();
-        for message in [
-            json!({"role":"custom","content":"hidden","display":false}),
-            json!({"role":"custom","content":"implicit hidden"}),
-            json!({"role":"custom","content":[{"type":"image","data":"ignored"}],"display":true}),
-        ] {
-            assert!(
-                mapper
-                    .on_message(&json!({"type":"message_end","message":message}))
-                    .is_empty()
-            );
-        }
-
-        let plain = mapper.on_message(&json!({
-            "type":"message_end",
-            "message":{
-                "role":"custom",
-                "customType":"my-extension",
-                "content":"plain text",
-                "display":true,
-                "timestamp":1785400000000_u64
-            }
-        }));
-        assert!(matches!(
-            plain.as_slice(),
-            [AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::Other { provider_kind, summary },
-                ..
-            })] if provider_kind == "my-extension" && summary == "plain text"
-        ));
-
-        let parts = mapper.on_message(&json!({
-            "type":"message_end",
-            "message":{
-                "role":"custom",
-                "content":[
-                    {"type":"text","text":"first"},
-                    {"type":"image","data":"ignored"},
-                    {"type":"text","text":"second"}
-                ],
-                "display":true,
-                "timestamp":1785400000001_u64
-            }
-        }));
-        assert!(matches!(
-            parts.as_slice(),
-            [AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::Other { provider_kind, summary },
-                ..
-            })] if provider_kind == "pi-extension" && summary == "first\nsecond"
-        ));
-    }
-
-    /// A stand-in for `pi --mode rpc` 1.5.0 answering with its documented
-    /// shapes (docs/rpc-commands.md: get_state, get_entries, fork,
-    /// switch_session): session `a` until a fork before entry `u1` moves to
-    /// `b`, and `switch_session` back to `a`'s file.
-    #[cfg(unix)]
-    const RPC_STAND_IN: &str = r#"#!/bin/sh
-file=/s/a.jsonl
-session=a
-while IFS= read -r line; do
-  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-  case "$line" in
-    *'"get_state"'*)
-      printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"sessionId":"%s","sessionFile":"%s"}}\n' "$id" "$session" "$file" ;;
-    *'"get_commands"'*)
-      printf '{"id":"%s","type":"response","command":"get_commands","success":true,"data":{"commands":[]}}\n' "$id" ;;
-    *'"get_entries"'*)
-      if [ "$prompted" = 1 ]; then
-        prompted=
-        printf '{"id":"%s","type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"message","id":"u1","parentId":null,"message":{"role":"user","content":"first prompt"}},{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":[]}}],"leafId":"a1"}}\n' "$id"
-      else
-        printf '{"id":"%s","type":"response","command":"get_entries","success":true,"data":{"entries":[],"leafId":null}}\n' "$id"
-      fi ;;
-    *'"set_model"'*|*'"set_thinking_level"'*)
-      printf '{"id":"%s","type":"response","command":"set","success":true}\n' "$id" ;;
-    *'"prompt"'*)
-      prompted=1
-      printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
-      printf '{"type":"agent_start"}\n{"type":"agent_settled"}\n' ;;
-    *'"fork"'*'"entryId":"u1"'*|*'"entryId":"u1"'*'"fork"'*)
-      file=/s/b.jsonl; session=b
-      printf '{"id":"%s","type":"response","command":"fork","success":true,"data":{"text":"first prompt","cancelled":false}}\n' "$id" ;;
-    *'"fork"'*)
-      printf '{"id":"%s","type":"response","command":"fork","success":false,"error":"Invalid entry ID for forking"}\n' "$id" ;;
-    *'"clone"'*)
-      file=/s/b.jsonl; session=b
-      printf '{"id":"%s","type":"response","command":"clone","success":true,"data":{"cancelled":false}}\n' "$id" ;;
-    *'"sessionPath":"/s/a.jsonl"'*)
-      file=/s/a.jsonl; session=a
-      printf '{"id":"%s","type":"response","command":"switch_session","success":true,"data":{"cancelled":false}}\n' "$id" ;;
-  esac
-done
-"#;
-
-    /// A new model and thinking level go to the running process with
-    /// `set_model`, then `set_thinking_level`, and the change is applied once
-    /// pi answered both; pi has no way back to its default model. Verified
-    /// against pi 1.5.0 with a stand-in provider: the next prompt runs on the
-    /// new model with the new thinking budget.
-    #[cfg(unix)]
-    #[test]
-    fn a_new_model_and_thinking_level_go_to_the_running_process() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("agent-pi-live-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("pi");
-        let requests = dir.join("requests");
-        std::fs::write(
-            &bin,
-            format!(
-                "#!/bin/sh\n{stand_in}",
-                stand_in = RPC_STAND_IN.trim_start_matches("#!/bin/sh\n").replace(
-                    "  id=$(printf",
-                    &format!(
-                        "  printf '%s\\n' \"$line\" >> '{}'\n  id=$(printf",
-                        requests.display()
-                    )
-                )
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        smol::block_on(async {
-            let handle = start(SessionOptions {
-                cwd: dir.clone(),
-                model: Some("provider/model".into()),
-                resume: None,
-                fork: None,
-                binary_path: Some(bin.clone()),
-                option_selections: Vec::new(),
-                mcp_servers: Vec::new(),
-                launch_env: LaunchEnv::default(),
-                extra_args: Vec::new(),
-                acp: None,
-                instructions: None,
             })
-            .await
-            .unwrap();
-            let applied = |events: Receiver<AgentEvent>| async move {
-                loop {
-                    if let AgentEvent::SettingsApplied { applied } = events.recv().await.unwrap() {
-                        return applied;
-                    }
-                }
-            };
-            for (model, expected) in [(Some("provider/other"), true), (None, false)] {
-                handle
-                    .commands
-                    .send(SessionCommand::ApplySettings {
-                        model: model.map(str::to_owned),
-                        option_selections: vec![OptionSelection {
-                            id: "reasoningEffort".into(),
-                            value: json!("high"),
-                        }],
-                    })
-                    .await
-                    .unwrap();
-                assert_eq!(applied(handle.events.clone()).await, expected, "{model:?}");
-            }
-            let _ = handle.commands.send(SessionCommand::Shutdown).await;
-            let log = std::fs::read_to_string(&requests).unwrap();
-            let lines: Vec<&str> = log.lines().collect();
-            let position = |needle: &str| lines.iter().rposition(|line| line.contains(needle));
-            assert!(position("\"modelId\":\"other\"").is_some(), "{log}");
-            assert!(
-                position("\"modelId\":\"other\"") < position("set_thinking_level"),
-                "{log}"
-            );
-        });
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A forked thread starts on the source's file, forks there, before a
-    /// prompt or at the leaf, before anything else that writes to the session
-    /// open, and goes on in the session pi made; a branch a rewind left is opened as it is, with
-    /// no fork, and one pi no longer has fails the start.
-    #[cfg(unix)]
-    #[test]
-    fn a_new_thread_goes_on_where_its_start_says() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("agent-pi-start-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("pi");
-        let requests = dir.join("requests");
-        std::fs::write(
-            &bin,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n{stand_in}",
-                log = requests.display(),
-                stand_in = RPC_STAND_IN.trim_start_matches("#!/bin/sh\n").replace(
-                    "  id=$(printf",
-                    &format!(
-                        "  printf '%s\\n' \"$line\" >> '{}'\n  id=$(printf",
-                        requests.display()
-                    )
-                )
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let branch = dir.join("left.jsonl");
-        std::fs::write(&branch, "").unwrap();
-        let options = |fork| SessionOptions {
-            cwd: dir.clone(),
-            model: Some("provider/model".into()),
-            resume: Some(ResumeCursor(
-                json!({"session_id": "a", "session_file": "/s/a.jsonl"}),
-            )),
-            fork,
-            binary_path: Some(bin.clone()),
-            option_selections: vec![OptionSelection {
-                id: "reasoningEffort".into(),
-                value: json!("high"),
-            }],
-            mcp_servers: Vec::new(),
-            launch_env: LaunchEnv::default(),
-            extra_args: Vec::new(),
-            acp: None,
-            instructions: None,
-        };
-        smol::block_on(async {
-            let session = |events: Receiver<AgentEvent>| async move {
-                loop {
-                    if let AgentEvent::SessionStarted { resume, .. } = events.recv().await.unwrap()
-                    {
-                        return resume.0;
-                    }
-                }
-            };
-            let handle = start(options(Some(ForkPoint::Before {
-                checkpoint_id: "u1".into(),
-            })))
-            .await
-            .unwrap();
-            assert_eq!(
-                session(handle.events.clone()).await,
-                json!({"session_id": "b", "session_file": "/s/b.jsonl"})
-            );
-            let _ = handle.commands.send(SessionCommand::Shutdown).await;
-            let log = std::fs::read_to_string(&requests).unwrap();
-            let lines: Vec<&str> = log.lines().collect();
-            assert!(
-                lines[0].contains("--session /s/a.jsonl") && !lines[0].contains("--thinking"),
-                "{log}"
-            );
-            let position = |needle: &str| lines.iter().position(|line| line.contains(needle));
-            assert!(
-                position("\"type\":\"fork\"") < position("set_thinking_level"),
-                "{log}"
-            );
-            assert!(
-                position("set_thinking_level") < position("set_model"),
-                "{log}"
-            );
-
-            std::fs::remove_file(&requests).unwrap();
-            let handle = start(options(Some(ForkPoint::Tail))).await.unwrap();
-            assert_eq!(
-                session(handle.events.clone()).await,
-                json!({"session_id": "b", "session_file": "/s/b.jsonl"})
-            );
-            let _ = handle.commands.send(SessionCommand::Shutdown).await;
-            let log = std::fs::read_to_string(&requests).unwrap();
-            let position = |needle: &str| log.lines().position(|line| line.contains(needle));
-            assert!(
-                position("\"type\":\"clone\"") < position("set_model"),
-                "{log}"
-            );
-
-            std::fs::remove_file(&requests).unwrap();
-            let token = branch.to_string_lossy().into_owned();
-            let handle = start(options(Some(ForkPoint::Branch {
-                token: token.clone(),
-            })))
-            .await
-            .unwrap();
-            session(handle.events.clone()).await;
-            let _ = handle.commands.send(SessionCommand::Shutdown).await;
-            let log = std::fs::read_to_string(&requests).unwrap();
-            assert!(log.contains(&format!("--session {token}")), "{log}");
-            assert!(!log.contains("\"type\":\"fork\""), "{log}");
-
-            assert!(matches!(
-                start(options(Some(ForkPoint::Branch {
-                    token: "/s/gone.jsonl".into(),
-                })))
-                .await,
-                Err(AgentError::Provider(_))
-            ));
-        });
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// pi rewinds by forking: each finished turn's prompt entry is a restore
-    /// point; a rewind forks before it into a new session the thread then
-    /// resumes, with the prompt to edit and the old session to go back to;
-    /// returning switches back to it. An entry pi does not know is refused.
-    #[cfg(unix)]
-    #[test]
-    fn a_rewind_forks_before_the_prompt_and_returns_to_the_branch_it_left() {
-        use std::os::unix::fs::PermissionsExt;
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("agent-pi-fork-{nonce}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("pi");
-        std::fs::write(&bin, RPC_STAND_IN).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        smol::block_on(async {
-            let handle = start(SessionOptions {
-                cwd: dir.clone(),
-                model: None,
-                resume: None,
-                fork: None,
-                binary_path: Some(bin.clone()),
-                option_selections: Vec::new(),
-                mcp_servers: Vec::new(),
-                launch_env: LaunchEnv::default(),
-                extra_args: Vec::new(),
-                acp: None,
-                instructions: None,
-            })
-            .await
-            .unwrap();
-            let next = async |kind: &str| loop {
-                let event = handle.events.recv().await.unwrap();
-                let value = serde_json::to_value(&event).unwrap();
-                if value["type"] == kind {
-                    return value;
-                }
-            };
-            next("session_started").await;
-            handle
-                .commands
-                .send(SessionCommand::SendTurn {
-                    delivery_id: 1,
-                    text: "first prompt".into(),
-                    options: None,
-                    attachments: Vec::new(),
-                })
-                .await
-                .unwrap();
-            let completed = next("turn_completed").await;
-            assert_eq!(
-                next("turn_checkpoint").await,
-                json!({"type": "turn_checkpoint", "turn_id": completed["turn_id"], "checkpoint_id": "u1"})
-            );
-
-            handle
-                .commands
-                .send(SessionCommand::Rewind {
-                    checkpoint_id: "unknown".into(),
-                    mode: RewindMode::Conversation,
-                })
-                .await
-                .unwrap();
-            let failed = next("rewind_failed").await;
-            assert_eq!(failed["failure"]["reason"], "target_not_found");
-
-            handle
-                .commands
-                .send(SessionCommand::Rewind {
-                    checkpoint_id: "u1".into(),
-                    mode: RewindMode::Conversation,
-                })
-                .await
-                .unwrap();
-            assert_eq!(
-                next("session_started").await["resume"],
-                json!({"session_id": "b", "session_file": "/s/b.jsonl"})
-            );
-            assert_eq!(
-                next("rewind_completed").await,
-                json!({"type": "rewind_completed", "checkpoint_id": "u1", "mode": "conversation",
-                       "prefill": "first prompt", "later_history": "branch",
-                       "undo_token": "/s/a.jsonl"})
-            );
-
-            handle
-                .commands
-                .send(SessionCommand::UndoRewind {
-                    checkpoint_id: "u1".into(),
-                    undo_token: "/s/a.jsonl".into(),
-                })
-                .await
-                .unwrap();
-            assert_eq!(
-                next("session_started").await["resume"],
-                json!({"session_id": "a", "session_file": "/s/a.jsonl"})
-            );
-            assert_eq!(
-                next("rewind_undone").await,
-                json!({"type": "rewind_undone", "checkpoint_id": "u1"})
-            );
-            let _ = handle.commands.send(SessionCommand::Shutdown).await;
-        });
-        let _ = std::fs::remove_dir_all(dir);
+        ));
     }
 }

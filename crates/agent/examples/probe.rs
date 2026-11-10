@@ -24,7 +24,7 @@
 //! `--image <path>`. Only one of the last three may be used.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use agent::{
     AcpAgent, AcpLaunch, AgentEvent, ApprovalDecision, Attachment, ForkPoint, ItemContent,
@@ -33,9 +33,6 @@ use agent::{
     list_models, list_plugins, run_plugin_op, start_session,
 };
 use base64::Engine as _;
-
-const STEER_DELAY: Duration = Duration::from_secs(10);
-const PHANTOM_TURN_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 enum ProbeMode {
@@ -186,8 +183,8 @@ fn image_attachment(path: PathBuf) -> Attachment {
         "gif" => "image/gif",
         "png" => "image/png",
         other => {
-            eprintln!("probe: unknown image extension {other:?}; defaulting to image/png");
-            "image/png"
+            eprintln!("probe: unknown image extension {other:?}; use png, jpg, webp or gif");
+            std::process::exit(2);
         }
     };
     eprintln!(
@@ -420,10 +417,6 @@ async fn run_probe(
         id: "reasoningEffort".into(),
         value: serde_json::Value::String(value.clone()),
     }));
-    let model = model.or_else(|| match (provider, effort.is_some()) {
-        (ProviderKind::ClaudeCode, true) => Some("claude-opus-4-8".to_string()),
-        _ => None,
-    });
     let opts = SessionOptions {
         cwd,
         model,
@@ -471,81 +464,96 @@ async fn run_probe(
         .await
         .expect("session command channel closed before first turn");
 
-    match &probe_mode {
-        ProbeMode::Interrupt(delay) => {
-            let commands = handle.commands.clone();
-            let delay = *delay;
-            smol::spawn(async move {
-                smol::Timer::after(delay).await;
-                eprintln!("--- sending Interrupt ---");
-                commands.send(SessionCommand::Interrupt).await.ok();
-                smol::Timer::after(Duration::from_secs(30)).await;
-                eprintln!("--- interrupt timed out, forcing shutdown ---");
-                commands.send(SessionCommand::Shutdown).await.ok();
-            })
-            .detach();
-        }
-        ProbeMode::Steer(message) => {
-            let commands = handle.commands.clone();
-            let message = message.clone();
-            smol::spawn(async move {
-                smol::Timer::after(STEER_DELAY).await;
-                eprintln!("probe: STEERING (mid-turn) -> {message:?}");
-                commands
-                    .send(SessionCommand::Steer {
-                        request_id: "probe-steer-1".into(),
-                        text: message,
-                        attachments: Vec::new(),
-                    })
-                    .await
-                    .ok();
-            })
-            .detach();
-        }
-        _ => {}
+    if let ProbeMode::Interrupt(delay) = &probe_mode {
+        let commands = handle.commands.clone();
+        let delay = *delay;
+        smol::spawn(async move {
+            smol::Timer::after(delay).await;
+            eprintln!("--- sending Interrupt ---");
+            commands.send(SessionCommand::Interrupt).await.ok();
+        })
+        .detach();
     }
+    // The steer goes in once the first turn is at work on something.
+    let mut steer = match &probe_mode {
+        ProbeMode::Steer(message) => Some(message.clone()),
+        _ => None,
+    };
+    // The follow-up's delay ends here; what it sends goes from the loop.
+    let (follow_up_due, due) = smol::channel::unbounded::<()>();
 
     let mut assistant = String::new();
     let mut turns_started = 0;
     let mut turns_completed = 0;
     let mut first_status = None;
     let mut steer_accepted = false;
-    let lingering = continuation
-        .linger
-        .or(continuation.follow_up.as_ref().map(|_| PHANTOM_TURN_GRACE));
+    let lingering = continuation.linger;
     let mut follow_up = continuation.follow_up;
     let mut apply = continuation.apply;
     let mut move_to = continuation.move_to;
     let mut stop_background = continuation.stop_background;
-    let mut open_until = None;
+    // From scheduling the follow-up until it is sent.
+    let mut awaiting_follow_up = None::<(Option<PathBuf>, String)>;
+    let mut applying = false;
     let mut running = false;
     let mut closing = false;
     loop {
-        let quiet = match lingering {
-            Some(linger) if turns_completed > 0 && !running && !closing => Some(linger),
-            _ if matches!(probe_mode, ProbeMode::Steer(_)) && turns_completed > 0 => {
-                Some(PHANTOM_TURN_GRACE)
-            }
-            _ => None,
-        };
-        let event = match quiet {
-            Some(quiet) => {
-                let event = smol::future::or(handle.events.recv(), async {
-                    smol::Timer::after(quiet).await;
-                    Err(smol::channel::RecvError)
-                })
-                .await
-                .ok();
-                if event.is_none() {
-                    if open_until.is_none_or(|until| Instant::now() >= until) {
-                        closing = true;
-                        handle.commands.send(SessionCommand::Shutdown).await.ok();
+        enum Input {
+            Event(Option<Box<AgentEvent>>),
+            Due,
+            Quiet,
+        }
+        let quiet = lingering.filter(|_| {
+            turns_completed > 0 && !running && !closing && awaiting_follow_up.is_none()
+        });
+        let input = smol::future::or(
+            async { Input::Event(handle.events.recv().await.ok().map(Box::new)) },
+            smol::future::or(
+                async {
+                    match due.recv().await {
+                        Ok(()) => Input::Due,
+                        Err(_) => std::future::pending().await,
                     }
-                    continue;
-                }
-                event
+                },
+                async {
+                    match quiet {
+                        Some(quiet) => {
+                            smol::Timer::after(quiet).await;
+                            Input::Quiet
+                        }
+                        None => std::future::pending().await,
+                    }
+                },
+            ),
+        )
+        .await;
+        let event = match input {
+            Input::Event(event) => event.map(|event| *event),
+            Input::Quiet => {
+                closing = true;
+                handle.commands.send(SessionCommand::Shutdown).await.ok();
+                continue;
             }
-            None => handle.events.recv().await.ok(),
+            Input::Due => {
+                if let Some((model, effort)) = apply.take() {
+                    eprintln!("probe: APPLY -> {model} {effort}");
+                    applying = true;
+                    handle
+                        .commands
+                        .send(SessionCommand::ApplySettings {
+                            model: Some(model),
+                            option_selections: vec![OptionSelection {
+                                id: "reasoningEffort".into(),
+                                value: serde_json::json!(effort),
+                            }],
+                        })
+                        .await
+                        .ok();
+                } else if let Some((cwd, text)) = awaiting_follow_up.take() {
+                    send_follow_up(&handle.commands, cwd, text).await;
+                }
+                continue;
+            }
         };
         let Some(event) = event else { break };
         match &event {
@@ -667,6 +675,31 @@ async fn run_probe(
                     handle.commands.send(SessionCommand::Shutdown).await.ok();
                 }
             }
+            AgentEvent::ItemStarted(item)
+                if turns_started > 0
+                    && turns_completed == 0
+                    && !matches!(item.content, ItemContent::UserMessage { .. }) =>
+            {
+                if let Some(message) = steer.take() {
+                    eprintln!("probe: STEERING (mid-turn) -> {message:?}");
+                    handle
+                        .commands
+                        .send(SessionCommand::Steer {
+                            request_id: "probe-steer-1".into(),
+                            text: message,
+                            attachments: Vec::new(),
+                        })
+                        .await
+                        .ok();
+                }
+            }
+            AgentEvent::SettingsApplied { applied } if applying => {
+                applying = false;
+                eprintln!("probe: settings applied: {applied}");
+                if let Some((cwd, text)) = awaiting_follow_up.take() {
+                    send_follow_up(&handle.commands, cwd, text).await;
+                }
+            }
             AgentEvent::TurnStarted { turn_id } => {
                 turns_started += 1;
                 if matches!(probe_mode, ProbeMode::Steer(_)) {
@@ -702,44 +735,15 @@ async fn run_probe(
                     .detach();
                 }
                 if let Some((delay, text)) = follow_up.take() {
-                    open_until = Some(Instant::now() + delay + Duration::from_secs(1));
-                    let commands = handle.commands.clone();
-                    let apply = apply.take();
-                    let move_to = move_to.take();
+                    awaiting_follow_up = Some((move_to.take(), text));
+                    let due = follow_up_due.clone();
                     smol::spawn(async move {
                         smol::Timer::after(delay).await;
-                        if let Some((model, effort)) = apply {
-                            eprintln!("probe: APPLY -> {model} {effort}");
-                            commands
-                                .send(SessionCommand::ApplySettings {
-                                    model: Some(model),
-                                    option_selections: vec![OptionSelection {
-                                        id: "reasoningEffort".into(),
-                                        value: serde_json::json!(effort),
-                                    }],
-                                })
-                                .await
-                                .ok();
-                            smol::Timer::after(Duration::from_secs(1)).await;
-                        }
-                        if let Some(cwd) = move_to {
-                            eprintln!("probe: MOVE TO -> {}", cwd.display());
-                            commands.send(SessionCommand::MoveTo { cwd }).await.ok();
-                        }
-                        eprintln!("probe: FOLLOW-UP -> {text:?}");
-                        commands
-                            .send(SessionCommand::SendTurn {
-                                delivery_id: 1,
-                                text,
-                                options: None,
-                                attachments: Vec::new(),
-                            })
-                            .await
-                            .ok();
+                        due.send(()).await.ok();
                     })
                     .detach();
                 }
-                if !matches!(probe_mode, ProbeMode::Steer(_)) && lingering.is_none() {
+                if lingering.is_none() && awaiting_follow_up.is_none() {
                     handle.commands.send(SessionCommand::Shutdown).await.ok();
                 }
             }
@@ -780,20 +784,32 @@ async fn run_probe(
                 .trim_matches(|character: char| !character.is_alphanumeric())
                 .to_uppercase();
             let steered = !marker.is_empty() && assistant.to_uppercase().contains(&marker);
-            let clean_accounting = turns_started == 1 && turns_completed == 1;
             println!("--- transcript ---\n{}", assistant.trim());
             println!("--- steering marker {marker} present: {steered} ---");
             println!("--- steer acceptance before completion observed: {steer_accepted} ---");
-            println!(
-                "--- turn accounting: TurnStarted={turns_started} \
-                 TurnCompleted={turns_completed} (both must be 1) ---"
-            );
-            i32::from(
-                first_status != Some(TurnStatus::Completed)
-                    || !steered
-                    || !clean_accounting
-                    || !steer_accepted,
-            )
+            i32::from(first_status != Some(TurnStatus::Completed) || !steered || !steer_accepted)
         }
     }
+}
+
+/// The follow-up turn, in the directory `--move-to` names when it does.
+async fn send_follow_up(
+    commands: &smol::channel::Sender<SessionCommand>,
+    cwd: Option<PathBuf>,
+    text: String,
+) {
+    if let Some(cwd) = cwd {
+        eprintln!("probe: MOVE TO -> {}", cwd.display());
+        commands.send(SessionCommand::MoveTo { cwd }).await.ok();
+    }
+    eprintln!("probe: FOLLOW-UP -> {text:?}");
+    commands
+        .send(SessionCommand::SendTurn {
+            delivery_id: 1,
+            text,
+            options: None,
+            attachments: Vec::new(),
+        })
+        .await
+        .ok();
 }

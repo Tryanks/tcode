@@ -1555,26 +1555,29 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("tcode-abandoned-stop-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let pi = root.join("pi");
-        let pid_file = root.join("pi.pid");
+        // A process that speaks no protocol and ignores every signal but
+        // SIGKILL; it imitates no harness's output.
+        let stuck = root.join("ignores-signals");
+        let pid_file = root.join("ignores-signals.pid");
         std::fs::write(
-            &pi,
+            &stuck,
             format!(
                 "#!/bin/sh\ntrap '' HUP INT TERM\necho $$ > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\nexec sleep 120\n",
                 pid = pid_file.display()
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
         let host = spawn_host(
             SessionStore::open_at(root.join("store")).unwrap(),
             HostServices::default(),
         )
         .unwrap();
 
-        // A model catalog query the harness never answers.
+        // Started in the harness slot of a model catalog query, which it
+        // never answers.
         let catalog = std::thread::spawn(move || {
-            smol::block_on(agent::pi::list_models(Some(pi), Default::default()))
+            smol::block_on(agent::pi::list_models(Some(stuck), Default::default()))
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let harness: libc::pid_t = loop {
@@ -1604,17 +1607,14 @@ mod tests {
         });
         busy.recv_blocking().unwrap();
 
-        let stopped = smol::block_on(smol::future::or(
-            async {
-                host.stop().await;
-                true
-            },
-            async {
-                smol::Timer::after(std::time::Duration::from_millis(200)).await;
-                false
-            },
-        ));
-        assert!(!stopped, "the host was still busy");
+        // The quit's budget runs out while the host is held: the stop is
+        // polled, still pending, and dropped.
+        let mut stop = Box::pin(host.stop());
+        assert!(
+            smol::block_on(smol::future::poll_once(&mut stop)).is_none(),
+            "the host was still busy"
+        );
+        drop(stop);
         let exited = |pid: libc::pid_t| {
             // SAFETY: `info` is a valid, writable siginfo; WNOWAIT leaves the
             // exit status for the thread that owns the child.

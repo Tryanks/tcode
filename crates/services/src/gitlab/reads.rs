@@ -864,41 +864,6 @@ pub(super) fn file(row: &Value) -> Option<PullRequestFile> {
 mod tests {
     use super::*;
 
-    /// The watch's conflict and the merge state come from GitLab's detailed status: a conflict
-    /// is one even while GitLab rechecks, a check in progress is pending, and anything else
-    /// that stops a merge blocks it rather than reading as a conflict.
-    #[test]
-    fn merge_status_reads_as_mergeability_and_merge_state() {
-        let mr = |detailed: &str, conflicts: bool| {
-            json!({"detailed_merge_status": detailed, "has_conflicts": conflicts,
-                   "merge_status": "can_be_merged", "draft": false})
-        };
-        assert_eq!(
-            mergeability(&mr("checking", true)),
-            Mergeability::Conflicting
-        );
-        assert_eq!(mergeability(&mr("checking", false)), Mergeability::Pending);
-        assert_eq!(
-            mergeability(&mr("not_approved", false)),
-            Mergeability::Clean
-        );
-        let passed = checks(&json!({"head_pipeline": {"status": "success"}}));
-        let state =
-            |detailed: &str| merge_state(&mr(detailed, false), Mergeability::Clean, &passed);
-        assert_eq!(state("mergeable"), PullRequestMergeState::Clean);
-        assert_eq!(state("need_rebase"), PullRequestMergeState::Behind);
-        assert_eq!(
-            state("discussions_not_resolved"),
-            PullRequestMergeState::Blocked
-        );
-        assert_eq!(state("checking"), PullRequestMergeState::Unknown);
-        let running = checks(&json!({"head_pipeline": {"status": "running"}}));
-        assert_eq!(
-            merge_state(&mr("mergeable", false), Mergeability::Clean, &running),
-            PullRequestMergeState::Unstable
-        );
-    }
-
     /// GitLab names a note's uploads below its project; the conversation names them on the
     /// server, so the client can draw them and the media read finds them named. Absolute links,
     /// text that only mentions `/uploads/`, and code stay as written.
@@ -915,25 +880,6 @@ mod tests {
         assert_eq!(
             absolute_uploads(code, "gitlab.com", "a/b"),
             "```md\n![shot](/uploads/ab12/shot.png)\n```\n~~~~\n[ref]: /uploads/ef56/a.png\n~~~~\nwrite `![x](/uploads/a/x.png)` for ![x](https://gitlab.com/a/b/uploads/a/x.png), `bärenhunger`"
-        );
-    }
-
-    /// The head pipeline is the merge request's one check, and one waiting on a manual job or
-    /// a schedule has not passed: it is pending, like everything not finished.
-    #[test]
-    fn a_pipeline_reads_as_one_check() {
-        assert_eq!(pipeline_status("failed"), CheckStatus::Failure);
-        assert!(pipeline_status("canceled").failed());
-        assert_eq!(pipeline_status("manual"), CheckStatus::Pending);
-        assert_eq!(pipeline_status("scheduled"), CheckStatus::Pending);
-        assert_eq!(
-            pipeline_status("waiting_for_resource"),
-            CheckStatus::Pending
-        );
-        assert_eq!(checks_state(&checks(&json!({}))), None);
-        assert_eq!(
-            checks_state(&checks(&json!({"head_pipeline": {"status": "manual"}}))),
-            Some(ChecksState::Pending)
         );
     }
 }

@@ -116,30 +116,38 @@ fn attach(machine: &Machine) -> Device {
     }
 }
 
-fn wait_syncing(transport: &Transport) {
+/// The next message on `channel`, or `None` once `deadline` passes, which
+/// only a failing test reaches.
+fn next<T>(channel: &async_channel::Receiver<T>, deadline: Instant) -> Option<T> {
+    tcode_traverse::block_on(async {
+        tokio::time::timeout_at(deadline.into(), channel.recv()).await
+    })
+    .ok()?
+    .ok()
+}
+
+fn wait_state(transport: &Transport, wanted: impl Fn(&ConnectionState) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut seen = Vec::new();
-    while Instant::now() < deadline {
-        if let Ok(state) = transport.state.try_recv() {
-            if matches!(state, ConnectionState::Syncing { .. }) {
-                return;
-            }
-            seen.push(state);
+    while let Some(state) = next(&transport.state, deadline) {
+        if wanted(&state) {
+            return;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        seen.push(state);
     }
-    panic!("the attachment never connected; saw {seen:?}");
+    panic!("did not observe the wanted state; saw {seen:?}");
+}
+
+fn wait_syncing(transport: &Transport) {
+    wait_state(transport, |state| {
+        matches!(state, ConnectionState::Syncing { .. })
+    });
 }
 
 fn wait_reconnecting(transport: &Transport) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline {
-        if let Ok(ConnectionState::Reconnecting { .. }) = transport.state.try_recv() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("the attachment never started reconnecting");
+    wait_state(transport, |state| {
+        matches!(state, ConnectionState::Reconnecting { .. })
+    });
 }
 
 fn open(device: &Device, host: &str, port: u16) -> io::Result<Tunnel> {

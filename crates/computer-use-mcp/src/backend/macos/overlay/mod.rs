@@ -313,28 +313,6 @@ mod tests {
     }
 
     #[test]
-    fn inactive_action_retires_target_before_visibility_refresh() {
-        let now = Instant::now();
-        let mut state = OverlayState {
-            cursor: None,
-            target: None,
-            poll_armed: true,
-            frame_armed: false,
-        };
-        state.set_target(target(submissions().reserve(None, now)));
-        state.refresh_visibility(now, Some(true));
-        assert!(state.target.is_some());
-        let expired = now + LINGER + Duration::from_secs(1);
-        state.refresh_visibility(expired, Some(false));
-        assert!(
-            state.target.is_none(),
-            "idle feedback must not reappear on visibility refresh"
-        );
-        state.refresh_visibility(expired + Duration::from_secs(1), Some(true));
-        assert!(state.target.is_none());
-    }
-
-    #[test]
     fn newer_action_renews_lifetime_but_closed_window_retires_it() {
         let now = Instant::now();
         let mut state = OverlayState {

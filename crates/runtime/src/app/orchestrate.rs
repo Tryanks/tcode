@@ -981,30 +981,15 @@ pub(super) fn resolve_child_worktree(
     cwd: PathBuf,
     child_id: &str,
     data_dir: &Path,
-) -> (PathBuf, Option<WorktreeInfo>, Option<String>) {
-    match provision(&cwd, child_id, None, data_dir) {
-        Ok(created) => {
-            let info = WorktreeInfo {
-                root_project_path: cwd,
-                base: created.base,
-                branch: created.branch,
-            };
-            (created.path, Some(info), None)
-        }
-        Err(ProvisionError::NotRepositoryRoot { path }) => {
-            let warning = format!(
-                "worktree isolation unavailable: {} is not a Git repository root; using the plain cwd",
-                path.display()
-            );
-            log::warn!("subagent worktree: {warning}");
-            (cwd, None, Some(warning))
-        }
-        Err(error) => {
-            let warning = format!("worktree isolation failed ({error}); using the plain cwd");
-            log::warn!("subagent worktree: {warning}");
-            (cwd, None, Some(warning))
-        }
-    }
+) -> Result<(PathBuf, WorktreeInfo), String> {
+    let created = provision(&cwd, child_id, None, data_dir)
+        .map_err(|error| format!("worktree isolation failed: {error}"))?;
+    let info = WorktreeInfo {
+        root_project_path: cwd,
+        base: created.base,
+        branch: created.branch,
+    };
+    Ok((created.path, info))
 }
 
 pub(super) fn final_assistant_message(timeline: &Timeline) -> String {
@@ -1142,60 +1127,4 @@ pub(super) fn assemble_report_callback(
         "{} {state}.{token_segment}\n{body}",
         callback_header(child_id, title)
     )
-}
-
-#[cfg(test)]
-mod permission_tests {
-    use super::*;
-
-    #[test]
-    fn missing_permission_hints_fall_back_and_control_less_providers_get_no_selection() {
-        for provider in [ProviderKind::ClaudeCode, ProviderKind::OpenCode] {
-            let mut descriptor = permission_control(provider).unwrap();
-            match &mut descriptor {
-                OptionDescriptor::Select {
-                    recommended,
-                    permissive,
-                    ..
-                } => {
-                    *recommended = None;
-                    *permissive = None;
-                }
-                OptionDescriptor::Boolean {
-                    recommended,
-                    permissive,
-                    ..
-                } => {
-                    *recommended = None;
-                    *permissive = None;
-                }
-            }
-            let expected = if provider == ProviderKind::ClaudeCode {
-                serde_json::json!("default")
-            } else {
-                serde_json::json!("normal")
-            };
-            for mode in [ChildApprovalMode::Auto, ChildApprovalMode::AlwaysAllow] {
-                assert_eq!(
-                    resolve_child_permission(Some(descriptor.clone()), mode)
-                        .unwrap()
-                        .value,
-                    expected
-                );
-            }
-        }
-        for provider in [ProviderKind::Pi, ProviderKind::Acp] {
-            for mode in [
-                ChildApprovalMode::Orchestrator,
-                ChildApprovalMode::Auto,
-                ChildApprovalMode::AlwaysAllow,
-                ChildApprovalMode::Manual,
-            ] {
-                assert_eq!(
-                    resolve_child_permission(permission_control(provider), mode),
-                    None
-                );
-            }
-        }
-    }
 }

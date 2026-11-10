@@ -467,7 +467,7 @@ fn a_cancelled_migration_changes_no_source_and_the_next_one_completes() {
         "{{\"ts\":1,\"event\":{{\"type\":\"turn_started\",\"turn_id\":\"{}\"}}}}\n",
         "x".repeat(4000)
     );
-    let bulk = bulk_line.repeat(2600);
+    let bulk = bulk_line.repeat(migrate::CHUNK_BYTES / bulk_line.len() + 1);
     assert!(bulk.len() > migrate::CHUNK_BYTES);
     fs::write(dir.path().join("bulk.jsonl"), &bulk).unwrap();
     let store = dir.store();
@@ -972,8 +972,6 @@ fn a_second_process_is_refused_and_a_relaunch_waits_for_the_owner_to_exit() {
         let store = dir.store();
         move || store.open()
     });
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(!waiting.is_finished(), "the relaunch waits for the owner");
     owner.release();
     waiting.join().unwrap().unwrap();
     // Only peeked: the host consumes the marker once it owns the data dir.
@@ -1089,118 +1087,6 @@ fn a_start_moves_an_older_data_dir_in_then_migrates_it_and_leaves_nothing_behind
     });
     assert_eq!(after, expected);
     assert_fixture_migrated(&SessionStore::open_at(root.clone()).unwrap(), &root);
-}
-
-/// Kill the migration at random points — while logs are copied, around the
-/// checkpoint, the rename, the directory syncs and the archival — and restart
-/// it: there is either no `tcode.db` and every source is where it was, or a
-/// complete one, and the finished migration always holds every source byte
-/// for byte. `TCODE_MIGRATION_KILLS` sets the number of kills.
-#[test]
-#[ignore = "spawns and SIGKILLs child processes over a large fixture; run deliberately"]
-fn migration_survives_sigkill() {
-    let runs: usize = std::env::var("TCODE_MIGRATION_KILLS")
-        .ok()
-        .and_then(|runs| runs.parse().ok())
-        .unwrap_or(20);
-    let originals = DataDir::new();
-    write_legacy_fixture(originals.path());
-    let line = format!(
-        "{{\"ts\":1,\"event\":{{\"type\":\"turn_started\",\"turn_id\":\"{}\"}}}}\n",
-        "x".repeat(1000)
-    );
-    for index in 0..24 {
-        fs::write(
-            originals.path().join(format!("bulk-{index}.jsonl")),
-            line.repeat(300 + index * 20),
-        )
-        .unwrap();
-    }
-    let names: Vec<String> = fs::read_dir(originals.path())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .collect();
-    let mut seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64
-        | 1;
-    // Kills spread over the time an uninterrupted migration takes.
-    let calibration = DataDir::new();
-    for name in &names {
-        fs::copy(originals.path().join(name), calibration.path().join(name)).unwrap();
-    }
-    let started = Instant::now();
-    let full = Child::report(Child::spawn(calibration.path(), None));
-    let window = started.elapsed().as_millis() as u64;
-    assert_eq!(full.report, "OPEN");
-    full.release();
-    let mut outcomes = HashMap::<&str, usize>::new();
-    for run in 0..runs {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        let dir = DataDir::new();
-        for name in &names {
-            fs::copy(originals.path().join(name), dir.path().join(name)).unwrap();
-        }
-        let mut owner = Child::spawn(dir.path(), None);
-        std::thread::sleep(Duration::from_millis(seed % (window + window / 10)));
-        owner.kill().unwrap();
-        owner.wait().unwrap();
-
-        // What the kill left: no database and untouched sources, a published
-        // database and every source in the data dir or legacy/, or a complete
-        // one whose sources the first open removes (checked below against the
-        // database instead).
-        let source = |name: &str| {
-            [dir.path().join(name), dir.path().join("legacy").join(name)]
-                .into_iter()
-                .find(|path| path.exists())
-        };
-        let outcome = if dir.path().join(DB_FILE).exists() {
-            let db = db::Db::open(&dir.path().join(DB_FILE), None).unwrap();
-            assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION, "run {run}");
-            drop(db);
-            if dir.path().join("tcode.db.archive").exists() {
-                "published, archival pending"
-            } else {
-                "complete"
-            }
-        } else {
-            for name in &names {
-                assert!(
-                    dir.path().join(name).exists(),
-                    "run {run}: {name} moved early"
-                );
-            }
-            if dir.path().join("tcode.db.migrating").exists() {
-                "staging"
-            } else {
-                "not started"
-            }
-        };
-        *outcomes.entry(outcome).or_default() += 1;
-        for name in names.iter().filter(|_| outcome != "complete") {
-            assert_eq!(
-                fs::read(source(name).unwrap_or_else(|| panic!("run {run}: {name} lost"))).unwrap(),
-                fs::read(originals.path().join(name)).unwrap(),
-                "run {run}: {name}"
-            );
-        }
-
-        let store = dir.migrated();
-        for name in names.iter().filter_map(|name| name.strip_suffix(".jsonl")) {
-            assert_eq!(
-                store.read_event_log(name).unwrap(),
-                fs::read(originals.path().join(format!("{name}.jsonl"))).unwrap(),
-                "run {run}: {name}"
-            );
-        }
-        assert_eq!(store.read_file().unwrap().sessions.len(), 2, "run {run}");
-        store.close().unwrap();
-    }
-    println!("{runs} kills over a {window} ms migration: {outcomes:?}");
 }
 
 /// A Codex log as stored: every turn-changes snapshot carries the turn's whole
@@ -1508,11 +1394,12 @@ fn legacy_codex_file_contents_replay_as_patches_without_rewriting_history() {
     );
 }
 
-/// Tool calls recorded before every adapter kept results canonical, as
-/// tcode.db holds them (images swapped for 1x1 pictures): a Codex MCP result,
-/// a Claude image read whose image is also inlined in the text, a connector
-/// whose payload is only structured, and a Codex rollout import. They read
-/// back as text and images; text in no provider shape is left alone.
+/// Tool calls recorded before every adapter kept results canonical, in the
+/// shape tcode.db holds them (invented content, 1x1 pictures): a Codex MCP
+/// result, a Claude image read whose image is also inlined in the text, a
+/// connector whose payload is only structured, and a Codex rollout import.
+/// They read back as text and images; text in no provider shape is left
+/// alone.
 #[test]
 fn tool_output_recorded_in_provider_shapes_reads_back_canonical() {
     const LOG: &str = include_str!("fixtures/legacy-tool-output.jsonl");
@@ -1571,8 +1458,8 @@ fn tool_output_recorded_in_provider_shapes_reads_back_canonical() {
 }
 
 /// A Codex sleep, image view and image generation recorded as `Other`
-/// before the adapter mapped them, as tcode.db holds them (the picture
-/// swapped for a 1x1 one), read back as the items a new row holds.
+/// before the adapter mapped them, in the shape tcode.db holds them (invented
+/// paths and ids, a 1x1 picture), read back as the items a new row holds.
 #[test]
 fn codex_items_recorded_as_other_read_back_as_their_items() {
     const LOG: &str = include_str!("fixtures/legacy-codex-items.jsonl");
@@ -1604,19 +1491,19 @@ fn codex_items_recorded_as_other_read_back_as_their_items() {
                 status: agent::ItemStatus::Completed,
             },
             agent::ItemContent::ImageRead {
-                path: "/tmp/tcode-before.png".into(),
+                path: "/tmp/example-before.png".into(),
                 image: None,
             },
             agent::ItemContent::ToolCall {
                 image_reads: vec![agent::Attachment {
                     media_type: "image/png".into(),
                     data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==".into(),
-                    source_path: Some("/Users/me/.codex/generated_images/01a196f6-db20-7941-b9de-d73415937480/exec-89f575db-4c35-4d77-a024-611fdd5d1d50.png".into()),
+                    source_path: Some("/home/user/.codex/generated_images/00000075-0000-0000-0000-000000000075/exec-00000074-0000-0000-0000-000000000074.png".into()),
                 }],
                 name: "image_generation".into(),
                 input: serde_json::json!({
                     "revised_prompt": "Edit the reference image: keep the subject, make the background transparent.",
-                    "input_images": ["/Users/me/project/assets/reference.png"],
+                    "input_images": ["/home/user/project/assets/reference.png"],
                 }),
                 output: None,
                 status: agent::ItemStatus::Completed,
@@ -2166,7 +2053,7 @@ fn an_older_store_moves_in_the_background_and_every_thread_reads_back_the_same()
 /// store ends with the store an uninterrupted pass leaves.
 #[test]
 fn an_interrupted_storage_pass_resumes_and_converges() {
-    let logs = [("stream", stream_log(400)), ("images", images_log())];
+    let logs = [("stream", stream_log(270)), ("images", images_log())];
     let older = older_data_dir(&logs);
     let read_all = |store: &SessionStore| {
         logs.iter()

@@ -10,6 +10,3 @@ active backend rejects. After swapping in a new upstream dump, rerun:
 ```
 cargo run -p tcode-ui --example sanitize_syntaxes -- <upstream.bin> crates/ui/assets/syntaxes.bin
 ```
-
-The `shipped_syntax_set_compiles_under_active_regex_backend` test fails if an
-unsanitized dump is committed.

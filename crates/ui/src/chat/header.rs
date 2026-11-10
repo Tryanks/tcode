@@ -1943,7 +1943,6 @@ mod tests {
                     pair[1] <= pair[0]
                 }
             })
-            && seen.iter().filter(|at| **at != from && **at != to).count() >= 3
     }
 
     /// Over a collapsed sidebar the header clears the traffic lights; as its

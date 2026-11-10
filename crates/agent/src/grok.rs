@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use agent_client_protocol::{UntypedMessage, schema::v1 as acp};
 use serde_json::{Map, Value, json};
@@ -242,23 +242,21 @@ impl Grok {
         };
         let exit_code = task.get("exit_code").and_then(Value::as_i64);
         let status = if exit_code == Some(0) {
-            "completed"
+            acp::ToolCallStatus::Completed
         } else {
-            "failed"
+            acp::ToolCallStatus::Failed
         };
         let output = task
             .get("output")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let Ok(acp::SessionUpdate::ToolCallUpdate(mut update)) = serde_json::from_value(json!({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": call,
-            "status": status,
-            "content": [{"type": "content", "content": {"type": "text", "text": output}}],
-            "rawOutput": {"type": "Bash", "exit_code": exit_code},
-        })) else {
-            return Vec::new();
-        };
+        let mut update = acp::ToolCallUpdate::new(
+            call,
+            acp::ToolCallUpdateFields::new()
+                .status(status)
+                .content(vec![acp::ToolCallContent::from(output)])
+                .raw_output(json!({"type": "Bash", "exit_code": exit_code})),
+        );
         let shell = prepare_tool_update(&mut update);
         let mut events = state.apply_update(acp::SessionUpdate::ToolCallUpdate(update));
         if let Some(shell) = shell {
@@ -397,39 +395,7 @@ impl Grok {
     ) -> Result<RewindPreview, RewindFailure> {
         let index = prompt_index(checkpoint_id)?;
         let response = execute_rewind(&session.connection, session_id, index, mode, false).await?;
-        let conflicts: Vec<RewindConflict> = list(&response, "conflicts", "conflicts")
-            .filter_map(|conflict| {
-                Some(RewindConflict {
-                    path: conflict.get("path")?.as_str()?.to_owned(),
-                    kind: field(conflict, "conflict_type", "conflictType")
-                        .and_then(|kind| serde_json::from_value(kind.clone()).ok())
-                        .unwrap_or(RewindConflictKind::Other),
-                })
-            })
-            .collect();
-        // A dry run never succeeds; its error is a refusal unless it only
-        // names the conflicts it lists.
-        if conflicts.is_empty()
-            && let Some(error) = field(&response, "error", "error").and_then(Value::as_str)
-        {
-            return Err(refusal(error));
-        }
-        let files = list(&response, "clean_files", "cleanFiles")
-            .filter_map(Value::as_str)
-            .map(RewindFile::path)
-            .chain(
-                conflicts
-                    .iter()
-                    .map(|conflict| RewindFile::path(&conflict.path)),
-            )
-            .collect();
-        Ok(RewindPreview {
-            files: RewindFiles {
-                files,
-                ..RewindFiles::default()
-            },
-            conflicts,
-        })
+        dry_run(&response)
     }
 
     /// Rewind to prompt `checkpoint_id`, stopping a running turn first as
@@ -444,31 +410,13 @@ impl Grok {
         let index = prompt_index(checkpoint_id)?;
         if session.with_state(|state| state.turn().is_some()) {
             session.interrupt(session_id).await;
-            let deadline = Instant::now() + Duration::from_secs(30);
             while session.with_state(|state| state.turn().is_some()) {
-                if Instant::now() >= deadline {
-                    return Err(RewindFailure::new(
-                        RewindFailureReason::TurnRunning,
-                        "the cancelled turn did not end within 30 s".to_owned(),
-                    ));
-                }
                 smol::Timer::after(Duration::from_millis(25)).await;
             }
         }
         self.check_numbering(session, session_id, index).await?;
         let response = execute_rewind(&session.connection, session_id, index, mode, true).await?;
-        if field(&response, "success", "success").and_then(Value::as_bool) != Some(true) {
-            let error = field(&response, "error", "error")
-                .and_then(Value::as_str)
-                .unwrap_or("Grok did not rewind");
-            return Err(
-                if list(&response, "conflicts", "conflicts").next().is_some() {
-                    RewindFailure::new(RewindFailureReason::Conflicts, error.to_owned())
-                } else {
-                    refusal(error)
-                },
-            );
-        }
+        let rewound = rewound(&response, checkpoint_id, mode)?;
         if mode.includes_conversation() {
             // The conversation now ends before prompt `index`, which the next
             // prompt takes again.
@@ -476,25 +424,7 @@ impl Grok {
             prompts.next = Some(index);
             prompts.texts.retain(|number, _| *number < index);
         }
-        Ok(AgentEvent::RewindCompleted {
-            checkpoint_id: checkpoint_id.to_owned(),
-            mode,
-            prefill: field(&response, "prompt_text", "promptText")
-                .and_then(Value::as_str)
-                .filter(|_| mode.includes_conversation())
-                .map(str::to_owned),
-            prefill_attachments: Vec::new(),
-            later_history: LaterHistory::Truncated,
-            files: mode.includes_files().then(|| RewindFiles {
-                files: list(&response, "reverted_files", "revertedFiles")
-                    .filter_map(Value::as_str)
-                    .map(RewindFile::path)
-                    .collect(),
-                ..RewindFiles::default()
-            }),
-            incomplete: None,
-            undo_token: None,
-        })
+        Ok(rewound)
     }
 
     /// Refuse a rewind whose number no longer names the prompt it was given
@@ -919,13 +849,11 @@ impl Dialect for Grok {
     async fn steer(
         &self,
         session: &Session,
+        session_id: &acp::SessionId,
         request_id: String,
         text: String,
         _attachments: Vec<Attachment>,
     ) {
-        let Some(session_id) = session.id() else {
-            return;
-        };
         self.steers().push_back((text.clone(), request_id.clone()));
         let sent = session
             .connection
@@ -965,12 +893,9 @@ impl Dialect for Grok {
     async fn rewind(
         self: Arc<Self>,
         session: Session,
+        session_id: acp::SessionId,
         command: SessionCommand,
     ) -> Option<AgentEvent> {
-        let Some(session_id) = session.id() else {
-            return command
-                .rewind_refusal(RewindFailure::new(RewindFailureReason::ProcessGone, None));
-        };
         match command {
             SessionCommand::PreviewRewind {
                 checkpoint_id,
@@ -1224,19 +1149,10 @@ async fn fork(
     point: &ForkPoint,
     opts: &SessionOptions,
 ) -> Result<String, AgentError> {
-    let cwd = opts.cwd.to_string_lossy();
-    let mut params = json!({ "sourceSessionId": source, "sourceCwd": cwd, "newCwd": cwd });
-    if let ForkPoint::Before { checkpoint_id } = point {
-        let index = prompt_index(checkpoint_id)
-            .map_err(|failure| AgentError::Protocol(failure.detail.unwrap_or_default()))?;
-        params["targetPromptIndex"] = json!(index.checked_sub(1).ok_or_else(|| {
-            AgentError::Provider("Grok cannot fork before a session's first prompt".into())
-        })?);
-    }
     let forked = connection
         .send_request(UntypedMessage {
             method: FORK.into(),
-            params,
+            params: fork_params(source, point, opts)?,
         })
         .block_task()
         .await
@@ -1253,6 +1169,25 @@ async fn fork(
         .ok_or_else(|| AgentError::Protocol(format!("Grok's fork returned no session: {forked}")))
 }
 
+/// `_x.ai/session/fork`'s params: `source` copied into the same directory,
+/// up to the prompt `point` names.
+fn fork_params(
+    source: &str,
+    point: &ForkPoint,
+    opts: &SessionOptions,
+) -> Result<Value, AgentError> {
+    let cwd = opts.cwd.to_string_lossy();
+    let mut params = json!({ "sourceSessionId": source, "sourceCwd": cwd, "newCwd": cwd });
+    if let ForkPoint::Before { checkpoint_id } = point {
+        let index = prompt_index(checkpoint_id)
+            .map_err(|failure| AgentError::Protocol(failure.detail.unwrap_or_default()))?;
+        params["targetPromptIndex"] = json!(index.checked_sub(1).ok_or_else(|| {
+            AgentError::Provider("Grok cannot fork before a session's first prompt".into())
+        })?);
+    }
+    Ok(params)
+}
+
 /// Grok's rewind points, `(prompt index, preview)`.
 async fn rewind_points(
     connection: &acp_session::Connection,
@@ -1265,11 +1200,11 @@ async fn rewind_points(
         })
         .block_task()
         .await?;
-    let response = unwrapped(response);
-    Ok(list(&response, "rewind_points", "rewindPoints")
+    Ok(list(&response, "rewind_points")
         .filter_map(|point| {
-            let index = field(point, "prompt_index", "promptIndex")?.as_u64()?;
-            let preview = field(point, "prompt_preview", "promptPreview")
+            let index = point.get("prompt_index")?.as_u64()?;
+            let preview = point
+                .get("prompt_preview")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             Some((usize::try_from(index).ok()?, preview))
@@ -1302,25 +1237,89 @@ async fn execute_rewind(
         })
         .block_task()
         .await
-        .map(unwrapped)
         .map_err(|err| RewindFailure::new(RewindFailureReason::Other, describe(&err)))
 }
 
-/// An extension response, which Grok's pager also accepts wrapped in `result`.
-fn unwrapped(response: Value) -> Value {
-    match response.get("result") {
-        Some(result) => result.clone(),
-        None => response,
+/// What a dry `_x.ai/rewind/execute` says a rewind would restore.
+fn dry_run(response: &Value) -> Result<RewindPreview, RewindFailure> {
+    let conflicts: Vec<RewindConflict> = list(response, "conflicts")
+        .filter_map(|conflict| {
+            Some(RewindConflict {
+                path: conflict.get("path")?.as_str()?.to_owned(),
+                kind: conflict
+                    .get("conflict_type")
+                    .and_then(|kind| serde_json::from_value(kind.clone()).ok())
+                    .unwrap_or(RewindConflictKind::Other),
+            })
+        })
+        .collect();
+    // A dry run never succeeds; its error is a refusal unless it only
+    // names the conflicts it lists.
+    if conflicts.is_empty()
+        && let Some(error) = response.get("error").and_then(Value::as_str)
+    {
+        return Err(refusal(error));
     }
+    let files = list(response, "clean_files")
+        .filter_map(Value::as_str)
+        .map(RewindFile::path)
+        .chain(
+            conflicts
+                .iter()
+                .map(|conflict| RewindFile::path(&conflict.path)),
+        )
+        .collect();
+    Ok(RewindPreview {
+        files: RewindFiles {
+            files,
+            ..RewindFiles::default()
+        },
+        conflicts,
+    })
 }
 
-/// A response field Grok names in snake_case, or its camelCase alias.
-fn field<'a>(value: &'a Value, snake: &str, camel: &str) -> Option<&'a Value> {
-    value.get(snake).or_else(|| value.get(camel))
+/// What a forced `_x.ai/rewind/execute` to `checkpoint_id` restored.
+fn rewound(
+    response: &Value,
+    checkpoint_id: &str,
+    mode: RewindMode,
+) -> Result<AgentEvent, RewindFailure> {
+    if response.get("success").and_then(Value::as_bool) != Some(true) {
+        let error = response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("Grok did not rewind");
+        return Err(if list(response, "conflicts").next().is_some() {
+            RewindFailure::new(RewindFailureReason::Conflicts, error.to_owned())
+        } else {
+            refusal(error)
+        });
+    }
+    Ok(AgentEvent::RewindCompleted {
+        checkpoint_id: checkpoint_id.to_owned(),
+        mode,
+        prefill: response
+            .get("prompt_text")
+            .and_then(Value::as_str)
+            .filter(|_| mode.includes_conversation())
+            .map(str::to_owned),
+        prefill_attachments: Vec::new(),
+        later_history: LaterHistory::Truncated,
+        files: mode.includes_files().then(|| RewindFiles {
+            files: list(response, "reverted_files")
+                .filter_map(Value::as_str)
+                .map(RewindFile::path)
+                .collect(),
+            ..RewindFiles::default()
+        }),
+        incomplete: None,
+        undo_token: None,
+    })
 }
 
-fn list<'a>(value: &'a Value, snake: &str, camel: &str) -> impl Iterator<Item = &'a Value> {
-    field(value, snake, camel)
+fn list<'a>(value: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
+    value
+        .get(key)
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -1407,14 +1406,9 @@ fn answer_lists(answers: Map<String, Value>) -> Map<String, Value> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::io::{BufRead as _, Write as _};
-    use std::time::Duration;
 
     use super::*;
-    use crate::{
-        ApprovalDecision, ContextFreshness, FileChangeKind, ItemStatus, McpRegistration,
-        OptionSelection, SessionCommand, ThreadItem,
-    };
+    use crate::{ContextFreshness, FileChangeKind, ItemStatus, OptionSelection, ThreadItem};
 
     // Grok 1.0.46 sessions recorded on the wire in both directions
     // (provenance: `tests/fixtures/grok/README.md`).
@@ -1424,112 +1418,72 @@ mod tests {
     /// to report it, then another sent turn.
     const AGENT_STARTED_TURN: &str =
         include_str!("../tests/fixtures/grok/agent_started_turn.jsonl");
-    const REPLAY_AGENT: &str = "TCODE_GROK_REPLAY_AGENT";
 
-    /// Stand in for `grok agent stdio`: answer the client with the recorded
-    /// agent messages, and require the client to send what Tcode sent, with
-    /// the same answers to Grok's own requests.
-    fn replay_agent(fixture: &str) {
-        let mut client = std::io::stdin().lock().lines();
-        let mut agent = std::io::stdout().lock();
-        let mut live_ids: HashMap<String, Value> = HashMap::new();
-        let mut mode_requests = HashSet::new();
-        for record in fixture.lines() {
-            let record: Value = serde_json::from_str(record).unwrap();
-            let recorded = &record["message"];
-            if recorded["method"] == "session/set_mode" {
-                mode_requests.insert(recorded["id"].to_string());
-                continue;
-            }
-            if recorded.get("method").is_none()
-                && mode_requests.contains(&recorded["id"].to_string())
-            {
-                continue;
-            }
-            if record["from"] == "agent" {
-                let mut message = recorded.clone();
-                if message.get("method").is_none() {
-                    message["id"] = live_ids[&message["id"].to_string()].clone();
-                }
-                writeln!(agent, "{message}").unwrap();
-                agent.flush().unwrap();
-                continue;
-            }
-            let live = loop {
-                let line = client.next().expect("the client hung up early").unwrap();
-                // The client's protocol errors about the test harness's own
-                // non-JSON output carry no id.
-                let Ok(live) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                if live.get("id").is_some_and(Value::is_null) {
-                    continue;
-                }
-                // Recordings made before Tcode read a resumed session's
-                // rewind points hold no answer to it: answer as a Grok
-                // without them would.
-                if live["method"] == REWIND_POINTS && recorded["method"] != REWIND_POINTS {
-                    let id = &live["id"];
-                    let refusal = json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "Method not found"}});
-                    writeln!(agent, "{refusal}").unwrap();
-                    agent.flush().unwrap();
-                    continue;
-                }
-                break live;
-            };
-            assert_eq!(live.get("method"), recorded.get("method"), "{live}");
-            if recorded["method"]
-                .as_str()
-                .is_some_and(|method| method.starts_with("_x.ai/rewind/"))
-            {
-                assert_eq!(live["params"], recorded["params"], "{live}");
-            }
-            if recorded["method"] == FORK {
-                assert_eq!(
-                    live["params"]["sourceSessionId"],
-                    recorded["params"]["sourceSessionId"]
-                );
-                assert_eq!(
-                    live["params"]["targetPromptIndex"],
-                    recorded["params"]["targetPromptIndex"]
-                );
-            }
-            if recorded["method"] == "initialize" {
-                let capabilities =
-                    |message: &Value| message["params"]["clientCapabilities"].clone();
-                assert_eq!(capabilities(&live), capabilities(recorded), "{live}");
-            }
-            match recorded.get("id") {
-                Some(id) if recorded.get("method").is_some() => {
-                    live_ids.insert(id.to_string(), live["id"].clone());
-                }
-                _ => assert_eq!(live["result"], recorded["result"], "{live}"),
-            }
-        }
-        for _ in client {}
+    fn records(fixture: &str) -> impl Iterator<Item = (bool, Value)> + '_ {
+        fixture.lines().map(|line| {
+            let mut record: Value = serde_json::from_str(line).unwrap();
+            (record["from"] == "client", record["message"].take())
+        })
     }
 
-    /// A stand-in `grok` that runs the test `test` as [`replay_agent`];
-    /// whatever arguments Tcode launches Grok with are left unread.
-    fn stand_in_binary(dir: &std::path::Path, test: &str) -> PathBuf {
-        let test = format!("grok::tests::{test}");
-        let exe = std::env::current_exe().unwrap();
-        let exe = exe.display();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let path = dir.join("grok");
-            let script = format!("#!/bin/sh\nexec '{exe}' --exact {test} --nocapture\n");
-            std::fs::write(&path, script).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            path
+    /// The agent's side of a recording fed to Grok's dialect in wire order,
+    /// routed as the ACP session routes it: a `session/update` the schema
+    /// reads goes to `session_update`, every other notification to
+    /// `notification`. Each `session/prompt` the client sent opens a turn,
+    /// and its result settles that turn unless Grok's own `turn_completed`
+    /// already has. Grok's requests to the user are left out.
+    fn replay(fixture: &str) -> Vec<AgentEvent> {
+        let grok = Grok::default();
+        let mut state = State::new(std::env::temp_dir());
+        let mut prompts = HashMap::new();
+        let mut events = Vec::new();
+        for (from_client, message) in records(fixture) {
+            let method = message.get("method").and_then(Value::as_str);
+            if from_client {
+                if method == Some("session/prompt") {
+                    let turn = format!("turn-{}", prompts.len() + 1);
+                    events.extend(state.begin_agent_turn(&turn));
+                    prompts.insert(message["id"].to_string(), turn);
+                }
+                continue;
+            }
+            match method {
+                Some(_) if message.get("id").is_some() => {}
+                Some(method) => {
+                    let params = message["params"].clone();
+                    let update = (method == "session/update")
+                        .then(|| serde_json::from_value::<acp::SessionNotification>(params.clone()))
+                        .and_then(Result::ok);
+                    events.extend(match update {
+                        Some(update) => grok.session_update(&mut state, update),
+                        None => grok.notification(&mut state, method, params),
+                    });
+                }
+                None => {
+                    let Some(turn) = prompts.get(&message["id"].to_string()) else {
+                        continue;
+                    };
+                    if state.turn() == Some(turn.as_str()) {
+                        let response = serde_json::from_value(message["result"].clone()).unwrap();
+                        let end = grok.turn_end(&mut state, Ok(response));
+                        events.extend(state.end_turn(turn, end));
+                    }
+                }
+            }
         }
-        #[cfg(windows)]
-        {
-            let path = dir.join("grok.cmd");
-            std::fs::write(&path, format!("@\"{exe}\" --exact {test} --nocapture\r\n")).unwrap();
-            path
-        }
+        events
+    }
+
+    /// The client's answer to the agent's request `method` in a recording.
+    fn exchange(fixture: &str, method: &str) -> (Value, Value) {
+        let mut records = records(fixture);
+        let (_, request) = records
+            .find(|(from_client, message)| !from_client && message["method"] == method)
+            .unwrap_or_else(|| panic!("no {method} in the recording"));
+        let (_, answer) = records
+            .find(|(from_client, message)| *from_client && message["id"] == request["id"])
+            .unwrap();
+        (request["params"].clone(), answer["result"].clone())
     }
 
     fn command_outputs<'a>(events: &'a [AgentEvent], id: &str) -> Vec<(&'a str, Option<i32>)> {
@@ -1588,160 +1542,44 @@ mod tests {
             .collect()
     }
 
-    /// Options for a session against a stand-in Grok running `test`, in a
-    /// fresh directory.
-    fn stand_in_options(test: &str) -> SessionOptions {
-        let dir =
-            std::env::temp_dir().join(format!("tcode-grok-replay-{}-{test}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        SessionOptions {
-            binary_path: Some(stand_in_binary(&dir, test)),
-            cwd: dir,
+    /// The fixtures' README records what Grok was launched with for the
+    /// recorded session.
+    #[test]
+    fn a_session_launches_grok_as_it_was_recorded() {
+        let opts = SessionOptions {
+            cwd: std::env::temp_dir(),
             model: None,
             resume: None,
             fork: None,
-            option_selections: Vec::new(),
-            mcp_servers: Vec::new(),
-            launch_env: LaunchEnv {
-                env: vec![(REPLAY_AGENT.into(), "1".into())],
-                home: None,
-            },
-            extra_args: Vec::new(),
-            acp: None,
-            instructions: None,
-        }
-    }
-
-    /// What the person driving a replayed session does after a turn completes.
-    enum Next {
-        Wait,
-        Send(&'static str),
-        Close,
-    }
-
-    /// Run a session as the app does: send `first`, approve once and answer
-    /// questions with their first option, and after the `n`th completed turn
-    /// do `next(n)`. Returns every event through the close.
-    fn replay(opts: SessionOptions, first: &str, next: impl Fn(usize) -> Next) -> Vec<AgentEvent> {
-        let mut completed = 0;
-        replay_reacting(opts, first, move |event| {
-            if !matches!(event, AgentEvent::TurnCompleted { .. }) {
-                return None;
-            }
-            completed += 1;
-            match next(completed) {
-                Next::Wait => None,
-                Next::Send(text) => Some(send_turn(completed as u64 + 1, text)),
-                Next::Close => Some(SessionCommand::Shutdown),
-            }
-        })
-    }
-
-    fn send_turn(delivery_id: u64, text: &str) -> SessionCommand {
-        SessionCommand::SendTurn {
-            delivery_id,
-            text: text.into(),
-            options: None,
-            attachments: Vec::new(),
-        }
-    }
-
-    /// [`replay`], doing what `react` returns for each event after approving
-    /// once and answering questions.
-    fn replay_reacting(
-        opts: SessionOptions,
-        first: &str,
-        mut react: impl FnMut(&AgentEvent) -> Option<SessionCommand>,
-    ) -> Vec<AgentEvent> {
-        let dir = opts.cwd.clone();
-        let events = smol::block_on(smol::future::or(
-            async {
-                let handle = start(opts).await.unwrap();
-                handle.commands.send(send_turn(1, first)).await.unwrap();
-                let mut events = Vec::new();
-                while let Ok(event) = handle.events.recv().await {
-                    let command = match &event {
-                        AgentEvent::ApprovalRequested(request) => {
-                            Some(SessionCommand::RespondApproval {
-                                request_id: request.id.clone(),
-                                decision: ApprovalDecision::Option(
-                                    request
-                                        .options
-                                        .iter()
-                                        .find(|option| {
-                                            option.kind == crate::ApprovalOptionKind::AllowOnce
-                                        })
-                                        .unwrap()
-                                        .id
-                                        .clone(),
-                                ),
-                            })
-                        }
-                        AgentEvent::UserInputRequested {
-                            request_id,
-                            questions,
-                            ..
-                        } => Some(SessionCommand::RespondUserInput {
-                            request_id: request_id.clone(),
-                            answers: questions
-                                .iter()
-                                .map(|question| {
-                                    (question.id.clone(), json!(question.options[0].label))
-                                })
-                                .collect(),
-                        }),
-                        event => react(event),
-                    };
-                    let closed = matches!(event, AgentEvent::SessionClosed { .. });
-                    events.push(event);
-                    if let Some(command) = command {
-                        handle.commands.send(command).await.unwrap();
-                    }
-                    if closed {
-                        break;
-                    }
-                }
-                events
-            },
-            async {
-                smol::Timer::after(Duration::from_secs(60)).await;
-                panic!("the replayed session did not finish");
-            },
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        // Every client message and answer matched the recording, or the
-        // stand-in would have hung up before the close.
-        assert!(
-            matches!(
-                events.last(),
-                Some(AgentEvent::SessionClosed { reason: None })
-            ),
-            "{events:#?}"
-        );
-        events
-    }
-
-    #[test]
-    fn recorded_resumed_turn_maps_to_the_canonical_stream() {
-        if std::env::var_os(REPLAY_AGENT).is_some() {
-            return replay_agent(RESUMED_TURN);
-        }
-        let opts = SessionOptions {
-            resume: Some(ResumeCursor(
-                json!({ "session_id": "01a10095-e65c-7983-a817-6884b010f1ae" }),
-            )),
+            binary_path: Some(PathBuf::from("/opt/grok/bin/grok")),
             option_selections: vec![OptionSelection {
                 id: "reasoningEffort".into(),
                 value: json!("low"),
             }],
-            mcp_servers: vec![McpRegistration {
-                name: "tcode_probe".into(),
-                url: "http://127.0.0.1:18433/mcp".into(),
-                bearer_token: "tcode-secret".into(),
-            }],
-            ..stand_in_options("recorded_resumed_turn_maps_to_the_canonical_stream")
+            mcp_servers: Vec::new(),
+            launch_env: LaunchEnv::default(),
+            extra_args: Vec::new(),
+            acp: None,
+            instructions: None,
         };
-        let events = replay(opts, "Count, edit, ask and echo", |_| Next::Close);
+        let launch = Grok::default().launch(&opts).unwrap();
+        assert_eq!(launch.program, PathBuf::from("/opt/grok/bin/grok"));
+        assert_eq!(
+            launch.args,
+            [
+                "--permission-mode",
+                "default",
+                "agent",
+                "--reasoning-effort",
+                "low",
+                "stdio"
+            ]
+        );
+    }
+
+    #[test]
+    fn recorded_resumed_turn_maps_to_the_canonical_stream() {
+        let events = replay(RESUMED_TURN);
 
         let started = events
             .iter()
@@ -1790,9 +1628,6 @@ mod tests {
                     && changes[0].path.ends_with("/in.txt")
                     && changes[0].diff.as_deref() == Some(
                         "--- a//private/tmp/grok-fixture/cwork/in.txt\n+++ b//private/tmp/grok-fixture/cwork/in.txt\n@@ -1,1 +1,1 @@\n-hello\n+bye\n")));
-        assert!(events.iter().any(|event| matches!(event,
-            AgentEvent::UserInputRequested { questions, .. }
-                if questions[0].id == "Which greeting should I use?")));
         assert!(matches!(completed(&events, "call_37_0"),
             ItemContent::ToolCall { name, output: Some(output), status: ItemStatus::Completed, .. }
                 if name == "tcode_probe/echo_upper" && output == "HELLO MCP"));
@@ -1805,8 +1640,7 @@ mod tests {
             ItemContent::AssistantMessage { text, .. } if text == "Counted, edited, asked and echoed."));
 
         assert!(events.iter().any(|event| matches!(event,
-            AgentEvent::TokenUsage(usage)
-                if usage.context_window == Some(500_000) && usage.used_tokens == Some(1234))));
+            AgentEvent::TokenUsage(usage) if usage.used_tokens == Some(1234))));
         let completions: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
@@ -1821,7 +1655,31 @@ mod tests {
         assert_eq!(usage.freshness, ContextFreshness::Current);
         assert_eq!(usage.turn_processed_tokens, Some(7404));
         assert_eq!(usage.used_tokens, Some(1234));
-        assert_eq!(usage.context_window, Some(500_000));
+    }
+
+    /// Grok keys a question by its text and takes every answer as a list of
+    /// the chosen labels.
+    #[test]
+    fn a_recorded_question_is_asked_and_answered_in_grok_s_shape() {
+        let (params, answered) = exchange(RESUMED_TURN, ASK_USER_QUESTION);
+        let asked = questions(&params).unwrap();
+        let [question] = asked.as_slice() else {
+            panic!("{asked:?}");
+        };
+        assert_eq!(question.id, "Which greeting should I use?");
+        assert_eq!(question.question, "Which greeting should I use?");
+        assert_eq!(
+            question
+                .options
+                .iter()
+                .map(|option| (option.label.as_str(), option.description.as_str()))
+                .collect::<Vec<_>>(),
+            [("Hello", "Friendly"), ("Hi", "Short")]
+        );
+        assert!(!question.multi_select);
+        let mut answers = Map::new();
+        answers.insert(question.id.clone(), json!("Hello"));
+        assert_eq!(Value::Object(answer_lists(answers)), answered["answers"]);
     }
 
     /// Grok reports a background task that finished during a sent turn with
@@ -1829,21 +1687,9 @@ mod tests {
     /// the sent turn's result is still on its way.
     #[test]
     fn a_turn_grok_starts_itself_runs_between_the_sent_turns() {
-        if std::env::var_os(REPLAY_AGENT).is_some() {
-            return replay_agent(AGENT_STARTED_TURN);
-        }
-        let opts = stand_in_options("a_turn_grok_starts_itself_runs_between_the_sent_turns");
-        let events = replay(
-            opts,
-            "Background then foreground",
-            |completed| match completed {
-                1 => Next::Wait,
-                2 => Next::Send("And now?"),
-                _ => Next::Close,
-            },
-        );
+        let events = replay(AGENT_STARTED_TURN);
 
-        let agent = "task-completed-01a100c2-37c5-7fc2-b92a-c0f8b2c3659b";
+        let agent = "task-completed-00000000-0000-7000-8000-000000000083";
         let at = |wanted: &dyn Fn(&AgentEvent) -> bool| {
             events
                 .iter()
@@ -1953,184 +1799,72 @@ mod tests {
         );
     }
 
-    /// [`RESUMED_TURN`] with the rewind exchanges in the shapes Grok's own
-    /// `x.ai/rewind/*` handlers answer (grok-build source,
-    /// `xai-grok-shell/src/extensions/rewind.rs` and `session/acp_types.rs`;
-    /// no Grok was installed to record them): the resumed session's points
-    /// after the resume, then a dry run, the points again and the rewind
-    /// before the close.
-    fn rewind_fixture() -> String {
-        const SESSION: &str = "01a10095-e65c-7983-a817-6884b010f1ae";
-        let exchange = |id: &str, method: &str, params: Value, result: Value| {
-            [
-                json!({"from": "client", "message": {"jsonrpc": "2.0", "id": id, "method": method, "params": params}}),
-                json!({"from": "agent", "message": {"jsonrpc": "2.0", "id": id, "result": result}}),
-            ]
-        };
-        let point = |index: u64, preview: &str| json!({"prompt_index": index, "created_at": "2026-11-07T03:00:00+00:00", "num_file_snapshots": index, "has_file_changes": index > 0, "prompt_preview": preview});
-        let execute = |force: bool, mode: &str| json!({"sessionId": SESSION, "targetPromptIndex": 1, "force": force, "mode": mode});
-        let mut lines = Vec::new();
-        for line in RESUMED_TURN.lines() {
-            let record: Value = serde_json::from_str(line).unwrap();
-            let message = record["message"].clone();
-            if message["method"] == "session/close" {
-                lines.extend(exchange(
-                    "rewind-preview",
-                    REWIND_EXECUTE,
-                    execute(false, "files_only"),
-                    json!({"success": false, "target_prompt_index": 1, "mode": "files_only", "reverted_files": [], "clean_files": ["in.txt"], "conflicts": [{"path": "notes.md", "conflict_type": "modified_externally"}], "prompt_text": null, "error": "External modifications detected. Confirm to revert anyway."}),
-                ));
-                lines.extend(exchange(
-                    "rewind-points",
-                    REWIND_POINTS,
-                    json!({"sessionId": SESSION}),
-                    json!({"rewind_points": [point(0, "Count to three"), point(1, "Count, edit, ask and echo")]}),
-                ));
-                lines.extend(exchange(
-                    "rewind-execute",
-                    REWIND_EXECUTE,
-                    execute(true, "all"),
-                    json!({"success": true, "target_prompt_index": 1, "mode": "all", "reverted_files": ["in.txt", "notes.md"], "clean_files": [], "conflicts": [], "prompt_text": "Count, edit, ask and echo", "error": null}),
-                ));
-            }
-            lines.push(record);
-            if message["id"] == "719e6cdf-86e3-45e8-9956-04007a0b87a0"
-                && message.get("result").is_some()
-            {
-                lines.extend(exchange(
-                    "resumed-points",
-                    REWIND_POINTS,
-                    json!({"sessionId": SESSION}),
-                    json!({"rewind_points": [point(0, "Count to three")]}),
-                ));
-            }
-        }
-        lines
-            .iter()
-            .map(Value::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    /// [`RESUMED_TURN`] with the session it resumes made by Grok's fork, in the
-    /// shape `xai-grok-shell/src/session/fork.rs` takes and answers.
-    fn fork_fixture() -> String {
-        let forked = RESUMED_TURN
-            .lines()
-            .find_map(|line| {
-                let record: Value = serde_json::from_str(line).unwrap();
-                (record["message"]["method"] == "session/resume")
-                    .then(|| record["message"]["params"]["sessionId"].clone())
-            })
-            .unwrap();
-        let mut lines = Vec::new();
-        for line in RESUMED_TURN.lines() {
-            let record: Value = serde_json::from_str(line).unwrap();
-            if record["message"]["method"] == "session/resume" {
-                lines.push(json!({"from": "client", "message": {"jsonrpc": "2.0", "id": "fork", "method": FORK,
-                    "params": {"sourceSessionId": "source-session", "targetPromptIndex": 2}}}).to_string());
-                lines.push(
-                    json!({"from": "agent", "message": {"jsonrpc": "2.0", "id": "fork",
-                    "result": {"newSessionId": forked}}})
-                    .to_string(),
-                );
-            }
-            lines.push(line.to_owned());
-        }
-        lines.join("\n")
-    }
-
-    /// Grok's fork keeps the prompt it names, so a fork before prompt 3 names
-    /// prompt 2, and the session goes on in the one it made.
+    /// Grok's fork keeps the prompt it names, so a fork before prompt 3
+    /// names prompt 2. The params are the ones grok-build's
+    /// `xai-grok-shell/src/session/fork.rs` takes.
     #[test]
     fn a_fork_before_a_prompt_names_the_prompt_before_it() {
-        if std::env::var_os(REPLAY_AGENT).is_some() {
-            return replay_agent(&fork_fixture());
-        }
         let opts = SessionOptions {
-            resume: Some(ResumeCursor(json!({ "session_id": "source-session" }))),
-            fork: Some(ForkPoint::Before {
-                checkpoint_id: "3".into(),
-            }),
-            ..stand_in_options("a_fork_before_a_prompt_names_the_prompt_before_it")
+            cwd: PathBuf::from("/home/user/project"),
+            model: None,
+            resume: None,
+            fork: None,
+            binary_path: None,
+            option_selections: Vec::new(),
+            mcp_servers: Vec::new(),
+            launch_env: LaunchEnv::default(),
+            extra_args: Vec::new(),
+            acp: None,
+            instructions: None,
         };
-        let events = replay(opts, "Count, edit, ask and echo", |_| Next::Close);
-        let started = events
-            .iter()
-            .find_map(|event| match event {
-                AgentEvent::SessionStarted {
-                    provider_session_id,
-                    ..
-                } => Some(provider_session_id.as_str()),
-                _ => None,
-            })
-            .unwrap();
-        assert_ne!(started, "source-session");
+        let before = |checkpoint_id: &str| ForkPoint::Before {
+            checkpoint_id: checkpoint_id.into(),
+        };
+        assert_eq!(
+            fork_params("source-session", &before("3"), &opts).unwrap(),
+            json!({"sourceSessionId": "source-session", "sourceCwd": "/home/user/project",
+                "newCwd": "/home/user/project", "targetPromptIndex": 2})
+        );
+        assert_eq!(
+            fork_params("source-session", &ForkPoint::Tail, &opts).unwrap(),
+            json!({"sourceSessionId": "source-session", "sourceCwd": "/home/user/project",
+                "newCwd": "/home/user/project"})
+        );
+        assert!(fork_params("source-session", &before("0"), &opts).is_err());
     }
 
-    /// A resumed session numbers its next prompt after the points it already
-    /// has; a dry run lists the files a restore would change and those
-    /// changed outside Grok, and the rewind returns the prompt and the files
-    /// it restored.
+    /// `_x.ai/rewind/execute` answers in the shapes of grok-build's
+    /// `xai-grok-shell/src/extensions/rewind.rs` and `session/acp_types.rs`:
+    /// a dry run lists the files a restore would change and those changed
+    /// outside Grok, and the rewind returns the prompt and the files it
+    /// restored.
     #[test]
-    fn a_rewind_runs_grok_s_own_rewind_to_the_prompt_s_number() {
-        if std::env::var_os(REPLAY_AGENT).is_some() {
-            return replay_agent(&rewind_fixture());
-        }
-        let opts = SessionOptions {
-            resume: Some(ResumeCursor(
-                json!({ "session_id": "01a10095-e65c-7983-a817-6884b010f1ae" }),
-            )),
-            option_selections: vec![OptionSelection {
-                id: "reasoningEffort".into(),
-                value: json!("low"),
-            }],
-            mcp_servers: vec![McpRegistration {
-                name: "tcode_probe".into(),
-                url: "http://127.0.0.1:18433/mcp".into(),
-                bearer_token: "tcode-secret".into(),
-            }],
-            ..stand_in_options("a_rewind_runs_grok_s_own_rewind_to_the_prompt_s_number")
-        };
-        let events = replay_reacting(opts, "Count, edit, ask and echo", |event| match event {
-            AgentEvent::TurnCompleted { .. } => Some(SessionCommand::PreviewRewind {
-                checkpoint_id: "1".into(),
-                mode: RewindMode::Files,
-            }),
-            AgentEvent::RewindPreviewed { .. } => Some(SessionCommand::Rewind {
-                checkpoint_id: "1".into(),
-                mode: RewindMode::FilesAndConversation,
-            }),
-            AgentEvent::RewindCompleted { .. } | AgentEvent::RewindFailed { .. } => {
-                Some(SessionCommand::Shutdown)
-            }
-            _ => None,
-        });
-        let rewind_events: Vec<Value> = events
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    AgentEvent::TurnCheckpoint { .. }
-                        | AgentEvent::RewindPreviewed { .. }
-                        | AgentEvent::RewindCompleted { .. }
-                        | AgentEvent::RewindFailed { .. }
-                )
-            })
-            .map(|event| serde_json::to_value(event).unwrap())
-            .collect();
+    fn a_rewind_reads_grok_s_own_answers() {
+        let preview = dry_run(&json!({"success": false, "target_prompt_index": 1, "mode": "files_only",
+            "reverted_files": [], "clean_files": ["in.txt"],
+            "conflicts": [{"path": "notes.md", "conflict_type": "modified_externally"}],
+            "prompt_text": null, "error": "External modifications detected. Confirm to revert anyway."}))
+        .unwrap();
         assert_eq!(
-            rewind_events,
-            [
-                json!({"type": "turn_checkpoint", "turn_id": "turn-1", "checkpoint_id": "1"}),
-                json!({"type": "rewind_previewed", "checkpoint_id": "1", "mode": "files", "result": {"type": "ready", "content": {
-                    "files": {"files": [{"path": "in.txt"}, {"path": "notes.md"}]},
-                    "conflicts": [{"path": "notes.md", "kind": "modified_externally"}],
-                }}}),
-                json!({"type": "rewind_completed", "checkpoint_id": "1", "mode": "files_and_conversation",
-                    "prefill": "Count, edit, ask and echo", "later_history": "truncated",
-                    "files": {"files": [{"path": "in.txt"}, {"path": "notes.md"}]}}),
-            ]
+            serde_json::to_value(preview).unwrap(),
+            json!({
+                "files": {"files": [{"path": "in.txt"}, {"path": "notes.md"}]},
+                "conflicts": [{"path": "notes.md", "kind": "modified_externally"}],
+            })
+        );
+        let rewound = rewound(
+            &json!({"success": true, "target_prompt_index": 1, "mode": "all",
+                "reverted_files": ["in.txt", "notes.md"], "clean_files": [], "conflicts": [],
+                "prompt_text": "Count, edit, ask and echo", "error": null}),
+            "1",
+            RewindMode::FilesAndConversation,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(rewound).unwrap(),
+            json!({"type": "rewind_completed", "checkpoint_id": "1", "mode": "files_and_conversation",
+                "prefill": "Count, edit, ask and echo", "later_history": "truncated",
+                "files": {"files": [{"path": "in.txt"}, {"path": "notes.md"}]}})
         );
     }
 }

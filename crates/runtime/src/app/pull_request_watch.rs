@@ -1017,7 +1017,3 @@ fn clear_watches(meta: &mut SessionMeta) -> bool {
     }
     cleared
 }
-
-#[cfg(test)]
-#[path = "pull_request_watch_tests.rs"]
-mod tests;

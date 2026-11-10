@@ -78,7 +78,7 @@ use tcode_services::version_check::provider_updates::{
 use tcode_services::version_check::{self as app_releases, ReleaseFeed};
 use tcode_services::workspace::list_workspace;
 use tcode_services::worktree::{
-    MergeBackError, MergeBackOutcome, ProvisionError, cleanup_orphans, merge_back, provision,
+    MergeBackError, MergeBackOutcome, cleanup_orphans, merge_back, provision,
     remove as remove_git_worktree, within_repository_worktree,
 };
 
@@ -550,10 +550,6 @@ impl AppState {
             tcode_services::relaunch::take(store.root()),
             computer_use_mcp::permissions::check(),
         );
-        // Older builds kept each conversation's terminal drawer here and
-        // reopened it with fresh shells on load; a drawer now lives only with
-        // its running terminals.
-        let _ = std::fs::remove_file(store.root().join("terminal-ui.json"));
         // Seed the model picker from the persisted cache so it is instant and
         // works offline; a background refresh (see `refresh_model_catalogs`)
         // updates it once the providers respond.
