@@ -1456,6 +1456,17 @@ impl Settings {
             return id.to_string();
         };
         let product = provider_label(profile.kind);
+        match self.profile_qualifier_as(id, signed_in_as) {
+            Some(name) => format!("{product} ({name})"),
+            None => product.to_string(),
+        }
+    }
+
+    /// What tells the profile apart from its harness's others in
+    /// [`Self::profile_display_name_as`]: its name, the account it is signed
+    /// in as, or its id. `None` is a profile named by its product alone.
+    pub fn profile_qualifier_as(&self, id: &str, signed_in_as: Option<&str>) -> Option<String> {
+        let profile = self.resolved_profile(id)?;
         let builtin = Self::is_builtin_profile_id(id);
         let account = signed_in_as
             .filter(|_| {
@@ -1468,18 +1479,15 @@ impl Settings {
             .and_then(|email| email.split('@').next())
             .map(str::trim)
             .filter(|local| !local.is_empty());
-        let qualifier = profile
+        profile
             .settings
             .display_name
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .or(account)
-            .or_else(|| (!builtin).then_some(id));
-        match qualifier {
-            Some(name) => format!("{product} ({name})"),
-            None => product.to_string(),
-        }
+            .or_else(|| (!builtin).then_some(id))
+            .map(str::to_owned)
     }
 
     /// The ids a new profile named `name` may take, best first: the name as a

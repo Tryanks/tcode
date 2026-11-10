@@ -1095,7 +1095,7 @@ impl HarnessDialog {
         };
         let page_title = match &self.page {
             Page::Overview => None,
-            Page::Profile(id) => Some(profile_name(store, id)),
+            Page::Profile(id) => Some(store.provider_profile_short_name(id)),
             Page::AddAccount => Some(crate::tr!("providers.harness.add_account").into_owned()),
             Page::AddEndpoint => Some(crate::tr!("providers.harness.add_endpoint").into_owned()),
         };
@@ -1709,7 +1709,7 @@ impl HarnessDialog {
         let store = self.store.read(cx);
         let snapshot = store.provider_profile_snapshot(&profile.id);
         let endpoint = profile.is_endpoint_profile();
-        let name = profile_name(store, &profile.id);
+        let name = store.provider_profile_short_name(&profile.id);
         let detail = if endpoint {
             endpoint_summary(description, &profile.settings.env)
         } else {
@@ -3070,19 +3070,6 @@ pub(crate) fn set_harness_enabled(
             tcode_core::acp::AcpAgentPatch::SetEnabled { enabled },
         ),
     });
-}
-
-/// A profile as its own page and its row name it: its display name, for the
-/// default account who it is signed in as, else its harness's name.
-pub(crate) fn profile_name(store: &WorkspaceStore, profile_id: &str) -> String {
-    let full = store.provider_profile_display_name(profile_id);
-    let kind = store.provider_profile_kind(profile_id);
-    let product = provider_label(kind);
-    full.strip_prefix(product)
-        .map(str::trim)
-        .and_then(|rest| rest.strip_prefix('(')?.strip_suffix(')'))
-        .map(str::to_owned)
-        .unwrap_or(full)
 }
 
 fn endpoint_chip(cx: &App) -> AnyElement {

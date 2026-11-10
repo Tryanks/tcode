@@ -2893,6 +2893,23 @@ impl WorkspaceStore {
             .profile_display_name_as(profile_id, email.as_deref())
     }
 
+    /// The profile as a list of its harness's profiles names it: what
+    /// [`Self::provider_profile_display_name`] puts beside the product, or
+    /// the whole name where there is nothing beside it.
+    pub fn provider_profile_short_name(&self, profile_id: &str) -> String {
+        if self.scoped_choice(profile_id).is_some() {
+            return self.provider_profile_display_name(profile_id);
+        }
+        let email = self
+            .provider_profile_snapshot(profile_id)
+            .as_ref()
+            .and_then(crate::provider_status::signed_in_account)
+            .and_then(|auth| auth.email.clone());
+        self.settings_replica
+            .profile_qualifier_as(profile_id, email.as_deref())
+            .unwrap_or_else(|| self.provider_profile_display_name(profile_id))
+    }
+
     /// What the host says each harness is: the native ones, then each
     /// installed ACP agent.
     pub fn harness_descriptions(&self) -> &[tcode_protocol::HarnessDescription] {
