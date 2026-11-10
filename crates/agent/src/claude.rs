@@ -1624,16 +1624,6 @@ async fn handle_command(
             ControlFlow::Continue(())
         }
         SessionCommand::Shutdown => {
-            // Settle pending AskUserQuestion callbacks before closing stdin.
-            for (request_id, response) in mapper.cancel_pending_user_input() {
-                let _ = write_line(stdin, &response).await;
-                let _ = event_tx
-                    .send(AgentEvent::UserInputResolved {
-                        request_id,
-                        answers: serde_json::Map::new(),
-                    })
-                    .await;
-            }
             let _ = stdin.close().await;
             let _ = child.kill();
             ControlFlow::Break("shutdown requested")
@@ -2483,24 +2473,6 @@ impl Mapper {
                 "updatedInput": { "questions": questions, "answers": answers }
             }),
         ))
-    }
-
-    /// Drain every pending `AskUserQuestion`, producing `(request_id, deny
-    /// control_response)` pairs with the cancellation message.
-    fn cancel_pending_user_input(&mut self) -> Vec<(String, Value)> {
-        self.pending_user_input
-            .drain()
-            .map(|(request_id, _questions)| {
-                let response = control_response(
-                    &request_id,
-                    json!({
-                        "behavior": "deny",
-                        "message": "User cancelled tool execution.",
-                    }),
-                );
-                (request_id, response)
-            })
-            .collect()
     }
 
     /// The `initialize` control request registering the worktree hooks.
@@ -7258,24 +7230,6 @@ mod tests {
 
     #[test]
     fn ask_user_question_parse_and_answer_wire_shape() {
-        let mut m = Mapper::new();
-        feed(
-            &mut m,
-            r#"{"type":"control_request","request_id":"ctrl-x","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"q?","header":"h"}]}}}"#,
-        );
-        let cancels = m.cancel_pending_user_input();
-        assert_eq!(cancels.len(), 1);
-        let (id, resp) = &cancels[0];
-        assert_eq!(id, "ctrl-x");
-        assert_eq!(resp["response"]["response"]["behavior"], "deny");
-        assert_eq!(
-            resp["response"]["response"]["message"],
-            "User cancelled tool execution."
-        );
-        // Drained: no longer answerable.
-        let empty = serde_json::Map::new();
-        assert!(m.build_user_input_response("ctrl-x", &empty).is_none());
-
         let mut m = Mapper::new();
         m.start_turn();
         let evs = feed(
