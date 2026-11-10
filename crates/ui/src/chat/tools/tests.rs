@@ -1,8 +1,9 @@
 //! Tool windows driven the way the app shows them: a thread's stored log,
 //! read back by a host, folded into the timeline and drawn by the chat.
 //! Each log is tool items inside one turn (`fixtures/*.jsonl`): rows in the
-//! shape tcode.db stores them, as recorded, with invented paths, ids and
-//! content.
+//! shape the current build writes to tcode.db (`EventEnvelopeRef` in
+//! `tcode_services::store`, items as the `agent` adapters map them now),
+//! with invented paths, ids and content.
 
 use std::sync::Arc;
 
@@ -240,8 +241,7 @@ pub(in crate::chat) fn read(
 }
 
 /// A call no family claims reads as its server and tool and the value that
-/// names it — a Codex connector's whose result was stored as MCP JSON as
-/// much as a Claude Code MCP call's.
+/// names it — a Codex connector's as much as a Claude Code MCP call's.
 #[gpui::test]
 fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
@@ -528,8 +528,8 @@ fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
 /// A read reads as the file and the lines read: numbered as its harness
 /// numbered them, or counted from the offset it asked for when the harness
 /// returned bare lines; a failure by the harness's own words; an image read
-/// as viewed, its image a tile above the row, whether it came live or from a
-/// Codex rollout stored before images had their own field.
+/// as viewed, its image a tile above the row, whether it came live or from an
+/// imported Codex rollout.
 #[gpui::test]
 fn a_read_reads_as_its_file_and_lines(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
@@ -1653,9 +1653,9 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
 /// The harness's calls about the session read as what they did: the tools
 /// a search loaded, the skill launched, a plan proposed as a call, a
 /// question asked and the answer it got, the reviewer's verdict with its
-/// risk and, when it denied, its rationale. A wait and an image generated,
-/// recorded as Codex items before they were mapped, read as such, and an
-/// image viewed then shows as its image, as one recorded now does.
+/// risk and, when it denied, its rationale. Codex's wait and generated image
+/// read as such, and the image it viewed and the one it generated show as
+/// their images.
 #[gpui::test]
 fn a_harness_call_reads_as_what_it_did_to_the_session(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
