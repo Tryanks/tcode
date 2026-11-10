@@ -171,9 +171,11 @@ jobs:
         if: runner.os != 'Linux'
         run: cargo nextest run --workspace --locked --no-fail-fast
 
-      - name: Test iOS text input on the host
+      # gpui-android is outside the workspace, so the workspace run skips it;
+      # its text-input tests run on any host.
+      - name: Test Android text input on the host
         if: runner.os == 'macOS'
-        run: cargo test -p gpui-ios --lib --locked
+        run: cargo test -p gpui-android --lib --locked
 
       # WebKitGTK sandboxes its web process with bubblewrap, which needs the
       # unprivileged user namespaces Ubuntu 24.04 restricts through AppArmor;
