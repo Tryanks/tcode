@@ -167,7 +167,12 @@ mod tests {
         );
     }
 
-    /// The messages agent.js posts, as it writes them.
+    /// Every message agent.js posts. Shapes are agent.js's own: `send` adds `n` and
+    /// `doc` to each; `ready` is the last statement, `reply` is the `reply` helper's
+    /// two objects, `input` is sent from `userActed`, `url` from `checkUrl`, and
+    /// `console` from `relay`, whose `location` is optional. Contents are invented.
+    /// Only a real engine shows that the script still sends these: the preview
+    /// smoke run (`--preview-smoke`).
     #[test]
     fn agent_messages_parse() {
         let cases = [
@@ -200,11 +205,25 @@ mod tests {
                 Message::Input { generation: 1 },
             ),
             (
+                r#"{"t":"url","url":"http://localhost:5173/#settings","n":"k","doc":"d1"}"#,
+                Message::Url {
+                    url: "http://localhost:5173/#settings".into(),
+                },
+            ),
+            (
                 r#"{"t":"console","level":"error","text":"boom","location":"http://x/app.js:3","n":"k","doc":"d1"}"#,
                 Message::Console(ConsoleEntry {
                     level: "error".into(),
                     text: "boom".into(),
                     location: Some("http://x/app.js:3".into()),
+                }),
+            ),
+            (
+                r#"{"t":"console","level":"error","text":"Unhandled promise rejection: x","n":"k","doc":"d1"}"#,
+                Message::Console(ConsoleEntry {
+                    level: "error".into(),
+                    text: "Unhandled promise rejection: x".into(),
+                    location: None,
                 }),
             ),
         ];
