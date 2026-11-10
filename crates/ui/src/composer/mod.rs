@@ -3650,6 +3650,54 @@ mod replica_tests {
         );
     }
 
+    /// The option chosen is the answer, whatever the free-form field holds.
+    /// A select field with a default arrives with the default in that field
+    /// (OpenCode's `form_question` makes it the prefill); choosing another
+    /// option answers with the one chosen.
+    #[gpui::test]
+    fn a_chosen_option_is_the_answer_whatever_the_custom_field_holds(cx: &mut TestAppContext) {
+        let (store, incoming, outgoing, mut status) = attach(cx);
+        let option = |label: &str| agent::UserInputOption {
+            label: label.into(),
+            description: String::new(),
+        };
+        status.activity.turn_running = true;
+        status.pending_user_input = Some(tcode_core::session::PendingUserInput {
+            request_id: "ask".into(),
+            questions: vec![UserInputQuestion {
+                id: "color".into(),
+                header: "Color".into(),
+                question: "Which color?".into(),
+                options: vec![option("Red"), option("Blue")],
+                multi_select: false,
+                prefill: Some("Red".into()),
+            }],
+            delivery: agent::UserInputDelivery::Blocking,
+        });
+        let (_composer, cx) = composer_on(&store, &incoming, status, cx);
+        while outgoing.try_recv().is_ok() {}
+        cx.simulate_keystrokes("2");
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        let answers: Vec<_> = std::iter::from_fn(|| outgoing.try_recv().ok())
+            .filter_map(
+                |line| match tcode_protocol::decode_client_line(&line).unwrap().payload {
+                    tcode_protocol::ClientPayload::Command(
+                        tcode_protocol::Command::RespondUserInput { answers, .. },
+                    ) => Some(answers),
+                    _ => None,
+                },
+            )
+            .collect();
+        assert_eq!(
+            answers,
+            [serde_json::Map::from_iter([(
+                "color".to_owned(),
+                serde_json::json!("Blue")
+            )])]
+        );
+    }
+
     #[gpui::test]
     fn queue_edit_waits_for_host_removal_and_in_flight_actions_are_disabled(
         cx: &mut TestAppContext,

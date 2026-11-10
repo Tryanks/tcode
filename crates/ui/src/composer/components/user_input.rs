@@ -316,6 +316,13 @@ impl Composer {
                             .touch(self.compact)
                             .label(crate::tr!("userinput.done"))
                             .on_click(cx.listener(move |this, _, window, cx| {
+                                // What is typed in the field and not yet
+                                // added is part of the answer Done sends.
+                                let text =
+                                    this.user_input_custom.read(cx).value().trim().to_string();
+                                if !text.is_empty() {
+                                    this.record_custom_answer(&questions_submit, text);
+                                }
                                 this.ui_submit(&questions_submit, request_id.clone(), window, cx);
                             })),
                     ),
@@ -645,6 +652,16 @@ impl Composer {
         if text.is_empty() {
             return;
         }
+        self.record_custom_answer(&questions, text);
+        input.update(cx, |state, cx| state.set_value("", window, cx));
+        self.ui_advance_or_submit(&questions, request_id, window, cx);
+        cx.notify();
+    }
+
+    /// Record typed `text` as an answer to the current question, as a click
+    /// records an option: one more answer to a multi-select question, the
+    /// answer to a single-select one.
+    fn record_custom_answer(&mut self, questions: &[UserInputQuestion], text: String) {
         let index = self
             .ui_question_index
             .min(questions.len().saturating_sub(1));
@@ -656,9 +673,6 @@ impl Composer {
                 *entry = vec![text];
             }
         }
-        input.update(cx, |state, cx| state.set_value("", window, cx));
-        self.ui_advance_or_submit(&questions, request_id, window, cx);
-        cx.notify();
     }
 
     pub(in super::super) fn ui_go(
@@ -733,18 +747,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let custom = self.user_input_custom.read(cx).value().trim().to_string();
-        let custom = if custom.is_empty() {
-            None
-        } else {
-            Some(custom.as_str())
-        };
-        let answers = assemble_user_input_answers(
-            questions,
-            &self.ui_selections,
-            self.ui_question_index,
-            custom,
-        );
+        let answers = assemble_user_input_answers(questions, &self.ui_selections);
         self.user_input_custom
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.ui_selections.clear();

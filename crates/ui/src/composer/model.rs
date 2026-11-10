@@ -340,9 +340,6 @@ pub(super) fn traits_chip_label(
     }
 }
 
-/// Build the answers map for a user-input request: keyed by question id, with a
-/// string (single-select / free-text) or string-array (multi-select) value. A
-/// non-empty custom answer overrides the current question's selections.
 /// A question counts as answered once it carries at least one selection (or a
 /// recorded custom-text answer, which is stored the same way).
 pub(super) fn user_input_answered(
@@ -379,23 +376,14 @@ pub(super) fn next_unanswered_question(
         .find(|&i| !user_input_answered(&questions[i], selections))
 }
 
+/// Build the answers map for a user-input request: keyed by question id, with a
+/// string (single-select / free-text) or string-array (multi-select) value.
 pub(super) fn assemble_user_input_answers(
     questions: &[UserInputQuestion],
     selections: &std::collections::HashMap<String, Vec<String>>,
-    current_index: usize,
-    custom_current: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut map = serde_json::Map::new();
-    for (i, question) in questions.iter().enumerate() {
-        if i == current_index
-            && let Some(text) = custom_current.map(str::trim).filter(|t| !t.is_empty())
-        {
-            map.insert(
-                question.id.clone(),
-                serde_json::Value::String(text.to_string()),
-            );
-            continue;
-        }
+    for question in questions {
         let selected = selections.get(&question.id).cloned().unwrap_or_default();
         let value = if question.multi_select {
             serde_json::Value::Array(
@@ -725,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn user_input_answers_assemble_with_multi_and_custom_override() {
+    fn user_input_answers_assemble_one_string_or_a_list_per_question() {
         let questions = vec![
             UserInputQuestion {
                 id: "q1".into(),
@@ -766,19 +754,11 @@ mod tests {
         selections.insert("q1".to_string(), vec!["A".to_string()]);
         selections.insert("q2".to_string(), vec!["X".to_string(), "Y".to_string()]);
 
-        let answers = assemble_user_input_answers(&questions, &selections, 0, None);
+        let answers = assemble_user_input_answers(&questions, &selections);
         assert_eq!(answers["q1"], serde_json::json!("A"));
         assert_eq!(answers["q2"], serde_json::json!(["X", "Y"]));
 
-        let answers = assemble_user_input_answers(&questions, &selections, 0, Some("  freehand  "));
-        assert_eq!(answers["q1"], serde_json::json!("freehand"));
-        assert_eq!(answers["q2"], serde_json::json!(["X", "Y"]));
-
-        let answers = assemble_user_input_answers(&questions, &selections, 0, Some("   "));
-        assert_eq!(answers["q1"], serde_json::json!("A"));
-
-        let answers =
-            assemble_user_input_answers(&questions, &std::collections::HashMap::new(), 0, None);
+        let answers = assemble_user_input_answers(&questions, &std::collections::HashMap::new());
         assert_eq!(answers["q1"], serde_json::json!(""));
         assert_eq!(answers["q2"], serde_json::json!([]));
     }
