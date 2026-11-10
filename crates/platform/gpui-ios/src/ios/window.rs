@@ -98,7 +98,7 @@ impl IosWindow {
         } else {
             params.bounds.size
         };
-        let scale_factor = metrics.scale.max(1.0);
+        let scale_factor = metrics.scale;
         let raw_handles = Self::raw_handles(view);
 
         let descriptor = wgpu::InstanceDescriptor {
@@ -191,7 +191,6 @@ impl IosWindow {
         height: f32,
         scale_factor: f32,
     ) -> anyhow::Result<()> {
-        let scale_factor = scale_factor.max(1.0);
         let raw_handles = Self::raw_handles(view);
         let instance = self
             .gpu_context
@@ -377,7 +376,6 @@ impl IosWindow {
 
     pub(crate) fn resize_from_host(&self, width: f32, height: f32, scale_factor: f32) {
         let size = size(px(width.max(1.0)), px(height.max(1.0)));
-        let scale_factor = scale_factor.max(1.0);
         if self.bounds.get().size == size
             && (self.scale_factor.get() - scale_factor).abs() < f32::EPSILON
         {

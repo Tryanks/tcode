@@ -111,9 +111,7 @@ pub(super) fn vsync() {
 }
 
 pub fn refresh_rate(rate: f32) {
-    if rate.is_finite() && rate > 0.0 {
-        enqueue(HostEvent::RefreshRate(rate));
-    }
+    enqueue(HostEvent::RefreshRate(rate));
 }
 
 pub fn thermal_status(status: i32) {
