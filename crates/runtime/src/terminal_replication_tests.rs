@@ -46,53 +46,60 @@ impl Replica {
         }
     }
 
-    /// Apply everything already delivered. A frame mid-stream replaces the
-    /// model; that only happens on a restart or a style-table rebuild.
-    fn pump(&mut self) {
-        while let Ok(envelope) = self.events.try_recv() {
-            match envelope.event {
-                ServerEvent::TerminalDelta {
-                    terminal_id,
-                    ref delta,
-                } if terminal_id == self.terminal_id => self.frame.apply(delta),
-                ServerEvent::TerminalFrame {
-                    terminal_id,
-                    ref frame,
-                } if terminal_id == self.terminal_id => self.frame = (**frame).clone(),
-                _ => {}
-            }
+    /// Apply one delivered event. A frame mid-stream replaces the model; that
+    /// only happens on a restart or a style-table rebuild.
+    fn apply(&mut self, envelope: EventEnvelope) {
+        match envelope.event {
+            ServerEvent::TerminalDelta {
+                terminal_id,
+                ref delta,
+            } if terminal_id == self.terminal_id => self.frame.apply(delta),
+            ServerEvent::TerminalFrame {
+                terminal_id,
+                ref frame,
+            } if terminal_id == self.terminal_id => self.frame = (**frame).clone(),
+            _ => {}
         }
     }
 
-    /// Pump until the replica matches the host grid, or fail with the diff.
+    /// Apply everything already delivered.
+    fn pump(&mut self) {
+        while let Ok(envelope) = self.events.try_recv() {
+            self.apply(envelope);
+        }
+    }
+
+    /// Wait for the next event the host delivers, and apply it.
+    fn next(&mut self) {
+        let envelope = self
+            .events
+            .recv_blocking()
+            .expect("the host stopped delivering events");
+        self.apply(envelope);
+    }
+
+    /// Take the host's events until the replica matches the host grid. A
+    /// replica that differs is owed a delta, so each miss waits for the next.
     fn settle(&mut self, terminal: &term::Terminal) {
-        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             self.pump();
-            let host = host_frame(terminal);
-            if difference(&self.frame, &host).is_none() {
+            if difference(&self.frame, &host_frame(terminal)).is_none() {
                 return;
             }
-            if Instant::now() >= deadline {
-                panic!(
-                    "replica never matched the host grid: {}",
-                    difference(&self.frame, &host).unwrap()
-                );
-            }
-            std::thread::sleep(Duration::from_millis(10));
+            self.next();
         }
     }
 }
 
-/// Project the host emulator exactly as the runtime does, without consuming the
-/// damage the live projection depends on.
+/// Project the host emulator's screen exactly as the runtime does, without
+/// consuming the damage the live projection depends on. A peek carries no
+/// scrollback, so the replica's history is checked on its own.
 fn host_frame(terminal: &term::Terminal) -> TerminalFrame {
     let snapshot = terminal.peek_snapshot();
     let mut projector = term::Projector::default();
     let visible = (0..snapshot.screen_lines)
         .map(|row| projector.visible_row(&snapshot, row))
         .collect();
-    let history = projector.history(&snapshot);
     TerminalFrame {
         cols: snapshot.cols as u16,
         rows: snapshot.screen_lines as u16,
@@ -100,7 +107,6 @@ fn host_frame(terminal: &term::Terminal) -> TerminalFrame {
         cursor: term::project::cursor(&snapshot),
         styles: projector.into_styles(),
         visible,
-        history,
         lines_evicted: snapshot.lines_evicted,
         title: snapshot.title.clone(),
         exited: snapshot.exited,
@@ -129,8 +135,8 @@ fn resolved_row(frame: &TerminalFrame, row: &TerminalRow) -> (bool, Vec<Resolved
     (row.wrapped, cells)
 }
 
-/// The first way two grids differ, or `None` when they are identical in every
-/// replicated dimension.
+/// The first way two grids differ on screen, or `None` when they are identical
+/// in every replicated dimension but scrollback.
 fn difference(replica: &TerminalFrame, host: &TerminalFrame) -> Option<String> {
     if (replica.cols, replica.rows) != (host.cols, host.rows) {
         return Some(format!(
@@ -168,31 +174,6 @@ fn difference(replica: &TerminalFrame, host: &TerminalFrame) -> Option<String> {
             ));
         }
     }
-    if replica.history.len() != host.history.len() {
-        return Some(format!(
-            "history rows {} != {}",
-            replica.history.len(),
-            host.history.len()
-        ));
-    }
-    for (index, (left, right)) in replica.history.iter().zip(&host.history).enumerate() {
-        let (left, right) = (resolved_row(replica, left), resolved_row(host, right));
-        if left != right {
-            let cell = left
-                .1
-                .iter()
-                .zip(&right.1)
-                .position(|(a, b)| a != b)
-                .unwrap_or(0);
-            return Some(format!(
-                "history row {index} cell {cell} wrapped {}/{}\n replica: {:?}\n    host: {:?}",
-                left.0,
-                right.0,
-                left.1.get(cell),
-                right.1.get(cell)
-            ));
-        }
-    }
     None
 }
 
@@ -218,8 +199,9 @@ struct Session {
     _host: SpawnedHost,
     mux: HostMux,
     link: HostLink,
-    /// The only consumer of this link's events; clones would compete for them.
-    events: async_channel::Receiver<EventEnvelope>,
+    /// This link's replica of the terminal, the only consumer of its events;
+    /// clones would compete for them.
+    watch: Replica,
     session_id: String,
     terminal_id: u64,
     terminal: Arc<term::Terminal>,
@@ -245,11 +227,12 @@ fn terminal_session() -> Session {
     )
     .unwrap()
     .expect("a spawned terminal");
+    let watch = Replica::attach(&link, events, terminal_id);
     Session {
         _host: host,
         mux,
         link,
-        events,
+        watch,
         session_id,
         terminal_id,
         terminal,
@@ -278,30 +261,27 @@ impl Session {
             .unwrap();
     }
 
-    /// Block until the host grid shows `needle` and has consumed the line
-    /// ending printed after it. The line discipline hands the sentinel and its
-    /// `\r\n` to the master side as separate writes, so the needle alone can
-    /// show up while the cursor move is still in flight, and a grid compared
-    /// moments later would already differ.
-    fn wait_for(&self, needle: &str) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+    /// Take the host's events until the grid shows `needle` and has consumed
+    /// the line ending printed after it. The line discipline hands the
+    /// sentinel and its `\r\n` to the master side as separate writes, so the
+    /// needle alone can show up while the cursor move is still in flight, and
+    /// a grid compared moments later would already differ.
+    fn wait_for(&mut self, needle: &str) {
         loop {
-            let host = host_frame(&self.terminal);
-            let sentinel_row = frame_text(&host)
+            self.watch.pump();
+            let frame = &self.watch.frame;
+            let sentinel_row = frame_text(frame)
                 .iter()
                 .position(|row| row.contains(needle));
             let settled = sentinel_row.is_some_and(|row| {
-                host.cursor
+                frame
+                    .cursor
                     .is_some_and(|cursor| (usize::from(cursor.row), cursor.col) == (row + 1, 0))
             });
             if settled {
                 return;
             }
-            assert!(
-                Instant::now() < deadline,
-                "the host terminal never showed {needle} followed by a newline"
-            );
-            std::thread::sleep(Duration::from_millis(20));
+            self.watch.next();
         }
     }
 
@@ -309,7 +289,7 @@ impl Session {
     /// An explicit title also prevents foreground-process polling from changing
     /// metadata between replica comparisons. Sentinels are octal-escaped so
     /// the shell's echo of the typed line never matches.
-    fn plain_shell(&self) {
+    fn plain_shell(&mut self) {
         self.send(concat!(
             "exec /bin/sh\rPS1=; stty -echo; printf '\\033]2;replication-test\\007",
             "\\122\\105\\101\\104\\131\\n'\r",
@@ -332,7 +312,7 @@ impl Session {
 fn late_attach_and_live_bursts_reproduce_modes_resize_and_retained_history() {
     use tcode_protocol::terminal::{CursorShape, TerminalMode};
 
-    let session = terminal_session();
+    let mut session = terminal_session();
     session.plain_shell();
     // Alt screen + bracketed paste + steady-bar cursor, then output that
     // scrolls the screen many times over, then a sentinel.
@@ -376,7 +356,10 @@ fn late_attach_and_live_bursts_reproduce_modes_resize_and_retained_history() {
     );
     session.wait_for("PRIMARY");
     replica.settle(&session.terminal);
-    assert_eq!(replica.frame.history.len(), HISTORY_LIMIT);
+    // Scrollback follows the screen once the burst has gone quiet.
+    while replica.frame.history.len() != HISTORY_LIMIT {
+        replica.next();
+    }
     assert!(
         !replica
             .frame
@@ -401,23 +384,22 @@ fn late_attach_and_live_bursts_reproduce_modes_resize_and_retained_history() {
 #[cfg(unix)]
 #[test]
 fn two_mux_clients_share_one_grid_and_one_pty() {
-    let session = terminal_session();
-    let mut first = Replica::attach(&session.link, session.events.clone(), session.terminal_id);
+    let mut session = terminal_session();
     session.plain_shell();
-    first.settle(&session.terminal);
+    session.watch.settle(&session.terminal);
 
     let second_link = linked(&session.mux);
     let second_events = observed_events(&second_link);
     let mut second = Replica::attach(&second_link, second_events, session.terminal_id);
-    assert_eq!(difference(&second.frame, &first.frame), None);
+    assert_eq!(difference(&second.frame, &session.watch.frame), None);
 
     // Live output reaches both, and a resize is authoritative for both.
     session.send("printf '\\114\\111\\126\\105\\n'\r");
     session.wait_for("LIVE");
-    first.settle(&session.terminal);
+    session.watch.settle(&session.terminal);
     second.settle(&session.terminal);
     session.resize(71, 19);
-    first.settle(&session.terminal);
+    session.watch.settle(&session.terminal);
     second.settle(&session.terminal);
     assert_eq!((second.frame.cols, second.frame.rows), (71, 19));
 
@@ -433,7 +415,7 @@ fn two_mux_clients_share_one_grid_and_one_pty() {
         })
         .unwrap();
     let mut rejoined = Replica::attach(&second_link, second.events.clone(), session.terminal_id);
-    first.settle(&session.terminal);
+    session.watch.settle(&session.terminal);
     rejoined.settle(&session.terminal);
 
     second_link
@@ -443,9 +425,9 @@ fn two_mux_clients_share_one_grid_and_one_pty() {
         })
         .unwrap();
     session.wait_for("SECOND");
-    first.settle(&session.terminal);
+    session.watch.settle(&session.terminal);
     rejoined.settle(&session.terminal);
-    assert_eq!(difference(&first.frame, &rejoined.frame), None);
+    assert_eq!(difference(&session.watch.frame, &rejoined.frame), None);
 
     // Selection lives in the client. The host stores only what a client sends
     // it, and publishes that to everyone watching the session.
@@ -488,7 +470,7 @@ fn two_mux_clients_share_one_grid_and_one_pty() {
 #[cfg(unix)]
 #[test]
 fn attachment_between_output_chunks_and_resize_preserves_contiguous_history() {
-    let session = terminal_session();
+    let mut session = terminal_session();
     session.plain_shell();
     session.send(
         "awk 'BEGIN{for(i=0;i<1500;i++) print \"line-\" i}'; printf '\\120\\101\\125\\123\\105\\104\\n'; read release; awk 'BEGIN{for(i=1500;i<3000;i++) print \"line-\" i}'; printf '\\102\\125\\123\\131\\n'\r",
@@ -503,22 +485,35 @@ fn attachment_between_output_chunks_and_resize_preserves_contiguous_history() {
     replica.settle(&session.terminal);
     assert_eq!((replica.frame.cols, replica.frame.rows), (88, 21));
 
+    let number = |frame: &TerminalFrame, row: &TerminalRow| {
+        row_text(&resolved_row(frame, row).1)
+            .strip_prefix("line-")?
+            .parse::<u32>()
+            .ok()
+    };
+    // Scrollback follows the screen once the burst has gone quiet: wait until
+    // it reaches the line just above the screen's first.
     let host = host_frame(&session.terminal);
-    assert_eq!(
-        replica.frame.history.len(),
-        host.history.len().min(HISTORY_LIMIT)
-    );
+    let first_on_screen = host
+        .visible
+        .iter()
+        .find_map(|row| number(&host, row))
+        .expect("the burst's last lines are on screen");
+    while replica
+        .frame
+        .history
+        .last()
+        .and_then(|row| number(&replica.frame, row))
+        != Some(first_on_screen - 1)
+    {
+        replica.next();
+    }
     assert!(replica.frame.history.len() > 100, "the burst scrolled");
     let numbers = replica
         .frame
         .history
         .iter()
-        .filter_map(|row| {
-            row_text(&resolved_row(&replica.frame, row).1)
-                .strip_prefix("line-")?
-                .parse::<u32>()
-                .ok()
-        })
+        .filter_map(|row| number(&replica.frame, row))
         .collect::<Vec<_>>();
     assert!(numbers.len() > 100, "{numbers:?}");
     assert!(
@@ -536,8 +531,20 @@ fn attachment_between_output_chunks_and_resize_preserves_contiguous_history() {
 fn projection_sends_changed_rows_and_defers_bursty_history_until_a_stable_gap() {
     use crate::terminal::{TerminalProjection, TerminalUpdate};
 
-    let session = terminal_session();
+    let mut session = terminal_session();
     session.plain_shell();
+    // With no subscriber the host projects nothing, so the projection driven
+    // here is the only reader of the grid's damage.
+    session
+        .link
+        .unsubscribe(Subscription {
+            known_index: None,
+            topic: Topic::Terminal {
+                terminal_id: session.terminal_id,
+            },
+            after: None,
+        })
+        .unwrap();
     session.resize(100, 30);
     let mut projection = TerminalProjection::new();
     let mut replica = projection.reset(&session.terminal);

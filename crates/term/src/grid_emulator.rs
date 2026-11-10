@@ -409,10 +409,10 @@ impl GridEmulator {
         self.read(scrolled_before, budget, true)
     }
 
-    /// Read the grid without consuming renderer damage, so a diagnostic reader
-    /// cannot starve the live projection.
+    /// Read the screen, without scrollback and without consuming renderer
+    /// damage, so a diagnostic reader cannot starve the live projection.
     pub fn peek_snapshot(&self) -> TermSnapshot {
-        self.read(0, crate::HISTORY_PEEK_LIMIT, false)
+        self.read(0, 0, false)
     }
 
     fn read(&self, scrolled_before: u64, budget: usize, consume: bool) -> TermSnapshot {

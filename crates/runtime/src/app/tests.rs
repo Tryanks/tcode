@@ -8763,7 +8763,10 @@ fn a_drafts_terminal_starts_in_its_project_directory() {
                 .unwrap()
                 .terminal_open
         );
-        assert_eq!(workspace.terminals[0].terminal.cwd(), project_cwd);
+        assert_eq!(
+            std::fs::canonicalize(workspace.terminals[0].terminal.working_directory()).unwrap(),
+            std::fs::canonicalize(&project_cwd).unwrap()
+        );
     });
 }
 

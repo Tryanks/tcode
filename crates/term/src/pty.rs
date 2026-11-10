@@ -214,10 +214,6 @@ impl PtyHandle {
         self.events.clone()
     }
 
-    pub fn cwd(&self) -> &Path {
-        &self.cwd
-    }
-
     pub fn working_directory(&self) -> PathBuf {
         self.shared
             .lock_recover()

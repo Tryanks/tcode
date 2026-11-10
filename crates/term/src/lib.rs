@@ -111,8 +111,6 @@ impl RawPty {
 const DEFAULT_COLS: usize = 80;
 #[cfg(any(feature = "pty", test))]
 const DEFAULT_ROWS: usize = 24;
-/// Scrollback rows a diagnostic peek copies; the wire cap is the same.
-pub const HISTORY_PEEK_LIMIT: usize = 1000;
 const DEFAULT_CELL_WIDTH_PX: u32 = 8;
 const DEFAULT_CELL_HEIGHT_PX: u32 = 17;
 
@@ -294,10 +292,6 @@ impl Terminal {
 
     pub fn grid(&self) -> &GridEmulator {
         &self.emulator
-    }
-
-    pub fn cwd(&self) -> &Path {
-        self.pty.cwd()
     }
 
     pub fn working_directory(&self) -> PathBuf {
