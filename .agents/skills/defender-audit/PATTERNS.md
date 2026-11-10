@@ -130,6 +130,89 @@ entries in other areas.
   against the real Claude Code (`--interrupt-after`), which still reported
   the turn interrupted.
 
+## What a stand-in does to production
+
+Removing the stand-ins showed they had not only proved nothing; they had
+taught production code what to expect.
+
+- **A shape only the test had.** OpenCode's plugin listing read
+  `[specifier, options]`, a spelling the hand-written test input used and
+  OpenCode never has. The spelling OpenCode does use, `{"package", "options"}`,
+  nobody read, so a plugin configured with options was missing from Tcode's
+  list. Found when the fake CLI went and the parser was checked against
+  OpenCode 2.2.6's own schema.
+- **A list checked against itself.** The test of the hidden ACP agents chose
+  its own ids and compared them with the hidden list. The live registry had
+  `opencode-v2`, a duplicate of the native integration, and the marketplace
+  offered it (Principle 3).
+- **A protocol whose sender is gone.** pi's approval parsing read the payload
+  of a Tcode extension deleted long before; the test and the parser kept each
+  other alive.
+- **A frame the harness never sends.** A Claude test removed a notification
+  from a trace to build "a terminal update with no notification after it",
+  which Claude Code 2.1.322 cannot produce; the code path it justified hid
+  the real defect, where the output file named by that notification was
+  never read.
+- **An order only the synthetic trace had.** The hand-built subagent trace
+  asserted Start, PreferPath, Stop; the real one is Start, Stop, PreferPath,
+  Stop.
+
+## Why tests stayed slow after the sleeps went
+
+After every lane, 202 tests still ran over two seconds (231 before). Three
+causes outside any one test, each found independently by several lanes:
+
+- **Unoptimized dependencies doing the test's real work**: picture decoding,
+  PBKDF2 at its real iteration count, zstd dictionaries. Optimizing those
+  packages in the dev profile took an interrupted storage pass from 7.8 s to
+  3.0 s. Done in this PR.
+- **A database per test, with `fullfsync`**: about 0.2 s to open and an fsync
+  per commit, queued behind each other when tests run in parallel. A case
+  table that opens one host for all its rows instead of one each is the part
+  a test can do. Open.
+- **`draw_settled` sleeping 16 ms a frame** (577 call sites in `crates/ui`),
+  because gpui-base's scrollbar and bounce sample `Instant::now()`. A test
+  that calls it after every step sleeps a whole animation each time; one
+  slept 6.7 s. Upstream's clock, to be confirmed and carried under Principle
+  8. Open.
+
+## Habits the lanes named
+
+Each was found in one lane and is likely elsewhere.
+
+- **The expected value comes from the code under test**: a label computed
+  with the function being tested, a hash literal the code produced, a filter
+  expression copied into the test.
+- **A negative assertion that cannot fail**: `try_recv().is_err()` straight
+  after writing to an echo child, before the line could have crossed the
+  pipe. A marker written after it, and reading everything before the marker,
+  makes it real.
+- **A wait that never ends on a regression**: `recv().await` with nothing
+  bounding it, ended only by the runner's kill timer.
+- **Private state written to set the scene, or read to assert**: a field
+  assigned instead of the event that sets it, a private cache cleared to
+  reach a state no user path reaches.
+- **A production timer shortened through a private field** so the test can
+  wait it out on the real clock.
+- **A timer as the contract**: a test that passes only once a production
+  deadline has run out.
+- **Input larger than the contract**: a 2048-pixel picture where the
+  assertion is who reads it, megabytes where one line over a chunk size does.
+- **One host or store per row of a case table.**
+- **A scene replayed across every width or theme** when neither moves what is
+  asserted.
+- **Motion as a contract**: a frame count, a fraction of an animation reached
+  at a given frame, a pixel offset, with no user path depending on the number
+  (Principle 6).
+- **The test rebuilds the production loop**: aborts the real task, edits its
+  private throttle, calls its private step by hand.
+- **The driver is unlike the real peer**: a test browser that never closes
+  its socket and so waits out the proxy's drain every time.
+- **A comment that says "recorded"** over data with no recording and no
+  source for its shape.
+- **A name that promises more than the assertions deliver.**
+- **A test with no fixed binary path** may launch the real CLI found on PATH.
+
 ## Families beyond the defence
 
 Named by the maintainer, not yet inventoried:
