@@ -140,12 +140,10 @@ impl Mr<'_> {
             return Err(Rejection::Invalid);
         }
         let squash = method == PullRequestMergeMethod::Squash;
-        // Asked for in both of GitLab's names; a merge that is not to wait must say so, or
-        // GitLab may keep it for the pipeline.
+        // A merge that is not to wait must say so, or GitLab may keep it for the pipeline.
         let mut body = json!({
             "sha": head,
             "squash": squash,
-            "merge_when_pipeline_succeeds": auto,
             "auto_merge": auto,
         });
         // Rebasing keeps each commit's own message.
