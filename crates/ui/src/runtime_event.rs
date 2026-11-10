@@ -33,6 +33,9 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::SettingsUnreadable { error } => {
                     crate::tr!("errors.settings_unreadable", error = error).into_owned()
                 }
+                RuntimeError::FileUnreadable { error } => {
+                    crate::tr!("errors.file_unreadable", error = error).into_owned()
+                }
                 RuntimeError::TerminalStart { error } => {
                     crate::tr!("errors.terminal_start", error = error).into_owned()
                 }

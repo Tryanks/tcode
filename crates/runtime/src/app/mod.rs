@@ -366,11 +366,8 @@ pub struct AppState {
     /// Set once the store failed and every thread was stopped.
     store_failed: bool,
     /// Why settings.json could not be read at start. While set, no settings
-    /// are written: the file may be a newer build's, and these settings are
-    /// defaults standing in for it.
-    settings_unreadable: Option<String>,
-    /// Whether the first settings write refused for that reason was reported.
-    settings_unreadable_reported: bool,
+    /// are written: these settings are defaults standing in for it.
+    settings_unreadable: Option<UnreadableFile>,
     pub sessions: SessionIndex,
     archived_revision: u64,
     activity_pending: VecDeque<String>,
@@ -492,6 +489,35 @@ pub struct AppState {
     session_search: Arc<SessionSearch>,
 }
 
+/// A file of the host's own that exists and could not be read at start. The
+/// host runs on the default standing in for it and writes nothing over the
+/// file, which may be a newer build's; the first write refused says why.
+pub(super) struct UnreadableFile {
+    error: String,
+    reported: bool,
+}
+
+impl UnreadableFile {
+    pub(super) fn read<T: Default>(read: std::io::Result<T>) -> (T, Option<Self>) {
+        match read {
+            Ok(value) => (value, None),
+            Err(error) => {
+                log::error!("running without an unreadable file: {error}");
+                let unreadable = Self {
+                    error: error.to_string(),
+                    reported: false,
+                };
+                (T::default(), Some(unreadable))
+            }
+        }
+    }
+
+    /// The reason, the first time a write is refused.
+    pub(super) fn first_refusal(&mut self) -> Option<String> {
+        (!std::mem::replace(&mut self.reported, true)).then(|| self.error.clone())
+    }
+}
+
 fn emit_runtime(cx: &mut HostCx, event: RuntimeEvent) {
     cx.emit(HostEvent::Runtime(event));
 }
@@ -525,21 +551,20 @@ impl AppState {
             project.quick_chat = scratch_root.as_ref() == Some(&project.root);
         }
         let settings_store = SettingsStore::new(store.root().clone());
-        let (settings, settings_unreadable) = match settings_store.try_load() {
-            Ok(settings) => (settings, None),
-            Err(error) => {
-                log::error!("settings.json is unreadable; running on defaults: {error}");
-                (Settings::default(), Some(error.to_string()))
-            }
-        };
-        let review_records = settings_store.load_review_records()?;
-        let control_activity = settings_store.load_control_activity()?;
+        let (settings, settings_unreadable) = UnreadableFile::read(settings_store.try_load());
+        let (review_records, reviews_unreadable) =
+            UnreadableFile::read(settings_store.load_review_records());
+        let (control_activity, activity_unreadable) =
+            UnreadableFile::read(settings_store.load_control_activity());
         let forge = tcode_services::forge::connect(settings_store.clone(), std::env::vars());
         forge.configure(settings.source_control.hosts.clone());
         let releases = Arc::new(ReleaseFeed::new(tcode_services::github::GitHubApi::host(
             tcode_services::github::Credentials::new(settings_store.clone(), []),
         )));
-        let provider_secret_names = provider_secret_names(&settings, &settings_store)?;
+        // An unreadable secrets.json refuses every write and is reported by
+        // whatever reads a secret, so no secret is shown as saved.
+        let provider_secret_names =
+            provider_secret_names(&settings, &settings_store).unwrap_or_default();
         // Push the loaded computer-use config to the (already-running) MCP layer
         // so the tools honor the persisted image-mode / allow-input choices from
         // the first call, not just after a settings change.
@@ -601,7 +626,6 @@ impl AppState {
             store_writer: None,
             store_failed: false,
             settings_unreadable,
-            settings_unreadable_reported: false,
             sessions: sessions.into(),
             projects,
             archived_revision: 0,
@@ -651,7 +675,12 @@ impl AppState {
             acp_installing: std::collections::HashSet::new(),
             plugin_catalogs: HashMap::new().into(),
             mcp: McpWiring::default(),
-            control: control::ControlState::new(review_records, control_activity),
+            control: control::ControlState::new(
+                review_records,
+                reviews_unreadable,
+                control_activity,
+                activity_unreadable,
+            ),
             callback_approval_requests: HashSet::new(),
             callback_user_input_requests: HashSet::new(),
             approvals: Default::default(),
@@ -758,9 +787,8 @@ impl AppState {
     }
 
     fn enqueue_settings(&mut self, settings: &Settings, cx: &mut HostCx) {
-        if let Some(error) = &self.settings_unreadable {
-            if !std::mem::replace(&mut self.settings_unreadable_reported, true) {
-                let error = error.clone();
+        if let Some(unreadable) = &mut self.settings_unreadable {
+            if let Some(error) = unreadable.first_refusal() {
                 self.report_error(RuntimeError::SettingsUnreadable { error }, cx);
             }
             return;

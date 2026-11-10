@@ -353,8 +353,17 @@ impl AppState {
         records.push(record.clone());
         let excess = records.len().saturating_sub(REVIEW_RECORD_LIMIT);
         records.drain(..excess);
-        let records = records.clone();
-        self.enqueue_store_write(StoreWrite::WriteReviewRecords(records), cx);
+        match &mut self.control.reviews_unreadable {
+            Some(unreadable) => {
+                if let Some(error) = unreadable.first_refusal() {
+                    self.report_error(RuntimeError::FileUnreadable { error }, cx);
+                }
+            }
+            None => {
+                let records = self.control.review_records.clone();
+                self.enqueue_store_write(StoreWrite::WriteReviewRecords(records), cx);
+            }
+        }
         emit_runtime(
             cx,
             RuntimeEvent::Notice(RuntimeNotice::ReviewRecorded {

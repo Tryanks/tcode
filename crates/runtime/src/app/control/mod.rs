@@ -33,6 +33,8 @@ const RESPONSE_CAP: usize = 64 * 1024;
 pub(super) struct ControlState {
     activity: VecDeque<ControlActivityEntry>,
     review_records: Vec<tcode_core::control::ReviewRecord>,
+    reviews_unreadable: Option<UnreadableFile>,
+    activity_unreadable: Option<UnreadableFile>,
     /// Answers to recent calls that carried a `request_id`, so a retry does not act twice.
     answered: VecDeque<(String, serde_json::Value)>,
 }
@@ -40,12 +42,16 @@ pub(super) struct ControlState {
 impl ControlState {
     pub(super) fn new(
         review_records: Vec<tcode_core::control::ReviewRecord>,
+        reviews_unreadable: Option<UnreadableFile>,
         mut activity: Vec<ControlActivityEntry>,
+        activity_unreadable: Option<UnreadableFile>,
     ) -> Self {
         activity.truncate(CONTROL_ACTIVITY_LIMIT);
         Self {
             activity: activity.into(),
             review_records,
+            reviews_unreadable,
+            activity_unreadable,
             answered: VecDeque::new(),
         }
     }
@@ -585,6 +591,12 @@ impl AppState {
             action,
         });
         self.control.activity.truncate(CONTROL_ACTIVITY_LIMIT);
+        if let Some(unreadable) = &mut self.control.activity_unreadable {
+            if let Some(error) = unreadable.first_refusal() {
+                self.report_error(RuntimeError::FileUnreadable { error }, cx);
+            }
+            return;
+        }
         let entries = self.control.activity.iter().cloned().collect();
         self.enqueue_store_write(StoreWrite::WriteControlActivity(entries), cx);
     }

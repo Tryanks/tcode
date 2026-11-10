@@ -1188,6 +1188,12 @@ pub enum RuntimeError {
     SettingsUnreadable {
         error: String,
     },
+    /// Another file of the host's own (reviews.json, control_activity.json)
+    /// could not be read at start, so the host runs without what it holds and
+    /// writes nothing over it. `error` names the file.
+    FileUnreadable {
+        error: String,
+    },
     TerminalStart {
         error: String,
     },

@@ -1375,6 +1375,7 @@ errors:
   persist_project: "プロジェクトを保存できませんでした：%{error}"
   persist_settings: "設定を保存できませんでした：%{error}"
   settings_unreadable: "Tcode は settings.json を読み込めなかったため（%{error}）、既定の設定で動作しており、このファイルには何も書き込みません。新しいバージョンの Tcode がこのファイルを書き込んだ可能性があります。そのバージョンで開いてください。"
+  file_unreadable: "Tcode は自身のファイルを読み込めなかったため（%{error}）、その内容を使わずに動作しており、このファイルには何も書き込みません。新しいバージョンの Tcode がこのファイルを書き込んだ可能性があります。そのバージョンで開いてください。"
   delete_session: "スレッドを削除できませんでした：%{error}"
   delete_project: "プロジェクトを削除できませんでした：%{error}"
   persist_session: "スレッドを保存できませんでした：%{error}"
