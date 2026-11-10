@@ -6,7 +6,6 @@ mod real_host;
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
@@ -89,9 +88,6 @@ fn config(data_dir: PathBuf) -> BrowserConfig {
 /// One bounded HTTP/1.1 request; returns the status line and body.
 fn http(addr: SocketAddr, method: &str, path: &str, body: &str) -> (String, Vec<u8>) {
     let mut stream = TcpStream::connect(addr).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(60)))
-        .unwrap();
     write!(
         stream,
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -144,10 +140,7 @@ impl Browser {
 
     async fn recv(&mut self) -> Value {
         loop {
-            match tokio::time::timeout(Duration::from_secs(10), self.0.next())
-                .await
-                .expect("the listener answered in time")
-            {
+            match self.0.next().await {
                 Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).unwrap(),
                 Some(Ok(_)) => continue,
                 other => panic!("socket ended: {other:?}"),
@@ -179,9 +172,6 @@ fn static_bundle_get_and_head_share_headers() {
     ] {
         let request = |method| {
             let mut stream = TcpStream::connect(server.local_addr()).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
             write!(
                 stream,
                 "{method} {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"

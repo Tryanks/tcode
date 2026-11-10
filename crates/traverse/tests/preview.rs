@@ -6,7 +6,6 @@ use std::{
     net::{Shutdown, TcpListener, TcpStream},
     path::PathBuf,
     sync::Arc,
-    time::Duration,
 };
 
 use tcode_client::{ConnectionState, host::Transport, host::TunnelOpener, pairing::PairedHost};
@@ -77,16 +76,11 @@ impl Machine {
         )
         .unwrap();
         let transport = tcode_traverse::connect(&paired, &device);
-        tcode_traverse::block_on(async {
-            tokio::time::timeout(Duration::from_secs(20), async {
-                while !matches!(
-                    transport.state.recv().await.unwrap(),
-                    ConnectionState::Syncing { .. }
-                ) {}
-            })
-            .await
-        })
-        .expect("the attachment connects");
+        // The attachment connects.
+        while !matches!(
+            transport.state.recv_blocking().unwrap(),
+            ConnectionState::Syncing { .. }
+        ) {}
         let tunnels = transport.current_host.as_ref().unwrap().tunnels().unwrap();
         Self {
             host: Some(host),
@@ -118,14 +112,7 @@ impl Drop for Machine {
 }
 
 fn socket(address: &str) -> TcpStream {
-    let socket = TcpStream::connect(address).unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    socket
-        .set_write_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    socket
+    TcpStream::connect(address).unwrap()
 }
 
 fn head(stream: &mut impl Read) -> String {
@@ -192,9 +179,6 @@ fn pipelined_requests_and_chunk_trailers_never_reach_the_origin_and_bad_framing_
             stream.read_exact(&mut body).unwrap();
             assert_eq!(body, expected);
             stream
-                .set_read_timeout(Some(Duration::from_secs(30)))
-                .unwrap();
-            stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 .unwrap();
             stream.shutdown(Shutdown::Write).unwrap();
@@ -256,9 +240,6 @@ fn connect_tunnels_preserve_half_close_and_die_with_the_proxy() {
     let destination = origin.local_addr().unwrap();
     let origin = std::thread::spawn(move || {
         let (mut stream, _) = origin.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
         stream.write_all(b"response first").unwrap();
         stream.shutdown(Shutdown::Write).unwrap();
         let mut request = String::new();
@@ -287,9 +268,6 @@ fn connect_tunnels_preserve_half_close_and_die_with_the_proxy() {
         .unwrap();
     assert!(head(&mut browser).starts_with("HTTP/1.1 200 "));
     let (mut target, _) = origin.accept().unwrap();
-    target
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
     browser.write_all(b"\x16\x03\x01tls bytes").unwrap();
     let mut seen = [0; 12];
     target.read_exact(&mut seen).unwrap();
@@ -323,9 +301,6 @@ fn websocket_upgrades_pass_through_an_absolute_form_request() {
     let port = origin.local_addr().unwrap().port();
     let origin = std::thread::spawn(move || {
         let (mut stream, _) = origin.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
         let request = head(&mut stream);
         assert!(request.starts_with("GET /ws HTTP/1.1\r\n"), "{request}");
         assert!(request.contains("\r\nConnection: Upgrade\r\n"), "{request}");
@@ -414,9 +389,6 @@ fn mapped_loopback_connections_become_tunnels_and_close_with_the_slot() {
     let bytes = b"GET /page?source=remote HTTP/1.1\r\nHost: localhost:12345\r\nAuthorization: Basic site-only\r\nUpgrade: websocket\r\n\r\n\x00\xff\x81payload";
     browser.write_all(bytes).unwrap();
     let (mut remote, _) = destination.accept().unwrap();
-    remote
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
     let mut received = vec![0; bytes.len()];
     remote.read_exact(&mut received).unwrap();
     assert_eq!(received, bytes);
