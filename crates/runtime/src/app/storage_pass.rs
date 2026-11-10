@@ -126,6 +126,9 @@ impl AppState {
 #[derive(Default)]
 struct MoveReport {
     reported: Option<Instant>,
+    /// The progress could not be read the last time it was asked; the
+    /// failure was reported then.
+    unreadable: bool,
 }
 
 impl MoveReport {
@@ -142,13 +145,16 @@ impl MoveReport {
                 waiting_for_space: false,
             }),
             Err(error) => {
-                let message = format!("could not read how far the move has come: {error}");
-                host_cx.enqueue(move |state, cx| {
-                    state.report_error(RuntimeError::External(message), cx)
-                });
+                if !std::mem::replace(&mut self.unreadable, true) {
+                    let message = format!("could not read how far the move has come: {error}");
+                    host_cx.enqueue(move |state, cx| {
+                        state.report_error(RuntimeError::External(message), cx)
+                    });
+                }
                 return;
             }
         };
+        self.unreadable = false;
         host_cx.enqueue(move |state, cx| state.replace_storage_migration(migration, cx));
     }
 }
