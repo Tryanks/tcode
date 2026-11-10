@@ -51,12 +51,12 @@ pub(super) struct Credential {
 }
 
 impl Credential {
-    /// A personal access token goes as Basic with an empty user; az's token as a bearer. A
-    /// token that is not one header-safe word is none at all, so it never reaches a request.
+    /// A personal access token goes as Basic with an empty user; az's token as a bearer. An
+    /// empty token is none at all.
     fn new(token: &str, bearer: bool, source: CredentialSource) -> Option<Self> {
         use base64::Engine as _;
         let token = token.trim();
-        if token.is_empty() || !token.bytes().all(|b| b.is_ascii_graphic()) {
+        if token.is_empty() {
             return None;
         }
         let authorization = if bearer {
@@ -462,8 +462,15 @@ impl Api {
         };
         let response = match answer {
             Ok(response) | Err(ureq::Error::Status(_, response)) => response,
-            Err(ureq::Error::Transport(_)) => {
-                return Err(if started.elapsed() >= DEADLINE {
+            Err(ureq::Error::Transport(transport)) => {
+                // ureq checks every header before sending; its message quotes the header, which
+                // may be the credential, so only its kind is told.
+                return Err(if transport.kind() == ureq::ErrorKind::BadHeader {
+                    error(
+                        ForgeErrorKind::InvalidInput,
+                        "Azure DevOps request not sent (ureq: invalid header)",
+                    )
+                } else if started.elapsed() >= DEADLINE {
                     error(ForgeErrorKind::Deadline, "Azure DevOps request deadline")
                 } else {
                     error(
@@ -658,6 +665,18 @@ mod tests {
         );
         assert_eq!(read(&named, "dev.azure.com/fabrikam"), env);
         assert_eq!(read(&named, "dev.azure.com/tailspin"), None);
+        // A token as saved goes out, for Azure to accept or refuse, whatever it carries.
+        store
+            .set_token(
+                HostKind::Azure,
+                "dev.azure.com/tailspin",
+                Some("tailspin\u{200b}secret"),
+            )
+            .unwrap();
+        assert_eq!(
+            read(&named, "dev.azure.com/tailspin"),
+            Some((CredentialSource::Saved, basic("tailspin\u{200b}secret")))
+        );
         // A host that is no organization's never gets one, whatever the key carries.
         for elsewhere in [
             "dev.azure.com:x@evil.test",
