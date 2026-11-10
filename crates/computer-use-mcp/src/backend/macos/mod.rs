@@ -14,8 +14,8 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::window::{
     kCGNullWindowID, kCGWindowBounds, kCGWindowLayer, kCGWindowListExcludeDesktopElements,
-    kCGWindowListOptionOnScreenOnly, kCGWindowName, kCGWindowNumber, kCGWindowOwnerName,
-    kCGWindowOwnerPID,
+    kCGWindowListOptionIncludingWindow, kCGWindowListOptionOnScreenOnly, kCGWindowName,
+    kCGWindowNumber, kCGWindowOwnerName, kCGWindowOwnerPID,
 };
 
 use super::{
@@ -465,6 +465,25 @@ fn action_point(root: &RootInfo, request: &ActionRequest) -> Result<(f64, f64), 
         BackendErrorCode::InvalidAction,
         "action requires x/y coordinates or an element with a non-empty frame",
     ))
+}
+
+/// Whether the window `root` was listed as is still open in its process.
+fn window_exists(root: &RootInfo) -> bool {
+    let Some(array) =
+        core_graphics::window::copy_window_info(kCGWindowListOptionIncludingWindow, root.window_id)
+    else {
+        return false;
+    };
+    let array_ref = array.as_concrete_TypeRef();
+    let count = unsafe { CFArrayGetCount(array_ref) }.max(0);
+    (0..count).any(|index| {
+        let dictionary = unsafe { CFArrayGetValueAtIndex(array_ref, index) } as CFDictionaryRef;
+        !dictionary.is_null()
+            && unsafe { CFGetTypeID(dictionary.cast()) } == unsafe { CFDictionaryGetTypeID() }
+            && dictionary_i64(dictionary, unsafe { kCGWindowNumber })
+                == Some(i64::from(root.window_id))
+            && dictionary_i64(dictionary, unsafe { kCGWindowOwnerPID }) == Some(i64::from(root.pid))
+    })
 }
 
 fn dictionary_value(dictionary: CFDictionaryRef, key: CFStringRef) -> Option<*const c_void> {

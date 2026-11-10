@@ -606,6 +606,17 @@ fn locate_window_in_application(
     application: AXUIElementRef,
     root: &RootInfo,
 ) -> Result<OwnedCf, BackendError> {
+    // The best-scoring window of the process would otherwise stand in for
+    // a closed one under the closed one's identity.
+    if !super::window_exists(root) {
+        return Err(BackendError::new(
+            BackendErrorCode::RootNotFound,
+            format!(
+                "the window of root {} is no longer open; call find_roots again",
+                root.ref_id
+            ),
+        ));
+    }
     let windows = try_copy_attribute_elements(application, "AXWindows", 200).map_err(|code| {
         let message = if code == AX_ERROR_API_DISABLED {
             format!(
