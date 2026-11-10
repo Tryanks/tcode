@@ -140,11 +140,6 @@ impl WorkspaceStore {
             self.save_member_settings();
             return;
         }
-        if !self.baseline_topics.contains(&tcode_protocol::Topic::Scope)
-            && Self::host_global_command(&command)
-        {
-            return;
-        }
         self.send(command);
     }
 
@@ -185,9 +180,7 @@ impl WorkspaceStore {
         command: Command,
         cx: &mut App,
     ) -> Task<Result<CommandResponse, ProtocolError>> {
-        if (!self.scope.is_full() || !self.baseline_topics.contains(&tcode_protocol::Topic::Scope))
-            && Self::host_global_command(&command)
-        {
+        if !self.scope.is_full() && Self::host_global_command(&command) {
             return cx.spawn(async |_| {
                 Err(ProtocolError::out_of_scope("command is outside this space"))
             });

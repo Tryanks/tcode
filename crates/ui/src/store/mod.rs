@@ -8092,6 +8092,26 @@ pub(crate) mod tests {
         })
     }
 
+    /// A settings change made before the host has said what this client may
+    /// do goes into the outbox, for the host to take or refuse.
+    #[gpui::test]
+    fn a_settings_change_before_the_scope_arrives_is_queued(cx: &mut TestAppContext) {
+        let (to_host, _requests) = async_channel::unbounded();
+        let (_replies, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, None, cx)
+        });
+        store.update(cx, |store, _| store.set_word_wrap_diffs(true));
+        assert!(link.pending_commands().iter().any(|(_, command)| matches!(
+            command,
+            Command::PatchSettings {
+                patch: tcode_protocol::SettingsPatch::WordWrapDiffs(true)
+            }
+        )));
+        link.close();
+    }
+
     /// Deleting a thread deletes every thread under it, archived ones too,
     /// though the index carries no archived thread: the confirmation counts
     /// them all.
