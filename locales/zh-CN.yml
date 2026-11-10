@@ -76,7 +76,7 @@ chat:
   reveal_in_file_manager: "在文件管理器中显示"
   copy_path: "复制路径"
   open_zed: "在 Zed 中打开"
-  open_zed_remote: "通过 Tcode 远程通道在 Zed 中打开"
+  open_zed_remote: "使用 Zed 远程打开"
   screen_open: "打开 %{name} 的截图"
   screen_position: "第 %{index} 张，共 %{total} 张"
   screen_earlier: "上一张截图"
