@@ -57,7 +57,7 @@ pub struct GitStatus {
     pub detached: bool,
     /// Current branch name (`None` when detached / no branch).
     pub branch: Option<String>,
-    /// The branch is the repo's default ref (`origin/HEAD`, else main/master).
+    /// The branch is the one `origin/HEAD` names; false when it names none.
     pub is_default_branch: bool,
     /// The working tree has staged or unstaged changes (or untracked files).
     pub has_working_tree_changes: bool,
@@ -433,7 +433,8 @@ pub fn sanitize_commit_message(raw: &str) -> String {
 /// Parse `git status --porcelain=2 --branch -z` output plus the numstat rows
 /// of the unstaged and the staged diff, which add up per path, into the local
 /// part of a [`GitStatus`]. `default_branch` is the short name from
-/// `origin/HEAD` (or `None`); `has_origin_remote` from `git remote`.
+/// `origin/HEAD`, `None` when the remote names none; `has_origin_remote`
+/// from `git remote`.
 ///
 /// This parser assumes a repository and sets `is_repo` to true.
 pub fn parse_status(
@@ -501,11 +502,7 @@ pub fn parse_status(
         })
         .collect();
 
-    let is_default_branch = match (&branch, default_branch) {
-        (Some(b), Some(d)) => b == d,
-        (Some(b), None) => b == "main" || b == "master",
-        _ => false,
-    };
+    let is_default_branch = branch.is_some() && branch.as_deref() == default_branch;
 
     GitStatus {
         is_repo: true,

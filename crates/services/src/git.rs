@@ -918,6 +918,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp);
     }
 
+    /// The branch counts as the default one only when `origin/HEAD` names it:
+    /// a remote that names none leaves it unknown, whatever the branch is called.
+    #[test]
+    fn status_tracks_the_upstream_and_the_branch_origin_head_names() {
+        let (temp, root) = scratch_repo("tcode-status-upstream-test");
+        let remote = temp.join("remote.git");
+        run(
+            &temp,
+            &["init", "--bare", "-b", "main", remote.to_str().unwrap()],
+        );
+        run(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        run(&root, &["push", "-u", "origin", "main"]);
+        std::fs::write(root.join("tracked.txt"), "ahead\n").unwrap();
+        run(&root, &["commit", "-am", "ahead"]);
+
+        let status = read_status(&root);
+        assert!(status.has_origin_remote && status.has_upstream);
+        assert_eq!((status.ahead, status.behind), (1, 0));
+        assert_eq!(status.branch.as_deref(), Some("main"));
+        assert!(!status.is_default_branch);
+
+        run(&root, &["remote", "set-head", "origin", "main"]);
+        assert!(read_status(&root).is_default_branch);
+        run(&root, &["checkout", "-b", "feature"]);
+        assert!(!read_status(&root).is_default_branch);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
     #[test]
     fn checkout_preserves_dirty_worktree_then_switches_once_clean() {
         let (temp, root) = scratch_repo("tcode-checkout-dirty-test");
