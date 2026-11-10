@@ -911,8 +911,6 @@ pub enum RewindBlocked {
     InProgress,
     /// A message is on its way to the harness.
     Delivering,
-    /// A turn runs and the harness does not stop it for a rewind.
-    TurnRunning,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

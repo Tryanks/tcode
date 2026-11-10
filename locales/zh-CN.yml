@@ -158,7 +158,6 @@ rewind:
   blocked:
     in_progress: "正在回退。"
     delivering: "有消息正在发送给 %{harness}。"
-    turn_running: "%{harness} 不会为回退停止正在运行的轮次，请等它结束。"
   mode:
     files_and_conversation: "对话和代码"
     conversation: "仅对话"

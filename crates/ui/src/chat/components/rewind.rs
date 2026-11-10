@@ -87,9 +87,6 @@ pub(crate) fn blocked_reason(blocked: tcode_protocol::RewindBlocked, harness: &s
         tcode_protocol::RewindBlocked::Delivering => {
             crate::tr!("rewind.blocked.delivering", harness = harness)
         }
-        tcode_protocol::RewindBlocked::TurnRunning => {
-            crate::tr!("rewind.blocked.turn_running", harness = harness)
-        }
     }
     .into_owned()
 }

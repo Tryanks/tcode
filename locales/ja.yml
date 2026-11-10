@@ -158,7 +158,6 @@ rewind:
   blocked:
     in_progress: "巻き戻しの実行中です。"
     delivering: "%{harness} にメッセージを送信中です。"
-    turn_running: "%{harness} は巻き戻しのために実行中のターンを止めません。終わるまでお待ちください。"
   mode:
     files_and_conversation: "会話とコード"
     conversation: "会話のみ"

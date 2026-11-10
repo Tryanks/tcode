@@ -314,6 +314,8 @@ pub use wire::{
 // read as unrestricted). HostingAction no longer reads new_code. HostProblem's
 // credentials_unreadable.
 // RuntimeNotice::WorktreeSeeded has no limit_reached.
+// RewindStatus's.
+// running_turn has no "refuse" and its blocked no "turn_running".
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

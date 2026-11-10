@@ -158,7 +158,6 @@ rewind:
   blocked:
     in_progress: "A rewind is in progress."
     delivering: "A message is on its way to %{harness}."
-    turn_running: "%{harness} does not stop a running turn to rewind; wait for it to finish."
   mode:
     files_and_conversation: "Conversation and code"
     conversation: "Conversation only"
