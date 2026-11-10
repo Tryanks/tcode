@@ -312,7 +312,7 @@ impl Forgejo {
                 .collect();
             let mut all = HashMap::new();
             for chunk in chunks {
-                all.extend(chunk.join().unwrap_or_else(|_| Ok(Vec::new()))?);
+                all.extend(chunk.join().unwrap()?);
             }
             Ok::<_, ForgeError>(all)
         })?;
