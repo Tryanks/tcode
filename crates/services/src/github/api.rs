@@ -389,9 +389,6 @@ impl GitHubApi {
                     }
                 })?;
         }
-        if started.elapsed() >= timeout {
-            return Err(GitHubError::Deadline);
-        }
         let truncated = body.len() > cap;
         body.truncate(cap);
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
