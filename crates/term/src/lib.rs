@@ -374,8 +374,8 @@ impl Terminal {
 #[cfg(all(test, feature = "pty"))]
 mod tests {
     use super::*;
+    #[cfg(windows)]
     use std::thread;
-    use std::time::{Duration, Instant};
 
     #[cfg(target_os = "linux")]
     use crate::pty::unix_shell;
@@ -396,19 +396,24 @@ mod tests {
         Terminal::spawn_command(std::env::temp_dir(), program, args, name).unwrap()
     }
 
+    /// The terminal's state once `predicate` holds, read again each time the
+    /// terminal reports a change. A program that exits without reaching it
+    /// fails the test: all of its output is in the grid by then.
     fn wait_until(terminal: &Terminal, predicate: impl Fn(&TermSnapshot) -> bool) -> TermSnapshot {
-        let start = Instant::now();
+        let events = terminal.events();
         loop {
             let state = terminal.peek_snapshot();
             if predicate(&state) {
                 return state;
             }
             assert!(
-                start.elapsed() < Duration::from_secs(120),
-                "terminal timed out: {:?}",
+                !state.exited,
+                "the program exited first: {:?}",
                 state.text()
             );
-            thread::sleep(Duration::from_millis(20));
+            events
+                .recv_blocking()
+                .unwrap_or_else(|_| panic!("the terminal closed: {:?}", state.text()));
         }
     }
 
@@ -453,24 +458,14 @@ mod tests {
         .unwrap();
         let events = pty.events();
         pty.kill().unwrap();
-        let start = Instant::now();
         loop {
-            match events.try_recv() {
+            match events.recv_blocking() {
                 Ok(PtyEvent::Exited { exit_code }) => {
                     assert_eq!(exit_code, None, "SIGHUP is not a normal exit code");
                     break;
                 }
                 Ok(PtyEvent::Output(_) | PtyEvent::ProcessInfoChanged { .. }) => {}
-                Err(async_channel::TryRecvError::Empty) => {
-                    assert!(
-                        start.elapsed() < Duration::from_secs(120),
-                        "PTY did not emit an exit event after kill"
-                    );
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(async_channel::TryRecvError::Closed) => {
-                    panic!("PTY event stream closed before kill exit")
-                }
+                Err(_) => panic!("PTY event stream closed before kill exit"),
             }
         }
         assert!(pty.exited());
@@ -481,7 +476,6 @@ mod tests {
     fn compatibility_events_cover_consumed_intents() {
         let terminal = command("printf '\\033]2;wire-title\\007\\007\\033]52;c;dGNvZGU=\\007'");
         let events = terminal.events();
-        let start = Instant::now();
         let mut emitted = Vec::new();
         while !emitted.contains(&TermEvent::Bell)
             || !emitted.contains(&TermEvent::Exited)
@@ -491,18 +485,9 @@ mod tests {
                 text: "tcode".into(),
             })
         {
-            match events.try_recv() {
+            match events.recv_blocking() {
                 Ok(event) => emitted.push(event),
-                Err(async_channel::TryRecvError::Empty) => {
-                    assert!(
-                        start.elapsed() < Duration::from_secs(120),
-                        "missing compatibility events: {emitted:?}"
-                    );
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(async_channel::TryRecvError::Closed) => {
-                    panic!("compatibility event stream closed: {emitted:?}")
-                }
+                Err(_) => panic!("compatibility event stream closed: {emitted:?}"),
             }
         }
         let state = terminal.peek_snapshot();
@@ -550,10 +535,10 @@ mod tests {
         terminal.write_input(b"continue\r".to_vec());
         wait_until(&terminal, |state| state.text().contains("moved"));
         let expected = std::fs::canonicalize("/tmp").unwrap();
-        let start = Instant::now();
+        // A change of directory is reported as a terminal change.
+        let events = terminal.events();
         while terminal.working_directory() != expected {
-            assert!(start.elapsed() < Duration::from_secs(10));
-            thread::sleep(Duration::from_millis(50));
+            events.recv_blocking().expect("the terminal is open");
         }
         terminal.write_input(b"finish\r".to_vec());
         assert_eq!(
@@ -584,11 +569,7 @@ mod tests {
             }
         });
         for _ in 0..3 {
-            assert!(
-                receiver
-                    .recv_timeout(Duration::from_secs(10))
-                    .expect("PTY spawn did not return")
-            );
+            assert!(receiver.recv().expect("PTY spawn did not return"));
         }
     }
 
