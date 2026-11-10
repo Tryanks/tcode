@@ -73,11 +73,11 @@ impl AppState {
             let (stat, patch) = commit_diff_context(&cwd, included.as_deref());
             let prompt = build_commit_prompt(&stat, &patch);
             let raw = run_claude_headless(binary.as_deref(), &cwd, &prompt)?;
-            let message = sanitize_commit_message(&raw);
+            let message = raw.trim();
             if message.is_empty() {
                 Err("model returned an empty commit message".to_string())
             } else {
-                Ok(message)
+                Ok(message.to_string())
             }
         })
     }

@@ -424,12 +424,6 @@ pub fn build_commit_prompt(stat: &str, patch: &str) -> String {
     )
 }
 
-/// The model's reply as the commit message the dialog offers for editing,
-/// without the whitespace around it; empty when the model wrote nothing.
-pub fn sanitize_commit_message(raw: &str) -> String {
-    raw.trim().to_string()
-}
-
 /// Parse `git status --porcelain=2 --branch -z` output plus the numstat rows
 /// of the unstaged and the staged diff, which add up per path, into the local
 /// part of a [`GitStatus`]. `default_branch` is the short name from
