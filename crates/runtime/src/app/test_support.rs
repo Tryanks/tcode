@@ -6,13 +6,6 @@ use std::rc::{Rc, Weak};
 use crate::host::HostFn;
 use tcode_protocol::{ClientMessage, ClientPayload, Command, HostMessage, decode_host_line};
 
-#[path = "../../../services/tests/support/github.rs"]
-#[allow(
-    dead_code,
-    reason = "The same HTTP fixture also supplies exchange helpers to services tests."
-)]
-pub(super) mod github_fixture;
-
 /// How long a test waits on the host before giving up. It only bounds a hang:
 /// a test that drives real git processes takes several seconds on a loaded
 /// Windows runner.

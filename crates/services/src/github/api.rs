@@ -175,16 +175,15 @@ pub struct GitHubApi {
 }
 
 impl GitHubApi {
+    /// Pooling is disabled because ureq retries an idempotent request without a body on a
+    /// stale pooled socket, and a label's DELETE is one.
     pub fn host(credentials: Arc<Credentials>) -> Arc<Self> {
-        Self::new(credentials, ureq::AgentBuilder::new())
-    }
-
-    /// Tests route the builder's resolver and TLS to a loopback fixture. Pooling is disabled
-    /// because ureq retries stale pooled sockets; GitHub writes must never retry here.
-    pub fn new(credentials: Arc<Credentials>, builder: ureq::AgentBuilder) -> Arc<Self> {
         Arc::new(Self {
             credentials,
-            agent: builder.redirects(0).max_idle_connections(0).build(),
+            agent: ureq::AgentBuilder::new()
+                .redirects(0)
+                .max_idle_connections(0)
+                .build(),
             gate: Gate::default(),
             ledger: Mutex::new(Ledger::default()),
             identities: Mutex::new(HashMap::new()),
