@@ -462,9 +462,19 @@ impl ComputerUseTools {
             _ = context.ct.cancelled() => return tool_error("computer-use action cancelled"),
             result = poll_successor(&previous, params.expect.as_ref(), expectation_preexisting) => result,
         };
-        let (successor, expectation_status, root_changed) = match successor_result {
+        let (successor, expectation_status) = match successor_result {
             Ok(result) => result,
-            Err(error) => return backend_error(error),
+            Err(error) => {
+                let report = json!({
+                    "previous_state_id": previous.state_id,
+                    "stopped_at": stopped_at,
+                    "steps": step_results,
+                    "successor_error": error,
+                });
+                return tool_error(
+                    &serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string()),
+                );
+            }
         };
         let successor = crate::state::global()
             .lock()
@@ -492,12 +502,11 @@ impl ComputerUseTools {
             "stopped_at": stopped_at,
             "steps": step_results,
             "expect": expectation_status,
-            "root_changed": root_changed,
             "diff_confidence": diff.confidence,
         });
         let mut text = serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string());
         text.push('\n');
-        if diff.use_full_view || root_changed {
+        if diff.use_full_view {
             text.push_str("successor full view:\n");
             text.push_str(&outline::render_folded(&successor.tree));
         } else {
@@ -607,9 +616,9 @@ impl ComputerUseTools {
         );
         let deadline = Instant::now() + timeout;
         let mut polls = 0_u64;
-        let (observed, root_changed, matched) = loop {
+        let (observed, matched) = loop {
             polls += 1;
-            let (mut observed, root_changed) = match observe_with_root_fallback(
+            let mut observed = match crate::backend::observe(
                 &previous.root,
                 ObserveRequest {
                     semantic: true,
@@ -621,10 +630,10 @@ impl ComputerUseTools {
             };
             outline::assign_refs_from_previous(&previous.tree, &mut observed.tree);
             if condition_satisfied(&observed.tree, &params.condition) {
-                break (observed, root_changed, true);
+                break (observed, true);
             }
             if Instant::now() >= deadline {
-                break (observed, root_changed, false);
+                break (observed, false);
             }
             tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
         };
@@ -639,7 +648,6 @@ impl ComputerUseTools {
             "status": status,
             "until": until_name(params.condition.until),
             "polls": polls,
-            "root_changed": root_changed,
         });
         let mut text = serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string());
         text.push('\n');
@@ -972,7 +980,7 @@ async fn poll_successor(
     previous: &crate::state::Observation,
     condition: Option<&UiCondition>,
     preexisting: bool,
-) -> Result<(RootObservation, &'static str, bool), crate::backend::BackendError> {
+) -> Result<(RootObservation, &'static str), crate::backend::BackendError> {
     let timeout = Duration::from_millis(
         condition
             .and_then(|condition| condition.timeout_ms)
@@ -981,7 +989,7 @@ async fn poll_successor(
     );
     let deadline = Instant::now() + timeout;
     loop {
-        let (mut observed, root_changed) = observe_with_root_fallback(
+        let mut observed = crate::backend::observe(
             &previous.root,
             ObserveRequest {
                 semantic: true,
@@ -997,27 +1005,9 @@ async fn poll_successor(
             Some(_) => None,
         };
         if let Some(status) = status {
-            return Ok((observed, status, root_changed));
+            return Ok((observed, status));
         }
         tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
-    }
-}
-
-fn observe_with_root_fallback(
-    root: &RootInfo,
-    request: ObserveRequest,
-) -> Result<(RootObservation, bool), crate::backend::BackendError> {
-    match crate::backend::observe(root, request) {
-        Ok(observed) => Ok((observed, false)),
-        Err(original_error) => {
-            let discovered = crate::backend::list_roots(&RootFilters::default())?;
-            let discovered = roots().lock().unwrap().refresh(discovered);
-            let Some(successor_root) = discovered.into_iter().next() else {
-                return Err(original_error);
-            };
-            crate::backend::observe(&successor_root, request)
-                .map(|observed| (observed, successor_root.identity() != root.identity()))
-        }
     }
 }
 
