@@ -42,23 +42,23 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                 };
                 for block in content_blocks(content) {
                     match block {
-                        UserBlock::Text(text) if !is_user_noise(&text) => {
-                            if first_user.is_none() {
-                                first_user = Some(text.clone());
-                            }
-                            next_id += 1;
-                            entries.push(ConvertedEntry::Item {
-                                ts,
-                                item: ThreadItem {
-                                    id: format!("imported-user-{next_id}"),
-                                    parent_item_id: None,
-                                    content: ItemContent::UserMessage {
-                                        text,
-                                        context_len: None,
-                                        attachments: Vec::new(),
+                        UserBlock::Text(text) => {
+                            for content in user_text(text) {
+                                if first_user.is_none()
+                                    && let ItemContent::UserMessage { text, .. } = &content
+                                {
+                                    first_user = Some(text.clone());
+                                }
+                                next_id += 1;
+                                entries.push(ConvertedEntry::Item {
+                                    ts,
+                                    item: ThreadItem {
+                                        id: format!("imported-user-{next_id}"),
+                                        parent_item_id: None,
+                                        content,
                                     },
-                                },
-                            });
+                                });
+                            }
                         }
                         UserBlock::ToolResult { id, output, failed } => {
                             let Some(index) = pending.remove(&id) else {
@@ -81,7 +81,6 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                 };
                             }
                         }
-                        UserBlock::Text(_) => {}
                     }
                 }
             }
@@ -179,15 +178,54 @@ fn should_skip(value: &Value) -> bool {
         || value.get("isMeta").and_then(Value::as_bool) == Some(true)
 }
 
-fn is_user_noise(text: &str) -> bool {
-    let text = text.trim_start();
-    [
-        "<command-message>",
-        "<command-name>",
-        "<local-command-stdout>",
-    ]
-    .iter()
-    .any(|prefix| text.starts_with(prefix))
+/// What a user text shows, read as Claude Code 2.1.322 writes and shows it.
+/// A slash command is recorded as its `<command-message>`, `<command-name>`
+/// and `<command-args>` tags and shown as the command line; a local
+/// command's output is recorded in `<local-command-stdout>` and
+/// `<local-command-stderr>` and shown unless it is empty or "(no content)";
+/// the caveat recorded before such output is not shown.
+fn user_text(text: String) -> Vec<ItemContent> {
+    if let Some(name) = tagged(&text, "command-name") {
+        let line = match tagged(&text, "command-args").filter(|args| !args.is_empty()) {
+            Some(args) => format!("{name} {args}"),
+            None => name.to_string(),
+        };
+        return vec![user_message(line)];
+    }
+    if text.contains("<local-command-caveat>") {
+        return Vec::new();
+    }
+    let output: Vec<_> = ["local-command-stdout", "local-command-stderr"]
+        .into_iter()
+        .filter_map(|tag| Some((tag, tagged(&text, tag)?)))
+        .collect();
+    if output.is_empty() {
+        return vec![user_message(text)];
+    }
+    output
+        .into_iter()
+        .filter(|(_, output)| !output.is_empty() && *output != "(no content)")
+        .map(|(tag, output)| ItemContent::Other {
+            provider_kind: tag.to_string(),
+            summary: output.to_string(),
+        })
+        .collect()
+}
+
+/// The trimmed text between `<tag>` and `</tag>`.
+fn tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&format!("</{tag}>"))? + start;
+    Some(text[start..end].trim())
+}
+
+fn user_message(text: String) -> ItemContent {
+    ItemContent::UserMessage {
+        text,
+        context_len: None,
+        attachments: Vec::new(),
+    }
 }
 
 enum UserBlock {

@@ -134,7 +134,10 @@ fn a_codex_rollout_imports_as_codex_recorded_it() {
 /// as that CLI writes a transcript line; `message` holds an Anthropic
 /// Messages API message (text, `thinking`, `tool_use` and `tool_result`
 /// blocks), and a compaction is a `system` line of subtype
-/// `compact_boundary`.
+/// `compact_boundary`. A slash command is the user text that CLI builds for
+/// it (`<command-message>`, `<command-name>`, `<command-args>`), a prompt
+/// command's expansion and a local command's caveat are meta lines, and a
+/// local command's output is a `<local-command-stdout>` user text.
 const CLAUDE_TRANSCRIPT: &str = r#"{"type":"user","message":{"role":"user","content":"Context the CLI adds for itself."},"isMeta":true,"uuid":"00000000-0000-4000-8000-000000000011","parentUuid":null,"isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:05.000Z"}
 {"type":"user","message":{"role":"user","content":"Read the readme"},"uuid":"00000000-0000-4000-8000-000000000012","parentUuid":"00000000-0000-4000-8000-000000000011","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:06.000Z"}
 {"type":"assistant","message":{"id":"msg_example_1","type":"message","role":"assistant","model":"claude-example","content":[{"type":"thinking","thinking":"Reading it.","signature":"c2lnbmF0dXJl"},{"type":"tool_use","id":"toolu_read","name":"Read","input":{"file_path":"/work/example/README.md"}}]},"uuid":"00000000-0000-4000-8000-000000000013","parentUuid":"00000000-0000-4000-8000-000000000012","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:07.000Z"}
@@ -143,11 +146,18 @@ const CLAUDE_TRANSCRIPT: &str = r#"{"type":"user","message":{"role":"user","cont
 {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_make","content":"make: no targets","is_error":true}]},"uuid":"00000000-0000-4000-8000-000000000016","parentUuid":"00000000-0000-4000-8000-000000000015","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:10.000Z"}
 {"type":"system","subtype":"compact_boundary","content":"Conversation compacted","uuid":"00000000-0000-4000-8000-000000000017","parentUuid":null,"isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:11.000Z"}
 {"type":"assistant","message":{"id":"msg_example_3","type":"message","role":"assistant","model":"claude-example","content":[{"type":"text","text":"Done."}]},"uuid":"00000000-0000-4000-8000-000000000018","parentUuid":"00000000-0000-4000-8000-000000000017","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:12.000Z"}
+{"type":"user","message":{"role":"user","content":"<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>src</command-args>"},"uuid":"00000000-0000-4000-8000-000000000019","parentUuid":"00000000-0000-4000-8000-000000000018","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:13.000Z"}
+{"type":"user","message":{"role":"user","content":"Review the code in src."},"isMeta":true,"uuid":"00000000-0000-4000-8000-000000000020","parentUuid":"00000000-0000-4000-8000-000000000019","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:13.000Z"}
+{"type":"user","message":{"role":"user","content":"<local-command-caveat>The command below was run directly in Claude Code.</local-command-caveat>"},"isMeta":true,"uuid":"00000000-0000-4000-8000-000000000021","parentUuid":"00000000-0000-4000-8000-000000000020","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:14.000Z"}
+{"type":"user","message":{"role":"user","content":"<command-message>cost</command-message>\n<command-name>/cost</command-name>"},"uuid":"00000000-0000-4000-8000-000000000022","parentUuid":"00000000-0000-4000-8000-000000000021","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:14.000Z"}
+{"type":"user","message":{"role":"user","content":"<local-command-stdout>Total cost: $0.00</local-command-stdout>"},"uuid":"00000000-0000-4000-8000-000000000023","parentUuid":"00000000-0000-4000-8000-000000000022","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:14.000Z"}
 "#;
 
 /// A transcript shows what Claude Code recorded: a meta message is passed
 /// over, a tool call shows the result answered to its id and fails when the
-/// result is an error, and a compaction is marked where it happened.
+/// result is an error, a compaction is marked where it happened, and a slash
+/// command shows as the command line the user typed, a local one with its
+/// output.
 #[test]
 fn a_claude_transcript_imports_as_claude_recorded_it() {
     let transcript = Transcript::new(CLAUDE_TRANSCRIPT);
@@ -176,6 +186,12 @@ fn a_claude_transcript_imports_as_claude_recorded_it() {
             Some(ItemContent::AssistantMessage {
                 text: "Done.".into(),
                 summarized: false,
+            }),
+            user("/review src"),
+            user("/cost"),
+            Some(ItemContent::Other {
+                provider_kind: "local-command-stdout".into(),
+                summary: "Total cost: $0.00".into(),
             }),
         ]
     );
