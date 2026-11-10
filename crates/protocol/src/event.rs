@@ -16,9 +16,6 @@ use tcode_core::{
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 
-/// Another name for [`StoredEvent`], left while `crates/ui` still uses it.
-pub type SessionEventRecord = StoredEvent;
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Topic {

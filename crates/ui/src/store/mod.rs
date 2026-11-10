@@ -4394,12 +4394,10 @@ pub(crate) mod tests {
     use gpui::{App, AppContext as _, TestAppContext};
     use tcode_core::{
         project::{Project, SessionMeta},
-        session::{EntryContent, ReviewComment, ReviewSide},
+        session::{EntryContent, ReviewComment, ReviewSide, StoredEvent},
         settings::Settings,
     };
-    use tcode_protocol::{
-        Command, EventEnvelope, ServerEvent, SessionEventRecord, Subscription, Topic,
-    };
+    use tcode_protocol::{Command, EventEnvelope, ServerEvent, Subscription, Topic};
     use tcode_runtime::host::HostEvent;
     use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
     use tcode_services::store::SessionStore;
@@ -5307,7 +5305,7 @@ pub(crate) mod tests {
         );
         let accepted_key = retry.key.unwrap();
         let same_text_record = |id: String| {
-            SessionEventRecord::from(AgentEvent::ItemCompleted(ThreadItem {
+            StoredEvent::from(AgentEvent::ItemCompleted(ThreadItem {
                 id,
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
@@ -5823,7 +5821,7 @@ pub(crate) mod tests {
                 workspace.update(cx, |store, cx| {
                     let topic = Topic::SessionEvents { session_id: "a".into() };
                     store.show_alone("a".into(), cx);
-                    let record = |text: &str| SessionEventRecord::from(AgentEvent::Delta {
+                    let record = |text: &str| StoredEvent::from(AgentEvent::Delta {
                         item_id: "answer".into(), kind: agent::DeltaKind::AssistantText, text: text.into(),
                     });
                     let baseline_id = host.subscription_request_id(&topic).unwrap();
@@ -6557,8 +6555,8 @@ pub(crate) mod tests {
         }
     }
 
-    fn recorded(ts: u64, event: AgentEvent) -> SessionEventRecord {
-        SessionEventRecord {
+    fn recorded(ts: u64, event: AgentEvent) -> StoredEvent {
+        StoredEvent {
             origin: None,
             author: None,
             ts: Some(ts),
@@ -6566,7 +6564,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn reply(ts: u64) -> SessionEventRecord {
+    fn reply(ts: u64) -> StoredEvent {
         recorded(
             ts,
             AgentEvent::ItemCompleted(ThreadItem {
@@ -6580,11 +6578,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn session_snapshot(
-        session_id: &str,
-        from: u64,
-        records: Vec<SessionEventRecord>,
-    ) -> EventEnvelope {
+    fn session_snapshot(session_id: &str, from: u64, records: Vec<StoredEvent>) -> EventEnvelope {
         let end = from + records.len() as u64;
         EventEnvelope {
             request_id: None,

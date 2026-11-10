@@ -49,8 +49,8 @@ pub use event::{
     ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus,
     QueuedMessageStatus, RewindBlocked, RewindStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
     RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice,
-    ServerEvent, SessionActivity, SessionEventRecord, SessionPlan, SessionStatus, StorageMigration,
-    TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
+    ServerEvent, SessionActivity, SessionPlan, SessionStatus, StorageMigration, TcodeDiskUsage,
+    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
     ThreadReferenceStatus, ThreadWakes, Topic,
 };
 pub use query::{
