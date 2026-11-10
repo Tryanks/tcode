@@ -884,7 +884,6 @@ pub struct RewindStatus {
     pub steer_targets: bool,
     pub later_history: agent::LaterHistory,
     pub preview: agent::RewindPreviewKind,
-    pub running_turn: agent::RunningTurnPolicy,
     pub restores_command_edits: bool,
     /// Why no rewind can start now.
     #[serde(default, skip_serializing_if = "Option::is_none")]

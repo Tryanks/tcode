@@ -213,7 +213,6 @@ pub struct RewindControl {
     pub steer_targets: bool,
     pub later_history: LaterHistory,
     pub preview: RewindPreviewKind,
-    pub running_turn: RunningTurnPolicy,
     /// Files the agent changed by running commands are restored too, not only
     /// those its own edit tools wrote.
     pub restores_command_edits: bool,
@@ -254,14 +253,6 @@ pub enum RewindPreviewKind {
     /// The files a restore would change, and those changed outside the agent
     /// since, which the restore would overwrite.
     Conflicts,
-}
-
-/// What a rewind does to a turn that is running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunningTurnPolicy {
-    /// The harness stops the turn first, as its own rewind does.
-    Interrupt,
 }
 
 /// What a harness lets a client do with its standing goal.
@@ -352,7 +343,6 @@ impl ProviderKind {
                     // `rewind_files` with `dry_run`.
                     preview: RewindPreviewKind::Files,
                     // `rewind_conversation`'s `interrupt_if_running`.
-                    running_turn: RunningTurnPolicy::Interrupt,
                     // File history tracks the edit tools' writes only.
                     restores_command_edits: false,
                 }),
@@ -412,7 +402,6 @@ impl ProviderKind {
                     steer_targets: false,
                     later_history: LaterHistory::Truncated,
                     preview: RewindPreviewKind::None,
-                    running_turn: RunningTurnPolicy::Interrupt,
                     restores_command_edits: false,
                 }),
                 manual_compaction: true,
@@ -497,7 +486,6 @@ impl ProviderKind {
                     steer_targets: false,
                     later_history: LaterHistory::Branch,
                     preview: RewindPreviewKind::None,
-                    running_turn: RunningTurnPolicy::Interrupt,
                     restores_command_edits: false,
                 }),
                 manual_compaction: true,
@@ -544,7 +532,6 @@ impl ProviderKind {
                     steer_targets: false,
                     later_history: LaterHistory::HiddenUntilNextSend,
                     preview: RewindPreviewKind::None,
-                    running_turn: RunningTurnPolicy::Interrupt,
                     restores_command_edits: true,
                 }),
                 manual_compaction: true,
@@ -624,7 +611,6 @@ impl ProviderKind {
                     steer_targets: false,
                     later_history: LaterHistory::Truncated,
                     preview: RewindPreviewKind::Conflicts,
-                    running_turn: RunningTurnPolicy::Interrupt,
                     restores_command_edits: false,
                 }),
                 manual_compaction: false,
@@ -2200,9 +2186,8 @@ pub enum SessionCommand {
     },
     /// Ask the provider to restore one of its own message checkpoints. The
     /// provider remains the sole owner of both the checkpoint and the restore
-    /// semantics; adapters without a native implementation reject this. Where
-    /// [`RewindControl::running_turn`] interrupts, the adapter stops a running
-    /// turn first the way its harness does. Answered by
+    /// semantics; adapters without a native implementation reject this. The
+    /// adapter stops a running turn first the way its harness does. Answered by
     /// [`AgentEvent::RewindCompleted`] or [`AgentEvent::RewindFailed`].
     Rewind {
         checkpoint_id: String,

@@ -313,8 +313,9 @@ pub use wire::{
 // nothing stands in for it (a principal, scope or space without a policy was
 // read as unrestricted). HostingAction no longer reads new_code. HostProblem
 // gains credentials_unreadable. RuntimeNotice::WorktreeSeeded has no
-// limit_reached. RewindStatus's running_turn has no "refuse" and its blocked
-// no "turn_running". SourceTool gains claude_agent_sdk.
+// limit_reached. RewindStatus has no running_turn (a running turn is always
+// interrupted first) and its blocked no "turn_running". SourceTool gains
+// claude_agent_sdk.
 // QueryResponse::ExternalHistory carries an ExternalHistory {dirs,
 // unreadable}, and SessionContentHits a SessionContentHits {hits, unreadable}.
 // tcode/group/1 no longer has the full rejection. RuntimeError gains

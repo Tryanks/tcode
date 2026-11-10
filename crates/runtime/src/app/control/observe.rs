@@ -248,7 +248,6 @@ struct RewindFacts {
     first_turn_conversation: bool,
     steer_targets: bool,
     later_history: agent::LaterHistory,
-    running_turn: agent::RunningTurnPolicy,
 }
 
 #[derive(Debug, Serialize)]
@@ -1181,7 +1180,6 @@ impl AppState {
                             first_turn_conversation: rewind.first_turn_conversation,
                             steer_targets: rewind.steer_targets,
                             later_history: rewind.later_history,
-                            running_turn: rewind.running_turn,
                         }),
                         manual_compaction: caps.manual_compaction,
                         goals: caps.goals.map(|goals| GoalFacts {

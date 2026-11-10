@@ -87,7 +87,6 @@ impl AppState {
             steer_targets: control.steer_targets,
             later_history: control.later_history,
             preview: control.preview,
-            running_turn: control.running_turn,
             restores_command_edits: control.restores_command_edits,
             blocked,
             pending: pending.map(|request| PendingRewind {
