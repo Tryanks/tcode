@@ -19,6 +19,8 @@ pub enum CredentialError {
     NotSignedIn,
     CliFailed,
     HostMismatch,
+    /// The token Tcode saved could not be read.
+    SavedUnreadable,
 }
 
 impl std::fmt::Display for CredentialError {
@@ -118,7 +120,11 @@ impl Credentials {
         if !choice.enabled {
             return Err(CredentialError::Disabled);
         }
-        if let Some(token) = self.store.token(HostKind::Github, &host).and_then(nonempty) {
+        let saved = self.store.token(HostKind::Github, &host).map_err(|error| {
+            log::error!("cannot read the saved GitHub token for {host}: {error}");
+            CredentialError::SavedUnreadable
+        })?;
+        if let Some(token) = saved.and_then(nonempty) {
             return Ok(Credential::new(host, token, CredentialSource::Saved));
         }
         if let Some((name, token)) = self.environment_token(&host) {
@@ -331,8 +337,7 @@ impl Credentials {
                 let token_set = self
                     .store
                     .token(HostKind::Github, &host)
-                    .and_then(nonempty)
-                    .is_some();
+                    .is_ok_and(|token| token.and_then(nonempty).is_some());
                 let logins = accounts
                     .get("hosts")
                     .and_then(|hosts| hosts.get(&host))

@@ -1448,15 +1448,28 @@ impl AppState {
             let env = host_cx
                 .unblock(move || {
                     let profile_id = Settings::builtin_profile_id(provider);
-                    launch_env_for_profile(
-                        &settings,
-                        profile_id,
-                        settings_store.profile_secrets(&Settings::harness_secret_id(provider)),
-                        settings_store.profile_secrets(profile_id),
+                    std::io::Result::Ok(
+                        launch_env_for_profile(
+                            &settings,
+                            profile_id,
+                            settings_store
+                                .profile_secrets(&Settings::harness_secret_id(provider))?,
+                            settings_store.profile_secrets(profile_id)?,
+                        )
+                        .pairs(provider),
                     )
-                    .pairs(provider)
                 })
                 .await;
+            let env = match env {
+                Ok(env) => env,
+                Err(error) => {
+                    host_cx.enqueue(move |state, cx| {
+                        state.report_error(RuntimeError::External(error.to_string()), cx);
+                        state.complete_provider_update(provider, false, cx);
+                    });
+                    return;
+                }
+            };
             let current = provider_updates::resolve_installation(provider, &binary, &env).await;
             host_cx.enqueue(move |state, cx| {
                 if state
@@ -1574,7 +1587,7 @@ impl AppState {
             await_secret_writes(writes).await?;
             let secrets = if env.iter().any(|var| var.sensitive) {
                 host_cx
-                    .unblock(move || store.try_profile_secrets(&id))
+                    .unblock(move || store.profile_secrets(&id))
                     .await
                     .map_err(|error| error.to_string())?
             } else {
@@ -1642,9 +1655,7 @@ impl AppState {
                         if names.is_empty() {
                             return Ok(Default::default());
                         }
-                        store
-                            .try_profile_secrets(id)
-                            .map_err(|error| error.to_string())
+                        store.profile_secrets(id).map_err(|error| error.to_string())
                     };
                     let secrets = read(&profile_id, &own)?;
                     let shared_secrets = match &harness_id {
@@ -1778,11 +1789,14 @@ impl AppState {
                 .ok_or("unknown profile")?;
             let provider = profile.kind;
             let binary_path = profile.settings.binary_path;
+            let unreadable = |error: std::io::Error| error.to_string();
             let launch_env = launch_env_for_profile(
                 &settings,
                 &profile_id,
-                secrets.profile_secrets(&Settings::harness_secret_id(provider)),
-                secrets.profile_secrets(&profile_id),
+                secrets
+                    .profile_secrets(&Settings::harness_secret_id(provider))
+                    .map_err(unreadable)?,
+                secrets.profile_secrets(&profile_id).map_err(unreadable)?,
             );
             agent::native_mcp::servers(provider, binary_path, &launch_env)
                 .unwrap_or_else(|| Err("no MCP configuration to read".to_owned()))
@@ -1850,15 +1864,15 @@ fn endpoint_profile_snapshot(
 pub(super) fn provider_secret_names(
     settings: &Settings,
     settings_store: &SettingsStore,
-) -> HashMap<String, HashSet<String>> {
+) -> std::io::Result<HashMap<String, HashSet<String>>> {
     let names = |id: String, env: &[EnvVar]| {
-        let saved = settings_store.profile_secrets(&id);
+        let saved = settings_store.profile_secrets(&id)?;
         let names = env
             .iter()
             .filter(|var| var.sensitive && saved.contains_key(&var.name))
             .map(|var| var.name.clone())
             .collect();
-        (id, names)
+        Ok((id, names))
     };
     let profiles = ProviderKind::NATIVE
         .into_iter()

@@ -218,7 +218,11 @@ impl Api {
                 "Azure DevOps host turned off",
             ));
         }
-        if let Some(token) = self.store.token(HostKind::Azure, authority) {
+        if let Some(token) = self
+            .store
+            .token(HostKind::Azure, authority)
+            .map_err(ForgeError::credentials_unreadable)?
+        {
             return Ok(Credential::new(&token, false, CredentialSource::Saved));
         }
         if self.environment_host().as_deref() == Some(authority) {
@@ -242,7 +246,7 @@ impl Api {
     }
 
     pub(super) fn token_saved(&self, authority: &str) -> bool {
-        self.store.token(HostKind::Azure, authority).is_some()
+        matches!(self.store.token(HostKind::Azure, authority), Ok(Some(_)))
     }
 
     /// What the organization's last answer to `credential` says: its account, and any problem.

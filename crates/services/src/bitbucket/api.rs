@@ -207,7 +207,11 @@ impl Api {
                 "Bitbucket host turned off",
             ));
         }
-        if let Some((token, email)) = self.store.saved_credential(HostKind::Bitbucket, HOST) {
+        if let Some((token, email)) = self
+            .store
+            .saved_credential(HostKind::Bitbucket, HOST)
+            .map_err(ForgeError::credentials_unreadable)?
+        {
             let source = match &email {
                 Some(email) => CredentialSource::SavedBasic {
                     email: email.clone(),
@@ -228,7 +232,7 @@ impl Api {
     }
 
     pub(super) fn token_saved(&self) -> bool {
-        self.store.token(HostKind::Bitbucket, HOST).is_some()
+        matches!(self.store.token(HostKind::Bitbucket, HOST), Ok(Some(_)))
     }
 
     /// What Bitbucket's last answer to `credential` says: its account, and any problem.

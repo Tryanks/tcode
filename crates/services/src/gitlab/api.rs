@@ -168,6 +168,7 @@ impl Api {
         if let Some(token) = self
             .store
             .token(HostKind::Gitlab, authority)
+            .map_err(ForgeError::credentials_unreadable)?
             .and_then(nonempty)
         {
             return Ok(Some(Credential {
@@ -216,8 +217,7 @@ impl Api {
     pub(super) fn token_saved(&self, authority: &str) -> bool {
         self.store
             .token(HostKind::Gitlab, authority)
-            .and_then(nonempty)
-            .is_some()
+            .is_ok_and(|token| token.and_then(nonempty).is_some())
     }
 
     /// What the server's last answer to `credential` says: its account, and any problem.

@@ -362,18 +362,23 @@ fn legacy_bare_array_index_migrates_with_one_derived_project_per_root() {
     );
 }
 
+/// An index that parses as no schema stops the migration before anything is
+/// written, so its threads' metadata is never migrated away.
 #[test]
-fn an_unparseable_index_does_not_stop_the_logs_migrating() {
+fn an_unparseable_index_stops_the_migration_and_changes_nothing() {
     let dir = DataDir::new();
     let corrupt = b"not valid session json";
     fs::write(dir.path().join("sessions.json"), corrupt).unwrap();
     fs::write(dir.path().join("orphan.jsonl"), ORPHAN_LOG).unwrap();
-    let store = dir.migrated();
+    let store = dir.store();
+    let mut before = snapshot(dir.path());
 
-    let file = store.read_file().unwrap();
-    assert!(file.projects.is_empty() && file.sessions.is_empty());
-    assert_eq!(store.read_event_log("orphan").unwrap(), ORPHAN_LOG);
-    assert!(!dir.path().join("sessions.json").exists());
+    let error = migrate(&store).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+    let mut after = snapshot(dir.path());
+    before.remove(LOCK_FILE);
+    after.remove(LOCK_FILE);
+    assert_eq!(after, before);
 }
 
 const LEGACY_DIR_NAME: &str = "legacy";

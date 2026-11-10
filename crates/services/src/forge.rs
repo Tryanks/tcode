@@ -218,6 +218,8 @@ pub enum ForgeErrorKind {
     InvalidInput,
     /// Media whose type is not an image, video or audio, or an image that does not decode.
     UnsupportedMedia,
+    /// The credentials Tcode saved could not be read, so nothing was sent.
+    CredentialsUnreadable,
 }
 
 impl std::fmt::Display for ForgeError {
@@ -228,6 +230,13 @@ impl std::fmt::Display for ForgeError {
 impl std::error::Error for ForgeError {}
 
 impl ForgeError {
+    pub(crate) fn credentials_unreadable(error: std::io::Error) -> Self {
+        Self {
+            kind: ForgeErrorKind::CredentialsUnreadable,
+            description: error.to_string(),
+        }
+    }
+
     /// When a rate limit or the pause after one ends.
     pub fn retry_at(&self) -> Option<SystemTime> {
         match self.kind {

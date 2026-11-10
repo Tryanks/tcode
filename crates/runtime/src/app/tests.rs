@@ -3423,8 +3423,8 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
     let env = launch_env_for_profile(
         &state.settings,
         "klaude-kode",
-        state.settings_store.profile_secrets(&harness),
-        state.settings_store.profile_secrets("klaude-kode"),
+        state.settings_store.profile_secrets(&harness).unwrap(),
+        state.settings_store.profile_secrets("klaude-kode").unwrap(),
     )
     .env;
     assert_eq!(env[..3], shared[..]);
@@ -3448,8 +3448,11 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
     let builtin = launch_env_for_profile(
         &state.settings,
         builtin_profile_id,
-        state.settings_store.profile_secrets(&harness),
-        state.settings_store.profile_secrets(builtin_profile_id),
+        state.settings_store.profile_secrets(&harness).unwrap(),
+        state
+            .settings_store
+            .profile_secrets(builtin_profile_id)
+            .unwrap(),
     )
     .env;
     assert_eq!(
@@ -8505,6 +8508,7 @@ fn store_writer_flush_persists_ordered_events_metadata_and_secrets_for_reopening
     assert_eq!(
         settings
             .profile_secrets("profile")
+            .unwrap()
             .get("ANTHROPIC_API_KEY")
             .map(String::as_str),
         Some("writer-secret")
@@ -14000,7 +14004,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     >(persisted())
     .unwrap();
     assert_eq!(
-        settings_store.profile_secrets("github")["ANTHROPIC_API_KEY"],
+        settings_store.profile_secrets("github").unwrap()["ANTHROPIC_API_KEY"],
         "legacy-provider-secret"
     );
     state.dispatch_command(
@@ -14015,6 +14019,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     cx.run_until(|_| {
         settings_store
             .profile_secrets("github")
+            .unwrap()
             .get("ANTHROPIC_API_KEY")
             .map(String::as_str)
             == Some("provider-replacement-secret")
@@ -14072,7 +14077,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     );
     cx.run_until(|_| persisted().get("@github").is_none());
     assert_eq!(
-        settings_store.profile_secrets("github")["ANTHROPIC_API_KEY"],
+        settings_store.profile_secrets("github").unwrap()["ANTHROPIC_API_KEY"],
         "provider-replacement-secret"
     );
     state.dispatch_command(
@@ -14084,7 +14089,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
             value: None,
         },
     );
-    cx.run_until(|_| settings_store.profile_secrets("github").is_empty());
+    cx.run_until(|_| settings_store.profile_secrets("github").unwrap().is_empty());
     let outgoing = cx.drain_outgoing();
     assert!(
         !serde_json::to_string(&outgoing)

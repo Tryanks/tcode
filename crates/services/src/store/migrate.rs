@@ -419,9 +419,8 @@ fn seal(db: Db, staging: &Path) -> io::Result<()> {
     sync_file(staging)
 }
 
-/// Today's tolerance: the object schema or the legacy bare array. An
-/// unparseable file is archived into `legacy/` as it is, with the logs, which
-/// still migrate.
+/// The object schema or the bare array of the builds before it. A file that
+/// parses as neither stops the migration, which then changes nothing.
 fn read_legacy_index(root: &Path) -> io::Result<IndexFile> {
     let path = root.join(LEGACY_INDEX);
     let bytes = match fs::read(&path) {
@@ -429,19 +428,19 @@ fn read_legacy_index(root: &Path) -> io::Result<IndexFile> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(IndexFile::default()),
         Err(error) => return Err(error),
     };
-    let parsed = serde_json::from_slice::<IndexFile>(&bytes).or_else(|_| {
-        serde_json::from_slice::<Vec<SessionMeta>>(&bytes).map(|sessions| IndexFile {
-            projects: Vec::new(),
-            sessions,
+    serde_json::from_slice::<IndexFile>(&bytes)
+        .or_else(|_| {
+            serde_json::from_slice::<Vec<SessionMeta>>(&bytes).map(|sessions| IndexFile {
+                projects: Vec::new(),
+                sessions,
+            })
         })
-    });
-    Ok(parsed.unwrap_or_else(|error| {
-        log::warn!(
-            "failed to parse {LEGACY_INDEX}: {error}; migrating the event logs without it, and \
-             archiving it with them"
-        );
-        IndexFile::default()
-    }))
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is unreadable: {error}", path.display()),
+            )
+        })
 }
 
 #[derive(Default)]

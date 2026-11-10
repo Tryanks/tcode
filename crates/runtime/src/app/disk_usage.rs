@@ -1,4 +1,3 @@
-use tcode_protocol::DiskUsageState;
 use tcode_services::disk_usage::{self, Account};
 
 use super::providers::launch_env_for_profile;
@@ -27,33 +26,34 @@ impl AppState {
         let secrets = self.settings_store.clone();
         let data_dir = self.store.root().to_path_buf();
         let measured = cx.unblock(move || {
-            let accounts: Vec<Account> = ProviderKind::NATIVE
+            let accounts = ProviderKind::NATIVE
                 .into_iter()
                 .flat_map(|kind| settings.profiles_for_kind(kind))
                 .map(|profile| {
                     let launch_env = launch_env_for_profile(
                         &settings,
                         &profile.id,
-                        secrets.profile_secrets(&Settings::harness_secret_id(profile.kind)),
-                        secrets.profile_secrets(&profile.id),
+                        secrets.profile_secrets(&Settings::harness_secret_id(profile.kind))?,
+                        secrets.profile_secrets(&profile.id)?,
                     );
-                    Account {
+                    Ok(Account {
                         provider: profile.kind,
                         dirs: disk_usage::state_dirs(profile.kind, &launch_env),
                         profile_id: profile.id,
-                    }
+                    })
                 })
-                .collect();
-            disk_usage::measure(&data_dir, &accounts)
+                .collect::<std::io::Result<Vec<Account>>>()?;
+            std::io::Result::Ok(disk_usage::measure(&data_dir, &accounts))
         });
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let usage = measured.await;
+            let measured = measured.await;
             host_cx.enqueue(move |state, cx| {
-                state.disk_usage = DiskUsageState {
-                    last: Some(usage),
-                    measuring: false,
-                };
+                state.disk_usage.measuring = false;
+                match measured {
+                    Ok(usage) => state.disk_usage.last = Some(usage),
+                    Err(error) => state.report_error(RuntimeError::External(error.to_string()), cx),
+                }
                 state.emit_disk_usage(cx);
             });
         });

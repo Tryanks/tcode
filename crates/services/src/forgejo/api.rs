@@ -191,7 +191,12 @@ impl Api {
             .get(authority)
             .map(|choice| choice.kind)
             .unwrap_or(HostKind::Forgejo);
-        if let Some(token) = self.store.token(kind, authority).and_then(nonempty) {
+        if let Some(token) = self
+            .store
+            .token(kind, authority)
+            .map_err(ForgeError::credentials_unreadable)?
+            .and_then(nonempty)
+        {
             return Ok(Some(Credential::new(token, CredentialSource::Saved)));
         }
         if let Some(token) = self.environment_token(authority) {
@@ -228,8 +233,7 @@ impl Api {
     pub(super) fn token_saved(&self, kind: HostKind, authority: &str) -> bool {
         self.store
             .token(kind, authority)
-            .and_then(nonempty)
-            .is_some()
+            .is_ok_and(|token| token.and_then(nonempty).is_some())
     }
 
     /// What the server's last answer to `credential` says: its account, and any problem.

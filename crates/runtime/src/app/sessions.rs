@@ -1198,8 +1198,10 @@ impl AppState {
         if settlement_changed {
             self.evaluate_all_settlement(cx);
         }
-        self.providers.provider_secret_names =
-            provider_secret_names(&self.settings, &self.settings_store);
+        match provider_secret_names(&self.settings, &self.settings_store) {
+            Ok(names) => self.providers.provider_secret_names = names,
+            Err(error) => self.report_error(RuntimeError::External(error.to_string()), cx),
+        }
         // Keep the live computer-use MCP config in step with the persisted
         // settings on every change (the server outlives any one snapshot).
         computer_use_mcp::config::set(self.settings.computer_use.clone());
