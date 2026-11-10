@@ -74,6 +74,30 @@ Not a defence: reporting a real failure as it happened; a branch the
 harness's wire protocol requires; translating a provider into the one
 `AgentEvent` stream (Principle 4); a feature the maintainer asked for.
 
+## Proving a harness integration
+
+To prove that Tcode calls a harness binary with the right arguments and
+understands its reply, the proof is cut where Tcode's own code is cut, and no
+test spawns anything that imitates the harness:
+
+1. **What Tcode sends.** Arguments, environment and request bodies are built
+   by a pure function production itself calls; the test asserts its return
+   value. No exec is injected to inspect them: an injection parameter is a
+   production seam only the test uses.
+2. **What Tcode understands.** The harness's real output, as a recorded
+   fixture with the provenance of the run, goes into the parser or mapper,
+   and the test asserts the events. Output typed by hand is a stand-in in the
+   form of data.
+3. **The conversation.** Handshake order, request and response pairing, and
+   cancellation are the actor's state machine: feed it lines, read the
+   requests it emits. No process.
+4. **Tcode's own process handling.** A child that exits, its stderr tail, a
+   kill: use a real trivial process that claims to be no harness
+   (`sh -c 'exit 3'`).
+5. **That the halves meet**, and that the real binary accepts what Tcode
+   sends: only the real harness shows it. That is the probe, run on purpose
+   and reported, not a unit test.
+
 ## Grounds
 
 A defence stays only on one of three grounds, named with its source:
