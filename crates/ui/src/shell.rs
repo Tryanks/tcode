@@ -894,12 +894,13 @@ impl AppShell {
                 }
             }
         }
+        // A host whose outbox cannot be read opens first too: opening it
+        // says why.
         if let Some(host) = setup.client_host.as_ref().and_then(|client| {
             client.load_hosts().into_iter().find(|host| {
-                client
-                    .outbox_storage(&host.host_id)
-                    .and_then(|storage| storage.load().ok())
-                    .is_some_and(|entries| !entries.is_empty())
+                client.outbox_storage(&host.host_id).is_some_and(|storage| {
+                    storage.load().map_or(true, |entries| !entries.is_empty())
+                })
             })
         }) {
             setup.initial = Some(AttachmentTarget::Remote(Box::new(host)));
