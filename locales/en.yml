@@ -95,6 +95,7 @@ chat:
   rail_goal: "Goal"
   rail_commands: "Commands"
   rail_pull_requests: "Pull requests"
+  rail_thread: "This thread"
   copy: "Copy"
   copied: "Copied!"
   copy_message: "Copy message"
