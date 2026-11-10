@@ -6,7 +6,7 @@ use std::{
     net::{Shutdown, TcpListener, TcpStream},
     path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use tcode_client::{ConnectionState, host::Transport, host::TunnelOpener, pairing::PairedHost};
@@ -77,14 +77,16 @@ impl Machine {
         )
         .unwrap();
         let transport = tcode_traverse::connect(&paired, &device);
-        let deadline = Instant::now() + Duration::from_secs(20);
-        loop {
-            assert!(Instant::now() < deadline, "attachment never connected");
-            if let Ok(ConnectionState::Syncing { .. }) = transport.state.try_recv() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        tcode_traverse::block_on(async {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                while !matches!(
+                    transport.state.recv().await.unwrap(),
+                    ConnectionState::Syncing { .. }
+                ) {}
+            })
+            .await
+        })
+        .expect("the attachment connects");
         let tunnels = transport.current_host.as_ref().unwrap().tunnels().unwrap();
         Self {
             host: Some(host),
@@ -225,6 +227,9 @@ fn pipelined_requests_and_chunk_trailers_never_reach_the_origin_and_bad_framing_
         assert!(head(&mut browser).starts_with("HTTP/1.1 200 OK"));
         // A reset instead of an orderly close discards the response on Windows.
         assert!(browser.read_to_end(&mut Vec::new()).is_ok());
+        // The browser closes the connection the response ended, which is
+        // what lets the proxy end the tunnel.
+        drop(browser);
         origin.join().unwrap();
     }
     for request in [

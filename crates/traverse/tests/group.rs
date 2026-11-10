@@ -116,15 +116,24 @@ fn saved(device: &DeviceIdentity, machine: &Machine) -> PairedHost {
         .unwrap_or_else(|| panic!("{id} is not saved"))
 }
 
-fn eventually(what: &str, check: impl Fn() -> bool) {
+/// The next message on `channel`, or `None` once `deadline` passes, which
+/// only a failing test reaches.
+fn next<T>(channel: &async_channel::Receiver<T>, deadline: Instant) -> Option<T> {
+    tcode_traverse::block_on(async {
+        tokio::time::timeout_at(deadline.into(), channel.recv()).await
+    })
+    .ok()?
+    .ok()
+}
+
+/// Waits until `check` holds on `machine`, which says so through its hosting
+/// state as it changes.
+fn eventually(machine: &Machine, what: &str, check: impl Fn() -> bool) {
+    let changes = machine.host.hosting_events();
     let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        if check() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    while !check() {
+        next(&changes, deadline).unwrap_or_else(|| panic!("never saw {what}"));
     }
-    panic!("never saw {what}");
 }
 
 fn admits(machine: &Machine, device: &DeviceIdentity) -> bool {
@@ -135,14 +144,11 @@ fn admits(machine: &Machine, device: &DeviceIdentity) -> bool {
 fn wait_state(transport: &Transport, wanted: impl Fn(&ConnectionState) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut seen = Vec::new();
-    while Instant::now() < deadline {
-        if let Ok(state) = transport.state.try_recv() {
-            if wanted(&state) {
-                return;
-            }
-            seen.push(state);
+    while let Some(state) = next(&transport.state, deadline) {
+        if wanted(&state) {
+            return;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        seen.push(state);
     }
     panic!("did not observe the wanted state; saw {seen:?}");
 }
@@ -227,7 +233,7 @@ fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first()
     assert_eq!(paired.name, "Desktop");
     assert_eq!(paired.group_id.as_deref(), Some(home.id.as_str()));
     assert!(admits(&desktop, &phone));
-    eventually("the headless machine admit the phone", || {
+    eventually(&headless, "the headless machine admit the phone", || {
         admits(&headless, &phone)
     });
     let to_headless = tcode_traverse::connect(&saved(&phone, &headless), &phone);
@@ -240,9 +246,11 @@ fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first()
         admits(&headless, &phone),
         "a machine that leaves keeps its devices as directly paired"
     );
-    eventually("the desktop see the headless machine leave", || {
-        state(&desktop).group.unwrap().machines.len() == 1
-    });
+    eventually(
+        &desktop,
+        "the desktop see the headless machine leave",
+        || state(&desktop).group.unwrap().machines.len() == 1,
+    );
     headless.host.shutdown();
     let to_desktop = tcode_traverse::connect(&saved(&phone, &desktop), &phone);
     wait_state(&to_desktop, up);
@@ -285,7 +293,7 @@ fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
     let phone_dir = TestDir::new("removed-phone");
     let phone = device(&phone_dir, "Phone");
     pair(&invitation(&second), &phone);
-    eventually("the first machine admit the phone", || {
+    eventually(&first, "the first machine admit the phone", || {
         admits(&first, &phone)
     });
     let client = tcode_traverse::connect(&saved(&phone, &first), &phone);
@@ -302,7 +310,7 @@ fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
     client.to_host.close();
 
     pair(&invitation(&first), &phone);
-    eventually("the second machine admit the phone again", || {
+    eventually(&second, "the second machine admit the phone again", || {
         admits(&second, &phone)
     });
 
@@ -311,7 +319,7 @@ fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
     let late = device(&late_dir, "Late phone");
     pair(&invitation(&second), &late);
     let late_id = late.endpoint_id().to_string();
-    eventually("the first machine decline the late phone", || {
+    eventually(&first, "the first machine decline the late phone", || {
         state(&first)
             .group
             .unwrap()
@@ -337,7 +345,7 @@ fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
         GroupAction::RemoveMachine(second.host.endpoint_id()),
     );
     assert_eq!(state(&first).group.unwrap().machines.len(), 1);
-    eventually("the removed machine leave the group", || {
+    eventually(&second, "the removed machine leave the group", || {
         state(&second).group.is_none()
     });
     assert!(admits(&second, &late));

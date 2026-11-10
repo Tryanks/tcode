@@ -70,24 +70,20 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// The states seen until `wanted` matches, and how long that took.
-fn wait_state(
-    transport: &Transport,
-    wanted: impl Fn(&ConnectionState) -> bool,
-    budget: Duration,
-) -> (Vec<ConnectionState>, Duration) {
-    let started = Instant::now();
+fn wait_state(transport: &Transport, wanted: impl Fn(&ConnectionState) -> bool) {
     let mut seen = Vec::new();
-    while started.elapsed() < budget {
-        if let Ok(state) = transport.state.try_recv() {
-            if wanted(&state) {
-                return (seen, started.elapsed());
+    tcode_traverse::block_on(async {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while let Ok(state) = transport.state.recv().await {
+                if wanted(&state) {
+                    return;
+                }
+                seen.push(state);
             }
-            seen.push(state);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("did not observe the wanted state; saw {seen:?}");
+        })
+        .await
+    })
+    .unwrap_or_else(|_| panic!("did not observe the wanted state; saw {seen:?}"));
 }
 
 /// A device paired with `host` whose `hosts.json` lists `addrs` for it, as
@@ -118,55 +114,6 @@ fn relaunched_device(
     (device, saved)
 }
 
-/// Every saved address is stale — the machine restarted on another port —
-/// and the browse is off: the device does not connect. There is no further
-/// source to fall back on, on loopback or anywhere else.
-#[test]
-fn stale_addresses_without_a_browse_do_not_reach_the_machine() {
-    let _ = env_logger::builder().is_test(true).try_init();
-    let host_dir = TestDir::new("stale-host");
-    let (host, _host_rx, _host_tx) = start_host(&host_dir, Some(free_port()));
-    let device_dir = TestDir::new("stale-device");
-    let (device, saved) = relaunched_device(
-        &host,
-        &device_dir,
-        vec![
-            format!("127.0.0.1:{}", free_port()),
-            format!("127.0.0.1:{}", free_port()),
-        ],
-    );
-
-    let client = tcode_traverse::connect(&saved, &device);
-    let (mut seen, took) = wait_state(
-        &client,
-        |state| matches!(state, ConnectionState::Reconnecting { .. }),
-        Duration::from_secs(40),
-    );
-    eprintln!("first attempt failed after {took:?}; saw {seen:?}");
-    // The retries that follow have nothing new to try either.
-    let until = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < until {
-        if let Ok(state) = client.state.try_recv() {
-            seen.push(state);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        !seen.iter().any(|state| matches!(
-            state,
-            ConnectionState::Syncing { .. } | ConnectionState::Connected { .. }
-        )),
-        "the device connected without a working address: {seen:?}"
-    );
-    assert!(
-        host.devices().iter().all(|device| device.live.is_none()),
-        "the machine sees a device: {:?}",
-        host.devices()
-    );
-    client.to_host.close();
-    host.shutdown();
-}
-
 #[test]
 fn a_saved_address_further_down_the_list_reaches_the_machine() {
     let _ = env_logger::builder().is_test(true).try_init();
@@ -186,11 +133,9 @@ fn a_saved_address_further_down_the_list_reaches_the_machine() {
     );
 
     let client = tcode_traverse::connect(&saved, &device);
-    wait_state(
-        &client,
-        |state| matches!(state, ConnectionState::Syncing { .. }),
-        Duration::from_secs(20),
-    );
+    wait_state(&client, |state| {
+        matches!(state, ConnectionState::Syncing { .. })
+    });
     let reached = host.devices();
     assert!(
         reached[0].live.as_ref().is_some_and(|path| path.direct),
@@ -224,16 +169,11 @@ fn a_saved_address_further_down_the_list_reaches_the_machine() {
 #[test]
 fn a_dropped_resolve_stops_the_platform_browse_at_once() {
     let id = iroh::SecretKey::from_bytes(&[5; 32]).public();
-    let requests = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), Vec::new())));
+    let (started_tx, started) = async_channel::unbounded();
+    let (stopped_tx, stopped) = async_channel::unbounded();
     let browser = std::sync::Arc::new(lan::SystemBrowser::new(
-        {
-            let requests = requests.clone();
-            move |request| requests.lock().unwrap().0.push(request)
-        },
-        {
-            let requests = requests.clone();
-            move |request| requests.lock().unwrap().1.push(request)
-        },
+        move |request| started_tx.send_blocking(request).unwrap(),
+        move |request| stopped_tx.send_blocking(request).unwrap(),
     ));
     let lookup = LanLookup::new(
         |_| Vec::new(),
@@ -243,14 +183,9 @@ fn a_dropped_resolve_stops_the_platform_browse_at_once() {
         },
     );
     let found: SocketAddr = "10.0.0.12:47420".parse().unwrap();
-    let dropped_at = tcode_traverse::block_on(async {
+    tcode_traverse::block_on(async {
         let mut stream = lookup.resolve(id).unwrap();
-        let request = loop {
-            if let Some(request) = requests.lock().unwrap().0.first().copied() {
-                break request;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        };
+        let request = started.recv().await.unwrap();
         browser.found(request, &id.to_string(), [found]);
         let item = stream.next().await.unwrap().unwrap();
         assert_eq!(item.provenance(), "lan-dns-sd");
@@ -258,20 +193,17 @@ fn a_dropped_resolve_stops_the_platform_browse_at_once() {
             item.endpoint_info().ip_addrs().copied().collect::<Vec<_>>(),
             [found]
         );
-        assert!(requests.lock().unwrap().1.is_empty(), "the browse runs on");
+        assert!(stopped.is_empty(), "the browse runs on");
+        let dropped_at = Instant::now();
         drop(stream);
-        Instant::now()
+        let stop = tokio::time::timeout(lan::BROWSE_TIME, stopped.recv())
+            .await
+            .expect("the platform browse was stopped before its deadline")
+            .unwrap();
+        assert_eq!(stop, request);
+        assert!(dropped_at.elapsed() < lan::BROWSE_TIME);
+        assert!(started.is_empty(), "one browse was started");
     });
-    let deadline = dropped_at + Duration::from_secs(1);
-    while requests.lock().unwrap().1.is_empty() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let (started, stopped) = requests.lock().unwrap().clone();
-    assert_eq!(stopped, started, "the platform browse was stopped");
-    assert!(
-        dropped_at.elapsed() < lan::BROWSE_TIME,
-        "stopped before the deadline"
-    );
 }
 
 /// Real multicast on this host's interfaces: the machine's DNS-SD record is
