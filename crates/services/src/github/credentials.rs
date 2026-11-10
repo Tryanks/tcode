@@ -91,6 +91,8 @@ pub struct Credentials {
     store: SettingsStore,
     environment: BTreeMap<String, String>,
     hosts: RwLock<BTreeMap<String, HostSettings>>,
+    /// The hosts gh last said it is signed in to.
+    signed_in: RwLock<Vec<String>>,
     cache: Mutex<HashMap<(String, Option<String>), Cached>>,
 }
 
@@ -104,6 +106,7 @@ impl Credentials {
             store,
             environment: environment.into_iter().collect(),
             hosts: RwLock::default(),
+            signed_in: RwLock::default(),
             cache: Mutex::new(HashMap::new()),
         })
     }
@@ -114,6 +117,18 @@ impl Credentials {
             .into_iter()
             .filter(|(_, choice)| choice.kind == HostKind::Github)
             .collect();
+    }
+
+    /// The GitHub hosts besides github.com that settings, gh's logins or `GH_HOST` name.
+    pub(super) fn known(&self) -> Vec<String> {
+        let mut known: Vec<String> = self.hosts.read().unwrap().keys().cloned().collect();
+        known.extend(self.signed_in.read().unwrap().iter().cloned());
+        known.extend(
+            self.environment
+                .get("GH_HOST")
+                .and_then(|value| normalize_host(value).ok()),
+        );
+        known
     }
 
     pub(super) fn check_enabled(&self, host: &str) -> Result<(), CredentialError> {
@@ -338,11 +353,14 @@ impl Credentials {
             configured.keys().map(|host| (host.clone(), true)).collect();
         hosts.insert("github.com".into(), false);
         if let Some(logins) = accounts.get("hosts").and_then(|hosts| hosts.as_object()) {
-            for host in logins.keys() {
-                if let Ok(host) = normalize_host(host) {
-                    hosts.insert(host, false);
-                }
+            let signed_in: Vec<_> = logins
+                .keys()
+                .filter_map(|host| normalize_host(host).ok())
+                .collect();
+            for host in &signed_in {
+                hosts.insert(host.clone(), false);
             }
+            *self.signed_in.write().unwrap() = signed_in;
         }
         hosts
             .into_iter()

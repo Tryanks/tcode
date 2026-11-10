@@ -113,7 +113,7 @@ impl Forge for GitHub {
     }
 
     fn checkout_repository(&self, checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
-        repository::resolve(checkout).map(neutral)
+        repository::resolve(checkout, &self.api.credentials().known()).map(neutral)
     }
 
     fn repository(&self, name: &str, host: &str) -> Option<Repository> {

@@ -79,7 +79,9 @@ pub fn pull_request_url(value: &str) -> Option<(PullRequestKey, String)> {
     Some((repository.key(number), repository.url(number)))
 }
 
-fn remote(value: &str) -> Option<Repository> {
+/// The repository a remote URL names on a GitHub host: one whose name says GitHub, or one of
+/// `known`, such as an Enterprise Server that settings or a gh login name.
+fn remote(known: &[String], value: &str) -> Option<Repository> {
     let value = value
         .strip_prefix("ssh://")
         .or_else(|| value.strip_prefix("https://"))
@@ -95,11 +97,8 @@ fn remote(value: &str) -> Option<Repository> {
         value.replacen(':', "/", 1)
     };
     let (host, path) = value.split_once('/')?;
-    if !host
-        .to_ascii_lowercase()
-        .split('.')
-        .any(|label| label == "github")
-    {
+    let lower = host.to_ascii_lowercase();
+    if !lower.split('.').any(|label| label == "github") && !known.contains(&lower) {
         return None;
     }
     selector(&format!("{host}/{path}"), host)
@@ -117,18 +116,19 @@ pub fn git_read(cwd: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn remotes(checkout: &crate::forge::Checkout<'_>) -> Vec<(String, Repository)> {
-    crate::forge::checkout::remotes(checkout, remote)
+fn remotes(checkout: &crate::forge::Checkout<'_>, known: &[String]) -> Vec<(String, Repository)> {
+    crate::forge::checkout::remotes(checkout, |value| remote(known, value))
 }
 
-pub fn resolve(checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
+/// The repository gh would pick for the checkout, among remotes on GitHub hosts and `known`.
+pub fn resolve(checkout: &crate::forge::Checkout<'_>, known: &[String]) -> Option<Repository> {
     let default_host = std::env::var("GH_HOST").unwrap_or_else(|_| "github.com".into());
     if let Ok(value) = std::env::var("GH_REPO")
         && let Some(repository) = selector(&value, &default_host)
     {
         return Some(repository);
     }
-    let remotes = remotes(checkout);
+    let remotes = remotes(checkout, known);
     if remotes.is_empty() {
         return None;
     }
@@ -180,6 +180,28 @@ pub fn resolve(checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An Enterprise Server's name need not say GitHub: a remote on one that settings or a gh
+    /// login name is read, one on an unnamed server is not.
+    #[test]
+    fn a_remote_on_a_known_enterprise_server_names_its_repository() {
+        let known = ["code.acme.test".to_owned()];
+        let repository = Some(Repository {
+            host: "code.acme.test".into(),
+            owner: "team".into(),
+            name: "app".into(),
+        });
+        assert_eq!(
+            remote(&known, "git@code.acme.test:Team/App.git"),
+            repository
+        );
+        assert_eq!(
+            remote(&known, "https://code.acme.test/team/app.git"),
+            repository
+        );
+        assert_eq!(remote(&[], "git@code.acme.test:team/app.git"), None);
+        assert!(remote(&[], "git@github.com:team/app.git").is_some());
+    }
 
     #[test]
     fn a_file_page_names_the_revision_and_encodes_the_path() {
