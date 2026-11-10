@@ -370,7 +370,7 @@ impl TextSystemState {
             );
 
         if emoji {
-            for pixel in bytes.chunks_exact_mut(4) {
+            for pixel in bytes.as_chunks_mut::<4>().0 {
                 swap_rgba_pa_to_bgra(pixel);
             }
         }

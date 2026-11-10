@@ -639,8 +639,17 @@ pub extern "C" fn gpui_ios_text_range(kind: u32) -> TextRange {
     result.into()
 }
 
+/// The UTF-8 length of the text in `range`, copied into `bytes` when it fits.
+///
+/// # Safety
+///
+/// `bytes` is null or addresses `capacity` writable bytes for the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn gpui_ios_read_text(range: TextRange, bytes: *mut u8, capacity: usize) -> usize {
+pub unsafe extern "C" fn gpui_ios_read_text(
+    range: TextRange,
+    bytes: *mut u8,
+    capacity: usize,
+) -> usize {
     let Some(range) = range.range() else {
         return NOT_FOUND;
     };
@@ -654,7 +663,7 @@ pub extern "C" fn gpui_ios_read_text(range: TextRange, bytes: *mut u8, capacity:
         return NOT_FOUND;
     };
     if !bytes.is_null() && capacity >= text.len() {
-        // SAFETY: Swift supplies a writable buffer of `capacity` bytes.
+        // SAFETY: the caller supplies a writable buffer of `capacity` bytes.
         unsafe {
             std::ptr::copy_nonoverlapping(text.as_ptr(), bytes, text.len());
         }
