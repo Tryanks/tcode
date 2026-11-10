@@ -27,8 +27,9 @@ const REVIEW: &str = "review-";
 
 pub(super) fn capabilities(server: Server) -> PullRequestCapabilities {
     PullRequestCapabilities {
-        reply: server.replies(),
-        resolve: server.resolves(),
+        // Gitea's API replies to and resolves a review comment; Forgejo 17's has neither.
+        reply: server.gitea,
+        resolve: server.gitea,
         reactions: true,
         labels: true,
         request_changes: true,

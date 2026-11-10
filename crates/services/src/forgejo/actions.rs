@@ -98,8 +98,8 @@ impl Pull<'_> {
             PullRequestMergeMethod::Squash => "squash",
             PullRequestMergeMethod::Rebase => "rebase",
         };
-        // Gitea 1.26 renamed the body's fields to snake case; older Gitea and Forgejo take `Do`.
-        let field = if self.api.server(self.authority()).snake_case_merge() {
+        // Gitea's merge body names the style `do`, Forgejo's `Do`.
+        let field = if self.api.server(self.authority()).gitea {
             "do"
         } else {
             "Do"

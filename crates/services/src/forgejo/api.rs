@@ -30,38 +30,19 @@ pub(super) fn error(kind: ForgeErrorKind, description: impl Into<String>) -> For
     }
 }
 
-/// The software and version a server reports, where Forgejo and Gitea's APIs differ.
+/// Which of the two a server runs, where their APIs differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Server {
-    /// Gitea's `major.minor`; `None` for Forgejo, which reports its own numbering with a
-    /// `+gitea-` suffix, and for a server whose version could not be read.
-    gitea: Option<(u64, u64)>,
+    /// `false` for Forgejo, which reports its own numbering with a `+gitea-` suffix, and for a
+    /// server whose version could not be read.
+    pub(super) gitea: bool,
 }
 
 impl Server {
     pub(super) fn parse(version: &str) -> Self {
-        let gitea = (!version.contains("+gitea-"))
-            .then(|| {
-                let mut parts = version.split(['.', '+', '-']);
-                Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
-            })
-            .flatten();
-        Self { gitea }
-    }
-    fn at_least(&self, version: (u64, u64)) -> bool {
-        self.gitea.is_some_and(|gitea| gitea >= version)
-    }
-    /// Resolving review comments, added in Gitea 1.26.
-    pub(super) fn resolves(&self) -> bool {
-        self.at_least((1, 26))
-    }
-    /// Replying to a review comment, added in Gitea 1.27.
-    pub(super) fn replies(&self) -> bool {
-        self.at_least((1, 27))
-    }
-    /// Gitea 1.26 renamed the merge body's title and message fields to snake case.
-    pub(super) fn snake_case_merge(&self) -> bool {
-        self.at_least((1, 26))
+        Self {
+            gitea: !version.contains("+gitea-"),
+        }
     }
 }
 
@@ -392,7 +373,7 @@ impl Api {
                 Server::parse(version["version"].as_str().unwrap_or_default()),
                 3600,
             ),
-            Err(_) => (Server { gitea: None }, 60),
+            Err(_) => (Server { gitea: false }, 60),
         };
         self.servers.lock().unwrap().insert(
             authority.to_owned(),
