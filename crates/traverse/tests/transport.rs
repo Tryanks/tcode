@@ -1379,11 +1379,11 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
     assert!(identity.spaces.is_empty());
     assert!(!identity.pairing_enabled);
     let migrated = std::fs::read(dir.0.join(HOST_FILE)).unwrap();
-    let persisted: Value = serde_json::from_slice(&migrated).unwrap();
-    // Outside a group the file stays version 3, which older builds read.
-    assert_eq!(persisted["v"], 3);
+    let mut persisted: Value = serde_json::from_slice(&migrated).unwrap();
     assert_eq!(identity.policy_revision, 0);
-    // A version 3 file that had no policy revision yet loads with no group.
+    // A version 3 file, as releases before groups wrote it, that had no
+    // policy revision yet loads with no group.
+    persisted["v"] = 3.into();
     let mut older_v3 = persisted.clone();
     older_v3.as_object_mut().unwrap().remove("policy_revision");
     std::fs::write(
@@ -1394,10 +1394,6 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
     let v3 = HostIdentity::load_or_create(&dir.0, "Test Host").unwrap();
     assert_eq!(v3.policy_revision, 0);
     assert!(v3.group.is_none());
-    v3.save().unwrap();
-    let rewritten: Value =
-        serde_json::from_slice(&std::fs::read(dir.0.join(HOST_FILE)).unwrap()).unwrap();
-    assert_eq!(rewritten["v"], 3);
     // A space stored before spaces had a policy keeps what its members could
     // do then.
     let mut spaced = persisted.clone();
@@ -1409,18 +1405,8 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
         spaced.spaces[0].policy,
         tcode_protocol::SpacePolicy::unrestricted()
     );
-    let version = || -> Value {
-        serde_json::from_slice::<Value>(&std::fs::read(dir.0.join(HOST_FILE)).unwrap()).unwrap()
-            ["v"]
-            .clone()
-    };
-    spaced.save().unwrap();
-    assert_eq!(version(), 3);
-    // A policy an older build would drop on saving makes the file one it
-    // refuses instead.
     spaced.spaces[0].policy = tcode_protocol::SpacePolicy::new_space();
     spaced.save().unwrap();
-    assert_eq!(version(), 5);
     assert_eq!(
         HostIdentity::load_or_create(&dir.0, "Test Host")
             .unwrap()
