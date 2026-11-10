@@ -697,25 +697,35 @@ impl PiActor {
             &mut self.stdin,
             &json!({"id":"tcode-entries","type":"get_entries"}),
         )?;
+        // `wait_response` reports pi refusing a request as
+        // `AgentError::Provider`; the session itself has started. Any other
+        // error means pi is gone.
         match self.wait_response("tcode-entries").await {
             Ok(response) => self.entries_cursor = last_entry_id(&response),
-            Err(err) => log::debug!("pi get_entries unavailable: {err}"),
+            Err(AgentError::Provider(err)) => {
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message: format!("pi get_entries failed: {err}"),
+                    })
+                    .await;
+            }
+            Err(err) => return Err(err),
         }
 
         send_json(
             &mut self.stdin,
             &json!({"id":"tcode-commands","type":"get_commands"}),
         )?;
-        let commands = match self.wait_response("tcode-commands").await {
-            Ok(response) => map_commands(&response),
-            Err(err) => {
-                log::debug!("pi get_commands unavailable: {err}");
-                Vec::new()
-            }
+        let event = match self.wait_response("tcode-commands").await {
+            Ok(response) => AgentEvent::ProviderCommands {
+                commands: map_commands(&response),
+            },
+            Err(AgentError::Provider(err)) => AgentEvent::Warning {
+                message: format!("pi get_commands failed: {err}"),
+            },
+            Err(err) => return Err(err),
         };
-        self.events
-            .emit(AgentEvent::ProviderCommands { commands })
-            .await;
+        self.events.emit(event).await;
         Ok(())
     }
 
@@ -818,9 +828,11 @@ impl PiActor {
         match request {
             PiRequest::Entries { turn } => {
                 if !success {
-                    // The cursor names an entry this session lacks: start over.
-                    log::debug!("pi get_entries failed: {}", response_error(message));
-                    self.entries_cursor = None;
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: format!("pi get_entries failed: {}", response_error(message)),
+                        })
+                        .await;
                     return;
                 }
                 if let Some(cursor) = last_entry_id(message) {
