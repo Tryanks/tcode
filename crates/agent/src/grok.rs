@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use agent_client_protocol::{UntypedMessage, schema::v1 as acp};
 use serde_json::{Map, Value, json};
@@ -442,14 +442,7 @@ impl Grok {
         let index = prompt_index(checkpoint_id)?;
         if session.with_state(|state| state.turn().is_some()) {
             session.interrupt(session_id).await;
-            let deadline = Instant::now() + Duration::from_secs(30);
             while session.with_state(|state| state.turn().is_some()) {
-                if Instant::now() >= deadline {
-                    return Err(RewindFailure::new(
-                        RewindFailureReason::TurnRunning,
-                        "the cancelled turn did not end within 30 s".to_owned(),
-                    ));
-                }
                 smol::Timer::after(Duration::from_millis(25)).await;
             }
         }
