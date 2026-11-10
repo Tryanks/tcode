@@ -368,7 +368,7 @@ fn register_chromium_observer(pid: u32, application: AXUIElementRef) {
         let notification = CFString::new(notification_name);
         let code =
             add_chromium_notification(observer, application, notification.as_concrete_TypeRef());
-        if code != AX_SUCCESS && code != -25210 {
+        if code != AX_SUCCESS {
             log::debug!(
                 "Chromium AX notification {notification_name} was rejected for pid {pid}: {}",
                 ax_error_name(code)
@@ -1023,21 +1023,21 @@ fn ax_result(operation: &'static str, code: AXError) -> Result<(), AxFailure> {
 fn ax_error_name(code: AXError) -> &'static str {
     match code {
         0 => "success",
-        -25201 => "failure",
-        -25202 => "illegal argument",
-        -25203 => "invalid UI element",
-        -25204 => "invalid observer",
-        -25205 => "cannot complete",
-        -25206 => "attribute unsupported",
-        -25207 => "action unsupported",
-        -25208 => "notification unsupported",
-        -25209 => "not implemented",
-        -25210 => "notification already registered",
-        -25211 => "notification not registered",
-        -25212 => "API disabled",
-        -25213 => "no value",
-        -25214 => "parameterized attribute unsupported",
-        -25215 => "not enough precision",
+        -25200 => "failure",
+        -25201 => "illegal argument",
+        -25202 => "invalid UI element",
+        -25203 => "invalid observer",
+        -25204 => "cannot complete",
+        -25205 => "attribute unsupported",
+        -25206 => "action unsupported",
+        -25207 => "notification unsupported",
+        -25208 => "not implemented",
+        -25209 => "notification already registered",
+        -25210 => "notification not registered",
+        -25211 => "API disabled",
+        -25212 => "no value",
+        -25213 => "parameterized attribute unsupported",
+        -25214 => "not enough precision",
         _ => "unknown",
     }
 }
