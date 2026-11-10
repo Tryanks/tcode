@@ -43,7 +43,7 @@ const ELICITATION_URL_CANCEL_LABEL: &str = "Cancel";
 fn permission_params(value: &str, turn: bool) -> Result<Value, String> {
     let (sandbox, policy, reviewer) = match value {
         "ask" => ("workspace-write", "on-request", "user"),
-        "auto_review" | "guardian_subagent" => ("workspace-write", "on-request", "auto_review"),
+        "auto_review" => ("workspace-write", "on-request", "auto_review"),
         "read_only" => ("read-only", "on-request", "user"),
         "full_access" => ("danger-full-access", "never", "user"),
         value
@@ -73,11 +73,7 @@ fn permission_params(value: &str, turn: bool) -> Result<Value, String> {
 }
 
 fn requested_permission(selections: &[OptionSelection]) -> String {
-    match selection_str(selections, "permissions").as_deref() {
-        Some("guardian_subagent") => "auto_review".into(),
-        Some(value) => value.into(),
-        None => "ask".into(),
-    }
+    selection_str(selections, "permissions").unwrap_or_else(|| "ask".into())
 }
 
 fn effective_permission(result: &Value) -> String {
@@ -1139,22 +1135,7 @@ impl SessionActor for Actor {
             SessionCommand::SetOption { id, value } => {
                 if id == "permissions" {
                     let value = value.as_str().ok_or("Codex permissions must be a string")?;
-                    let value = if value == "guardian_subagent" {
-                        "auto_review"
-                    } else {
-                        value
-                    };
                     permission_params(value, true)?;
-                    let OptionDescriptor::Select { options, .. } = &self.permission_descriptor
-                    else {
-                        unreachable!()
-                    };
-                    if !options
-                        .iter()
-                        .any(|option| option.value == value && option.unavailable.is_none())
-                    {
-                        return Err(format!("Codex permission value is unavailable: {value}"));
-                    }
                     self.requested_permission = value.into();
                 } else if id == "reasoningEffort" {
                     self.effort = value.as_str().map(str::to_owned);
@@ -2096,12 +2077,12 @@ impl Actor {
             "threadId": self.thread_id,
             "input": user_input(text, attachments),
         });
-        if let Ok(permission) = permission_params(&self.requested_permission, true) {
-            params
-                .as_object_mut()
-                .expect("turn params")
-                .extend(permission.as_object().expect("permission params").clone());
-        }
+        let permission = permission_params(&self.requested_permission, true)
+            .expect("the thread start and SetOption accept only mappable permissions");
+        params
+            .as_object_mut()
+            .expect("turn params")
+            .extend(permission.as_object().expect("permission params").clone());
         if let Some(effort) = &effort {
             params["effort"] = json!(effort);
         }
@@ -4466,13 +4447,6 @@ mod tests {
                 ("profile:restricted", "on-request", "user", None),
             ] {
                 let (mut actor, events) = test_actor();
-                actor.permission_descriptor = permission_descriptor(
-                    &[
-                        json!({"id":"restricted","description":"Custom workspace rules","allowed":true}),
-                    ],
-                    "ask",
-                    &Value::Null,
-                );
                 actor
                     .handle_command(SessionCommand::SetOption {
                         id: "permissions".into(),
