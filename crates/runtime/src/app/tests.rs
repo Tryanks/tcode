@@ -8559,7 +8559,9 @@ fn deleting_a_project_ends_the_terminal_its_draft_left_running() {
         }
     });
 
-    state.update(cx, |state, cx| state.host.delete_project("doomed", cx));
+    state.update(cx, |state, cx| {
+        state.host.delete_project("doomed", cx).detach()
+    });
     cx.run_until(|state| {
         terminals.iter().all(|&terminal| {
             state
@@ -10212,7 +10214,7 @@ fn archived_revision_invalidates_sharing_facts_when_another_thread_or_draft_leav
     state.update(cx, |state, cx| {
         let before = state.archived_sessions();
         assert!(before.worktree_shared.contains("owner"));
-        state.delete_session("fork", false, cx);
+        state.delete_session("fork", false, cx).detach();
         let after = state.archived_sessions();
         assert!(after.revision > before.revision);
         assert!(!after.worktree_shared.contains("owner"));

@@ -1625,18 +1625,29 @@ impl AppState {
     /// their metas and event logs in one transaction, and (when
     /// `remove_worktree`) remove each git worktree they own that no remaining
     /// thread works in. A worktree they own that is not removed is recorded as
-    /// kept, so the startup sweep leaves it.
-    pub fn delete_session(&mut self, session_id: &str, remove_worktree: bool, cx: &mut HostCx) {
+    /// kept, so the startup sweep leaves it. Their uploads are removed off
+    /// the host, and the task returned ends when they are gone.
+    pub fn delete_session(
+        &mut self,
+        session_id: &str,
+        remove_worktree: bool,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<(), ProtocolError>> {
         let mut ids = descendant_session_ids(&self.sessions, session_id);
         if ids.is_empty() {
             ids.push(session_id.to_string());
         }
-        self.delete_session_ids(&ids, remove_worktree, cx);
+        self.delete_session_ids(&ids, remove_worktree, cx)
     }
 
-    fn delete_session_ids(&mut self, ids: &[String], remove_worktree: bool, cx: &mut HostCx) {
+    fn delete_session_ids(
+        &mut self,
+        ids: &[String],
+        remove_worktree: bool,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<(), ProtocolError>> {
         if ids.is_empty() {
-            return;
+            return cx.spawn_background(async { Ok(()) });
         }
         let deleted: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let metas: Vec<_> = self
@@ -1728,7 +1739,7 @@ impl AppState {
         }
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         self.persist_settings(cx);
-        self.remove_thread_uploads(ids.to_vec(), cx);
+        let uploads = self.remove_thread_uploads(ids.to_vec(), cx);
         for (deleted_id, root, cwd) in worktree_removals {
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
@@ -1751,11 +1762,17 @@ impl AppState {
                 });
             });
         }
+        uploads
     }
 
     /// Permanently remove a project and all of its threads from tcode. Project
-    /// files and worktrees on disk are left in place.
-    pub fn delete_project(&mut self, project_id: &str, cx: &mut HostCx) {
+    /// files and worktrees on disk are left in place. The task returned ends
+    /// when the threads' uploads are gone.
+    pub fn delete_project(
+        &mut self,
+        project_id: &str,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<(), ProtocolError>> {
         let session_ids: Vec<String> = self
             .sessions
             .iter()
@@ -1772,7 +1789,7 @@ impl AppState {
         for id in &drafts {
             self.shutdown_active(id, cx);
         }
-        self.remove_thread_uploads(drafts, cx);
+        let draft_uploads = self.remove_thread_uploads(drafts, cx);
         let draft_destination = ConversationDestination::ProjectDraft(project_id.to_string());
         self.terminal_workspaces.remove(&draft_destination);
         let mut ids = Vec::new();
@@ -1787,7 +1804,7 @@ impl AppState {
                 }
             }
         }
-        self.delete_session_ids(&ids, false, cx);
+        let uploads = self.delete_session_ids(&ids, false, cx);
         self.enqueue_store_write(StoreWrite::RemoveProject(project_id.to_string()), cx);
         self.settings
             .collapsed_projects
@@ -1795,16 +1812,26 @@ impl AppState {
         self.persist_settings(cx);
         self.projects.retain(|project| project.id != project_id);
         self.replace_external_import_status(project_id, None, cx);
+        cx.spawn_background(async move {
+            let drafts = draft_uploads.await;
+            uploads.await.and(drafts)
+        })
     }
 
-    fn remove_thread_uploads(&self, session_ids: Vec<String>, cx: &mut HostCx) {
+    fn remove_thread_uploads(
+        &self,
+        session_ids: Vec<String>,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<(), ProtocolError>> {
         let directories = self.user_directories.clone();
-        let uploads = cx.unblock(move || directories.remove_thread_uploads(&session_ids));
-        HostCx::spawn_detached(cx, async move {
-            if let Err(error) = uploads.await {
-                log::warn!("could not remove a deleted thread's uploads: {error}");
-            }
-        });
+        cx.unblock(move || {
+            directories
+                .remove_thread_uploads(&session_ids)
+                .map_err(|error| ProtocolError {
+                    code: "uploads_not_removed".into(),
+                    message: format!("could not remove a deleted thread's uploads: {error}"),
+                })
+        })
     }
 
     /// Whether `session_id` owns live or queued work.

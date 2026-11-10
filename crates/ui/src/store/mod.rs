@@ -5922,9 +5922,9 @@ pub(crate) mod tests {
                 Vec::new(),
             )
         });
-        smol::block_on(
-            host.update_state_for_test(|state, cx| state.delete_session("deleted", false, cx)),
-        )
+        smol::block_on(host.update_state_for_test(|state, cx| {
+            state.delete_session("deleted", false, cx).detach()
+        }))
         .unwrap();
         workspace.update(cx, |store, cx| {
             store.receive(

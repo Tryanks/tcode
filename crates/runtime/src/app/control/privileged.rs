@@ -374,7 +374,12 @@ impl AppState {
                 });
                 continue;
             }
-            self.delete_session(&target, remove_worktree, &mut cx);
+            let uploads = self.delete_session(&target, remove_worktree, &mut cx);
+            cx.spawn_detached(async move {
+                if let Err(error) = uploads.await {
+                    log::warn!("{}", error.message);
+                }
+            });
             self.audit(
                 caller,
                 &caller.thread_id,

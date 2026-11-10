@@ -301,12 +301,11 @@ fn uploads_land_in_the_scratch_directory_and_leave_with_their_thread() {
         remove_worktree: false,
     })
     .unwrap();
-    let uploads = today.join("uploads").join(&session_id);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while uploads.exists() && std::time::Instant::now() < deadline {
-        std::thread::yield_now();
-    }
-    assert!(!uploads.exists(), "the thread's uploads leave with it");
+    // The deletion is answered once the thread's uploads are gone.
+    assert!(
+        !today.join("uploads").join(&session_id).exists(),
+        "the thread's uploads leave with it"
+    );
     assert!(today.is_dir(), "quick threads work in the day's folder");
     host.shutdown_blocking().unwrap();
     std::fs::remove_dir_all(root).unwrap();

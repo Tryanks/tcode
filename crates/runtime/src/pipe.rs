@@ -1068,8 +1068,18 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::DeleteSession {
             session_id,
             remove_worktree,
-        } => app.delete_session(&session_id, remove_worktree, cx),
-        Command::DeleteProject { project_id } => app.delete_project(&project_id, cx),
+        } => {
+            let uploads = app.delete_session(&session_id, remove_worktree, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { uploads.await.map(|()| CommandResponse::Unit) }),
+            );
+        }
+        Command::DeleteProject { project_id } => {
+            let uploads = app.delete_project(&project_id, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { uploads.await.map(|()| CommandResponse::Unit) }),
+            );
+        }
         Command::MarkSessionUnread { session_id } => app.mark_session_unread(&session_id, cx),
         Command::MarkSessionRead {
             session_id,
