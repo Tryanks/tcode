@@ -54,8 +54,6 @@ struct Zoomed {
 /// How a zoom of the column leaves one pane.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PaneZoom {
-    /// A pane of the column is zoomed in, so the column is that pane alone.
-    pub(crate) zoomed: bool,
     /// The pane is drawn over the column, its slot holding a placeholder.
     pub(crate) overlaid: bool,
     /// Another pane is drawn over this one.
@@ -77,7 +75,6 @@ impl Zoom {
     /// How a zoom leaves `pane` now.
     pub(crate) fn of(&self, pane: &Entity<ThreadPanel>) -> PaneZoom {
         PaneZoom {
-            zoomed: self.is_zoomed(),
             overlaid: self.pane() == Some(pane),
             beneath: self.pane().is_some_and(|zoomed| zoomed != pane),
         }

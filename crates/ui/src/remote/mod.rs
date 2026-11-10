@@ -165,10 +165,6 @@ impl ClientAttachment {
         self.request.clone()
     }
 
-    pub fn hosts(&self) -> Vec<PairedHost> {
-        self.host.load_hosts()
-    }
-
     pub fn save_host(&self, host: PairedHost) {
         self.host.remember_host(host);
     }
