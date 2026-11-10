@@ -72,7 +72,7 @@ pub fn list_roots(filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> 
         }
         let bundle_id = identifiers
             .entry(pid)
-            .or_insert_with(|| ax::application_identifier(pid))
+            .or_insert_with(|| ax::bundle_identifier(pid).unwrap_or_default())
             .clone();
         let mut root = RootInfo {
             ref_id: String::new(),

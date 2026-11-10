@@ -187,17 +187,9 @@ impl Target {
     }
 }
 
-pub(super) fn application_identifier(pid: u32) -> String {
-    if let Some(identifier) = running_application_identifier(pid) {
-        return identifier;
-    }
-    let Some(application) = create_application(pid) else {
-        return String::new();
-    };
-    attribute_string(application.as_ax(), "AXIdentifier").unwrap_or_default()
-}
-
-fn running_application_identifier(pid: u32) -> Option<String> {
+/// The bundle identifier of the application running as `pid`; `None` for a
+/// process without one.
+pub(super) fn bundle_identifier(pid: u32) -> Option<String> {
     // SAFETY: all selectors and return types below are stable Foundation/AppKit
     // APIs. The autorelease pool bounds temporary Objective-C objects created
     // on the MCP runtime thread.
