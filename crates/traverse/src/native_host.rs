@@ -202,7 +202,7 @@ impl NativeClientHost {
     fn write_prefs(&self, prefs: &serde_json::Value) {
         let result = serde_json::to_vec_pretty(prefs)
             .map_err(io::Error::other)
-            .and_then(|bytes| write_private(&self.data_dir, "mobile.json", &bytes));
+            .and_then(|bytes| write_private(&self.data_dir, &self.prefs_path(), &bytes));
         if let Err(error) = result {
             log::error!("could not write mobile.json: {error}");
         }
@@ -639,20 +639,10 @@ fn system_host_name() -> Option<String> {
     None
 }
 
-fn write_private(data_dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+/// Replace `path` in `data_dir` whole, as the other files of the profile are.
+fn write_private(data_dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::create_dir_all(data_dir)?;
-    let path = data_dir.join(name);
-    let mut options = fs::OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    use io::Write as _;
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
+    crate::identity::write_private(path, bytes)
 }
 
 struct FileOutbox {
@@ -675,14 +665,7 @@ impl tcode_client::outbox::Storage for FileOutbox {
         entries: &[tcode_client::outbox::Entry],
     ) -> Result<(), tcode_protocol::ProtocolError> {
         let bytes = serde_json::to_vec(entries).map_err(tcode_client::outbox::storage_error)?;
-        let temporary = format!("{}.tmp", self.name);
-        write_private(&self.data_dir, &temporary, &bytes)
-            .and_then(|()| {
-                fs::rename(
-                    self.data_dir.join(&temporary),
-                    self.data_dir.join(&self.name),
-                )
-            })
+        write_private(&self.data_dir, &self.data_dir.join(&self.name), &bytes)
             .map_err(tcode_client::outbox::storage_error)
     }
 }
