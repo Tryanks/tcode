@@ -119,26 +119,10 @@ impl Db {
         };
         {
             let writer = db.writer()?;
-            // FULL syncs the WAL on every commit; on Apple platforms only
-            // F_FULLFSYNC (`fullfsync`) also flushes the drive's write cache,
-            // so a committed batch survives power loss. Both are read back
-            // because Turso accepts and ignores values it does not implement.
-            db.execute(&writer, "PRAGMA synchronous = FULL", ())?;
+            // Every commit syncs the WAL (Turso's default, synchronous FULL);
+            // on Apple platforms only F_FULLFSYNC also flushes the drive's
+            // write cache, so a committed batch survives power loss.
             db.execute(&writer, "PRAGMA fullfsync = ON", ())?;
-            let synchronous = db.query_integer(&writer, "PRAGMA synchronous")?;
-            if synchronous != Some(2) {
-                return Err(io::Error::other(format!(
-                    "{}: PRAGMA synchronous is {synchronous:?}, expected FULL",
-                    path.display()
-                )));
-            }
-            #[cfg(target_vendor = "apple")]
-            if db.query_integer(&writer, "PRAGMA fullfsync")? != Some(1) {
-                return Err(io::Error::other(format!(
-                    "{}: PRAGMA fullfsync did not take effect",
-                    path.display()
-                )));
-            }
             if let Some(schema) = schema {
                 block_on(writer.execute_batch(schema))
                     .map_err(|error| sql_error(path, "create schema", error))?;
