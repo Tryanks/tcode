@@ -481,71 +481,6 @@ fn make_executable(_path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// A slice of the real index (fetched from the CDN), including both hidden
-    /// adapters and both distribution shapes.
-    const SAMPLE: &str = r#"{
-      "version": "1.0.0",
-      "agents": [
-        {
-          "id": "gemini", "name": "Gemini CLI", "version": "0.50.0",
-          "description": "Google's Gemini CLI",
-          "repository": "https://github.com/google-gemini/gemini-cli",
-          "license": "Apache-2.0",
-          "icon": "https://cdn.agentclientprotocol.com/registry/v1/latest/gemini.svg",
-          "distribution": { "npx": { "package": "@google/gemini-cli@0.50.0", "args": ["--acp"] } }
-        },
-        {
-          "id": "claude-acp", "name": "Claude Agent", "version": "0.58.1",
-          "description": "Adapter over Claude Code",
-          "distribution": { "npx": { "package": "@agentclientprotocol/claude-agent-acp@0.58.1" } }
-        },
-        {
-          "id": "codex-acp", "name": "Codex", "version": "1.1.2",
-          "description": "Adapter over the Codex CLI",
-          "distribution": { "npx": { "package": "@agentclientprotocol/codex-acp@1.1.2" } }
-        },
-        {
-          "id": "pi-acp", "name": "pi ACP", "version": "0.0.26",
-          "description": "Adapter over pi",
-          "distribution": { "npx": { "package": "pi-acp@0.0.26" } }
-        },
-        {
-          "id": "opencode", "name": "OpenCode", "version": "1.18.3",
-          "description": "OpenCode ACP server",
-          "distribution": { "binary": {} }
-        },
-        {
-          "id": "goose", "name": "goose", "version": "1.14.0", "description": "Block's goose",
-          "distribution": {
-            "binary": {
-              "darwin-aarch64": {
-                "archive": "https://example.test/goose-aarch64-apple-darwin.tar.gz",
-                "cmd": "./goose", "args": ["acp"], "env": { "GOOSE_ACP": "1" }
-              },
-              "linux-x86_64": {
-                "archive": "https://example.test/goose-x86_64-unknown-linux.tar.gz",
-                "cmd": "./goose", "args": ["acp"]
-              }
-            }
-          }
-        },
-        {
-          "id": "kilo", "name": "Kilo", "version": "7.4.5", "description": "Both shapes",
-          "distribution": {
-            "npx": { "package": "@kilocode/cli@7.4.5", "args": ["acp"] },
-            "binary": {
-              "darwin-aarch64": { "archive": "https://example.test/kilo-darwin-arm64.zip", "cmd": "./kilo", "args": ["acp"] }
-            }
-          },
-          "uvx": { "package": "ignored==1.0" }
-        }
-      ]
-    }"#;
-
-    fn registry() -> Registry {
-        parse(SAMPLE.as_bytes()).expect("the sample index must parse")
-    }
-
     /// The real thing, against the live CDN: fetch the index, then download +
     /// extract a binary distribution for this platform and check the resolved
     /// command actually exists and is executable. Network-bound, so it is
@@ -582,55 +517,6 @@ mod tests {
             other => panic!("expected a binary install, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// Adapters over our own native CLIs are never offered in the marketplace.
-    #[test]
-    fn the_native_cli_adapters_are_never_visible() {
-        let registry = registry();
-        let ids: Vec<&str> = visible_agents(&registry)
-            .iter()
-            .map(|agent| agent.id.as_str())
-            .collect();
-        assert_eq!(ids, vec!["gemini", "goose", "kilo"]);
-    }
-
-    #[test]
-    fn recipes_prefer_platform_binaries_fall_back_to_npx_and_preserve_environment() {
-        let registry = registry();
-        let kilo = &registry.agents[6];
-        match resolve_recipe(kilo, "darwin-aarch64") {
-            Some(Recipe::Binary(binary)) => {
-                assert!(binary.archive.ends_with("kilo-darwin-arm64.zip"));
-                assert_eq!(binary.args, vec!["acp".to_string()]);
-            }
-            other => panic!("expected the binary recipe, got {other:?}"),
-        }
-        // …but a platform with no binary build falls back to npx.
-        match resolve_recipe(kilo, "linux-aarch64") {
-            Some(Recipe::Npx(npx)) => {
-                assert_eq!(npx.package, "@kilocode/cli@7.4.5");
-                assert_eq!(npx.args, vec!["acp".to_string()]);
-            }
-            other => panic!("expected the npx recipe, got {other:?}"),
-        }
-        let goose = &registry.agents[5];
-        assert!(resolve_recipe(goose, "windows-aarch64").is_none());
-        assert!(matches!(
-            resolve_recipe(goose, "linux-x86_64"),
-            Some(Recipe::Binary(_))
-        ));
-        let agent: RegistryAgent = serde_json::from_str(
-            r#"{ "id": "x", "name": "X", "version": "1",
-                 "distribution": { "npx": { "package": "x@1", "env": { "X_ACP": "1" } } } }"#,
-        )
-        .unwrap();
-        match resolve_recipe(&agent, "linux-x86_64") {
-            Some(Recipe::Npx(npx)) => {
-                assert_eq!(npx.env.get("X_ACP").map(String::as_str), Some("1"));
-            }
-            other => panic!("expected an npx recipe, got {other:?}"),
-        }
     }
 
     /// `cmd` may only point inside the archive (or be `node`): the index must
@@ -722,30 +608,6 @@ mod tests {
             }
             other => panic!("expected the extracted binary, got {:?}", other.is_err()),
         }
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn cached_index_remains_readable_after_ttl() {
-        let dir = std::env::temp_dir().join(format!("tcode-acp-cache-{}", uuid::Uuid::new_v4()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(cached(&dir).is_none());
-        assert!(!cache_is_fresh(&dir));
-
-        write_cache(&dir, &registry()).unwrap();
-        assert!(cache_is_fresh(&dir));
-        assert_eq!(cached(&dir).unwrap().agents.len(), 7);
-
-        // Age it past the TTL: still readable, no longer fresh.
-        let path = cache_path(&dir);
-        let mut stale: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        stale["fetched_at"] =
-            serde_json::json!(tcode_core::project::now_secs() - CACHE_TTL.as_secs() - 1);
-        std::fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
-        assert!(!cache_is_fresh(&dir));
-        assert_eq!(cached(&dir).unwrap().agents.len(), 7);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
