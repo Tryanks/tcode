@@ -1,8 +1,4 @@
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum LinkTarget {
@@ -38,28 +34,6 @@ impl LinkTarget {
             Self::Local(path) => cx.open_with_system(&path),
             Self::Thread(anchor) => window.dispatch_action(Box::new(anchor), cx),
         }
-    }
-}
-
-#[derive(Default)]
-pub(super) struct LinkTargetCache {
-    entries: RefCell<HashMap<String, LinkTarget>>,
-}
-
-impl LinkTargetCache {
-    pub(super) fn resolve(&self, url: &str, base_dir: Option<&Path>) -> LinkTarget {
-        if let Some(target) = self.entries.borrow().get(url) {
-            return target.clone();
-        }
-        let target = resolve_link(url, base_dir);
-        self.entries
-            .borrow_mut()
-            .insert(url.to_string(), target.clone());
-        target
-    }
-
-    pub(super) fn clear(&mut self) {
-        self.entries.get_mut().clear();
     }
 }
 

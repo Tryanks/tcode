@@ -24,7 +24,7 @@ use std::time::Instant;
 use web_time::Instant;
 
 use super::{
-    link_target::{LinkTarget, LinkTargetCache},
+    link_target::LinkTarget,
     mermaid,
     nodes::{BlockNode, TextPosition},
     render::{self, RootItem},
@@ -78,7 +78,6 @@ pub struct MarkdownState {
     pub(super) base_dir: Option<PathBuf>,
     pub(super) image_host: crate::store::ImageHost,
     pub(super) image_resolver: Option<ImageResolver>,
-    link_targets: LinkTargetCache,
     /// The block the pointer is over, whose actions (a formula's, a
     /// diagram's) fade in.
     pub(super) hover: crate::motion::ListHover,
@@ -167,7 +166,6 @@ impl MarkdownState {
             base_dir: None,
             image_host: crate::store::ImageHost::NONE,
             image_resolver: None,
-            link_targets: LinkTargetCache::default(),
             hover: crate::motion::ListHover::new(crate::material::HOVER),
             pending_context: None,
             copied: CopiedMark::default(),
@@ -358,7 +356,6 @@ impl MarkdownState {
             return;
         }
         self.base_dir = base_dir;
-        self.link_targets.clear();
         cx.notify();
     }
 
@@ -379,7 +376,7 @@ impl MarkdownState {
     }
 
     pub(super) fn resolve_link(&self, url: &str) -> LinkTarget {
-        self.link_targets.resolve(url, self.base_dir())
+        super::link_target::resolve_link(url, self.base_dir())
     }
 
     /// The image drawn in the text. A host file is drawn from its largest preview, whose key
@@ -489,7 +486,6 @@ impl MarkdownState {
     }
 
     pub(super) fn set_math_source(&mut self, path: &str, source: bool, cx: &mut Context<Self>) {
-        self.prepare_reparse();
         // The formula's text becomes its source or its glyphs, so a
         // selection's offsets in it would land elsewhere.
         if let Some(membership) = &self.selection {
@@ -569,12 +565,7 @@ impl MarkdownState {
         cx.notify();
     }
 
-    fn prepare_reparse(&mut self) {
-        self.link_targets.clear();
-    }
-
     fn reparse_append(&mut self, cx: &mut Context<Self>) {
-        self.prepare_reparse();
         let mut reparse_start = self.incremental_reparse_start();
         let mut parsed_document = super::parse::parse_document(&self.text[reparse_start..]);
         if reparse_start > 0 && parsed_document.defines_links {
@@ -709,7 +700,6 @@ impl MarkdownState {
         self.image_sizes.clear();
         self.glides.borrow_mut().clear();
         render::clear_code_measurements(cx.entity_id(), cx);
-        self.prepare_reparse();
         let parsed_document = super::parse::parse_document(&self.text);
         self.items = root_items(&parsed_document.root);
         self.parsed = Rc::new(parsed_document.root);
@@ -992,8 +982,6 @@ pub(super) struct PaintedRun {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, process, time::SystemTime};
-
     use gpui::{
         AppContext as _, Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext,
         Window, div, px,
@@ -1073,65 +1061,6 @@ mod tests {
                 });
             }
         }
-    }
-
-    #[gpui::test]
-    fn link_target_cache_tracks_document_content_and_base_dir(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(super::super::init);
-        let nonce = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("clock should be after Unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "tcode-markdown-state-link-cache-{}-{nonce}",
-            process::id()
-        ));
-        let first_base = root.join("first");
-        let second_base = root.join("second");
-        fs::create_dir_all(&first_base).expect("create first base directory");
-        fs::create_dir_all(&second_base).expect("create second base directory");
-        let path = first_base.join("linked.md");
-        fs::write(&path, b"linked").expect("create linked file");
-
-        let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("[link](linked.md)", cx)));
-        state.update(cx, |state, cx| {
-            state.set_base_dir(Some(first_base.clone()), cx);
-            assert_eq!(
-                state.resolve_link("linked.md"),
-                LinkTarget::Local(path.clone())
-            );
-        });
-
-        fs::remove_file(&path).expect("remove linked file");
-        state.update(cx, |state, cx| {
-            assert_eq!(
-                state.resolve_link("linked.md"),
-                LinkTarget::Local(path.clone())
-            );
-            state.set_text("changed [link](linked.md)", cx);
-            assert_eq!(
-                state.resolve_link("linked.md"),
-                LinkTarget::Web("linked.md".to_string())
-            );
-        });
-
-        fs::write(&path, b"linked again").expect("recreate linked file");
-        state.update(cx, |state, cx| {
-            assert_eq!(
-                state.resolve_link("linked.md"),
-                LinkTarget::Web("linked.md".to_string())
-            );
-            state.set_base_dir(Some(second_base), cx);
-            assert_eq!(
-                state.resolve_link("linked.md"),
-                LinkTarget::Web("linked.md".to_string())
-            );
-            state.set_base_dir(Some(first_base), cx);
-            assert_eq!(state.resolve_link("linked.md"), LinkTarget::Local(path));
-        });
-
-        fs::remove_dir_all(root).expect("remove temporary directory");
     }
 
     /// Drag from `start` to `end` and read what the view's document holds.
