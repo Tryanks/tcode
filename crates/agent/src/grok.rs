@@ -395,11 +395,12 @@ impl Grok {
     ) -> Result<RewindPreview, RewindFailure> {
         let index = prompt_index(checkpoint_id)?;
         let response = execute_rewind(&session.connection, session_id, index, mode, false).await?;
-        let conflicts: Vec<RewindConflict> = list(&response, "conflicts", "conflicts")
+        let conflicts: Vec<RewindConflict> = list(&response, "conflicts")
             .filter_map(|conflict| {
                 Some(RewindConflict {
                     path: conflict.get("path")?.as_str()?.to_owned(),
-                    kind: field(conflict, "conflict_type", "conflictType")
+                    kind: conflict
+                        .get("conflict_type")
                         .and_then(|kind| serde_json::from_value(kind.clone()).ok())
                         .unwrap_or(RewindConflictKind::Other),
                 })
@@ -408,11 +409,11 @@ impl Grok {
         // A dry run never succeeds; its error is a refusal unless it only
         // names the conflicts it lists.
         if conflicts.is_empty()
-            && let Some(error) = field(&response, "error", "error").and_then(Value::as_str)
+            && let Some(error) = response.get("error").and_then(Value::as_str)
         {
             return Err(refusal(error));
         }
-        let files = list(&response, "clean_files", "cleanFiles")
+        let files = list(&response, "clean_files")
             .filter_map(Value::as_str)
             .map(RewindFile::path)
             .chain(
@@ -448,17 +449,16 @@ impl Grok {
         }
         self.check_numbering(session, session_id, index).await?;
         let response = execute_rewind(&session.connection, session_id, index, mode, true).await?;
-        if field(&response, "success", "success").and_then(Value::as_bool) != Some(true) {
-            let error = field(&response, "error", "error")
+        if response.get("success").and_then(Value::as_bool) != Some(true) {
+            let error = response
+                .get("error")
                 .and_then(Value::as_str)
                 .unwrap_or("Grok did not rewind");
-            return Err(
-                if list(&response, "conflicts", "conflicts").next().is_some() {
-                    RewindFailure::new(RewindFailureReason::Conflicts, error.to_owned())
-                } else {
-                    refusal(error)
-                },
-            );
+            return Err(if list(&response, "conflicts").next().is_some() {
+                RewindFailure::new(RewindFailureReason::Conflicts, error.to_owned())
+            } else {
+                refusal(error)
+            });
         }
         if mode.includes_conversation() {
             // The conversation now ends before prompt `index`, which the next
@@ -470,14 +470,15 @@ impl Grok {
         Ok(AgentEvent::RewindCompleted {
             checkpoint_id: checkpoint_id.to_owned(),
             mode,
-            prefill: field(&response, "prompt_text", "promptText")
+            prefill: response
+                .get("prompt_text")
                 .and_then(Value::as_str)
                 .filter(|_| mode.includes_conversation())
                 .map(str::to_owned),
             prefill_attachments: Vec::new(),
             later_history: LaterHistory::Truncated,
             files: mode.includes_files().then(|| RewindFiles {
-                files: list(&response, "reverted_files", "revertedFiles")
+                files: list(&response, "reverted_files")
                     .filter_map(Value::as_str)
                     .map(RewindFile::path)
                     .collect(),
@@ -1251,11 +1252,11 @@ async fn rewind_points(
         })
         .block_task()
         .await?;
-    let response = unwrapped(response);
-    Ok(list(&response, "rewind_points", "rewindPoints")
+    Ok(list(&response, "rewind_points")
         .filter_map(|point| {
-            let index = field(point, "prompt_index", "promptIndex")?.as_u64()?;
-            let preview = field(point, "prompt_preview", "promptPreview")
+            let index = point.get("prompt_index")?.as_u64()?;
+            let preview = point
+                .get("prompt_preview")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             Some((usize::try_from(index).ok()?, preview))
@@ -1288,25 +1289,12 @@ async fn execute_rewind(
         })
         .block_task()
         .await
-        .map(unwrapped)
         .map_err(|err| RewindFailure::new(RewindFailureReason::Other, describe(&err)))
 }
 
-/// An extension response, which Grok's pager also accepts wrapped in `result`.
-fn unwrapped(response: Value) -> Value {
-    match response.get("result") {
-        Some(result) => result.clone(),
-        None => response,
-    }
-}
-
-/// A response field Grok names in snake_case, or its camelCase alias.
-fn field<'a>(value: &'a Value, snake: &str, camel: &str) -> Option<&'a Value> {
-    value.get(snake).or_else(|| value.get(camel))
-}
-
-fn list<'a>(value: &'a Value, snake: &str, camel: &str) -> impl Iterator<Item = &'a Value> {
-    field(value, snake, camel)
+fn list<'a>(value: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
+    value
+        .get(key)
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
