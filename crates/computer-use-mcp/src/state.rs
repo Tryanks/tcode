@@ -2,7 +2,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::backend::RootInfo;
 use crate::outline::{
@@ -106,29 +107,20 @@ pub struct OutputPage {
     pub eof: bool,
 }
 
-#[derive(Debug)]
+/// State and output ids are unique across every session's store, so an id a
+/// model still holds from another registration of its thread never names a
+/// different state.
+static NEXT_STATE: AtomicU64 = AtomicU64::new(1);
+static NEXT_OUTPUT: AtomicU64 = AtomicU64::new(1);
+
+/// One session's observations and output pages.
+#[derive(Debug, Default)]
 pub struct StateStore {
-    next_state: u64,
-    next_output: u64,
     observations: HashMap<String, Arc<Observation>>,
     observation_lru: VecDeque<String>,
     harness_histories: HashMap<String, HarnessHistory>,
     outputs: HashMap<String, OutputEntry>,
     output_lru: VecDeque<String>,
-}
-
-impl Default for StateStore {
-    fn default() -> Self {
-        Self {
-            next_state: 1,
-            next_output: 1,
-            observations: HashMap::new(),
-            observation_lru: VecDeque::new(),
-            harness_histories: HashMap::new(),
-            outputs: HashMap::new(),
-            output_lru: VecDeque::new(),
-        }
-    }
 }
 
 impl StateStore {
@@ -149,8 +141,7 @@ impl StateStore {
 
         let harness_annotation = self.record_harness_observation(&root, &tree);
 
-        let state_id = format!("S{}", self.next_state);
-        self.next_state += 1;
+        let state_id = format!("S{}", NEXT_STATE.fetch_add(1, Ordering::Relaxed));
         let observation = Arc::new(Observation {
             state_id: state_id.clone(),
             root,
@@ -231,8 +222,7 @@ impl StateStore {
         text: impl Into<Arc<str>>,
         initial_offset: usize,
     ) -> String {
-        let output_ref = format!("@o{}", self.next_output);
-        self.next_output += 1;
+        let output_ref = format!("@o{}", NEXT_OUTPUT.fetch_add(1, Ordering::Relaxed));
         self.outputs.insert(
             output_ref.clone(),
             OutputEntry {
@@ -574,12 +564,6 @@ fn touch(lru: &mut VecDeque<String>, key: &str) {
     lru.push_back(key.to_string());
 }
 
-static STORE: OnceLock<Mutex<StateStore>> = OnceLock::new();
-
-pub fn global() -> &'static Mutex<StateStore> {
-    STORE.get_or_init(|| Mutex::new(StateStore::default()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,16 +598,19 @@ mod tests {
     fn lru_evicts_least_recently_used_observation() {
         let mut store = StateStore::default();
         let first = store.insert_observation(root(1), tree("one"));
-        for window_id in 2..=OBSERVATION_CAPACITY as u32 {
+        let second = store.insert_observation(root(2), tree("Window 2"));
+        for window_id in 3..=OBSERVATION_CAPACITY as u32 {
             store.insert_observation(root(window_id), tree(&format!("Window {window_id}")));
         }
         store.get(&first.state_id).unwrap();
         let newest =
             store.insert_observation(root(OBSERVATION_CAPACITY as u32 + 1), tree("newest"));
         assert!(store.get(&first.state_id).is_ok());
-        assert!(store.get("S2").is_err());
         assert!(store.get(&newest.state_id).is_ok());
-        assert!(matches!(store.get("S2"), Err(StateError::Evicted(_))));
+        assert!(matches!(
+            store.get(&second.state_id),
+            Err(StateError::Evicted(_))
+        ));
         assert!(store.harness_histories.contains_key(&root(1).identity()));
         assert!(!store.harness_histories.contains_key(&root(2).identity()));
         assert_eq!(store.harness_histories.len(), OBSERVATION_CAPACITY);

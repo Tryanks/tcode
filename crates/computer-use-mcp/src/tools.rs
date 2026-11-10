@@ -19,6 +19,7 @@ use crate::backend::{
     RootFilters, RootInfo, RootObservation,
 };
 use crate::outline::{self, UiNode};
+use crate::state::StateStore;
 
 pub use crate::backend::{ActionKind as UiActionKind, MouseButton, RootKind};
 
@@ -185,14 +186,19 @@ struct WaitForParams {
 pub struct ComputerUseTools {
     tool_router: ToolRouter<Self>,
     feedback: Arc<crate::feedback::FeedbackSession>,
+    states: Arc<Mutex<StateStore>>,
 }
 
 #[tool_router]
 impl ComputerUseTools {
-    fn new(feedback: Arc<crate::feedback::FeedbackSession>) -> Self {
+    fn new(
+        feedback: Arc<crate::feedback::FeedbackSession>,
+        states: Arc<Mutex<StateStore>>,
+    ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             feedback,
+            states,
         }
     }
 
@@ -228,7 +234,7 @@ impl ComputerUseTools {
                 root.frame.h
             ));
         }
-        bounded_success(None, lines.join("\n"), Vec::new())
+        bounded_success(&self.states, None, lines.join("\n"), Vec::new())
     }
 
     #[tool(
@@ -269,7 +275,11 @@ impl ComputerUseTools {
             Ok(observed) => observed,
             Err(error) => return backend_error(error),
         };
-        save_observation(observed, capture_warning(config.image_mode, &permissions))
+        save_observation(
+            &self.states,
+            observed,
+            capture_warning(config.image_mode, &permissions),
+        )
     }
 
     #[tool(
@@ -278,7 +288,7 @@ impl ComputerUseTools {
                        Oversized results return a preview and continuation ref for read_text."
     )]
     async fn search_ui(&self, Parameters(params): Parameters<SearchUiParams>) -> CallToolResult {
-        let observation = match crate::state::global().lock().unwrap().get(&params.state_id) {
+        let observation = match self.states.lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
         };
@@ -300,7 +310,12 @@ impl ComputerUseTools {
                 outline::render_line(result.node, 0)
             ));
         }
-        bounded_success(Some(&observation.state_id), lines.join("\n"), Vec::new())
+        bounded_success(
+            &self.states,
+            Some(&observation.state_id),
+            lines.join("\n"),
+            Vec::new(),
+        )
     }
 
     #[tool(
@@ -309,7 +324,7 @@ impl ComputerUseTools {
                        Oversized results return a preview and continuation ref for read_text."
     )]
     async fn expand_ui(&self, Parameters(params): Parameters<ExpandUiParams>) -> CallToolResult {
-        let observation = match crate::state::global().lock().unwrap().get(&params.state_id) {
+        let observation = match self.states.lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
         };
@@ -319,6 +334,7 @@ impl ComputerUseTools {
             Err(error) => return tool_error(&error),
         };
         bounded_success(
+            &self.states,
             Some(&observation.state_id),
             format!("state_id: {}\n{expanded}", observation.state_id),
             Vec::new(),
@@ -331,7 +347,7 @@ impl ComputerUseTools {
                        Oversized results return a preview and continuation ref for read_text."
     )]
     async fn inspect_ui(&self, Parameters(params): Parameters<InspectUiParams>) -> CallToolResult {
-        let observation = match crate::state::global().lock().unwrap().get(&params.state_id) {
+        let observation = match self.states.lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
         };
@@ -353,7 +369,7 @@ impl ComputerUseTools {
             "children_error": node.children_error,
         });
         let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-        bounded_success(Some(&observation.state_id), text, Vec::new())
+        bounded_success(&self.states, Some(&observation.state_id), text, Vec::new())
     }
 
     #[tool(
@@ -381,7 +397,7 @@ impl ComputerUseTools {
                 "observe-only mode is enabled in Settings → Computer Use; input actions are disabled",
             );
         }
-        let previous = match crate::state::global().lock().unwrap().get(&params.state_id) {
+        let previous = match self.states.lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
         };
@@ -427,7 +443,7 @@ impl ComputerUseTools {
                 break;
             }
         }
-        crate::state::global()
+        self.states
             .lock()
             .unwrap()
             .record_actions(&previous.root, action_descriptions);
@@ -459,7 +475,8 @@ impl ComputerUseTools {
                 );
             }
         };
-        let successor = crate::state::global()
+        let successor = self
+            .states
             .lock()
             .unwrap()
             .insert_observation(successor.root, successor.tree);
@@ -500,7 +517,7 @@ impl ComputerUseTools {
         if feedback.is_current() {
             feedback.complete();
         }
-        bounded_success(Some(&successor.state_id), text, Vec::new())
+        bounded_success(&self.states, Some(&successor.state_id), text, Vec::new())
     }
 
     #[tool(
@@ -514,7 +531,7 @@ impl ComputerUseTools {
             Err(_) => return tool_error("offset is too large for this platform"),
         };
         let page = if params.r#ref.starts_with("@o") {
-            crate::state::global().lock().unwrap().read_output(
+            self.states.lock().unwrap().read_output(
                 &params.r#ref,
                 params.state_id.as_deref(),
                 offset,
@@ -523,7 +540,7 @@ impl ComputerUseTools {
             let Some(state_id) = params.state_id.as_deref() else {
                 return tool_error("state_id is required when reading an @e element ref");
             };
-            crate::state::global().lock().unwrap().page_element_text(
+            self.states.lock().unwrap().page_element_text(
                 state_id,
                 &params.r#ref,
                 offset.unwrap_or(0),
@@ -545,6 +562,7 @@ impl ComputerUseTools {
             )
         };
         bounded_success(
+            &self.states,
             page.owner_state.as_deref(),
             format!(
                 "ref: {}\nstate_id: {}\noffset: {}\nnext_offset: {}\ntotal_bytes: {}\neof: {}\n{}\n---\n{}",
@@ -576,7 +594,7 @@ impl ComputerUseTools {
         if let Some(result) = permission_gate(permissions, true, false) {
             return result;
         }
-        let previous = match crate::state::global().lock().unwrap().get(&params.state_id) {
+        let previous = match self.states.lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
         };
@@ -590,7 +608,8 @@ impl ComputerUseTools {
             Ok(waited) => waited,
             Err(error) => return backend_error(error),
         };
-        let successor = crate::state::global()
+        let successor = self
+            .states
             .lock()
             .unwrap()
             .insert_observation(observed.root, observed.tree);
@@ -605,7 +624,7 @@ impl ComputerUseTools {
         let mut text = serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string());
         text.push('\n');
         text.push_str(&outline::render_folded(&successor.tree));
-        bounded_success(Some(&successor.state_id), text, Vec::new())
+        bounded_success(&self.states, Some(&successor.state_id), text, Vec::new())
     }
 }
 
@@ -650,9 +669,12 @@ impl ServerHandler for ComputerUseTools {
 
 pub type Service = StreamableHttpService<ComputerUseTools, LocalSessionManager>;
 
+/// One registration's endpoint. Its observations are its own: another
+/// thread's calls neither read nor evict them.
 pub(crate) fn service(feedback: Arc<crate::feedback::FeedbackSession>) -> Service {
+    let states = Arc::new(Mutex::new(StateStore::default()));
     StreamableHttpService::new(
-        move || Ok(ComputerUseTools::new(feedback.clone())),
+        move || Ok(ComputerUseTools::new(feedback.clone(), states.clone())),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     )
@@ -852,7 +874,11 @@ fn capture_warning(
     None
 }
 
-fn save_observation(observed: RootObservation, warning: Option<&str>) -> CallToolResult {
+fn save_observation(
+    states: &Mutex<StateStore>,
+    observed: RootObservation,
+    warning: Option<&str>,
+) -> CallToolResult {
     let RootObservation {
         root,
         tree,
@@ -860,10 +886,7 @@ fn save_observation(observed: RootObservation, warning: Option<&str>) -> CallToo
         screenshot,
         screenshot_mime,
     } = observed;
-    let observation = crate::state::global()
-        .lock()
-        .unwrap()
-        .insert_observation(root, tree);
+    let observation = states.lock().unwrap().insert_observation(root, tree);
     let mut text = format!(
         "state_id: {}\nroot: {} app=\"{}\" title=\"{}\"\nelements: {} interactive: {}",
         observation.state_id,
@@ -893,7 +916,7 @@ fn save_observation(observed: RootObservation, warning: Option<&str>) -> CallToo
         })
         .into_iter()
         .collect();
-    bounded_success(Some(&observation.state_id), text, extra)
+    bounded_success(states, Some(&observation.state_id), text, extra)
 }
 
 fn prepare_action(tree: &UiNode, action: &UiAction) -> Result<ActionRequest, String> {
@@ -1078,14 +1101,12 @@ fn escaped(value: &str) -> String {
 }
 
 fn bounded_success(
+    states: &Mutex<StateStore>,
     owner_state: Option<&str>,
     text: String,
     mut extra: Vec<ContentBlock>,
 ) -> CallToolResult {
-    let text = crate::state::global()
-        .lock()
-        .unwrap()
-        .bound_model_text(owner_state, text);
+    let text = states.lock().unwrap().bound_model_text(owner_state, text);
     let mut content = vec![ContentBlock::text(text)];
     content.append(&mut extra);
     CallToolResult::success(content)
@@ -1179,7 +1200,8 @@ mod observation_tests {
             assert_eq!(policy, expected);
             let screenshot = policy.should_capture(true).then(|| vec![0xff, 0xd8, 0xff]);
             let warning = capture_warning(configured, &permissions);
-            let result = save_observation(sparse_observation(screenshot), warning);
+            let states = Mutex::new(StateStore::default());
+            let result = save_observation(&states, sparse_observation(screenshot), warning);
             assert!(
                 matches!(&result.content[0], ContentBlock::Text(text) if text.text.contains("text_sparse: true"))
             );

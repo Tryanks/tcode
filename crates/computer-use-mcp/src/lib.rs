@@ -24,7 +24,8 @@
 //! # Contract
 //!
 //! - Every `@e` ref belongs to the `state_id` that produced it. Observations
-//!   are immutable and kept in a bounded LRU (default 8); acting from an
+//!   are immutable and kept in a bounded LRU (default 8) of the session's
+//!   own, which no other thread's calls evict; acting from an
 //!   evicted state is rejected and the model must observe again. A step
 //!   whose target's live role or title no longer matches the state fails.
 //! - `act_ui` reports `worked` / `didnt` / `unknown` per step, stops at the
