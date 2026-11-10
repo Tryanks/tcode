@@ -16,12 +16,8 @@ pub const OUTPUT_CAPACITY: usize = 32;
 const RECENT_ACTION_CAPACITY: usize = 8;
 const CANDIDATE_TARGET_CAPACITY: usize = 64;
 const DELTA_ENTRY_CAPACITY: usize = 16;
-const STABLE_LABEL_CAPACITY: usize = 3_000;
-const STABLE_LABEL_MAX_BYTES: usize = 512;
 const DISPLAY_LABEL_MAX_CHARS: usize = 160;
 const DISPLAY_LABEL_MAX_BYTES: usize = 200;
-const ROLE_MAX_BYTES: usize = 48;
-const ACTION_DESCRIPTION_MAX_BYTES: usize = 256;
 
 #[derive(Debug)]
 pub struct Observation {
@@ -200,9 +196,7 @@ impl StateStore {
     ) {
         let history = self.harness_histories.entry(root.identity()).or_default();
         for description in descriptions {
-            history
-                .recent_actions
-                .push_back(truncate_plain(&description, ACTION_DESCRIPTION_MAX_BYTES));
+            history.recent_actions.push_back(description);
             while history.recent_actions.len() > RECENT_ACTION_CAPACITY {
                 history.recent_actions.pop_front();
             }
@@ -371,7 +365,7 @@ pub(crate) fn harness_action_description(
             description.push('"');
         }
     }
-    truncate_plain(&description, ACTION_DESCRIPTION_MAX_BYTES)
+    description
 }
 
 fn harness_annotation(
@@ -409,27 +403,19 @@ fn harness_annotation(
     lines.extend(harness_delta_lines(current_labels, Some(initial_labels)));
     lines.push("</state_delta>".to_string());
     lines.push("</computer_use_harness>".to_string());
-    let annotation = lines.join("\n");
-    debug_assert!(annotation.len() <= MAX_MODEL_BYTES);
-    annotation
+    lines.join("\n")
 }
 
 fn stable_labels(root: &UiNode) -> Vec<StableLabel> {
     fn visit(node: &UiNode, seen: &mut HashSet<String>, labels: &mut Vec<StableLabel>) {
-        if labels.len() >= STABLE_LABEL_CAPACITY {
-            return;
-        }
         if let Some(display) = stable_label(node) {
-            let key = truncate_plain(&display.to_lowercase(), STABLE_LABEL_MAX_BYTES);
+            let key = display.to_lowercase();
             if seen.insert(key.clone()) {
                 labels.push(StableLabel { key, display });
             }
         }
         for child in &node.children {
             visit(child, seen, labels);
-            if labels.len() >= STABLE_LABEL_CAPACITY {
-                break;
-            }
         }
     }
 
@@ -468,8 +454,7 @@ fn choose_label(title: &str, description: &str, value: Option<&str>) -> Option<S
 }
 
 fn normalize_label(value: &str) -> String {
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    truncate_plain(&normalized, STABLE_LABEL_MAX_BYTES)
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn candidate_target_lines(root: &UiNode) -> Vec<String> {
@@ -478,12 +463,14 @@ fn candidate_target_lines(root: &UiNode) -> Vec<String> {
             return;
         }
         if node.is_interactive() {
-            let ref_id = truncate_plain(&node.ref_id, 32);
-            let role = truncate_plain(&canonical_role(&node.role), ROLE_MAX_BYTES);
             let label = candidate_label(node)
                 .map(|label| display_label(&label))
                 .unwrap_or_default();
-            lines.push(format!("- {ref_id} {role} \"{label}\""));
+            lines.push(format!(
+                "- {} {} \"{label}\"",
+                node.ref_id,
+                canonical_role(&node.role)
+            ));
         }
         for child in &node.children {
             visit(child, lines);
