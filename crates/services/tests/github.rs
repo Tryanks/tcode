@@ -27,7 +27,7 @@ fn real_git_checkouts_resolve_the_gh_default_remote() {
         "remote",
         "add",
         "origin",
-        "git@github-work:ForkOwner/project.git",
+        "git@github.com:ForkOwner/project.git",
     ]);
     git(&[
         "remote",
@@ -44,14 +44,14 @@ fn real_git_checkouts_resolve_the_gh_default_remote() {
             .owner,
         "sample"
     );
+    // gh honours the mark over its ranking of remote names, whatever else the checkout has.
     git(&["config", "--unset", "remote.upstream.gh-resolved"]);
     git(&["config", "remote.origin.gh-resolved", "base"]);
     assert_eq!(
         repository::resolve(&tcode_services::forge::Checkout::new(&subdirectory))
             .unwrap()
             .owner,
-        "sample",
-        "mixed hosts and SSH aliases reject the strict gh mark and use the host-ranked remote"
+        "forkowner"
     );
     let _ = std::fs::remove_dir_all(root);
 }

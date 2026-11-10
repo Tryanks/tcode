@@ -70,7 +70,7 @@ pub fn pull_request_url(value: &str) -> Option<(PullRequestKey, String)> {
     Some((repository.key(number), repository.url(number)))
 }
 
-fn remote(value: &str) -> Option<(Repository, String)> {
+fn remote(value: &str) -> Option<Repository> {
     let ssh = value.starts_with("ssh://") || value.starts_with("git@");
     let value = value
         .strip_prefix("ssh://")
@@ -87,7 +87,6 @@ fn remote(value: &str) -> Option<(Repository, String)> {
         value.replacen(':', "/", 1)
     };
     let (host, path) = value.split_once('/')?;
-    let literal_host = host.to_ascii_lowercase();
     let host = if ssh && !host.contains('.') && host.to_ascii_lowercase().contains("github") {
         "github.com"
     } else {
@@ -100,7 +99,7 @@ fn remote(value: &str) -> Option<(Repository, String)> {
     {
         return None;
     }
-    Some((selector(&format!("{host}/{path}"), host)?, literal_host))
+    selector(&format!("{host}/{path}"), host)
 }
 
 pub fn git_read(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -116,7 +115,7 @@ pub fn git_read(cwd: &Path, args: &[&str]) -> Option<String> {
 }
 
 fn remotes(checkout: &crate::forge::Checkout<'_>) -> Vec<(String, Repository)> {
-    crate::forge::checkout::remotes(checkout, |url| Some(remote(url)?.0))
+    crate::forge::checkout::remotes(checkout, remote)
 }
 
 pub fn resolve(checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
@@ -126,50 +125,51 @@ pub fn resolve(checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
     {
         return Some(repository);
     }
-    let fetch = checkout.remotes();
     let remotes = remotes(checkout);
     if remotes.is_empty() {
         return None;
     }
+    // gh's order: upstream, github, origin, then the rest as Git lists them.
+    let rank = |name: &str| {
+        ["upstream", "github", "origin"]
+            .iter()
+            .position(|rank| name.eq_ignore_ascii_case(rank))
+            .unwrap_or(99)
+    };
+    let mut ranked: Vec<_> = remotes.iter().collect();
+    ranked.sort_by_key(|(name, _)| rank(name));
+    // As in gh, the first remote in that order that `gh repo set-default` marked names the
+    // repository: itself for `base`, else the owner and name the mark holds.
     let marks = git_read(
         checkout.cwd(),
         &["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"],
     )
     .unwrap_or_default();
-    let marked: Vec<_> = marks
-        .lines()
-        .filter_map(|line| {
+    let mark = |remote: &str| {
+        marks.lines().find_map(|line| {
             let (key, value) = line.split_once(char::is_whitespace)?;
             let name = key.strip_prefix("remote.")?.strip_suffix(".gh-resolved")?;
-            let (_, repository) = remotes.iter().find(|(n, _)| n == name)?;
-            if value.trim() == "base" {
-                Some(repository.clone())
-            } else {
-                selector(value, &repository.host)
-            }
+            (name == remote).then(|| value.trim().to_owned())
         })
-        .collect();
+    };
+    if let Some(marked) = ranked.iter().find_map(|(name, repository)| {
+        let value = mark(name)?;
+        if value == "base" {
+            Some(repository.clone())
+        } else {
+            selector(&value, &repository.host)
+        }
+    }) {
+        return Some(marked);
+    }
     let host = remotes
         .iter()
         .find(|(name, _)| name == "origin")
         .or_else(|| remotes.first())
         .map(|(_, repository)| repository.host.as_str())
         .unwrap_or(&default_host);
-    if marked.len() == 1
-        && fetch
-            .iter()
-            .all(|(_, url)| remote(url).is_some_and(|(_, literal_host)| literal_host == host))
-    {
-        return marked.into_iter().next();
-    }
-    remotes
-        .iter()
-        .filter(|(_, repository)| repository.host == host)
-        .min_by_key(|(name, _)| {
-            ["upstream", "github", "origin"]
-                .iter()
-                .position(|rank| name.eq_ignore_ascii_case(rank))
-                .unwrap_or(99)
-        })
+    ranked
+        .into_iter()
+        .find(|(_, repository)| repository.host == host)
         .map(|(_, repository)| repository.clone())
 }
