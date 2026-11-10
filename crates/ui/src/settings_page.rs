@@ -3826,8 +3826,15 @@ mod tests {
             HostServices::default(),
         )
         .unwrap();
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(host.link(), WorkspaceAttachment::Local, None, None, cx)
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                cx,
+            )
         });
         let window_state = cx.new(|_| WindowState::default());
         let mut page_handle = None;
@@ -3856,7 +3863,7 @@ mod tests {
             assert!(custom.right() <= body.right());
             assert!(body.bottom() < px(height));
         }
-        crate::store::tests::shutdown_test_host(cx, &store, &host);
+        driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3869,8 +3876,15 @@ mod tests {
             HostServices::default(),
         )
         .expect("spawn settings test host");
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(host.link(), WorkspaceAttachment::Local, None, None, cx)
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                cx,
+            )
         });
         let window_state = cx.new(|_| WindowState::default().with_compact(true));
         let (probe, cx) = cx.add_window_view(|window, cx| {
@@ -3997,7 +4011,7 @@ mod tests {
             crate::window_state::Destination::Settings
         );
 
-        crate::store::tests::shutdown_test_host(cx, &store, &host);
+        driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4128,8 +4142,15 @@ mod tests {
 
         // No blocking seed: this is the portable client's timeline, where the
         // first snapshot lands after the page already exists.
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(host.link(), WorkspaceAttachment::Local, None, None, cx)
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                cx,
+            )
         });
         let window_state = cx.new(|_| WindowState::default());
         let (page, cx) = cx.add_window_view(|window, cx| {
@@ -4146,23 +4167,9 @@ mod tests {
             );
         });
 
-        // The host answers from its own thread; keep draining until the page
-        // hydrates rather than a fixed number of turns, so a slow CI runner
-        // cannot race the first snapshot.
-        let drain = |cx: &mut VisualTestContext| {
-            let deadline = crate::store::tests::host_deadline();
-            loop {
-                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-                cx.run_until_parked();
-                if page.read_with(cx, |page, _| page.hydrated)
-                    || std::time::Instant::now() >= deadline
-                {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        };
-        drain(cx);
+        driver.wait_until(cx, &store, "the page to hydrate", |cx| {
+            page.read_with(cx, |page, _| page.hydrated)
+        });
 
         page.read_with(cx, |page, cx| {
             assert!(page.hydrated);
@@ -4186,29 +4193,21 @@ mod tests {
             assert!(page.home_url_input.dirty, "a typed value is a user edit");
         });
 
-        crate::store::tests::await_with_events(
-            cx,
-            &store,
-            host.link().command(tcode_protocol::Command::PatchSettings {
-                patch: SettingsPatch::BrowserHomeUrl(Some("https://elsewhere.example".into())),
-            }),
-        )
-        .expect("patch settings");
-        let deadline = crate::store::tests::host_deadline();
-        loop {
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-            cx.run_until_parked();
-            if store.read_with(cx, |store, _| {
+        let link = driver.link.clone();
+        driver
+            .await_with_events(
+                cx,
+                &store,
+                link.command(tcode_protocol::Command::PatchSettings {
+                    patch: SettingsPatch::BrowserHomeUrl(Some("https://elsewhere.example".into())),
+                }),
+            )
+            .expect("patch settings");
+        driver.wait_until(cx, &store, "the later settings snapshot", |cx| {
+            store.read_with(cx, |store, _| {
                 store.settings().browser.home_url.as_deref() == Some("https://elsewhere.example")
-            }) {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "later settings snapshot did not arrive"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+            })
+        });
 
         page.read_with(cx, |page, cx| {
             assert_eq!(
@@ -4218,7 +4217,7 @@ mod tests {
             );
         });
 
-        crate::store::tests::shutdown_test_host(cx, &store, &host);
+        driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 

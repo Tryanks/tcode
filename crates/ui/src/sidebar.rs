@@ -8251,24 +8251,17 @@ mod tests {
             ),
         ];
         let wait_for_rows =
-            |cx: &mut VisualTestContext, driver: &mut crate::store::tests::LocalHostDriver| {
-                let deadline = crate::store::tests::host_deadline();
-                loop {
-                    driver.step(cx, &store);
-                    draw(cx);
-                    let rows: Vec<_> = selectors
-                        .iter()
-                        .filter_map(|(row, _)| cx.debug_bounds(row))
-                        .collect();
-                    if rows.len() == selectors.len() {
-                        return rows;
-                    }
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "thread rows never rendered"
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+            |cx: &mut VisualTestContext, driver: &mut crate::store::tests::LocalHostDriver| loop {
+                driver.step(cx, &store);
+                draw(cx);
+                let rows: Vec<_> = selectors
+                    .iter()
+                    .filter_map(|(row, _)| cx.debug_bounds(row))
+                    .collect();
+                if rows.len() == selectors.len() {
+                    return rows;
                 }
+                driver.wait_for_host("the thread rows");
             };
 
         let set_marks =
@@ -8276,17 +8269,10 @@ mod tests {
              enabled: bool,
              driver: &mut crate::store::tests::LocalHostDriver| {
                 store.update(cx, |store, _| store.set_sidebar_provider_marks(enabled));
-                let deadline = crate::store::tests::host_deadline();
-                while store.read_with(cx, |store, _| store.settings().sidebar_provider_marks)
-                    != enabled
-                {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "setting never replicated"
-                    );
-                    driver.step(cx, &store);
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
+                driver.wait_until(cx, &store, "the setting to replicate", |cx| {
+                    store.read_with(cx, |store, _| store.settings().sidebar_provider_marks)
+                        == enabled
+                });
             };
 
         // Off by default: rows render without a mark.
@@ -8572,24 +8558,18 @@ mod tests {
             for collapsed in [true, false] {
                 let header = cx.debug_bounds("compact-group-header").unwrap();
                 cx.simulate_click(header.center(), gpui::Modifiers::default());
-                let deadline = crate::store::tests::host_deadline();
-                loop {
-                    driver.step(cx, &store);
-                    draw(cx);
-                    let any_collapsed = store.read_with(cx, |store, _| {
-                        seeded
-                            .iter()
-                            .any(|project| store.is_project_collapsed(&project.id))
-                    });
-                    if any_collapsed == collapsed {
-                        break;
-                    }
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "project toggle reaches the replica"
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
+                driver.wait_until(
+                    cx,
+                    &store,
+                    "the project toggle to reach the replica",
+                    |cx| {
+                        store.read_with(cx, |store, _| {
+                            seeded
+                                .iter()
+                                .any(|project| store.is_project_collapsed(&project.id))
+                        }) == collapsed
+                    },
+                );
                 draw_settled(cx);
                 let visible = ["compact-row-thread-0", "compact-row-thread-1"]
                     .into_iter()

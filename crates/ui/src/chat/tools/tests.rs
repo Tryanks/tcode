@@ -998,19 +998,9 @@ fn a_shortened_output_loads_whole_when_asked(cx: &mut TestAppContext) {
     click(cx, "activity-row-long");
     assert!(shows(cx, "load-output-long"), "the preview offers the rest");
     click(cx, "load-output-long");
-    let store = thread.store.clone();
-    thread
-        .driver
-        .wait_until(cx, &store, "the whole output", |_| true);
-    let deadline = crate::store::tests::host_deadline();
-    while shows(cx, "load-output-long") {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the output never loaded"
-        );
-        thread.driver.step(cx, &store);
-        draw_settled(cx);
-    }
+    step_until(&mut thread, "the whole output", cx, |cx| {
+        !shows(cx, "load-output-long")
+    });
     click(cx, "tool-text-long-output-more");
     assert!(shows(cx, "tool-text-long-output"));
     thread.shutdown(cx);
@@ -1156,20 +1146,10 @@ fn a_shortened_commands_output_loads_into_its_grid(cx: &mut TestAppContext) {
         "the preview holds the start: {preview}"
     );
     click(cx, "load-output-long");
-    let store = thread.store.clone();
     // Loaded, the grid ends on the command's last line.
-    let deadline = crate::store::tests::host_deadline();
-    loop {
-        thread.driver.step(cx, &store);
-        draw_settled(cx);
-        if copied_output("long", cx).ends_with("line 600 of the run") {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the output never loaded into the grid"
-        );
-    }
+    step_until(&mut thread, "the output in the grid", cx, |cx| {
+        copied_output("long", cx).ends_with("line 600 of the run")
+    });
     assert!(!shows(cx, "tool-text-long-output"), "no text view");
     scroll_output("long", 1_000., cx);
     let start = copied_output("long", cx);
@@ -1180,23 +1160,15 @@ fn a_shortened_commands_output_loads_into_its_grid(cx: &mut TestAppContext) {
     thread.shutdown(cx);
 }
 
-/// Steps the host until `done`, failing with `what` after a few seconds.
+/// Steps the host until the window drawn at rest shows `what`.
 fn step_until(
     thread: &mut StoredThread,
     what: &str,
     cx: &mut VisualTestContext,
-    mut done: impl FnMut(&mut VisualTestContext) -> bool,
+    done: impl FnMut(&mut VisualTestContext) -> bool,
 ) {
     let store = thread.store.clone();
-    let deadline = crate::store::tests::host_deadline();
-    loop {
-        thread.driver.step(cx, &store);
-        draw_settled(cx);
-        if done(cx) {
-            return;
-        }
-        assert!(std::time::Instant::now() < deadline, "{what}");
-    }
+    thread.driver.settle_until(cx, &store, what, done);
 }
 
 /// A command that printed five thousand lines, its host's screen of them in
@@ -1212,7 +1184,7 @@ fn a_five_thousand_line_command_scrolls_to_its_first_line(cx: &mut TestAppContex
     let (mut thread, cx) = StoredThread::open(cx, &log, 1_024.);
     thread.open_work_log("count", cx);
     click(cx, "activity-row-count");
-    step_until(&mut thread, "the host's screen never came", cx, |cx| {
+    step_until(&mut thread, "the host's screen", cx, |cx| {
         copied_output("count", cx).ends_with("line 5000 of the run")
     });
     assert!(!shows(cx, "load-output-count"), "nothing left to load");
@@ -1248,7 +1220,7 @@ fn an_output_past_the_grids_ceiling_says_so_and_copies_whole(cx: &mut TestAppCon
     draw_settled(cx);
     click(cx, "menu-item-1");
     let whole = numbered(lines);
-    step_until(&mut thread, "Copy output never copied it all", cx, |cx| {
+    step_until(&mut thread, "the whole output copied", cx, |cx| {
         cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
             .as_deref()
             == Some(whole.as_str())
