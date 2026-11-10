@@ -223,7 +223,6 @@ fn plan_slugs(transcript: &Path) -> std::io::Result<Vec<String>> {
             continue;
         };
         if let Some(slug) = entry.get("slug").and_then(Value::as_str)
-            && is_file_name(slug)
             && !slugs.iter().any(|known| known == slug)
         {
             slugs.push(slug.to_owned());
