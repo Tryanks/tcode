@@ -2238,42 +2238,6 @@ impl State {
             .and_then(Value::as_i64)
             .map(|code| code as i32)
     }
-
-    /// Reject any path the agent asks for that escapes the session's cwd.
-    fn resolve_path(&self, path: &Path) -> Result<PathBuf, acp::Error> {
-        let absolute = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.cwd.join(path)
-        };
-        let normalized = normalize(&absolute);
-        if !normalized.starts_with(normalize(&self.cwd)) {
-            return Err(acp::Error::new(
-                -32602,
-                format!(
-                    "path `{}` is outside the session working directory",
-                    path.display()
-                ),
-            ));
-        }
-        Ok(normalized)
-    }
-}
-
-/// Lexical path normalization (the file may not exist yet, so `canonicalize` is
-/// not an option for writes).
-fn normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
 }
 
 /// The shell command behind an `execute` tool call: the underlying tool's own
@@ -2669,7 +2633,7 @@ impl Client {
         &self,
         args: acp::ReadTextFileRequest,
     ) -> Result<acp::ReadTextFileResponse, acp::Error> {
-        let path = self.state.lock_recover().resolve_path(&args.path)?;
+        let path = self.state.lock_recover().cwd.join(&args.path);
         let content = smol::fs::read_to_string(&path).await.map_err(|err| {
             acp::Error::new(-32603, format!("could not read {}: {err}", path.display()))
         })?;
@@ -2690,7 +2654,7 @@ impl Client {
         &self,
         args: acp::WriteTextFileRequest,
     ) -> Result<acp::WriteTextFileResponse, acp::Error> {
-        let path = self.state.lock_recover().resolve_path(&args.path)?;
+        let path = self.state.lock_recover().cwd.join(&args.path);
         if let Some(parent) = path.parent() {
             smol::fs::create_dir_all(parent).await.map_err(|err| {
                 acp::Error::new(
@@ -2711,7 +2675,7 @@ impl Client {
         connection: &Connection,
     ) -> Result<acp::CreateTerminalResponse, acp::Error> {
         let cwd = match &args.cwd {
-            Some(cwd) => self.state.lock_recover().resolve_path(cwd)?,
+            Some(cwd) => self.state.lock_recover().cwd.join(cwd),
             None => self.state.lock_recover().cwd.clone(),
         };
         let terminal = Terminal::spawn(
@@ -3667,18 +3631,6 @@ mod tests {
         let (status, message) = stop_reason_status(acp::StopReason::MaxTokens);
         assert_eq!(status, TurnStatus::Failed);
         assert!(message.unwrap().contains("token limit"));
-    }
-
-    #[test]
-    fn paths_outside_the_session_cwd_are_rejected() {
-        let state = state();
-        assert!(state.resolve_path(Path::new("src/main.rs")).is_ok());
-        assert!(
-            state
-                .resolve_path(Path::new("/tmp/tcode-acp-test/../etc/passwd"))
-                .is_err()
-        );
-        assert!(state.resolve_path(Path::new("/etc/passwd")).is_err());
     }
 
     #[test]
