@@ -503,9 +503,7 @@ impl Forgejo {
         let behind_by = if text(&pr, "merge_base").as_deref() == Some(base.as_str()) {
             Some(0)
         } else {
-            pull.get(&format!("compare/{head}...{base}"), "Compare")
-                .ok()
-                .and_then(|compare| compare["total_commits"].as_u64())
+            pull.get(&format!("compare/{head}...{base}"), "Compare")?["total_commits"].as_u64()
         };
         let permissions = &repository["permissions"];
         let writes = viewer.is_some()
