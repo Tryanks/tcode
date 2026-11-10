@@ -949,9 +949,9 @@ impl CommandPalette {
                 self.close(cx);
             }
             Action::ToggleTerminal => {
-                if let Some((store, session_id)) = self.current(cx) {
+                if let Some((store, Some(session_id))) = self.current(cx) {
                     store.update(cx, |store, cx| {
-                        store.toggle_terminal_panel_for(session_id.unwrap_or_default(), cx)
+                        store.toggle_terminal_panel_for(session_id, cx)
                     });
                 }
                 self.close(cx);
