@@ -135,11 +135,8 @@ impl Credentials {
         if let Some(cached) = cache.get(&key) {
             return cached.value.clone();
         }
-        let mut result = self.gh_token(&host, choice.account.as_deref());
-        if result == Err(CredentialError::NotSignedIn) && choice.account.is_some() {
-            result = self.gh_token(&host, None);
-        }
-        let value = result
+        let value = self
+            .gh_token(&host, choice.account.as_deref())
             .map(|token| Credential::new(host, token, CredentialSource::Cli { tool: "gh".into() }));
         let ttl = match &value {
             Ok(_) => 300,
@@ -370,18 +367,14 @@ impl Credentials {
                 let source = credential.map(|credential| credential.source);
                 // gh's login is the account chosen, else the one gh has active.
                 let login = match &source {
-                    Some(CredentialSource::Cli { .. }) => choice
-                        .account
-                        .clone()
-                        .filter(|account| accounts.contains(account))
-                        .or_else(|| {
-                            logins.into_iter().flatten().find_map(|login| {
-                                (login.get("active").and_then(|active| active.as_bool())
-                                    == Some(true))
-                                .then(|| login.get("login")?.as_str().map(str::to_owned))
-                                .flatten()
-                            })
-                        }),
+                    Some(CredentialSource::Cli { .. }) => choice.account.clone().or_else(|| {
+                        logins.into_iter().flatten().find_map(|login| {
+                            (login.get("active").and_then(|active| active.as_bool())
+                                == Some(true))
+                            .then(|| login.get("login")?.as_str().map(str::to_owned))
+                            .flatten()
+                        })
+                    }),
                     _ => login,
                 };
                 let env_overrides_account = matches!(source, Some(CredentialSource::Env { .. }))
