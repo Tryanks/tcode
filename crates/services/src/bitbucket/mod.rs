@@ -619,8 +619,14 @@ impl Forge for Bitbucket {
         let pr = self.pr(key);
         let read = pr.pr()?;
         let checks = pr.checks(&reads::head(&read).unwrap_or_default())?;
+        let ended_at =
+            if reads::state(&read) == Some(tcode_core::pull_request::PullRequestState::Open) {
+                None
+            } else {
+                pr.ended_at(&read)?
+            };
         let summary = Summary {
-            snapshot: reads::snapshot(&read, &checks, Self::now()).ok_or_else(|| {
+            snapshot: reads::snapshot(&read, &checks, ended_at, Self::now()).ok_or_else(|| {
                 error(
                     ForgeErrorKind::Uncertain,
                     "Bitbucket pull request unreadable",
