@@ -2621,12 +2621,7 @@ impl StreamTask {
     }
 
     async fn run(&self, mut send: SendStream, mut reader: LineReader) -> io::Result<()> {
-        let first = match wire::read_control::<ClientLine>(&mut reader).await {
-            Ok(first) => first,
-            Err(error) => {
-                return Err(error);
-            }
-        };
+        let first = wire::read_first::<ClientLine>(&mut reader, wire::MAX_CONTROL_LINE).await?;
         match first {
             ClientLine::Hello {
                 protocol_version,

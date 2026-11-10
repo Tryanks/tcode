@@ -5,8 +5,9 @@
 //! group; see [`crate::group`]. `tcode/1` is accepted only from a paired
 //! `EndpointId`; its first bi stream opens with `hello` and, after `hello_ok`,
 //! carries `ClientMessage`/`HostMessage` lines. Every control line is JSON
-//! terminated by `\n`, at most [`MAX_CONTROL_LINE`] bytes, and must arrive
-//! within [`CONTROL_TIMEOUT`].
+//! terminated by `\n` and at most [`MAX_CONTROL_LINE`] bytes, and must arrive
+//! within [`CONTROL_TIMEOUT`], except the first line of a stream a paired
+//! device opens on `tcode/1`.
 //!
 //! The protocol lines after `hello_ok` travel as one raw deflate stream per
 //! direction ([`LineWriter`], [`LineStream`]), sync-flushed after every line
@@ -247,9 +248,19 @@ pub async fn read_control_within<T: serde::de::DeserializeOwned>(
     reader: &mut LineReader,
     max: usize,
 ) -> io::Result<T> {
-    let line = tokio::time::timeout(CONTROL_TIMEOUT, read_line(reader, max))
+    tokio::time::timeout(CONTROL_TIMEOUT, read_first(reader, max))
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "control line timed out"))??
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "control line timed out"))?
+}
+
+/// Read a stream's first line of at most `max` bytes and decode it, for as
+/// long as the peer takes.
+pub async fn read_first<T: serde::de::DeserializeOwned>(
+    reader: &mut LineReader,
+    max: usize,
+) -> io::Result<T> {
+    let line = read_line(reader, max)
+        .await?
         .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no control line"))?;
     serde_json::from_str(&line).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
