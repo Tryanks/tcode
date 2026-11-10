@@ -18132,35 +18132,39 @@ pub(crate) mod tests {
         assert!(cx.debug_bounds("diff-line-new-stale.rs-1").is_none());
     }
 
-    #[test]
-    fn sidebar_overlay_follows_hover_only_on_collapsed_workspace_routes() {
-        for (current, transition, popover, visible) in [
-            (false, SidebarHoverTransition::Trigger(true), false, true),
-            (false, SidebarHoverTransition::Trigger(false), false, false),
-            (true, SidebarHoverTransition::Trigger(false), false, true),
-            (false, SidebarHoverTransition::Overlay(true), false, true),
-            (true, SidebarHoverTransition::Overlay(true), false, true),
-            (true, SidebarHoverTransition::Overlay(false), false, false),
-            (true, SidebarHoverTransition::Overlay(false), true, true),
-            (false, SidebarHoverTransition::Overlay(false), true, false),
-        ] {
-            assert_eq!(
-                next_sidebar_overlay_visibility(current, transition, true, Route::Chat, popover),
-                visible
-            );
-            assert!(!next_sidebar_overlay_visibility(
-                current,
-                transition,
-                false,
-                Route::Chat,
-                popover
-            ));
-            for route in [Route::Settings, Route::Hosts] {
-                assert!(!next_sidebar_overlay_visibility(
-                    current, transition, true, route, popover
-                ));
-            }
-        }
+    /// With the sidebar collapsed, the pointer at the window's left edge
+    /// brings the sidebar in over the chat; it stays while the pointer is on
+    /// it and goes once the pointer leaves it. Expanded, the sidebar is in
+    /// its column and the edge brings nothing.
+    #[gpui::test]
+    fn a_collapsed_sidebar_comes_in_from_the_edge_while_the_pointer_is_on_it(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (_shell, _host, cx) = mount_panes(cx);
+        let none = gpui::Modifiers::default();
+        let edge = gpui::point(px(4.), px(400.));
+        let overlay = |cx: &mut VisualTestContext| cx.debug_bounds("sidebar-hover-overlay");
+
+        cx.simulate_mouse_move(edge, None, none);
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(overlay(cx), None, "the sidebar is in its column");
+
+        cx.simulate_mouse_move(gpui::point(px(1000.), px(400.)), None, none);
+        cx.update(|_, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(overlay(cx), None);
+
+        cx.simulate_mouse_move(edge, None, none);
+        crate::test_frames::draw_settled(cx);
+        let shown = overlay(cx).expect("the edge brings the sidebar in");
+        cx.simulate_mouse_move(shown.center(), None, none);
+        crate::test_frames::draw_settled(cx);
+        assert!(overlay(cx).is_some(), "it stays while the pointer is on it");
+
+        cx.simulate_mouse_move(gpui::point(shown.right() + px(200.), px(400.)), None, none);
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(overlay(cx), None, "it goes once the pointer leaves it");
     }
 
     /// thread-1's timeline: a running turn holding a question, an agent
