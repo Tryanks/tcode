@@ -1424,10 +1424,6 @@ struct OpenedThread {
     warnings: Vec<String>,
 }
 
-/// Ids of the startup's `thread/turns/list` pages, clear of the ones
-/// [`initialize_and_open_thread`] numbers one by one.
-const FIRST_TURN_LIST_REQUEST: i64 = 1 << 32;
-
 async fn initialize_and_open_thread(
     opts: &SessionOptions,
     stdin: &mut BufWriter<ChildStdin>,
@@ -1438,22 +1434,7 @@ async fn initialize_and_open_thread(
     let cwd = opts.cwd.to_string_lossy();
     let permission = requested_permission(&opts.option_selections);
     let (method, mut params) = if let Some(resume) = &opts.resume {
-        let fork = match &opts.fork {
-            None => None,
-            Some(ForkPoint::Tail) => Some(None),
-            Some(ForkPoint::Before { checkpoint_id }) => {
-                let thread_id = resume_thread_id(resume)?;
-                Some(Some(
-                    turn_before(stdin, lines, thread_id, checkpoint_id).await?,
-                ))
-            }
-            Some(ForkPoint::Branch { .. }) => {
-                return Err(AgentError::Provider(
-                    "Codex keeps no branches to go on in".into(),
-                ));
-            }
-        };
-        resume_request(resume, fork, &cwd)?
+        resume_request(resume, opts.fork.as_ref(), &cwd)?
     } else {
         (
             "thread/start",
@@ -1539,74 +1520,30 @@ fn resume_thread_id(resume: &ResumeCursor) -> Result<&str, AgentError> {
     })
 }
 
-/// `fork` is the thread's resume as a fork, through the turn it names when
-/// it names one.
+/// `thread/resume`, or `thread/fork` when the session forks the thread.
 fn resume_request(
     resume: &ResumeCursor,
-    fork: Option<Option<String>>,
+    fork: Option<&ForkPoint>,
     cwd: &str,
 ) -> Result<(&'static str, Value), AgentError> {
     let mut params = json!({
         "threadId": resume_thread_id(resume)?,
         "cwd": cwd,
     });
-    if let Some(Some(last_turn_id)) = &fork {
-        params["lastTurnId"] = json!(last_turn_id);
-    }
-    Ok((
-        if fork.is_some() {
+    let method = match fork {
+        None => "thread/resume",
+        Some(ForkPoint::Tail) => "thread/fork",
+        Some(ForkPoint::Before { checkpoint_id }) => {
+            params["beforeTurnId"] = json!(checkpoint_id);
             "thread/fork"
-        } else {
-            "thread/resume"
-        },
-        params,
-    ))
-}
-
-/// The turn before `turn_id`, which `thread/fork` keeps through: it has no
-/// parameter for a fork before a turn. `thread/turns/list` knows the turns of
-/// the rollout a Tcode turn may not show, such as a compaction's, newest
-/// first.
-async fn turn_before(
-    stdin: &mut BufWriter<ChildStdin>,
-    lines: &Receiver<ChildOutput>,
-    thread_id: &str,
-    turn_id: &str,
-) -> Result<String, AgentError> {
-    let mut cursor = Value::Null;
-    let mut found = false;
-    for id in FIRST_TURN_LIST_REQUEST.. {
-        send_json(
-            stdin,
-            &json!({"id": id, "method": "thread/turns/list", "params": {
-                "threadId": thread_id, "cursor": cursor, "sortDirection": "desc",
-            }}),
-        )?;
-        let page = wait_for_response(lines, id).await?;
-        for turn in page
-            .get("data")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let id = turn.get("id").and_then(Value::as_str);
-            if found {
-                return id.map(str::to_owned).ok_or_else(|| {
-                    AgentError::Protocol(format!("Codex turn without an id: {turn}"))
-                });
-            }
-            found = id == Some(turn_id);
         }
-        cursor = page.get("nextCursor").cloned().unwrap_or(Value::Null);
-        if cursor.as_str().is_none_or(str::is_empty) {
-            break;
+        Some(ForkPoint::Branch { .. }) => {
+            return Err(AgentError::Provider(
+                "Codex keeps no branches to go on in".into(),
+            ));
         }
-    }
-    Err(AgentError::Provider(if found {
-        "Codex cannot fork before a thread's first turn".into()
-    } else {
-        format!("turn {turn_id} is not in Codex thread {thread_id}")
-    }))
+    };
+    Ok((method, params))
 }
 
 async fn request_permission_profiles(
@@ -4794,12 +4731,29 @@ mod tests {
         });
     }
 
+    /// A fork before a turn is `thread/fork` with `beforeTurnId`, which
+    /// `v2/ThreadForkParams.ts` of 0.167.0 defines as "fork before, excluding
+    /// that turn and all later turns"; ChatGPT.app 26.1103 sends it the same way.
     #[test]
     fn fork_request_uses_native_method_and_resume_thread_id() {
         let resume = ResumeCursor(json!({"thread_id": "thread-source"}));
-        let (method, params) = resume_request(&resume, Some(None), "/workspace").unwrap();
+        let (method, params) =
+            resume_request(&resume, Some(&ForkPoint::Tail), "/workspace").unwrap();
         assert_eq!(method, "thread/fork");
-        assert_eq!(params["threadId"], "thread-source");
+        assert_eq!(
+            params,
+            json!({"threadId": "thread-source", "cwd": "/workspace"})
+        );
+
+        let before = ForkPoint::Before {
+            checkpoint_id: "turn-2".into(),
+        };
+        let (method, params) = resume_request(&resume, Some(&before), "/workspace").unwrap();
+        assert_eq!(method, "thread/fork");
+        assert_eq!(
+            params,
+            json!({"threadId": "thread-source", "cwd": "/workspace", "beforeTurnId": "turn-2"})
+        );
 
         let (method, _) = resume_request(&resume, None, "/workspace").unwrap();
         assert_eq!(method, "thread/resume");
@@ -7456,64 +7410,6 @@ mod tests {
             tx.send(ChildOutput::Line(reply)).await.unwrap();
         }
         rx
-    }
-
-    /// A finished turn as `v2/Turn.ts` of the 0.167.0 schema shapes it.
-    fn turn(id: &str) -> Value {
-        json!({"id": id, "rootTurnId": null, "items": [], "itemsView": "summary",
-            "status": "completed", "error": null, "startedAt": 1767225600,
-            "completedAt": 1767225601, "durationMs": 1000})
-    }
-
-    /// `thread/fork` keeps through a turn, so a fork before a turn asks
-    /// `thread/turns/list` (newest first, page after page, as
-    /// `v2/ThreadTurnsListResponse.ts` of 0.167.0 pages it) for the turn
-    /// before it. The first turn has none, and a turn the thread does not
-    /// have is not guessed at.
-    #[test]
-    fn a_fork_before_a_turn_keeps_through_the_turn_before_it() {
-        smol::block_on(async {
-            let list = |cursor: Value| json!({"threadId": "source", "cursor": cursor, "sortDirection": "desc"});
-            for (before, forked, pages) in [
-                ("turn-3", Some("turn-2"), 1),
-                ("turn-2", Some("turn-1"), 2),
-                ("turn-1", None, 2),
-                ("gone", None, 2),
-            ] {
-                let (mut actor, _events) = test_actor();
-                let replies = replies([
-                    (
-                        FIRST_TURN_LIST_REQUEST,
-                        json!({"data": [turn("turn-3"), turn("turn-2")],
-                            "nextCursor": "page-2", "backwardsCursor": "page-0"}),
-                    ),
-                    (
-                        FIRST_TURN_LIST_REQUEST + 1,
-                        json!({"data": [turn("turn-1")], "nextCursor": null,
-                            "backwardsCursor": "page-1"}),
-                    ),
-                ])
-                .await;
-                let found = turn_before(&mut actor.stdin, &replies, "source", before).await;
-                match forked {
-                    Some(forked) => assert_eq!(found.unwrap(), forked, "{before}"),
-                    None => assert!(matches!(found, Err(AgentError::Provider(_))), "{before}"),
-                }
-                let requests = written(&mut actor).await;
-                assert_eq!(
-                    requests,
-                    [
-                        json!({"id": FIRST_TURN_LIST_REQUEST, "method": "thread/turns/list",
-                            "params": list(Value::Null)}),
-                        json!({"id": FIRST_TURN_LIST_REQUEST + 1, "method": "thread/turns/list",
-                            "params": list(json!("page-2"))}),
-                    ][..pages],
-                    "{before}"
-                );
-                let _ = actor.child.kill();
-                let _ = actor.child.wait();
-            }
-        });
     }
 
     /// Only a paginated thread written to disk can be reverted, so each
