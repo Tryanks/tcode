@@ -8052,14 +8052,14 @@ mod tests {
     /// point at a transcript still reads the notified file before it stops.
     #[test]
     fn an_undiscovered_subagent_tail_reads_the_notified_output_file() {
-        const SPAWN: &str = "toolu_01BXJLqzyGgqst9idkvgU4Mw";
-        const RECORDED_OUTPUT: &str = "/tmp/claude-1000/-home-user-project/00000000-0000-4000-8000-000000000002/tasks/a01a6c3ef10d0f4a5.output";
+        const SPAWN: &str = "toolu_010000000000000000000002";
+        const RECORDED_OUTPUT: &str = "/tmp/claude-1000/-home-user-project/00000000-0000-4000-8000-000000000002/tasks/a0000000000000001.output";
         let trace =
             include_str!("../tests/fixtures/claude/subagent_handback_background_trace.jsonl");
         let root =
             std::env::temp_dir().join(format!("tcode-notified-output-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let output_file = root.join("a01a6c3ef10d0f4a5.output");
+        let output_file = root.join("a0000000000000001.output");
         // The transcript holds the child's own records, which stdout also
         // forwards with `parent_tool_use_id`.
         let child = format!("\"parent_tool_use_id\":\"{SPAWN}\"");
@@ -8103,7 +8103,7 @@ mod tests {
                 tailed.iter().any(|event| matches!(
                     event,
                     AgentEvent::ItemCompleted(ThreadItem { id, .. })
-                        if *id == format!("{SPAWN}:toolu_01T4uuAGaM12YCPm6kBnYvH5")
+                        if *id == format!("{SPAWN}:toolu_010000000000000000000003")
                 )),
                 "the tail never read {output_file:?}: {tailed:?}"
             );
