@@ -498,14 +498,12 @@ fn bundled() -> ClaudeCatalog {
     ClaudeCatalog::from_json(BUNDLED).expect("bundled Claude model manifest is valid")
 }
 
-/// In-memory manifest plus the fetch bookkeeping that paces refreshes.
+/// In-memory manifest and when it was fetched.
 pub(crate) struct ManifestState {
     catalog: Arc<ClaudeCatalog>,
     /// Wall-clock millis of the fetch that produced `catalog`; `None` for the
-    /// bundle. Persisted with the disk cache so a restart does not refetch.
+    /// bundle. Persisted with the disk cache.
     fetched_at_ms: Option<u64>,
-    last_attempt_ms: Option<u64>,
-    disk_loaded: bool,
     #[cfg(feature = "process")]
     source_responses: HashMap<String, (String, Vec<u8>)>,
 }
@@ -529,8 +527,6 @@ impl ManifestState {
         Self {
             catalog: Arc::new(catalog),
             fetched_at_ms: None,
-            last_attempt_ms: None,
-            disk_loaded: false,
             #[cfg(feature = "process")]
             source_responses: HashMap::new(),
         }
@@ -563,11 +559,8 @@ mod refresh {
         ),
     ];
     pub(super) const CACHE_FILE: &str = "claude-model-manifest.json";
-    /// How long a fetched manifest stays fresh.
-    pub(super) const TTL_MS: u64 = 60 * 60 * 1000;
-    /// Minimum gap between attempts after a failure, so an offline machine
-    /// does not pay a network timeout on every catalog refresh.
-    pub(super) const RETRY_MS: u64 = 5 * 60 * 1000;
+    /// How old a fetched manifest is before a refresh fetches again.
+    const TTL_MS: u64 = 60 * 60 * 1000;
     const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
     const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
@@ -586,11 +579,8 @@ mod refresh {
     }
 
     impl ManifestState {
-        /// Adopt the disk cache once, unless the bundle is newer by `updatedAt`.
+        /// Adopt the disk cache, unless the bundle is newer by `updatedAt`.
         pub(crate) fn load_cache(&mut self, path: &Path) {
-            if std::mem::replace(&mut self.disk_loaded, true) {
-                return;
-            }
             let Some(cache) = std::fs::read_to_string(path)
                 .ok()
                 .and_then(|text| serde_json::from_str::<CacheFile>(&text).ok())
@@ -607,28 +597,18 @@ mod refresh {
             }
         }
 
-        /// Whether a fetch is due now; records the attempt when it is.
-        pub(crate) fn begin_fetch(&mut self, now_ms: u64, network: bool) -> bool {
-            // A timestamp in the future means the wall clock moved backwards;
-            // treat it as expired so the refetch rewrites both timestamps.
-            let within = |since: Option<u64>, window: u64| {
-                since.is_some_and(|since| now_ms >= since && now_ms - since < window)
-            };
-            if !network
-                || within(self.fetched_at_ms, TTL_MS)
-                || within(self.last_attempt_ms, RETRY_MS)
-            {
-                return false;
-            }
-            self.last_attempt_ms = Some(now_ms);
-            true
+        /// Whether a refresh fetches: the copy in effect is the bundle, or
+        /// was fetched [`TTL_MS`] or more from `now_ms`.
+        fn fetch_due(&self, now_ms: u64) -> bool {
+            self.fetched_at_ms
+                .is_none_or(|at| now_ms.abs_diff(at) >= TTL_MS)
         }
 
         /// Adopt a fetched manifest when it is at least as new by `updatedAt`
         /// as the catalog in effect; returns the adopted manifest. An
         /// undecodable or invalid body leaves the catalog in place and is an
         /// error. A valid but older manifest is `Ok(None)`: not adopted, but
-        /// it still counts as a fetch so the TTL paces the next attempt.
+        /// it still counts as a fetch, so the next is a TTL later.
         pub(crate) fn install(
             &mut self,
             now_ms: u64,
@@ -681,17 +661,20 @@ mod refresh {
         })
     }
 
-    /// Load the disk cache under `cache_dir` and, when the TTL allows and
-    /// `network` is on, fetch every remote manifest and keep the newest.
-    /// Blocking; never fails.
+    /// Stand the disk cache under `cache_dir` in for the bundle and, when
+    /// `network` is on and the copy in effect is the bundle or a TTL old,
+    /// fetch every remote manifest and keep the newest. Blocking; never
+    /// fails.
     pub(crate) fn refresh(cache_dir: Option<&Path>, network: bool) {
         let cache_path = cache_dir.map(|dir| dir.join(CACHE_FILE));
         let now = now_ms();
         let due = with_state(|state| {
-            if let Some(path) = &cache_path {
+            if state.fetched_at_ms.is_none()
+                && let Some(path) = &cache_path
+            {
                 state.load_cache(path);
             }
-            state.begin_fetch(now, network)
+            network && state.fetch_due(now)
         });
         if !due {
             return;
@@ -1039,7 +1022,7 @@ mod tests {
 
     #[cfg(feature = "process")]
     mod refresh {
-        use super::super::refresh::{CACHE_FILE, CacheFile, RETRY_MS, TTL_MS};
+        use super::super::refresh::{CACHE_FILE, CacheFile};
         use super::*;
 
         fn fresh_state() -> ManifestState {
@@ -1138,22 +1121,6 @@ mod tests {
         }
 
         #[test]
-        fn fetches_are_paced_by_ttl_retry_and_setting() {
-            let mut state = fresh_state();
-            assert!(!state.begin_fetch(1_000, false), "network disabled");
-            assert!(state.begin_fetch(1_000, true));
-            assert!(!state.begin_fetch(1_000 + RETRY_MS - 1, true), "retry gap");
-            assert!(state.begin_fetch(1_000 + RETRY_MS, true));
-            state.fetched_at_ms = Some(10_000);
-            assert!(!state.begin_fetch(10_000 + TTL_MS - 1, true), "fresh");
-            assert!(state.begin_fetch(10_000 + TTL_MS, true));
-            // A future timestamp (clock moved backwards) counts as expired.
-            state.fetched_at_ms = Some(u64::MAX);
-            state.last_attempt_ms = Some(u64::MAX);
-            assert!(state.begin_fetch(5, true));
-        }
-
-        #[test]
         fn disk_cache_is_adopted_unless_the_bundle_is_newer() {
             let dir = std::env::temp_dir().join(format!(
                 "tcode-manifest-{}-{}",
@@ -1186,11 +1153,6 @@ mod tests {
             state.load_cache(&path);
             assert_eq!(model_ids(&state)[0], "test-cached");
             assert_eq!(state.fetched_at_ms, Some(42));
-
-            // Loaded once: a later cache write is not re-read.
-            write("2035-01-01T00:00:00Z");
-            state.load_cache(&path);
-            assert_eq!(model_ids(&state)[0], "test-cached");
 
             // Corrupt cache: bundle stays.
             std::fs::write(&path, b"{}").unwrap();
