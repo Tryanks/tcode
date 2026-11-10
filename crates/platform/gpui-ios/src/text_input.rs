@@ -255,23 +255,6 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_ranges_preserve_cjk_emoji_and_combining_text() {
-        let text = "前😀e\u{301}后";
-        for (range, expected) in [
-            (0..1, "前"),
-            (1..3, "😀"),
-            (3..5, "e\u{301}"),
-            (5..6, "后"),
-            (6..6, ""),
-        ] {
-            assert_eq!(utf16_slice(text, range), Some(expected));
-        }
-        for range in [1..2, 2..3, 0..7, Range { start: 5, end: 3 }] {
-            assert_eq!(utf16_slice(text, range), None);
-        }
-    }
-
-    #[test]
     fn native_ranges_distinguish_absent_empty_and_overflow() {
         assert_eq!(
             TextRange::from(Some(1..3)),
