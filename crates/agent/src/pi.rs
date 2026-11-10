@@ -1087,7 +1087,7 @@ impl PiActor {
                     name: message
                         .get("title")
                         .and_then(Value::as_str)
-                        .unwrap_or("Confirmation")
+                        .unwrap_or_default()
                         .to_owned(),
                     input: Value::Null,
                     detail: message
