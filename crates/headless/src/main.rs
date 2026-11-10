@@ -561,9 +561,14 @@ fn pair_command(args: &[String]) -> Result<(), String> {
     let store = SessionStore::open_host(option_value(args, "--data-dir").map(PathBuf::from))
         .map_err(|error| error.to_string())?;
     let path = store.root().join(INVITATION_FILE);
-    let file: Option<InvitationFile> = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let file: Option<InvitationFile> = match std::fs::read(&path) {
+        Ok(bytes) => Some(
+            serde_json::from_slice(&bytes)
+                .map_err(|error| format!("could not read {}: {error}", path.display()))?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("could not read {}: {error}", path.display())),
+    };
     let valid = file.filter(|file| file.expires_unix > now_unix());
     let Some(file) = valid else {
         return Err("no valid invitation; the logged-in browser can create one from Settings → Remote, or restart serve".into());
