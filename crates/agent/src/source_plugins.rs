@@ -336,12 +336,19 @@ pub(crate) async fn list_opencode(context: &PluginContext) -> Result<PluginListi
     // Answered by OpenCode's background server, which the CLI starts itself.
     let (loaded, checked) =
         smol::future::zip(run(&["plugin", "list"]), run(&["plugin", "check"])).await;
+    let mut errors = Vec::new();
     let loaded = loaded
         .map(|out| parse_opencode_list(&out))
-        .unwrap_or_default();
+        .unwrap_or_else(|error| {
+            errors.push(format!("opencode plugin list: {error}"));
+            Vec::new()
+        });
     let checked = checked
         .map(|out| parse_opencode_check(&out))
-        .unwrap_or_default();
+        .unwrap_or_else(|error| {
+            errors.push(format!("opencode plugin check: {error}"));
+            Vec::new()
+        });
     let entries = configured
         .iter()
         .map(|source| {
@@ -378,7 +385,7 @@ pub(crate) async fn list_opencode(context: &PluginContext) -> Result<PluginListi
         entries,
         marketplaces: Vec::new(),
         marketplace_actions: Vec::new(),
-        errors: Vec::new(),
+        errors,
     })
 }
 
@@ -645,6 +652,27 @@ mod tests {
                 ))
                 .is_err(),
                 "the CLI changes the global configuration only"
+            );
+        }
+
+        /// A background server that fails leaves the plugins without versions
+        /// or update states, and the listing says why instead of passing for
+        /// one with nothing to report.
+        #[test]
+        fn opencode_tells_why_the_server_could_not_answer_for_its_plugins() {
+            let opencode = FakeCli::new(
+                "opencode",
+                "'debug paths config') echo /home/me/.config/opencode ;;\n'debug config --standalone') echo '[{\"type\":\"document\",\"path\":\"/home/me/.config/opencode/opencode.json\",\"info\":{\"plugins\":[\"opencode-wakatime\"]}}]' ;;\n'plugin list'|'plugin check') echo 'database is locked' >&2; exit 1 ;;",
+            );
+            let listing =
+                smol::block_on(list_plugins(ProviderKind::OpenCode, &opencode.context)).unwrap();
+            assert_eq!(listing.entries.len(), 1, "the configuration still names it");
+            assert_eq!(
+                listing.errors,
+                [
+                    "opencode plugin list: provider reported error: database is locked",
+                    "opencode plugin check: provider reported error: database is locked",
+                ]
             );
         }
     }
