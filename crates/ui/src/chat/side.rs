@@ -1293,7 +1293,7 @@ impl ChatView {
                 store
                     .thread_meta(&of.lead_session)
                     .map(|meta| meta.title.clone())
-                    .unwrap_or_default(),
+                    .filter(|title| !title.trim().is_empty()),
             )
         };
         let execution = heading.as_ref().and_then(|heading| heading.execution);
@@ -1313,18 +1313,20 @@ impl ChatView {
             .motion
             .shown("side-back", on_sheet.then_some(()), SHOW, window, cx)
             .map(|shown| {
-                let name: SharedString =
-                    crate::tr!("agents.back_to_parent", title = lead_title.as_str())
-                        .into_owned()
-                        .into();
+                let name: SharedString = match &lead_title {
+                    Some(title) => crate::tr!("agents.back_to_parent", title = title.as_str()),
+                    None => crate::tr!("settings.back"),
+                }
+                .into_owned()
+                .into();
                 // The lead's title fades rather than pushing the agent's out
                 // of the header.
-                let label = (!lead_title.trim().is_empty()).then(|| {
+                let label = lead_title.clone().map(|title| {
                     div()
                         .debug_selector(|| "side-back-title".into())
                         .min_w_0()
                         .overflow_hidden()
-                        .child(crate::widgets::fade_text(lead_title.clone()))
+                        .child(crate::widgets::fade_text(title))
                 });
                 shown.fold_across(
                     Button::new("side-back")
