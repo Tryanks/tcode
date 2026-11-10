@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{
-    ExternalRoots, ExternalThread, RecentDir, SourceTool, collect_files, file_modified_ms,
-    timestamp_ms,
+    ExternalHistory, ExternalRoots, ExternalThread, RecentDir, SourceTool, collect_files,
+    file_modified_ms, timestamp_ms,
 };
 
 #[derive(Debug)]
@@ -16,25 +16,39 @@ struct DesktopMeta {
     last_active_ms: Option<u64>,
 }
 
-pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Vec<RecentDir> {
+/// The external threads under `roots`, grouped by directory, and every path
+/// the scan could not read.
+pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> ExternalHistory {
+    let mut unreadable = Vec::new();
     let desktop = roots
         .claude_desktop_meta
         .as_deref()
-        .map(desktop_metadata)
+        .map(|root| desktop_metadata(root, &mut unreadable))
         .unwrap_or_default();
     let mut found = Vec::<(PathBuf, ExternalThread)>::new();
 
     let claude_files = roots
         .claude_projects
         .as_deref()
-        .map(claude_session_files)
+        .map(|root| claude_session_files(root, &mut unreadable))
         .unwrap_or_default();
     for path in claude_files {
-        let Ok(file) = File::open(&path) else {
-            continue;
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                unreadable.push(unreadable_path(&path, &error));
+                continue;
+            }
         };
         let mut head = None;
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
+        for line in BufReader::new(file).lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    unreadable.push(unreadable_path(&path, &error));
+                    break;
+                }
+            };
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -97,14 +111,21 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Vec
     }
 
     for root in &roots.codex_session_roots {
-        for path in collect_files(root, &|path| {
-            path.extension().is_some_and(|ext| ext == "jsonl")
-        }) {
-            let Ok(file) = File::open(&path) else {
-                continue;
-            };
-            let Some(Ok(line)) = BufReader::new(file).lines().next() else {
-                continue;
+        let files = collect_files(
+            root,
+            &|path| path.extension().is_some_and(|ext| ext == "jsonl"),
+            &mut unreadable,
+        );
+        for path in files {
+            let line = match File::open(&path)
+                .and_then(|file| BufReader::new(file).lines().next().transpose())
+            {
+                Ok(Some(line)) => line,
+                Ok(None) => continue,
+                Err(error) => {
+                    unreadable.push(unreadable_path(&path, &error));
+                    continue;
+                }
             };
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
@@ -169,15 +190,24 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Vec
         })
         .collect();
     dirs.sort_by_key(|dir| std::cmp::Reverse(dir.last_active_ms));
-    dirs
+    ExternalHistory { dirs, unreadable }
+}
+
+pub(super) fn unreadable_path(path: &Path, error: &std::io::Error) -> String {
+    format!("{}: {error}", path.display())
 }
 
 /// Session transcripts live directly under `projects/<slug>/` — one `.jsonl`
 /// per session. Deeper trees (`<session-id>/subagents/**`, `workflows/**`) hold
 /// sidechain material, so recursing would surface non-threads.
-fn claude_session_files(projects_root: &Path) -> Vec<PathBuf> {
-    let Ok(slugs) = std::fs::read_dir(projects_root) else {
-        return Vec::new();
+fn claude_session_files(projects_root: &Path, unreadable: &mut Vec<String>) -> Vec<PathBuf> {
+    let slugs = match std::fs::read_dir(projects_root) {
+        Ok(slugs) => slugs,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            unreadable.push(unreadable_path(projects_root, &error));
+            return Vec::new();
+        }
     };
     let mut files = Vec::new();
     for slug in slugs.flatten() {
@@ -185,8 +215,12 @@ fn claude_session_files(projects_root: &Path) -> Vec<PathBuf> {
         if !dir.is_dir() {
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                unreadable.push(unreadable_path(&dir, &error));
+                continue;
+            }
         };
         for entry in entries.flatten() {
             let path = entry.path();
@@ -198,15 +232,24 @@ fn claude_session_files(projects_root: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn desktop_metadata(root: &Path) -> HashMap<String, DesktopMeta> {
+fn desktop_metadata(root: &Path, unreadable: &mut Vec<String>) -> HashMap<String, DesktopMeta> {
     let mut metadata = HashMap::new();
-    for path in collect_files(root, &|path| {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("local_") && name.ends_with(".json"))
-    }) {
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
+    let files = collect_files(
+        root,
+        &|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("local_") && name.ends_with(".json"))
+        },
+        unreadable,
+    );
+    for path in files {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                unreadable.push(unreadable_path(&path, &error));
+                continue;
+            }
         };
         let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
             continue;

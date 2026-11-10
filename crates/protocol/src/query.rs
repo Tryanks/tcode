@@ -251,7 +251,7 @@ pub enum QueryResponse {
         entries: Vec<IconImageEntry>,
     },
     Directories(DirectoryListing),
-    ExternalHistory(Vec<RecentDir>),
+    ExternalHistory(ExternalHistory),
     CommitMessage(String),
     GitDiff(GitDiffResult),
     FileBytes(#[serde(with = "crate::wire::base64_bytes")] Vec<u8>),
@@ -407,6 +407,15 @@ pub struct ExternalThread {
     pub external_id: String,
     pub title_hint: Option<String>,
     pub last_active_ms: u64,
+}
+
+/// What a scan of external agents' histories found, and what it could not
+/// read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalHistory {
+    pub dirs: Vec<RecentDir>,
+    /// A path the scan could not read, and why, one per entry.
+    pub unreadable: Vec<String>,
 }
 
 /// Recently active directory containing external threads.

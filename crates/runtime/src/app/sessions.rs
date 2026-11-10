@@ -714,7 +714,7 @@ impl AppState {
 
     /// Scan supported external-agent histories without exposing the import
     /// service or application stores to callers.
-    pub fn scan_external_history(&self, executor: &HostCx) -> HostTask<Vec<RecentDir>> {
+    pub fn scan_external_history(&self, executor: &HostCx) -> HostTask<ExternalHistory> {
         let exclude: Vec<_> = self
             .projects
             .iter()
@@ -723,13 +723,13 @@ impl AppState {
         let sessions = self.sessions.clone();
         executor.unblock(move || {
             let known = existing_external_ids(&sessions);
-            let mut recent = scan_recent_dirs(&ExternalRoots::detect(), &exclude);
-            for dir in &mut recent {
+            let mut history = scan_recent_dirs(&ExternalRoots::detect(), &exclude);
+            for dir in &mut history.dirs {
                 dir.threads
                     .retain(|thread| !known.contains(&thread.external_id));
             }
-            recent.retain(|dir| !dir.threads.is_empty());
-            recent
+            history.dirs.retain(|dir| !dir.threads.is_empty());
+            history
         })
     }
 

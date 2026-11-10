@@ -365,6 +365,7 @@ sidebar:
   path_required: "ディレクトリのパスを入力してください。"
   path_rejected: "ホストがこのパスを拒否しました：%{reason}"
   recent_failed: "ホストから最近のアクティビティを読み取れませんでした：%{reason}"
+  recent_unreadable: "ホスト上のエージェント履歴の一部を読み取れませんでした：%{reason}"
   import_failed: "インポートを開始できませんでした：%{reason}"
   import_refused: "ホストがインポートを拒否しました"
   importing: "スレッドをインポート中…"

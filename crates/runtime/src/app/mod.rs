@@ -44,11 +44,11 @@ use tcode_core::ui::{
     ConversationDestination, MAX_TERMINALS_PER_SESSION, TerminalSplitDirection, WorkspaceMode,
 };
 use tcode_protocol::{
-    AcpMarketplaceItem, ArchivedSessions, EventEnvelope, ExternalImportState, ExternalImportStatus,
-    ExternalThread, ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot,
-    IndexSummary, MergeWorktreeFailure, PathEntry, ProtocolError,
+    AcpMarketplaceItem, ArchivedSessions, EventEnvelope, ExternalHistory, ExternalImportState,
+    ExternalImportStatus, ExternalThread, ForkAvailability, GitActionRequest, GitStatusStatus,
+    IndexSnapshot, IndexSummary, MergeWorktreeFailure, PathEntry, ProtocolError,
     ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueryResponse,
-    QueuedMessageStatus, RecentDir, RuntimeEffect, RuntimeError, RuntimeNotice,
+    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
     RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast, ServerEvent,
     SessionActivity, SessionEventRecord, SessionPlan, SessionSearchHit, SessionStatus,
     TcodeUpdateStatus, TerminalStatus, ThreadExportFormat, Topic,

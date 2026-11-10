@@ -23,8 +23,8 @@ use tcode_protocol::{
     ArchivedSessions, Command, CommandResponse, DiskUsageState, EventEnvelope,
     ExternalImportStatus, ExternalThread, GitDiffResult, GitDiffScope, GitStatusStatus,
     IndexSummary, PathEntry, ProtocolError, ProviderVersionStatus, ProvidersStatus, Query,
-    QueryResponse, RecentDir, Scope, ScopedProviderChoice, ServerEvent, SessionPlan,
-    SessionSearchHit, SessionStatus, StorageMigration, Subscription, Topic,
+    QueryResponse, Scope, ScopedProviderChoice, ServerEvent, SessionPlan, SessionSearchHit,
+    SessionStatus, StorageMigration, Subscription, Topic,
 };
 pub(crate) mod terminal;
 pub(crate) use terminal::ClientTerminal;
@@ -3063,7 +3063,10 @@ impl WorkspaceStore {
     /// Scan the *host's* external-agent histories. A failure is returned rather
     /// than logged away: an empty list and a broken host look identical to the
     /// user otherwise.
-    pub fn scan_external_history(&self, cx: &mut App) -> Task<Result<Vec<RecentDir>, String>> {
+    pub fn scan_external_history(
+        &self,
+        cx: &mut App,
+    ) -> Task<Result<tcode_protocol::ExternalHistory, String>> {
         if !self.can_manage_host() {
             return cx.spawn(async |_| Err(crate::tr!("member.unavailable").into_owned()));
         }

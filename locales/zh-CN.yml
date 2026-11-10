@@ -365,6 +365,7 @@ sidebar:
   path_required: "请输入目录路径。"
   path_rejected: "主机拒绝了该路径：%{reason}"
   recent_failed: "无法从主机读取最近活动：%{reason}"
+  recent_unreadable: "主机上有部分代理历史无法读取：%{reason}"
   import_failed: "无法开始导入：%{reason}"
   import_refused: "主机拒绝了本次导入"
   importing: "正在导入线程…"

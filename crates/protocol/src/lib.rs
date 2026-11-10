@@ -63,6 +63,8 @@ pub use query::{
     SessionSearchHit, SourceTool, SpaceAction, SpaceAgents, SpaceApproval, SpaceInfo, SpacePolicy,
     TraverseLookupState, TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus,
     TraverseRelayStatus, TraverseSourceStatus,
+// DeviceAccess, DirectoryListing, ExternalHistory, ExternalThread, GitDiffResult, GitDiffScope,.
+// HostingState, IconImageEntry, MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, ModelGrant,.
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
@@ -316,7 +318,8 @@ pub use wire::{
 // RuntimeNotice::WorktreeSeeded has no limit_reached.
 // RewindStatus's.
 // running_turn has no "refuse" and its blocked no "turn_running".
-// SourceTool gains claude_agent_sdk.
+// SourceTool gains claude_agent_sdk. QueryResponse::ExternalHistory carries
+// an ExternalHistory {dirs, unreadable}.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

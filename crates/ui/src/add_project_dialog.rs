@@ -36,7 +36,8 @@ use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 use crate::time::{humanize_ago, now_secs};
 use tcode_core::settings::ProjectStart;
 use tcode_protocol::{
-    CommandResponse, DirectoryListing, ExternalImportState, ExternalThread, RecentDir, SourceTool,
+    CommandResponse, DirectoryListing, ExternalHistory, ExternalImportState, ExternalThread,
+    RecentDir, SourceTool,
 };
 
 gpui::actions!(add_project, [CompleteFolder]);
@@ -97,7 +98,7 @@ impl FolderBrowser {
 
 enum RecentState {
     Loading,
-    Ready(Vec<RecentDir>),
+    Ready(ExternalHistory),
     Failed(String),
 }
 
@@ -378,10 +379,17 @@ impl AddProjectDialog {
         let mut recents_from = None;
         if typed.trim().is_empty()
             && let RecentState::Ready(recent) = &self.recent
-            && !recent.is_empty()
+            && !recent.dirs.is_empty()
         {
             recents_from = Some(rows.len());
-            rows.extend(recent.iter().take(RECENT_LIMIT).cloned().map(Row::Recent));
+            rows.extend(
+                recent
+                    .dirs
+                    .iter()
+                    .take(RECENT_LIMIT)
+                    .cloned()
+                    .map(Row::Recent),
+            );
         }
         let folders_from = rows.len();
         let answer = self.folders.answer_for(&directory);
@@ -939,6 +947,14 @@ impl Render for AddProjectDialog {
             match &self.recent {
                 RecentState::Failed(error) => Some((
                     crate::tr!("sidebar.recent_failed", reason = error.clone()).into_owned(),
+                    true,
+                )),
+                RecentState::Ready(recent) if !recent.unreadable.is_empty() => Some((
+                    crate::tr!(
+                        "sidebar.recent_unreadable",
+                        reason = recent.unreadable.join("; ")
+                    )
+                    .into_owned(),
                     true,
                 )),
                 _ => None,
@@ -1546,7 +1562,7 @@ mod tests {
             let [(id, _)] = asked.as_slice() else {
                 panic!("expected one recents scan, asked: {asked:?}");
             };
-            let recent = paths
+            let dirs = paths
                 .iter()
                 .map(|path| RecentDir {
                     path: path.into(),
@@ -1557,7 +1573,10 @@ mod tests {
             self.send(
                 HostMessage::QueryResult {
                     id: *id,
-                    result: Ok(QueryResponse::ExternalHistory(recent)),
+                    result: Ok(QueryResponse::ExternalHistory(ExternalHistory {
+                        dirs,
+                        unreadable: Vec::new(),
+                    })),
                 },
                 cx,
             );

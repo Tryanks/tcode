@@ -365,6 +365,7 @@ sidebar:
   path_required: "Enter a directory path."
   path_rejected: "The machine rejected this path: %{reason}"
   recent_failed: "Could not read recent activity from the machine: %{reason}"
+  recent_unreadable: "Some agent history on the machine could not be read: %{reason}"
   import_failed: "Could not start the import: %{reason}"
   import_refused: "the machine refused the import"
   importing: "Importing threads…"

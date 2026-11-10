@@ -14,7 +14,7 @@ use serde_json::json;
 
 use crate::store::{Mutation, SessionStore};
 use tcode_core::project::{Project, SessionMeta};
-pub use tcode_protocol::{ExternalThread, RecentDir, SourceTool};
+pub use tcode_protocol::{ExternalHistory, ExternalThread, RecentDir, SourceTool};
 
 /// Where each tool keeps its history; `None` or empty where there is none
 /// to scan, as for a host with no home directory.
@@ -277,30 +277,39 @@ fn file_modified_ms(path: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// The files under `root` that `predicate` takes; a directory that cannot be
+/// read is added to `unreadable`, and a missing `root` holds nothing.
 fn collect_files(
     root: &std::path::Path,
     predicate: &impl Fn(&std::path::Path) -> bool,
+    unreadable: &mut Vec<String>,
 ) -> Vec<PathBuf> {
     fn visit(
         dir: &std::path::Path,
         predicate: &impl Fn(&std::path::Path) -> bool,
         files: &mut Vec<PathBuf>,
+        unreadable: &mut Vec<String>,
     ) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                unreadable.push(scan::unreadable_path(dir, &error));
+                return;
+            }
         };
         for entry in entries.flatten() {
             let path = entry.path();
             // Not followed through symlinks: a link back to an ancestor would
             // make the walk branch without end.
             if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                visit(&path, predicate, files);
+                visit(&path, predicate, files, unreadable);
             } else if predicate(&path) {
                 files.push(path);
             }
         }
     }
     let mut files = Vec::new();
-    visit(root, predicate, &mut files);
+    visit(root, predicate, &mut files, unreadable);
     files
 }
