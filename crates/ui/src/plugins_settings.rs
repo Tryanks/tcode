@@ -750,8 +750,9 @@ impl PluginsSettingsPanel {
             .and_then(|thread| store.session_of(thread))
             .and_then(|thread| store.thread_meta(&thread).cloned())
             .map(|meta| {
-                meta.profile_id
-                    .unwrap_or_else(|| tcode_core::settings::provider_key(meta.provider).into())
+                meta.profile_id.unwrap_or_else(|| {
+                    tcode_core::settings::Settings::builtin_profile_id(meta.provider).into()
+                })
             });
         thread_profile
             .filter(|id| accounts.iter().any(|account| account.id == *id))
