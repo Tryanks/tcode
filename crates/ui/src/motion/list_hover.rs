@@ -1,11 +1,12 @@
-//! Hover reveals that fade, in a list too long for state per item.
+//! Hover reveals that fade across a list's items, one item hovered at a time.
 //!
 //! GPUI's `hover` and `group_hover` are styles that switch at once, with no
-//! transition; gpui-base's `transition` animates a value an element samples,
-//! but an item that keeps its own hovered flag and transition keeps state for
-//! every item of a list that may hold thousands. [`ListHover`] is the list's
-//! one hovered item, with the fades of the items the pointer just entered or
-//! left: at rest it holds one key, whatever the list's length.
+//! transition, and an item's `on_hover` hears the pointer leave as it moves
+//! onto a part of the item that blocks it (its actions over it). [`ListHover`]
+//! is the list's one hovered item, hovered while the pointer is over the
+//! item or any of its parts or while a [`HoverHold`] lives, with the fades
+//! of the items the pointer just entered or left on [`Owned`]'s glide: at
+//! rest it holds one key, whatever the list's length.
 
 use std::{
     cell::RefCell,
