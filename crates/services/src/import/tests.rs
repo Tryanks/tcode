@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use agent::{ItemContent, ItemStatus};
 use serde_json::json;
 
-use super::{ConvertedEntry, ConvertedThread, codex};
+use super::{ConvertedEntry, ConvertedThread, claude, codex};
 
 /// A transcript written to a file of its own, removed with the value.
 struct Transcript(PathBuf);
@@ -118,6 +118,59 @@ fn a_codex_rollout_imports_as_codex_recorded_it() {
                 json!({"command": ["make", "test"]}),
                 None,
                 ItemStatus::Interrupted,
+            ),
+            None,
+            Some(ItemContent::AssistantMessage {
+                text: "Done.".into(),
+                summarized: false,
+            }),
+        ]
+    );
+}
+
+/// A transcript in Claude Code 2.1.322's shape, content invented. Each line
+/// is a message spread with `cwd`, `userType`, `entrypoint`, `version`,
+/// `gitBranch`, `sessionId`, `timestamp`, `parentUuid` and `isSidechain`,
+/// as that CLI writes a transcript line; `message` holds an Anthropic
+/// Messages API message (text, `thinking`, `tool_use` and `tool_result`
+/// blocks), and a compaction is a `system` line of subtype
+/// `compact_boundary`.
+const CLAUDE_TRANSCRIPT: &str = r#"{"type":"user","message":{"role":"user","content":"Context the CLI adds for itself."},"isMeta":true,"uuid":"00000000-0000-4000-8000-000000000011","parentUuid":null,"isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:05.000Z"}
+{"type":"user","message":{"role":"user","content":"Read the readme"},"uuid":"00000000-0000-4000-8000-000000000012","parentUuid":"00000000-0000-4000-8000-000000000011","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:06.000Z"}
+{"type":"assistant","message":{"id":"msg_example_1","type":"message","role":"assistant","model":"claude-example","content":[{"type":"thinking","thinking":"Reading it.","signature":"c2lnbmF0dXJl"},{"type":"tool_use","id":"toolu_read","name":"Read","input":{"file_path":"/work/example/README.md"}}]},"uuid":"00000000-0000-4000-8000-000000000013","parentUuid":"00000000-0000-4000-8000-000000000012","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:07.000Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_read","content":"Example readme"}]},"uuid":"00000000-0000-4000-8000-000000000014","parentUuid":"00000000-0000-4000-8000-000000000013","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:08.000Z"}
+{"type":"assistant","message":{"id":"msg_example_2","type":"message","role":"assistant","model":"claude-example","content":[{"type":"tool_use","id":"toolu_make","name":"Bash","input":{"command":"make"}}]},"uuid":"00000000-0000-4000-8000-000000000015","parentUuid":"00000000-0000-4000-8000-000000000014","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:09.000Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_make","content":"make: no targets","is_error":true}]},"uuid":"00000000-0000-4000-8000-000000000016","parentUuid":"00000000-0000-4000-8000-000000000015","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:10.000Z"}
+{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","uuid":"00000000-0000-4000-8000-000000000017","parentUuid":null,"isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:11.000Z"}
+{"type":"assistant","message":{"id":"msg_example_3","type":"message","role":"assistant","model":"claude-example","content":[{"type":"text","text":"Done."}]},"uuid":"00000000-0000-4000-8000-000000000018","parentUuid":"00000000-0000-4000-8000-000000000017","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:12.000Z"}
+"#;
+
+/// A transcript shows what Claude Code recorded: a meta message is passed
+/// over, a tool call shows the result answered to its id and fails when the
+/// result is an error, and a compaction is marked where it happened.
+#[test]
+fn a_claude_transcript_imports_as_claude_recorded_it() {
+    let transcript = Transcript::new(CLAUDE_TRANSCRIPT);
+    let thread = claude::convert(&transcript.0, "claude:example").unwrap();
+    assert_eq!(thread.first_user.as_deref(), Some("Read the readme"));
+    assert_eq!(
+        shown(thread),
+        [
+            user("Read the readme"),
+            Some(ItemContent::Reasoning {
+                text: "Reading it.".into(),
+            }),
+            tool(
+                "Read",
+                json!({"file_path": "/work/example/README.md"}),
+                Some("Example readme"),
+                ItemStatus::Completed,
+            ),
+            tool(
+                "Bash",
+                json!({"command": "make"}),
+                Some("make: no targets"),
+                ItemStatus::Failed,
             ),
             None,
             Some(ItemContent::AssistantMessage {
