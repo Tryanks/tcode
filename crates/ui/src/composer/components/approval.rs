@@ -234,10 +234,6 @@ impl Composer {
                         .child(crate::tr!("mobile.offline_action")),
                 )
             });
-        let blocked_path = request
-            .blocked_path
-            .clone()
-            .filter(|path| !request_names_path(request, path));
         let detail = crate::widgets::Collapsible::new(
             self.motion_id(format_args!("approval-detail-{}", request.id)),
             expanded,
@@ -258,7 +254,7 @@ impl Composer {
                             .child(reason),
                     )
                 })
-                .when_some(blocked_path, |this, path| {
+                .when_some(request.blocked_path.clone(), |this, path| {
                     this.child(
                         div()
                             .text_secondary(self.compact, cx)
@@ -391,25 +387,6 @@ impl Composer {
             )
         });
     }
-}
-
-/// Whether the card already shows `path`: in the harness's reason or in what
-/// the request asks to do.
-fn request_names_path(request: &ApprovalRequest, path: &str) -> bool {
-    request
-        .reason
-        .as_deref()
-        .is_some_and(|reason| reason.contains(path))
-        || match &request.kind {
-            ApprovalKind::ExecCommand { command, .. } => command.contains(path),
-            ApprovalKind::FileChange { changes } => {
-                changes.iter().any(|change| change.path == path)
-            }
-            ApprovalKind::FileRead { detail } | ApprovalKind::ToolUse { detail, .. } => {
-                detail.contains(path)
-            }
-            ApprovalKind::Plan { .. } => false,
-        }
 }
 
 #[cfg(test)]
