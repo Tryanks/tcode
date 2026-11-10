@@ -151,6 +151,14 @@ Defences are not the only family. Others the maintainer has named:
 - **able to hang**: a race that, lost, never ends, held in check only by a
   runner's kill timer.
 
+A test's wait never spends the real clock. It waits on an event or a state:
+a channel, a condition, a process exiting. Behaviour that is about time (a
+debounce, a grace period, an expiry, an animation) is driven by a clock the
+test advances; where production reads the wall clock itself and makes that
+impossible, the finding is in production, which should take time from one
+owner that the running app and the test both go through. A bound that only a
+failure reaches belongs to the test runner, not to the test.
+
 The list is open, and the worst of the codebase is not confined to it. In
 the inventory, report anything in the lane that the maintainer would not have
 asked for and that has no ground, whether or not it has a name here: say what
