@@ -393,17 +393,8 @@ impl PullRequestView {
     }
 
     pub(super) fn url(&self, cx: &App) -> Option<String> {
-        let (_, key) = self.current.as_ref()?;
-        self.link(cx)
-            .map(|link| link.url)
-            .filter(|url| !url.is_empty())
-            .or_else(|| {
-                self.stack(cx)?
-                    .layers
-                    .iter()
-                    .find(|layer| layer.number == key.number)
-                    .map(|layer| layer.url.clone())
-            })
+        let (session, key) = self.current.as_ref()?;
+        super::page_url(self.store.read(cx).pull_requests(session), key)
     }
 
     pub(super) fn tab(&self, cx: &App) -> Tab {

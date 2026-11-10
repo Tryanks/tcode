@@ -146,11 +146,7 @@ impl Offer {
         let state = snapshot
             .map(|snapshot| snapshot.state)
             .or(layer.map(|layer| layer.state))?;
-        let url = link
-            .map(|link| link.url.clone())
-            .filter(|url| !url.is_empty())
-            .or(layer.map(|layer| layer.url.clone()))
-            .unwrap_or_default();
+        let url = super::page_url(links, key).unwrap_or_default();
         let method = action
             .as_ref()
             .and_then(|action| merge_method(&action.merge_methods, chosen, project_default));

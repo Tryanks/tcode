@@ -1478,16 +1478,14 @@ pub fn present_result(
         result,
         PullRequestActionResult::Rebased { .. } | PullRequestActionResult::RebaseStopped { .. }
     );
+    let links = store.read(cx).pull_requests(session);
     let answer = Answer {
         stack: id,
         target: target.number,
         layers,
         base,
-        branches: branches(store.read(cx).pull_requests(session), target),
-        url: Some(format!(
-            "https://{}/{}/pull/{}",
-            target.host, target.repository, target.number
-        )),
+        branches: branches(links, target),
+        url: super::page_url(links, target),
         rebase,
         late,
     };
@@ -3029,22 +3027,26 @@ fn progress_view(
                     }
                 })
         });
-        let url = format!(
-            "https://{}/{}/pull/{failed}",
-            target.offer.key.host, target.offer.key.repository
+        let url = super::page_url(
+            target.store.read(cx).pull_requests(&target.session),
+            &PullRequestKey::new(&target.offer.key.host, &target.offer.key.repository, failed),
         );
         let wash = warning_wash(cx)
             .child(div().child(state))
             .child(div().child(advice))
             .child(
-                h_flex().gap_2().items_center().children(ask).child(
-                    Button::new("pr-stack-open-failed")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::ExternalLink)
-                        .label(tr_with("open_layer", &[("number", failed.to_string())]))
-                        .on_click(move |_, _, cx| cx.open_url(&url)),
-                ),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .children(ask)
+                    .children(url.map(|url| {
+                        Button::new("pr-stack-open-failed")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::ExternalLink)
+                            .label(tr_with("open_layer", &[("number", failed.to_string())]))
+                            .on_click(move |_, _, cx| cx.open_url(&url))
+                    })),
             );
         body = body.children(shown.map(|shown| shown.fold(wash)));
     }

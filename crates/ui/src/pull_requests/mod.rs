@@ -452,6 +452,23 @@ pub fn sidebar_badge(
     )
 }
 
+/// The pull request's page as the host names it: the thread's link to it, or the layer of a
+/// native stack it was opened from.
+pub(super) fn page_url(links: &[ThreadPullRequestLink], key: &PullRequestKey) -> Option<String> {
+    links
+        .iter()
+        .find(|link| link.key == *key)
+        .map(|link| link.url.clone())
+        .filter(|url| !url.is_empty())
+        .or_else(|| {
+            pull_request::native_stack(links, key)?
+                .layers
+                .iter()
+                .find(|layer| layer.number == key.number)
+                .map(|layer| layer.url.clone())
+        })
+}
+
 /// What a watch message reports, localized and joined for its notice and transcript row.
 pub fn watch_notice_kinds(notice: &WatchNotice) -> String {
     let parts: Vec<_> = match notice {
