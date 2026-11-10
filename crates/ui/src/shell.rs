@@ -95,7 +95,7 @@ impl Render for WindowDragState {
 /// Whether this client's window can be dragged by its content at all. A phone
 /// or browser surface has no movable window, so the handlers below are not just
 /// useless there — they would arm on presses that belong to the content.
-pub(crate) const WINDOW_DRAGGABLE: bool = cfg!(not(any(
+const WINDOW_DRAGGABLE: bool = cfg!(not(any(
     target_os = "ios",
     target_os = "android",
     target_family = "wasm"
@@ -1356,12 +1356,7 @@ impl AppShell {
     /// reached only alone replaces them, and a browser only ever has its
     /// own. A link the machine refused is not reused: it stopped
     /// reconnecting, and pairing again lands here with the same machine.
-    pub fn open_host(
-        &mut self,
-        target: AttachmentTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_host(&mut self, target: AttachmentTarget, window: &mut Window, cx: &mut Context<Self>) {
         let fixed = self
             .setup
             .client_host
@@ -1430,7 +1425,7 @@ impl AppShell {
     /// Take `host` out of the workspace: only its link closes, and it stays
     /// out though a group it is in would bring it back. Leaving a host
     /// reached alone opens the workspace again.
-    pub fn leave_host(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
+    fn leave_host(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
         // The host in this process is always in the workspace.
         if *host == HostKey::Local || self.link_of(host).is_none() {
             return;
@@ -1447,7 +1442,7 @@ impl AppShell {
     }
 
     /// Move `host` one place earlier, or later, among the workspace's hosts.
-    pub fn move_host(&mut self, host: &HostKey, earlier: bool, cx: &mut Context<Self>) {
+    fn move_host(&mut self, host: &HostKey, earlier: bool, cx: &mut Context<Self>) {
         self.arrange_workspace(
             |workspace| crate::workspace::shift(workspace, host, earlier),
             cx,
@@ -4438,7 +4433,7 @@ fn back_button(id: &'static str, parent: SharedString) -> crate::widgets::button
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
-/// A nav-bar icon button. Blue is reserved for primary actions and live state.
+/// A nav-bar icon button.
 fn nav_icon_button(
     id: impl Into<ElementId>,
     aria_label: impl Into<SharedString>,
