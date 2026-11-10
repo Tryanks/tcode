@@ -2129,7 +2129,8 @@ impl Render for MergeStackDialog {
                 let mut notes: Vec<(SharedString, MergeNote)> = vec![(
                     "merge".into(),
                     (
-                        IconName::GitMerge, theme.info,
+                        IconName::GitMerge,
+                        theme.info,
                         tr_with(
                             "note_merge",
                             &[
@@ -2176,7 +2177,8 @@ impl Render for MergeStackDialog {
                     notes.push((
                         SharedString::from(format!("checks-{number}")),
                         (
-                            IconName::CircleX, theme.danger,
+                            IconName::CircleX,
+                            theme.danger,
                             tr_with("note_checks", &[("number", number.to_string())]),
                         ),
                     ));
@@ -2188,7 +2190,8 @@ impl Render for MergeStackDialog {
                         notes.push((
                             SharedString::from(format!("changes-{number}")),
                             (
-                                IconName::MessageSquareWarning, theme.danger,
+                                IconName::MessageSquareWarning,
+                                theme.danger,
                                 tr_with("note_changes", &[("number", number.to_string())]),
                             ),
                         ));
@@ -2207,7 +2210,8 @@ impl Render for MergeStackDialog {
                     notes.push((
                         "unconfirmed".into(),
                         (
-                            IconName::CircleQuestionMark, theme.warning,
+                            IconName::CircleQuestionMark,
+                            theme.warning,
                             tr_with(
                                 "previous_unconfirmed",
                                 &[("ago", super::detail::ago(*started_at))],
