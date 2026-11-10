@@ -1410,6 +1410,14 @@ fn a_desktop_call_reads_as_the_window_it_saw_and_the_steps_it_took(cx: &mut Test
     click(cx, &format!("tool-tree-{act}-toggle"));
     assert!(shows(cx, &format!("tool-tree-{act}-0")));
     assert!(!shows(cx, &format!("tool-tree-{act}-1")));
+    click(cx, &format!("activity-row-{act}"));
+    // A read shows the page it read; the facts the server put before it
+    // (where to continue) stay one click away.
+    let read_text = "toolu_010000000000000000000050";
+    click(cx, &format!("activity-row-{read_text}"));
+    assert!(shows(cx, &format!("tool-text-{read_text}-page")));
+    click(cx, &format!("tool-raw-{read_text}-toggle"));
+    assert!(shows(cx, &format!("tool-text-{read_text}-output")));
     thread.shutdown(cx);
 }
 
