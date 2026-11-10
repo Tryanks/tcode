@@ -1261,6 +1261,7 @@ diff:
   empty: "この範囲にファイルの変更はありません"
   loading: "差分を読み込み中…"
   truncated: "この差分は 200 KB を超えたため、プレビューは途中までです。"
+  turn_partial: "このターンのコマンドが、ここに載っていないファイルを変更した可能性があります。"
   add_comment: "コメントを追加"
   copy_line: "行をコピー"
   copy_selected_lines: "選択した行をコピー"

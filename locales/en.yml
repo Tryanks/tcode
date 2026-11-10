@@ -1261,6 +1261,7 @@ diff:
   empty: "No file changes in this scope"
   loading: "Loading diff…"
   truncated: "This diff exceeded 200 KB. The preview was truncated."
+  turn_partial: "Commands in this turn may have changed files not listed here."
   add_comment: "Add comment"
   copy_line: "Copy line"
   copy_selected_lines: "Copy selected lines"

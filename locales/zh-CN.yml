@@ -1254,6 +1254,7 @@ diff:
   empty: "此范围内没有文件更改"
   loading: "正在加载 Diff…"
   truncated: "此 Diff 超过 200 KB，预览已截断。"
+  turn_partial: "此回合中的命令可能修改了未在此列出的文件。"
   add_comment: "添加评论"
   copy_line: "复制该行"
   copy_selected_lines: "复制选中的行"
