@@ -2522,7 +2522,6 @@ impl ProtocolHandler for MainHandler {
         let policy = tcode_client::attachment::AttachmentPolicy::network();
         let hello_done = Arc::new(AtomicBool::new(false));
         let principal = Arc::new(Mutex::new(None));
-        let open_streams = Arc::new(AtomicUsize::new(0));
         let tunnels = Arc::new(AtomicUsize::new(0));
         // The hosting list shows how each device is carried.
         let mut paths = connection.path_events();
@@ -2538,24 +2537,16 @@ impl ProtocolHandler for MainHandler {
             let Ok((send, recv)) = accepted else {
                 break;
             };
-            if open_streams.fetch_add(1, Ordering::AcqRel) >= wire::MAX_STREAMS as usize {
-                open_streams.fetch_sub(1, Ordering::AcqRel);
-                drop((send, recv));
-                continue;
-            }
             let stream = StreamTask {
                 shared: shared.clone(),
                 connection: connection.clone(),
                 policy,
                 hello_done: hello_done.clone(),
                 principal: principal.clone(),
-                open_streams: open_streams.clone(),
                 tunnels: tunnels.clone(),
             };
             tokio::spawn(async move {
-                let result = stream.run(send, wire::reader(recv)).await;
-                stream.open_streams.fetch_sub(1, Ordering::AcqRel);
-                if let Err(error) = result {
+                if let Err(error) = stream.run(send, wire::reader(recv)).await {
                     log::debug!("main stream ended: {error}");
                 }
             });
@@ -2582,7 +2573,6 @@ struct StreamTask {
     connection: Connection,
     hello_done: Arc<AtomicBool>,
     principal: Arc<Mutex<Option<Principal>>>,
-    open_streams: Arc<AtomicUsize>,
     tunnels: Arc<AtomicUsize>,
 }
 
