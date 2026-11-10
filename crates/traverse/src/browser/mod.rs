@@ -542,6 +542,15 @@ where
         return Ok(());
     };
     let token = hello.token;
+    // Authenticated, the socket carries protocol lines, bounded as every
+    // network line is. The browser sends nothing until `hello_ok`, so the
+    // reader built for the hello holds nothing to carry over.
+    let authenticated = WebSocketConfig::default()
+        .max_message_size(Some(crate::wire::MAX_LINE))
+        .max_frame_size(Some(crate::wire::MAX_LINE));
+    let mut websocket =
+        WebSocketStream::from_raw_socket(websocket.into_inner(), Role::Server, Some(authenticated))
+            .await;
     // The hosting list shows what the device calls itself now, not what it
     // said when it logged in. The token already validated, so a failed write
     // is not a reason to refuse the connection.

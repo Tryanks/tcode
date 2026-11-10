@@ -267,6 +267,48 @@ fn two_browsers_get_their_own_acks_and_shared_broadcasts() {
     real_host::stop(runtime, &mux);
 }
 
+/// An authenticated browser sends protocol lines of any size the protocol
+/// allows: one upload chunk, as the composer writes it, reaches the host and
+/// is answered on the same socket.
+#[test]
+fn an_upload_chunk_crosses_the_socket_after_the_hello() {
+    let dir = TestDir::new("chunk");
+    let (runtime, mux) = real_host::spawn(&dir.0, Default::default(), |_| {});
+    configure_password(&dir.0, "secret password");
+    let server = serve(mux.clone(), config(dir.0.clone())).unwrap();
+    let addr = server.local_addr();
+    let token = login(addr, "secret password", "Chrome").1["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let chunk = tcode_protocol::encode_line(&tcode_protocol::ClientMessage {
+        principal: None,
+        key: None,
+        id: 3,
+        payload: tcode_protocol::ClientPayload::Query(tcode_protocol::Query::WriteUpload {
+            session_id: "no-such-session".into(),
+            path: "upload".into(),
+            offset: 0,
+            bytes: vec![7; tcode_core::attachments::UPLOAD_CHUNK_BYTES],
+        }),
+    })
+    .unwrap();
+    tcode_traverse::block_on(async {
+        let (mut browser, reply) = Browser::hello(addr, hello(&token, "Chrome")).await;
+        assert_eq!(reply["type"], "hello_ok");
+        browser.send(serde_json::from_str(&chunk).unwrap()).await;
+        loop {
+            let reply = browser.recv().await;
+            if reply["type"] == "query_result" {
+                assert_eq!(reply["content"]["id"], 3);
+                break;
+            }
+        }
+    });
+    server.shutdown();
+    real_host::stop(runtime, &mux);
+}
+
 /// A browser following the hosting state hears of another browser coming
 /// online without reading again.
 #[test]
