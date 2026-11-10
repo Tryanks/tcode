@@ -2,7 +2,7 @@ use super::{
     GitHubApi, GitHubError, RequestOptions, RestRequest,
     api::Authentication,
     graphql::{self, AliasItem, Variables},
-    repository::{Repository, pull_request_url},
+    repository::Repository,
 };
 use crate::forge::Summary;
 use serde_json::{Value, json};
@@ -132,7 +132,7 @@ impl PullRequests {
             ""
         };
         let selection = format!(
-            "number title url state isDraft mergeable reviewDecision additions deletions changedFiles updatedAt mergedAt closedAt headRefName baseRefName author {{ login avatarUrl }} latestReviews(first: 20) {{ nodes {{ state author {{ login }} }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }}{stacks}"
+            "title state isDraft mergeable reviewDecision additions deletions changedFiles updatedAt mergedAt closedAt headRefName baseRefName author {{ login avatarUrl }} latestReviews(first: 20) {{ nodes {{ state author {{ login }} }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }}{stacks}"
         );
         let document = graphql::aliases(
             "query",
@@ -150,12 +150,8 @@ impl PullRequests {
         )
         .ok_or(GitHubError::Request)?;
         let response: Value = self.api.graphql(host, &document, options)?.json()?;
-        Ok(keys
-            .iter()
-            .enumerate()
-            .map(|(index, key)| {
-                decode_summary(&response["data"][format!("s{index}")]["pullRequest"], key)
-            })
+        Ok((0..keys.len())
+            .map(|index| decode_summary(&response["data"][format!("s{index}")]["pullRequest"]))
             .collect())
     }
     fn complete_summaries(
@@ -242,14 +238,7 @@ fn state(raw: &Value) -> Option<PullRequestState> {
         _ => None,
     }
 }
-fn decode_summary(raw: &Value, key: &PullRequestKey) -> Option<Summary> {
-    if raw["number"].as_u64()? != key.number {
-        return None;
-    }
-    let (actual, _) = pull_request_url(raw["url"].as_str()?)?;
-    if actual != *key {
-        return None;
-    }
+fn decode_summary(raw: &Value) -> Option<Summary> {
     let checks = raw["commits"]["nodes"]
         .as_array()
         .and_then(|rows| rows.last())
@@ -347,5 +336,63 @@ fn review_decision(raw: &Value) -> Option<ReviewDecision> {
         Some(ReviewDecision::Approved)
     } else {
         decision
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `PullRequest` node as GitHub's GraphQL API returns it for the summary selection. Shape:
+    /// the `PullRequest` object and the `PullRequestState`, `MergeableState`,
+    /// `PullRequestReviewDecision` and `StatusState` enums of GitHub's GraphQL reference
+    /// (docs.github.com/en/graphql/reference/pulls and /commits). Content is invented.
+    fn node() -> Value {
+        json!({
+            "title": "Teach the parser tabs",
+            "state": "OPEN",
+            "isDraft": false,
+            "mergeable": "UNKNOWN",
+            "reviewDecision": "REVIEW_REQUIRED",
+            "additions": 12,
+            "deletions": 3,
+            "changedFiles": 2,
+            "updatedAt": "2026-01-02T03:04:05Z",
+            "mergedAt": null,
+            "closedAt": null,
+            "headRefName": "tabs",
+            "baseRefName": "main",
+            "author": { "login": "octo-writer", "avatarUrl": "https://avatars.example.test/u/1" },
+            "latestReviews": { "nodes": [] },
+            "commits": { "nodes": [{ "commit": { "statusCheckRollup": { "state": "EXPECTED" } } }] }
+        })
+    }
+
+    #[test]
+    fn a_summary_is_what_github_answered_for_the_pull_request_asked_about() {
+        let summary = decode_summary(&node()).expect("GitHub answered with a pull request");
+        let snapshot = summary.snapshot;
+        assert_eq!(snapshot.state, PullRequestState::Open);
+        assert_eq!(snapshot.title, "Teach the parser tabs");
+        assert_eq!(
+            (snapshot.head_branch.as_str(), snapshot.base_branch.as_str()),
+            ("tabs", "main")
+        );
+        assert_eq!(snapshot.mergeability, Mergeability::Pending);
+        assert_eq!(snapshot.checks_state, Some(ChecksState::Pending));
+        assert_eq!(
+            (
+                snapshot.additions,
+                snapshot.deletions,
+                snapshot.changed_files
+            ),
+            (Some(12), Some(3), Some(2))
+        );
+        assert_eq!(
+            snapshot.author.map(|author| author.login).as_deref(),
+            Some("octo-writer")
+        );
+        // Read without the stack fields, the node names no stack.
+        assert_eq!(summary.stack_number, None);
     }
 }
