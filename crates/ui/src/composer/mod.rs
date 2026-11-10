@@ -3215,7 +3215,7 @@ mod replica_tests {
             "the thread launches on the second account"
         );
         driver.shutdown(cx, &store, &host);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The star on a second account's row lights that row alone: the first
@@ -3287,7 +3287,7 @@ mod replica_tests {
             })
         });
         driver.shutdown(cx, &store, &host);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]

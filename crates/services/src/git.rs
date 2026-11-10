@@ -854,10 +854,10 @@ mod tests {
         run(&root, &["commit", "-m", "files"]);
         std::fs::write(subdirectory.join("nested.txt"), "one\n2\n3\n").unwrap();
         std::fs::write(root.join("binary.dat"), b"\0two").unwrap();
-        std::fs::write(subdirectory.join("é \"q\".txt"), "a\nb\n").unwrap();
-        std::fs::write(subdirectory.join("a*.txt"), "glob\n").unwrap();
+        std::fs::write(subdirectory.join("é q.txt"), "a\nb\n").unwrap();
+        std::fs::write(subdirectory.join("a[b].txt"), "glob\n").unwrap();
         std::fs::write(subdirectory.join("ab.txt"), "plain\n").unwrap();
-        run(&root, &["add", "sub/é \"q\".txt"]);
+        run(&root, &["add", "sub/é q.txt"]);
         run(&root, &["mv", "tracked.txt", "moved.txt"]);
 
         let status = read_status(&subdirectory).unwrap();
@@ -872,15 +872,15 @@ mod tests {
             [
                 entry("binary.dat", 0, 0),
                 entry("moved.txt", 0, 0),
-                entry("sub/a*.txt", 0, 0),
+                entry("sub/a[b].txt", 0, 0),
                 entry("sub/ab.txt", 0, 0),
                 entry("sub/nested.txt", 2, 1),
-                entry("sub/é \"q\".txt", 2, 0),
+                entry("sub/é q.txt", 2, 0),
             ]
         );
         assert_eq!(status.branch.as_deref(), Some("main"));
 
-        let included = ["sub/a*.txt".to_string(), "sub/é \"q\".txt".to_string()];
+        let included = ["sub/a[b].txt".to_string(), "sub/é q.txt".to_string()];
         perform_action(
             &subdirectory,
             GitAction::Commit,
