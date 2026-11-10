@@ -213,7 +213,6 @@ fn display_char(ch: char) -> char {
 pub struct Terminal {
     pty: PtyHandle,
     emulator: GridEmulator,
-    notifications: async_channel::Sender<TermEvent>,
     events: async_channel::Receiver<TermEvent>,
 }
 
@@ -289,7 +288,6 @@ impl Terminal {
         Ok(Self {
             pty,
             emulator,
-            notifications,
             events,
         })
     }
@@ -321,9 +319,7 @@ impl Terminal {
     }
 
     pub fn write_input(&self, bytes: impl Into<Vec<u8>>) {
-        if self.pty.write_input_inner(bytes.into()).unwrap_or(false) {
-            let _ = self.notifications.try_send(TermEvent::Wakeup);
-        }
+        let _ = self.pty.write_input(bytes.into());
     }
 
     /// Resize the grid and update its physical cell metrics as one operation.
