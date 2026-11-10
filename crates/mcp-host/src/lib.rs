@@ -185,31 +185,20 @@ impl Host {
 
     pub fn start(self) -> std::io::Result<()> {
         self.listener.set_nonblocking(true)?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let listener = {
+            let _context = runtime.enter();
+            tokio::net::TcpListener::from_std(self.listener)?
+        };
         std::thread::Builder::new()
             .name("mcp-host".into())
             .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
+                if let Err(error) = runtime.block_on(axum::serve(listener, self.app).into_future())
                 {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        log::error!("mcp-host: failed to build tokio runtime: {error}");
-                        return;
-                    }
-                };
-                runtime.block_on(async move {
-                    let listener = match tokio::net::TcpListener::from_std(self.listener) {
-                        Ok(listener) => listener,
-                        Err(error) => {
-                            log::error!("mcp-host: failed to adopt listener: {error}");
-                            return;
-                        }
-                    };
-                    if let Err(error) = axum::serve(listener, self.app).await {
-                        log::error!("mcp-host: server exited with error: {error}");
-                    }
-                });
+                    log::error!("mcp-host: server exited with error: {error}");
+                }
             })?;
         Ok(())
     }
