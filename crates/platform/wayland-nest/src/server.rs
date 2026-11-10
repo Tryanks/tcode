@@ -70,9 +70,6 @@ const TEXT_MIME_TYPES: [&str; 5] = [
 /// The socket's name, before the process id.
 const SOCKET_PREFIX: &str = "tcode-nest-";
 
-/// Largest clipboard text read from the client.
-const MAX_CLIPBOARD_BYTES: u64 = 16 << 20;
-
 /// How long the compositor waits after its event loop fails, so a failure
 /// that repeats does not spin.
 const ERROR_PAUSE: Duration = Duration::from_millis(50);
@@ -838,9 +835,7 @@ impl State {
         let events = self.events.clone();
         std::thread::spawn(move || {
             let mut text = String::new();
-            let read = std::fs::File::from(read)
-                .take(MAX_CLIPBOARD_BYTES)
-                .read_to_string(&mut text);
+            let read = std::fs::File::from(read).read_to_string(&mut text);
             if read.is_ok() && !text.is_empty() {
                 let _ = events.try_send(Event::Clipboard(text));
             }
