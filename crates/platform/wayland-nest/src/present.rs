@@ -121,11 +121,7 @@ impl Target {
         let buffer = &mut self.buffers[index];
         buffer.fill(frame, crop);
         self.surface.attach(Some(&buffer.buffer), 0, 0);
-        if self.surface.version() >= 4 {
-            self.surface.damage_buffer(0, 0, width, height);
-        } else {
-            self.surface.damage(0, 0, i32::MAX, i32::MAX);
-        }
+        self.surface.damage_buffer(0, 0, width, height);
         self.surface.commit();
         buffer.busy.store(true, Ordering::Relaxed);
         presenter
