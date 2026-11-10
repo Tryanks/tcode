@@ -570,6 +570,7 @@ mod tests {
         }
         timeline.entries.push(entry("late", assistant("Done.")));
         let (store, window_state, session_id) = seed_chat(cx, timeline);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(store, window_state, Some(session_id), window, cx)
         });

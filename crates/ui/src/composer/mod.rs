@@ -2863,18 +2863,15 @@ mod replica_tests {
         );
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        // The running turn's spinner rests only with motion reduced.
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (_composer, cx) = cx.add_window_view(|window, cx| {
             Composer::new(store.clone(), session_id.clone(), window, cx)
         });
         for width in (360..=1200).step_by(20) {
             let width = width as f32;
             cx.simulate_resize(gpui::size(px(width), px(800.)));
-            for _ in 0..100 {
-                cx.run_until_parked();
-                if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
-                    break;
-                }
-            }
+            draw_settled(cx);
             let stop = cx
                 .debug_bounds("stop-turn")
                 .unwrap_or_else(|| panic!("no Stop at {width}px"));
@@ -3061,6 +3058,7 @@ mod replica_tests {
     }
 
     fn two_accounts(cx: &mut TestAppContext, name: &str) -> TwoAccounts {
+        cx.update(|cx| cx.set_reduce_motion(true));
         use agent::ProviderKind;
 
         cx.update(crate::theme::init);
