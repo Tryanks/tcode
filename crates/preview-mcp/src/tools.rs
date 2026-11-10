@@ -67,10 +67,10 @@ pub struct ResizeParams {
     pub mode: String,
     /// Fixed canvas width in CSS pixels.
     #[serde(default)]
-    pub width: Option<i64>,
+    pub width: Option<u32>,
     /// Fixed canvas height in CSS pixels.
     #[serde(default)]
-    pub height: Option<i64>,
+    pub height: Option<u32>,
     /// Named device preset, as an alternative to width and height.
     #[serde(default)]
     pub preset: Option<String>,
@@ -138,10 +138,6 @@ pub struct WaitForParams {
     pub timeout_ms: Option<i64>,
 }
 
-const MIN_CANVAS_DIMENSION: i64 = 240;
-const MAX_CANVAS_DIMENSION: i64 = 3840;
-const MAX_CANVAS_AREA: u64 = 3840 * 2160;
-
 fn resize_op(params: ResizeParams) -> Result<PreviewOp, String> {
     let landscape = match params.orientation.as_deref().unwrap_or("portrait") {
         "portrait" => false,
@@ -170,23 +166,10 @@ fn resize_op(params: ResizeParams) -> Result<PreviewOp, String> {
                     .map(|(_, width, height)| (*width, *height))
                     .ok_or_else(|| format!("unknown preview preset {preset:?}"))?
             } else {
-                let width = params
-                    .width
-                    .ok_or_else(|| "fixed mode requires width and height, or a preset".to_string())?
-                    .clamp(MIN_CANVAS_DIMENSION, MAX_CANVAS_DIMENSION)
-                    as u32;
-                let height = params
-                    .height
-                    .ok_or_else(|| "fixed mode requires width and height, or a preset".to_string())?
-                    .clamp(MIN_CANVAS_DIMENSION, MAX_CANVAS_DIMENSION)
-                    as u32;
-                (width, height)
+                params.width.zip(params.height).ok_or_else(|| {
+                    "fixed mode requires width and height, or a preset".to_string()
+                })?
             };
-            if u64::from(width) * u64::from(height) > MAX_CANVAS_AREA {
-                return Err(format!(
-                    "fixed canvas area must not exceed {MAX_CANVAS_AREA} CSS pixels"
-                ));
-            }
             if landscape {
                 std::mem::swap(&mut width, &mut height);
             }
