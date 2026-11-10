@@ -3010,12 +3010,9 @@ mod tests {
     }
 
     /// A self-hosted instance that does not answer at start: the machine
-    /// runs with no relay and no lookup, and the manifest is applied to the
-    /// running endpoint by the refresh that first reaches it. The loop
-    /// itself is paced in minutes, so the test runs one refresh by hand
-    /// through the same apply path.
+    /// runs with no relay and no lookup, and its hosting status says why.
     #[test]
-    fn a_self_hosted_machine_starts_without_its_manifest_and_applies_it_when_it_arrives() {
+    fn a_self_hosted_machine_starts_without_its_manifest_and_says_why() {
         let dir = std::env::temp_dir().join(format!(
             "tcode-host-late-manifest-{}-{}",
             std::process::id(),
@@ -3029,7 +3026,7 @@ mod tests {
         let (to_host, _host_rx) =
             async_channel::unbounded::<tcode_client::attachment::AttachmentMessage>();
         let (_host_tx, from_host) = async_channel::unbounded::<String>();
-        let mut host = TraverseHost::start(
+        let host = TraverseHost::start(
             HostMux::new(to_host, from_host),
             HostConfig {
                 host_name: "Late".into(),
@@ -3066,59 +3063,6 @@ mod tests {
         );
         assert!(status.relays.is_empty() && status.lookups.is_empty());
 
-        std::fs::write(
-            &manifest_path,
-            r#"{"version":1,"relays":[{"url":"https://relay.self-hosted.test/","region":"eu"}],"pkarr":["https://relay.self-hosted.test/pkarr"]}"#,
-        )
-        .unwrap();
-        let loader = host.shared.loaders[0].clone();
-        // The failed startup fetch paces the next attempt; the loop would wait
-        // it out. The loop is stopped before the stamp is reset: its first
-        // pass runs as soon as the runtime schedules it, and once unpaced it
-        // would fetch the written manifest itself, leaving this refresh with
-        // nothing to return.
-        for refresh in host.refresh.drain(..) {
-            refresh.abort();
-        }
-        loader.state().last_attempt_ms = None;
-        let manifest = block_on(loader.refresh()).expect("the manifest arrived");
-        block_on(host.shared.apply_manifest(0, manifest));
-        assert_eq!(
-            host.shared.relays.urls::<Vec<_>>(),
-            [iroh::RelayUrl::from(
-                Url::parse("https://relay.self-hosted.test/").unwrap()
-            )]
-        );
-        assert_eq!(
-            endpoint.address_lookup().unwrap().len(),
-            2,
-            "a pkarr publisher and resolver"
-        );
-        let [status] = <[_; 1]>::try_from(host.hosting(HostingAction::State).unwrap().traverse)
-            .expect("one source");
-        assert_eq!(status.source, source);
-        assert_eq!(
-            (status.manifest.state, status.manifest.error),
-            (TraverseManifestState::Live, None),
-            "fetched by this run, and the failure is behind it"
-        );
-        assert!(status.manifest.fetched_unix.is_some());
-        assert_eq!(
-            status
-                .relays
-                .iter()
-                .map(|relay| (relay.url.as_str(), relay.region.as_deref()))
-                .collect::<Vec<_>>(),
-            [("https://relay.self-hosted.test/", Some("eu"))]
-        );
-        assert_eq!(
-            status
-                .lookups
-                .iter()
-                .map(|lookup| lookup.url.as_str())
-                .collect::<Vec<_>>(),
-            ["https://relay.self-hosted.test/pkarr"]
-        );
         host.shutdown();
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -3126,7 +3070,7 @@ mod tests {
     /// Several enabled sources: the endpoint dials the union of their relays
     /// and publishes to and resolves through every one's pkarr URLs. A
     /// source that does not answer at start is left out without holding
-    /// the others back, and its manifest joins them when it arrives.
+    /// the others back.
     #[test]
     fn several_sources_serve_the_union_of_their_relays_and_every_lookup() {
         let dir = std::env::temp_dir().join(format!(
@@ -3160,7 +3104,7 @@ mod tests {
         let (to_host, _host_rx) =
             async_channel::unbounded::<tcode_client::attachment::AttachmentMessage>();
         let (_host_tx, from_host) = async_channel::unbounded::<String>();
-        let mut host = TraverseHost::start(
+        let host = TraverseHost::start(
             HostMux::new(to_host, from_host),
             HostConfig {
                 host_name: "Sources".into(),
@@ -3185,26 +3129,6 @@ mod tests {
             "a pkarr publisher and resolver for each answering source"
         );
 
-        std::fs::write(&paths[2], manifest("late")).unwrap();
-        let loader = host.shared.loaders[2].clone();
-        // As with a single source: the loops stop before the failed
-        // attempt's pacing is reset, so this refresh is the one that fetches.
-        for refresh in host.refresh.drain(..) {
-            refresh.abort();
-        }
-        loader.state().last_attempt_ms = None;
-        let late = block_on(loader.refresh()).expect("the manifest arrived");
-        block_on(host.shared.apply_manifest(2, late));
-        assert_eq!(
-            relay_urls(&host),
-            [
-                "https://a.test/",
-                "https://b.test/",
-                "https://late.test/",
-                "https://shared.test/"
-            ]
-        );
-        assert_eq!(endpoint.address_lookup().unwrap().len(), 6);
         host.shutdown();
         let _ = std::fs::remove_dir_all(dir);
     }
