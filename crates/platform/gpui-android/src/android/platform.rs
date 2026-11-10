@@ -52,7 +52,6 @@ pub(crate) struct AndroidPlatform {
     window: RefCell<Option<Weak<AndroidWindowInner>>>,
     active_handle: Cell<Option<AnyWindowHandle>>,
     callbacks: RefCell<PlatformCallbacks>,
-    clipboard: RefCell<Option<ClipboardItem>>,
     thermal_state: Cell<ThermalState>,
     power_mode: Cell<PowerMode>,
     quit_pending: Cell<bool>,
@@ -81,7 +80,6 @@ impl AndroidPlatform {
             window: RefCell::new(None),
             active_handle: Cell::new(None),
             callbacks: RefCell::new(PlatformCallbacks::default()),
-            clipboard: RefCell::new(None),
             thermal_state: Cell::new(ThermalState::Nominal),
             power_mode: Cell::new(PowerMode::Unknown),
             quit_pending: Cell::new(false),
@@ -670,16 +668,13 @@ impl Platform for AndroidPlatform {
     }
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
-        host::read_clipboard()
-            .map(ClipboardItem::new_string)
-            .or_else(|| self.clipboard.borrow().clone())
+        host::read_clipboard().map(ClipboardItem::new_string)
     }
 
     fn write_to_clipboard(&self, item: ClipboardItem) {
         if let Some(text) = item.text() {
             host::write_clipboard(text.to_string());
         }
-        *self.clipboard.borrow_mut() = Some(item);
     }
 
     fn write_credentials(&self, _url: &str, _username: &str, _password: &[u8]) -> Task<Result<()>> {

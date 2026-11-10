@@ -201,7 +201,7 @@ host address reachable from the device.
   and accessibility bridging are not implemented in this backend;
   applications must provide any required services in their host.
 - The text clipboard is bridged to Android `ClipboardManager`. Non-text GPUI
-  clipboard data is retained only in-process.
+  clipboard data is not carried.
 - Raw multi-touch reaches the portable gesture arena, but this backend does not
   yet translate stylus buttons, hover, or hardware mouse-wheel axes.
 
