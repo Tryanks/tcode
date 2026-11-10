@@ -1076,11 +1076,12 @@ fn no_plugin_management(provider: ProviderKind) -> AgentError {
 
 /// Registry agents never offered for new sessions because they duplicate a
 /// native integration.
-pub const HIDDEN_ACP_AGENT_IDS: [&str; 6] = [
+pub const HIDDEN_ACP_AGENT_IDS: [&str; 7] = [
     "claude-acp",
     "codex-acp",
     "pi-acp",
     "opencode",
+    "opencode-v2",
     "cursor",
     "grok-build",
 ];
