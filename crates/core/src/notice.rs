@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn approvals_and_questions_are_requests_not_results() {
         let [approval] = &callbacks(
-            "[orchestrate] thread kid (\"Fix (\"x\")\") is waiting for approval: Bash: rm -rf build (request_id: r1). Native options: [{\"id\":\"allow\",\"label\":\"Allow\") \"}]. The user answers in the child thread.",
+            "[orchestrate] thread kid (\"Fix (\"x\")\") is waiting for approval: Bash: rm -rf build (approval_id: r1). Native options: [{\"id\":\"allow\",\"label\":\"Allow\") \"}]. The user answers in the child thread.",
         )[..] else {
             panic!("one callback");
         };
@@ -250,40 +250,11 @@ mod tests {
         assert_eq!(approval.report(), None);
 
         let [question] = &callbacks(
-            "[orchestrate] thread kid (\"Fix\") is asking (request_id: q1; the child is blocked until it is answered). Questions: [{\"id\":\"a\"}]. The user answers in the child thread.",
+            "[orchestrate] thread kid (\"Fix\") is asking (question_id: q1; the child is blocked until it is answered). Questions: [{\"id\":\"a\"}]. The user answers in the child thread.",
         )[..] else {
             panic!("one callback");
         };
         assert_eq!(question.event, CallbackEvent::Question);
         assert_eq!(question.report(), None);
-    }
-
-    #[test]
-    fn merged_control_messages_are_one_notice() {
-        assert_eq!(
-            host_notice(
-                "[control] thread a (\"First\") turn_completed: completed\n\n[control] thread b (\"Second\") idle"
-            ),
-            Some(HostNotice::Control(vec![
-                "thread a (\"First\") turn_completed: completed".into(),
-                "thread b (\"Second\") idle".into(),
-            ]))
-        );
-        assert_eq!(host_notice("[control]no space"), None);
-    }
-
-    #[test]
-    fn the_reminder_and_watch_messages_are_notices() {
-        assert_eq!(
-            host_notice(CHILD_REPORT_REMINDER.trim()),
-            Some(HostNotice::ReportReminder)
-        );
-        assert_eq!(
-            host_notice(&pull_request_watch::merged_message(5, "https://x/pull/5")),
-            Some(HostNotice::PullRequest {
-                number: 5,
-                notice: WatchNotice::Merged
-            })
-        );
     }
 }

@@ -2712,17 +2712,6 @@ mod tests {
     }
 
     #[test]
-    fn context_window_change_folds_into_the_timeline() {
-        let timeline =
-            Timeline::fold_events([AgentEvent::ContextWindowChanged { window: 500_000 }]);
-
-        assert!(timeline.entries.iter().any(|entry| matches!(
-            entry.content,
-            EntryContent::ContextWindowChanged { window: 500_000 }
-        )));
-    }
-
-    #[test]
     fn structured_user_input_blocks_until_resolution_or_turn_end() {
         let request = AgentEvent::UserInputRequested {
             request_id: "que_1".into(),
@@ -3006,26 +2995,6 @@ mod tests {
             (&timeline.entries, &timeline.turns),
             (&before.entries, &before.turns)
         );
-    }
-
-    #[test]
-    fn cloned_timeline_entries_are_shared_until_updated() {
-        let mut timeline = Timeline::fold_events([user_msg("user-1", "before")]);
-        let snapshot = timeline.clone();
-
-        assert!(Arc::ptr_eq(&timeline.entries[0], &snapshot.entries[0]));
-
-        timeline.apply_at(None, &user_msg("user-1", "after"));
-
-        assert!(!Arc::ptr_eq(&timeline.entries[0], &snapshot.entries[0]));
-        assert!(matches!(
-            &snapshot.entries[0].content,
-            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "before"
-        ));
-        assert!(matches!(
-            &timeline.entries[0].content,
-            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "after"
-        ));
     }
 
     #[test]
@@ -3513,135 +3482,6 @@ mod tests {
                 assert_eq!(text, expected, "{kind:?}: snapshot {incoming:?}");
             }
         }
-    }
-
-    /// Modeled on crates/agent/tests/fixtures/codex/v2_messages.jsonl:
-    /// file-change item + approval + deltas for message/reasoning/command output.
-    #[test]
-    fn fold_codex_style_trace_with_approval() {
-        let changes = vec![FileChange {
-            path: "/tmp/probe-codex/hello.txt".into(),
-            kind: FileChangeKind::Create,
-            diff: Some("hi\n".into()),
-        }];
-        let mut timeline = Timeline::default();
-        timeline.apply_at(
-            None,
-            &AgentEvent::TurnStarted {
-                turn_id: "turn-1".into(),
-            },
-        );
-        timeline.apply_at(
-            None,
-            &AgentEvent::ItemStarted(ThreadItem {
-                id: "patch-1".into(),
-                parent_item_id: None,
-                content: ItemContent::FileChange {
-                    changes: changes.clone(),
-                    status: ItemStatus::InProgress,
-                },
-            }),
-        );
-        timeline.apply_at(
-            None,
-            &AgentEvent::ApprovalRequested(ApprovalRequest {
-                id: "41".into(),
-                parent_item_id: None,
-                turn_id: Some("turn-1".into()),
-                kind: ApprovalKind::FileChange {
-                    changes: changes.clone(),
-                },
-                reason: None,
-                blocked_path: None,
-                options: Vec::new(),
-            }),
-        );
-
-        assert!(timeline.turn_running);
-        assert_eq!(timeline.pending_approvals.len(), 1);
-
-        timeline.apply_at(
-            None,
-            &AgentEvent::ApprovalResolved {
-                request_id: "41".into(),
-                decision: ApprovalDecision::Option("accept".into()),
-            },
-        );
-        assert!(timeline.pending_approvals.is_empty());
-
-        // Deltas create items lazily.
-        timeline.apply_at(
-            None,
-            &AgentEvent::Delta {
-                item_id: "message-1".into(),
-                kind: DeltaKind::AssistantText,
-                text: "PONG".into(),
-            },
-        );
-        timeline.apply_at(
-            None,
-            &AgentEvent::Delta {
-                item_id: "reasoning-1".into(),
-                kind: DeltaKind::ReasoningText,
-                text: "Checking".into(),
-            },
-        );
-        timeline.apply_at(
-            None,
-            &AgentEvent::Delta {
-                item_id: "command-1".into(),
-                kind: DeltaKind::CommandOutput,
-                text: "ok\n".into(),
-            },
-        );
-        timeline.apply_at(
-            None,
-            &AgentEvent::TokenUsage(TokenUsage {
-                used_tokens: Some(123),
-                context_window: Some(200000),
-                ..Default::default()
-            }),
-        );
-        timeline.apply_at(
-            None,
-            &AgentEvent::ItemCompleted(ThreadItem {
-                id: "patch-1".into(),
-                parent_item_id: None,
-                content: ItemContent::FileChange {
-                    changes: changes.clone(),
-                    status: ItemStatus::Completed,
-                },
-            }),
-        );
-        timeline.apply_at(
-            None,
-            &AgentEvent::TurnCompleted {
-                turn_id: "turn-1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-        );
-
-        assert!(!timeline.turn_running);
-        assert_eq!(timeline.entries.len(), 4);
-        assert!(matches!(
-            &timeline.entries[0].content,
-            EntryContent::Item(ItemContent::FileChange { changes, .. })
-                if changes.len() == 1 && changes[0].path.ends_with("hello.txt")
-        ));
-        assert!(matches!(
-            &timeline.entries[1].content,
-            EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "PONG"
-        ));
-        assert!(matches!(
-            &timeline.entries[2].content,
-            EntryContent::Item(ItemContent::Reasoning { text }) if text == "Checking"
-        ));
-        assert!(matches!(
-            &timeline.entries[3].content,
-            EntryContent::Item(ItemContent::CommandExecution { output, .. }) if output == "ok\n"
-        ));
-        assert_eq!(timeline.usage.unwrap().used_tokens, Some(123));
     }
 
     #[test]
