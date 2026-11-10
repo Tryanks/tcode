@@ -1394,11 +1394,12 @@ fn legacy_codex_file_contents_replay_as_patches_without_rewriting_history() {
     );
 }
 
-/// Tool calls recorded before every adapter kept results canonical, as
-/// tcode.db holds them (images swapped for 1x1 pictures): a Codex MCP result,
-/// a Claude image read whose image is also inlined in the text, a connector
-/// whose payload is only structured, and a Codex rollout import. They read
-/// back as text and images; text in no provider shape is left alone.
+/// Tool calls recorded before every adapter kept results canonical, in the
+/// shape tcode.db holds them (invented content, 1x1 pictures): a Codex MCP
+/// result, a Claude image read whose image is also inlined in the text, a
+/// connector whose payload is only structured, and a Codex rollout import.
+/// They read back as text and images; text in no provider shape is left
+/// alone.
 #[test]
 fn tool_output_recorded_in_provider_shapes_reads_back_canonical() {
     const LOG: &str = include_str!("fixtures/legacy-tool-output.jsonl");
@@ -1457,8 +1458,8 @@ fn tool_output_recorded_in_provider_shapes_reads_back_canonical() {
 }
 
 /// A Codex sleep, image view and image generation recorded as `Other`
-/// before the adapter mapped them, as tcode.db holds them (the picture
-/// swapped for a 1x1 one), read back as the items a new row holds.
+/// before the adapter mapped them, in the shape tcode.db holds them (invented
+/// paths and ids, a 1x1 picture), read back as the items a new row holds.
 #[test]
 fn codex_items_recorded_as_other_read_back_as_their_items() {
     const LOG: &str = include_str!("fixtures/legacy-codex-items.jsonl");
@@ -1490,19 +1491,19 @@ fn codex_items_recorded_as_other_read_back_as_their_items() {
                 status: agent::ItemStatus::Completed,
             },
             agent::ItemContent::ImageRead {
-                path: "/tmp/tcode-before.png".into(),
+                path: "/tmp/example-before.png".into(),
                 image: None,
             },
             agent::ItemContent::ToolCall {
                 image_reads: vec![agent::Attachment {
                     media_type: "image/png".into(),
                     data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==".into(),
-                    source_path: Some("/Users/me/.codex/generated_images/01a196f6-db20-7941-b9de-d73415937480/exec-89f575db-4c35-4d77-a024-611fdd5d1d50.png".into()),
+                    source_path: Some("/home/user/.codex/generated_images/00000075-0000-0000-0000-000000000075/exec-00000074-0000-0000-0000-000000000074.png".into()),
                 }],
                 name: "image_generation".into(),
                 input: serde_json::json!({
                     "revised_prompt": "Edit the reference image: keep the subject, make the background transparent.",
-                    "input_images": ["/Users/me/project/assets/reference.png"],
+                    "input_images": ["/home/user/project/assets/reference.png"],
                 }),
                 output: None,
                 status: agent::ItemStatus::Completed,
