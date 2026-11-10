@@ -4951,8 +4951,18 @@ pub(crate) fn confirm_delete(
     window
         .spawn(cx, async move |cx| {
             let count = count.await;
-            let _ = cx.update(|window, cx| {
-                open_delete_confirmation(store, session_id, title, ok_text, count, window, cx)
+            let _ = cx.update(|window, cx| match count {
+                Ok(count) => {
+                    open_delete_confirmation(store, session_id, title, ok_text, count, window, cx)
+                }
+                // Without the archived threads the dialog could not say how
+                // many threads the delete takes.
+                Err(error) => window.push_notification(
+                    Notification::error(
+                        crate::tr!("settings.archived_failed", error = error).into_owned(),
+                    ),
+                    cx,
+                ),
             });
         })
         .detach();

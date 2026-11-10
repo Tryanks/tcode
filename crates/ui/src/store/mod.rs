@@ -4330,24 +4330,25 @@ impl WorkspaceStore {
         Some(self.deletion_count(session_id, &archived.sessions))
     }
 
-    /// [`Self::held_deletion_count`] over the archived threads, fetched once.
-    pub fn fetch_deletion_count(&self, session_id: &str, cx: &mut Context<Self>) -> Task<usize> {
+    /// [`Self::held_deletion_count`] over the archived threads, fetched once;
+    /// why they could not be read, when they could not.
+    pub fn fetch_deletion_count(
+        &self,
+        session_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<usize, String>> {
         let host = self.host.clone();
         let session_id = session_id.to_string();
         cx.spawn(async move |this, cx| {
             let archived = match host.query(Query::ArchivedSessions).await {
                 Ok(QueryResponse::ArchivedSessions(archived)) => archived.sessions,
                 Ok(other) => {
-                    log::warn!("unexpected archived-sessions response: {other:?}");
-                    Vec::new()
+                    return Err(format!("unexpected archived-sessions response: {other:?}"));
                 }
-                Err(error) => {
-                    log::warn!("archived sessions failed: {}", error.message);
-                    Vec::new()
-                }
+                Err(error) => return Err(error.message),
             };
             this.read_with(cx, |store, _| store.deletion_count(&session_id, &archived))
-                .unwrap_or(1)
+                .map_err(|error| error.to_string())
         })
     }
 
@@ -8165,8 +8166,41 @@ pub(crate) mod tests {
             .unwrap();
         assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
         cx.run_until_parked();
+        assert_eq!(count.take(), Some(Ok(3)));
 
-        assert_eq!(count.get(), Some(3));
+        // Without the archived threads there is no count to state.
+        let result = count.clone();
+        store.update(cx, |store, cx| {
+            let task = store.fetch_deletion_count("parent", cx);
+            cx.spawn(async move |_, _| result.set(Some(task.await)))
+                .detach();
+        });
+        cx.run_until_parked();
+        let query = std::iter::from_fn(|| requests.try_recv().ok())
+            .map(|line| tcode_protocol::decode_client_line(&line).unwrap())
+            .find(|message| {
+                message.payload
+                    == tcode_protocol::ClientPayload::Query(tcode_protocol::Query::ArchivedSessions)
+            })
+            .expect("the count fetches the archived threads");
+        replies
+            .try_send(
+                tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
+                    id: query.id,
+                    result: Err(tcode_protocol::ProtocolError {
+                        code: "store".into(),
+                        message: "the index could not be read".into(),
+                    }),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        cx.run_until_parked();
+        assert_eq!(
+            count.take(),
+            Some(Err("the index could not be read".to_owned()))
+        );
         link.close();
     }
 
