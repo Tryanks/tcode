@@ -1093,7 +1093,6 @@ pub enum MergeWorktreeFailure {
     Git,
 }
 
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeToast {
