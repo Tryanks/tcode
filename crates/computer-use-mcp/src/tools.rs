@@ -350,6 +350,7 @@ impl ComputerUseTools {
             "enabled": node.enabled,
             "focused": node.focused,
             "child_count": node.children.len(),
+            "children_error": node.children_error,
         });
         let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
         bounded_success(Some(&observation.state_id), text, Vec::new())

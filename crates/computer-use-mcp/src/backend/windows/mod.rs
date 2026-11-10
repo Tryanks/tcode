@@ -642,6 +642,7 @@ fn walk_element(
             enabled: element.is_enabled().unwrap_or(true),
             focused: element.has_keyboard_focus().unwrap_or(false),
             children: Vec::new(),
+            children_error: None,
         },
         children: Vec::new(),
     };

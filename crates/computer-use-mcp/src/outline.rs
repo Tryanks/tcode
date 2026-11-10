@@ -54,6 +54,10 @@ pub struct UiNode {
     pub enabled: bool,
     pub focused: bool,
     pub children: Vec<UiNode>,
+    /// Why the platform could not list this element's children, which the
+    /// tree then lacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub children_error: Option<String>,
 }
 
 impl UiNode {
@@ -327,6 +331,12 @@ pub fn render_line(node: &UiNode, depth: usize) -> String {
     }
     if node.focused {
         line.push_str(" focused");
+    }
+    if let Some(error) = &node.children_error {
+        line.push_str(&format!(
+            " children_unreadable=\"{}\"",
+            display_string(error, 240)
+        ));
     }
     line
 }

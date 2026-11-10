@@ -28,7 +28,9 @@ type AXError = i32;
 type AXValueType = u32;
 
 const AX_SUCCESS: AXError = 0;
+const AX_ERROR_ATTRIBUTE_UNSUPPORTED: AXError = -25205;
 const AX_ERROR_API_DISABLED: AXError = -25211;
+const AX_ERROR_NO_VALUE: AXError = -25212;
 const AX_VALUE_CGPOINT: AXValueType = 1;
 const AX_VALUE_CGSIZE: AXValueType = 2;
 const AX_VALUE_CGRECT: AXValueType = 3;
@@ -537,7 +539,15 @@ pub(super) fn locate_target(
 ) -> Result<Target, BackendError> {
     let (application, mut element) = locate_window(root)?;
     for &index in path {
-        let children = copy_children(element.as_ax(), index.saturating_add(1));
+        let children = copy_children(element.as_ax(), index.saturating_add(1)).map_err(|code| {
+            BackendError::new(
+                BackendErrorCode::OperationFailed,
+                format!(
+                    "could not read the children along the target's accessibility path: {}",
+                    ax_error_text(code)
+                ),
+            )
+        })?;
         let Some(child) = children.into_iter().nth(index) else {
             return Err(BackendError::new(
                 BackendErrorCode::OperationFailed,
@@ -701,6 +711,7 @@ fn walk_tree(root: AXUIElementRef, context: &mut WalkContext) -> Option<UiNode> 
             return Some(node);
         };
         let invisible_leaf = node.children.is_empty()
+            && node.children_error.is_none()
             && !node.is_interactive()
             && node.title.is_empty()
             && node.value.is_empty()
@@ -735,6 +746,12 @@ fn read_element(
     let actions = action_names(element);
     let enabled = attribute_bool(element, "AXEnabled").unwrap_or(true);
     let focused = attribute_bool(element, "AXFocused").unwrap_or(false);
+    let remaining = MAX_NODES - context.count;
+    let (children, children_error) =
+        match copy_children(element, remaining.min(MAX_CHILDREN_PER_NODE)) {
+            Ok(children) => (children, None),
+            Err(code) => (Vec::new(), Some(ax_error_text(code))),
+        };
     let node = UiNode {
         ref_id: String::new(),
         role: canonical_role(&role),
@@ -746,26 +763,20 @@ fn read_element(
         enabled,
         focused,
         children: Vec::new(),
+        children_error,
     };
-    let remaining = MAX_NODES - context.count;
-    let children = copy_children(element, remaining.min(MAX_CHILDREN_PER_NODE));
     Some((node, children.into_iter()))
 }
 
-fn copy_children(element: AXUIElementRef, maximum: usize) -> Vec<OwnedCf> {
-    copy_attribute_elements(element, "AXChildren", maximum)
+/// An element that has no children attribute, or no value for it, has none.
+fn copy_children(element: AXUIElementRef, maximum: usize) -> Result<Vec<OwnedCf>, AXError> {
+    match try_copy_attribute_elements(element, "AXChildren", maximum) {
+        Err(AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE) => Ok(Vec::new()),
+        result => result,
+    }
 }
 
-fn copy_attribute_elements(
-    element: AXUIElementRef,
-    attribute_name: &str,
-    maximum: usize,
-) -> Vec<OwnedCf> {
-    try_copy_attribute_elements(element, attribute_name, maximum).unwrap_or_default()
-}
-
-/// Like [`copy_attribute_elements`], but reports the AX error code of a failed
-/// copy so callers can tell a refused API from an empty attribute.
+/// The elements of an attribute, or the AX error code of a failed copy.
 fn try_copy_attribute_elements(
     element: AXUIElementRef,
     attribute_name: &str,
@@ -975,6 +986,10 @@ fn ax_result(operation: &'static str, code: AXError) -> Result<(), AxFailure> {
     } else {
         Err(AxFailure { operation, code })
     }
+}
+
+fn ax_error_text(code: AXError) -> String {
+    format!("AX error {code} ({})", ax_error_name(code))
 }
 
 fn ax_error_name(code: AXError) -> &'static str {
