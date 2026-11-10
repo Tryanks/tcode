@@ -7926,9 +7926,12 @@ mod tests {
 
     #[gpui::test]
     fn canceling_inline_rename_discards_the_unsaved_title(cx: &mut TestAppContext) {
-        for compact in [false, true] {
-            cancel_inline_rename(cx, compact);
-        }
+        cancel_inline_rename(cx, false);
+    }
+
+    #[gpui::test]
+    fn canceling_inline_rename_on_the_phone_discards_the_unsaved_title(cx: &mut TestAppContext) {
+        cancel_inline_rename(cx, true);
     }
 
     fn cancel_inline_rename(cx: &mut TestAppContext, compact: bool) {
@@ -7941,7 +7944,6 @@ mod tests {
         meta.project_id = Some(project.id.clone());
         meta.title = "Original title".into();
         meta.id = "rename-thread".into();
-        let session_id = meta.id.clone();
         let host =
             spawn_host(session_store, HostServices::default()).expect("spawn sidebar test host");
         smol::block_on(host.update_state_for_test(move |state, _| {
@@ -8149,12 +8151,26 @@ mod tests {
                 "the mark leaves with the menu"
             );
         }
+        if !compact {
+            let (button, modifiers) = (gpui::MouseButton::Right, gpui::Modifiers::none());
+            cx.simulate_mouse_down(trigger, button, modifiers);
+            cx.simulate_mouse_up(trigger, button, modifiers);
+            crate::test_frames::draw_settled(cx);
+            let rename = cx
+                .debug_bounds("menu-item-2")
+                .expect("thread menu opens")
+                .center();
+            cx.simulate_click(rename, gpui::Modifiers::default());
+            draw(cx);
+        }
         cx.update(|window, cx| {
             sidebar.update(cx, |sidebar, cx| {
-                if !compact {
-                    sidebar.on_rename(&ThreadRename(local(session_id.clone())), window, cx);
-                }
-                let input = sidebar.renaming.as_ref().unwrap().input.clone();
+                let input = sidebar
+                    .renaming
+                    .as_ref()
+                    .expect("Rename starts editing")
+                    .input
+                    .clone();
                 input.update(cx, |input, cx| input.set_value("Unsaved title", window, cx));
             });
         });
