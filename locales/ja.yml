@@ -76,7 +76,7 @@ chat:
   reveal_in_file_manager: "ファイルマネージャーで表示"
   copy_path: "パスをコピー"
   open_zed: "Zed で開く"
-  open_zed_remote: "Tcode のリモート経由で Zed で開く"
+  open_zed_remote: "Zed でリモートで開く"
   screen_open: "%{name} のスクリーンショットを開く"
   screen_position: "%{index} / %{total}"
   screen_earlier: "前のスクリーンショット"

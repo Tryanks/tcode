@@ -76,7 +76,7 @@ chat:
   reveal_in_file_manager: "Reveal in file manager"
   copy_path: "Copy path"
   open_zed: "Open in Zed"
-  open_zed_remote: "Open in Zed over Tcode (remote)"
+  open_zed_remote: "Open remotely in Zed"
   screen_open: "Open screenshot of %{name}"
   screen_position: "%{index} of %{total}"
   screen_earlier: "Earlier screenshot"
