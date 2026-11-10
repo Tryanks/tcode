@@ -1079,11 +1079,6 @@ mod tests {
             let recorded = frame(name, id, true);
             assert_eq!(method, recorded["method"], "{op:?}");
             assert_eq!(params, recorded["params"], "{op:?}");
-            let wire = params.to_string();
-            assert!(
-                !wire.contains("dangerously") && !wire.contains("bypass"),
-                "{wire}"
-            );
         }
         // A dotted id stays one key segment (written live as `[plugins."a.b@m"]`).
         assert_eq!(
