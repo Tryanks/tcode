@@ -413,11 +413,7 @@ pub(crate) fn activity_run_duration_ms(
 // A failed command inside a run is normal agent probing (grep exit 1, a
 // retried build); it never fails the run. Only the turn's own terminal
 // status colors the snapshot, and only on the segment that carries it.
-pub(crate) fn work_log_outcome(
-    turn: &TurnMeta,
-    _activities: &[&TimelineEntry],
-    is_last: bool,
-) -> TurnStatus {
+pub(crate) fn work_log_outcome(turn: &TurnMeta, is_last: bool) -> TurnStatus {
     if is_last {
         turn.status.unwrap_or(TurnStatus::Completed)
     } else {
@@ -563,11 +559,10 @@ pub(crate) fn turn_time_parts(clock: String, timing: Option<TurnTiming>) -> Vec<
 
 pub(crate) fn turn_time_breakdown(timing: Option<TurnTiming>) -> Option<String> {
     timing.map(|timing| {
-        let tools = timing.tool_ms.min(timing.total_ms);
-        let ai = timing.total_ms - tools;
+        let ai = timing.total_ms - timing.tool_ms;
         [
             crate::tr!("chat.turn_ai", duration = format_elapsed(ai)).into_owned(),
-            crate::tr!("chat.turn_tools", duration = format_elapsed(tools)).into_owned(),
+            crate::tr!("chat.turn_tools", duration = format_elapsed(timing.tool_ms)).into_owned(),
         ]
         .join(" · ")
     })
