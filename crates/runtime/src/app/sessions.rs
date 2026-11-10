@@ -1205,8 +1205,11 @@ impl AppState {
             self.evaluate_all_settlement(cx);
         }
         match provider_secret_names(&self.settings, &self.settings_store) {
-            Ok(names) => self.providers.provider_secret_names = names,
-            Err(error) => self.report_error(RuntimeError::External(error.to_string()), cx),
+            Ok(names) => {
+                self.providers.provider_secret_names = names;
+                self.providers.secrets_unreadable = None;
+            }
+            Err(error) => self.providers.secrets_unreadable = Some(error.to_string()),
         }
         // Keep the live computer-use MCP config in step with the persisted
         // settings on every change (the server outlives any one snapshot).

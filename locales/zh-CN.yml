@@ -738,6 +738,7 @@ providers:
     name_placeholder: "VARIABLE_NAME"
     value_placeholder: "值"
     stored_secret: "已保存的密钥 - 输入新值以替换"
+    secrets_unreadable: "读不了已保存的密钥（%{error}），所以这里不显示任何已保存的密钥，需要密钥的线程无法启动，也不会有任何内容写进这个文件。"
     sensitive: "敏感"
     remove: "移除变量"
     security_help: "敏感值将单独存储，保存后不会再返回给应用。"

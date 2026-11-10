@@ -742,6 +742,7 @@ providers:
     name_placeholder: "VARIABLE_NAME"
     value_placeholder: "値"
     stored_secret: "保存済みのシークレット（新しい値を入力すると置き換えます）"
+    secrets_unreadable: "保存済みのシークレットを読み込めなかったため（%{error}）、保存済みとして表示されるものはなく、シークレットが必要なスレッドは開始できず、このファイルには何も書き込みません。"
     sensitive: "機密"
     remove: "変数を削除"
     security_help: "機密の値は別に保存され、保存後はアプリに返されません。"

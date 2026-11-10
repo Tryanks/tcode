@@ -3027,6 +3027,11 @@ impl WorkspaceStore {
         self.settings_replica.provider_color(profile_id)
     }
 
+    /// Why the host's saved secrets could not be read.
+    pub fn provider_secrets_unreadable(&self) -> Option<&str> {
+        self.providers_replica.secrets_unreadable.as_deref()
+    }
+
     pub fn provider_profile_stored_secret_names(&self, profile_id: &str) -> HashSet<String> {
         self.providers_replica
             .secret_names

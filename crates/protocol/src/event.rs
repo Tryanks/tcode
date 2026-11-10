@@ -384,6 +384,9 @@ pub struct ProvidersStatus {
     /// Environment-variable names present for each profile. Values never cross
     /// the protocol boundary.
     pub secret_names: HashMap<String, HashSet<String>>,
+    /// Why the host's saved secrets could not be read: then no name above is
+    /// saved as far as clients can tell, and the host saves none.
+    pub secrets_unreadable: Option<String>,
     /// Native plugin catalogs of the profiles a client asked about: for each,
     /// the listing from outside any project and the listing of the one
     /// project last asked about.

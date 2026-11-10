@@ -1344,6 +1344,75 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
     });
 }
 
+/// A secrets.json this build cannot read at start: the host runs, clients
+/// are told the saved secrets could not be read rather than shown none,
+/// saving a secret says why it is refused, and the file is left as it is.
+#[test]
+fn unreadable_secrets_are_reported_and_never_written_over() {
+    let test_store = TestStore::new("tcode-secrets-unreadable");
+    std::fs::create_dir_all(test_store.root()).unwrap();
+    let torn = r#"{"version":1,"profiles":{"codex":"#;
+    std::fs::write(test_store.root().join("secrets.json"), torn).unwrap();
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    state.deliver(
+        cx,
+        1000,
+        tcode_protocol::ClientPayload::Subscribe(Subscription {
+            topic: Topic::Providers,
+            after: None,
+            known_index: None,
+        }),
+    );
+    cx.run_until_parked();
+    let unreadable = cx
+        .drain_outgoing()
+        .into_iter()
+        .find_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                event: ServerEvent::ProvidersReplaced(status),
+                ..
+            }) => Some(status.secrets_unreadable),
+            _ => None,
+        });
+    assert!(
+        unreadable
+            .flatten()
+            .is_some_and(|error| error.contains("secrets.json")),
+        "the providers status says the secrets could not be read"
+    );
+    state.dispatch_command(
+        cx,
+        43,
+        Command::SetProfileSecret {
+            profile_id: "codex".into(),
+            name: "OPENAI_API_KEY".into(),
+            value: Some("typed-again".into()),
+        },
+    );
+    cx.run_until_parked();
+    let outgoing = cx.drain_outgoing();
+    assert!(outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            event: ServerEvent::Runtime(RuntimeEvent::Error(RuntimeError::FileUnreadable { error })),
+            ..
+        }) if error.contains("secrets.json")
+    )));
+    assert!(!outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            event: ServerEvent::ProvidersReplaced(status),
+            ..
+        }) if status.secret_names.get("codex").is_some_and(|names| !names.is_empty())
+    )));
+    state.update(cx, |state, _| state.close_store().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(test_store.root().join("secrets.json")).unwrap(),
+        torn
+    );
+}
+
 #[test]
 fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
     let cx = &mut TestAppContext::default();

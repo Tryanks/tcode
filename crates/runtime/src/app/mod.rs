@@ -568,10 +568,7 @@ impl AppState {
         let releases = Arc::new(ReleaseFeed::new(tcode_services::github::GitHubApi::host(
             tcode_services::github::Credentials::new(settings_store.clone(), []),
         )));
-        // An unreadable secrets.json refuses every write and is reported by
-        // whatever reads a secret, so no secret is shown as saved.
-        let provider_secret_names =
-            provider_secret_names(&settings, &settings_store).unwrap_or_default();
+        let provider_secret_names = provider_secret_names(&settings, &settings_store);
         // Push the loaded computer-use config to the (already-running) MCP layer
         // so the tools honor the persisted image-mode / allow-input choices from
         // the first call, not just after a settings change.

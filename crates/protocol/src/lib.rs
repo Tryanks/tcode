@@ -337,6 +337,7 @@ pub use wire::{
 // SessionStatus gains preparing_turn.
 // ServerEvent gains preview_request_cancelled.
 // Command gains cancel_plugin_operation, RuntimeToast plugin_operation_cancelled.
+// ProvidersStatus gains secrets_unreadable.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

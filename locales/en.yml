@@ -742,6 +742,7 @@ providers:
     name_placeholder: "VARIABLE_NAME"
     value_placeholder: "Value"
     stored_secret: "Stored secret - enter a new value to replace"
+    secrets_unreadable: "Saved secret values could not be read (%{error}), so none shows as saved, a thread that needs one does not start, and none is saved over the file."
     sensitive: "Sensitive"
     remove: "Remove variable"
     security_help: "Sensitive values are stored separately and are not returned to the app after saving."

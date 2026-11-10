@@ -664,6 +664,26 @@ impl HarnessDialog {
         self.store.read(cx).provider_profile_stored_secret_names(id)
     }
 
+    /// What the variables say while the host's saved secrets cannot be read,
+    /// where no secret shows as saved.
+    fn secrets_unreadable(&self, cx: &App) -> Option<AnyElement> {
+        let error = self
+            .store
+            .read(cx)
+            .provider_secrets_unreadable()?
+            .to_owned();
+        Some(
+            div()
+                .debug_selector(|| "harness-secrets-unreadable".into())
+                .text_secondary(false, cx)
+                .child(crate::tr!(
+                    "providers.env.secrets_unreadable",
+                    error = error
+                ))
+                .into_any_element(),
+        )
+    }
+
     /// The variables the overview edits: on a harness with one account, that
     /// account's own; else the ones every account shares.
     fn harness_env_value(&self, cx: &App) -> Vec<EnvVar> {
@@ -2410,6 +2430,7 @@ impl HarnessDialog {
             );
         }
         let env = self.harness_env(window, cx);
+        let unreadable = self.secrets_unreadable(cx);
         rows.push(
             v_flex()
                 .w_full()
@@ -2427,6 +2448,7 @@ impl HarnessDialog {
                     self.compact(),
                     cx,
                 ))
+                .children(unreadable)
                 .child(env)
                 .into_any_element(),
         );
@@ -2786,6 +2808,7 @@ impl HarnessDialog {
             ));
         }
         let env = self.profile_env(window, cx);
+        let unreadable = self.secrets_unreadable(cx);
         advanced.push(
             v_flex()
                 .w_full()
@@ -2807,6 +2830,7 @@ impl HarnessDialog {
                     self.compact(),
                     cx,
                 ))
+                .children(unreadable)
                 .child(env)
                 .into_any_element(),
         );
@@ -3440,6 +3464,18 @@ mod tests {
                 assert!(!shown(cx, selector), "{harness:?} must not show {selector}");
             }
         }
+    }
+
+    /// Secrets the host could not read are not shown as none saved: the
+    /// variables say why.
+    #[gpui::test]
+    fn unreadable_secrets_are_said_beside_the_variables(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (settings, mut status) = settings_and_status();
+        status.secrets_unreadable = Some("secrets.json is unreadable".into());
+        let host = Host::new(settings, status, Vec::new(), cx);
+        let (_dialog, cx) = host.open(HarnessId::Native(ProviderKind::Pi), cx);
+        assert!(cx.debug_bounds("harness-secrets-unreadable").is_some());
     }
 
     /// The dialog lists what the host read from the harness's own files and

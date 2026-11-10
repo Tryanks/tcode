@@ -66,6 +66,9 @@ pub struct ProviderCatalog {
     profile_revisions: HashMap<String, u64>,
     secret_writes: SecretWrites,
     pub(super) provider_secret_names: HashMap<String, HashSet<String>>,
+    /// Why secrets.json could not be read when the names above were last
+    /// read. No secret is shown as saved and none is written over the file.
+    pub(super) secrets_unreadable: Option<String>,
     logins: HashMap<String, RunningLogin>,
     next_login: u64,
 }
@@ -73,8 +76,15 @@ pub struct ProviderCatalog {
 impl ProviderCatalog {
     pub(super) fn new(
         model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
-        provider_secret_names: HashMap<String, HashSet<String>>,
+        provider_secret_names: std::io::Result<HashMap<String, HashSet<String>>>,
     ) -> Self {
+        let (provider_secret_names, secrets_unreadable) = match provider_secret_names {
+            Ok(names) => (names, None),
+            Err(error) => {
+                log::error!("running without the saved secrets: {error}");
+                (HashMap::new(), Some(error.to_string()))
+            }
+        };
         Self {
             model_catalogs,
             model_refreshes: HashMap::new(),
@@ -89,6 +99,7 @@ impl ProviderCatalog {
             profile_revisions: HashMap::new(),
             secret_writes: HashMap::new(),
             provider_secret_names,
+            secrets_unreadable,
             logins: HashMap::new(),
             next_login: 0,
         }
@@ -304,6 +315,7 @@ impl ProviderCatalog {
                     .any(|status| status.checking)
                 || self.tcode_update.checking,
             secret_names: self.provider_secret_names.clone(),
+            secrets_unreadable: self.secrets_unreadable.clone(),
             plugins,
             harnesses: Vec::new(),
         }
@@ -516,6 +528,10 @@ impl AppState {
         value: Option<&str>,
         cx: &mut HostCx,
     ) {
+        if let Some(error) = self.providers.secrets_unreadable.clone() {
+            self.report_error(RuntimeError::FileUnreadable { error }, cx);
+            return;
+        }
         self.providers.invalidate_profile_reads(id);
         if let Some(kind) = ProviderKind::NATIVE
             .into_iter()
@@ -778,7 +794,10 @@ impl AppState {
         settings.favorite_models.retain(|favorite| {
             !matches!(favorite, FavoriteModel::Row { profile_id: Some(starred), .. } if starred == id)
         });
-        self.enqueue_store_write(StoreWrite::ClearProfileSecrets(id.to_string()), cx);
+        match self.providers.secrets_unreadable.clone() {
+            Some(error) => self.report_error(RuntimeError::FileUnreadable { error }, cx),
+            None => self.enqueue_store_write(StoreWrite::ClearProfileSecrets(id.to_string()), cx),
+        }
         self.providers.provider_secret_names.remove(id);
         self.providers.secret_writes.remove(id);
         self.update_settings(settings, cx);
@@ -1954,7 +1973,7 @@ mod provider_lifecycle_tests {
 
     #[test]
     fn failed_usage_fetch_keeps_the_last_windows_and_their_time() {
-        let mut catalog = ProviderCatalog::new(HashMap::new(), HashMap::new());
+        let mut catalog = ProviderCatalog::new(HashMap::new(), Ok(HashMap::new()));
         let windows = tcode_core::usage::ProviderUsage {
             fetched_at: 1_700_000_000,
             plan: Some("max".into()),
