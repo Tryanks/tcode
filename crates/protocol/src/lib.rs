@@ -329,6 +329,7 @@ pub use wire::{
 // The user_message item has no context_len.
 // PullRequestFiles' changed_files may be absent (the host gave no count).
 // PullRequestFile gains url, the file's page on the host.
+// ThreadWakes' pull_requests are PullRequestKeys, not numbers.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

@@ -463,7 +463,7 @@ fn keeps_going(state: &ThreadRowState) -> Option<String> {
         wakes
             .pull_requests
             .iter()
-            .map(|number| crate::tr!("background.keeps_watch", number = number).into_owned()),
+            .map(|key| crate::tr!("background.keeps_watch", number = key.number).into_owned()),
     );
     if let Some(at) = wakes.scheduled_at {
         parts.push(
@@ -7046,7 +7046,11 @@ mod tests {
                     unsettled: 0,
                     wakes: tcode_protocol::ThreadWakes {
                         pull_requests: if doing == Doing::Watch {
-                            vec![1048]
+                            vec![tcode_core::pull_request::PullRequestKey::new(
+                                "github.com",
+                                "sample/project",
+                                1048,
+                            )]
                         } else {
                             Vec::new()
                         },

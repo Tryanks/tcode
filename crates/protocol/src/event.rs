@@ -733,9 +733,9 @@ impl BackgroundActivity {
 /// What wakes a thread later though nothing of it runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadWakes {
-    /// Numbers of the pull requests a watch that is not paused follows.
+    /// The pull requests a watch that is not paused follows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pull_requests: Vec<u64>,
+    pub pull_requests: Vec<tcode_core::pull_request::PullRequestKey>,
     /// When its earliest scheduled message is due (unix seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_at: Option<u64>,

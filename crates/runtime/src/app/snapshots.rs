@@ -603,7 +603,7 @@ impl<'a> ActivityProjection<'a> {
                     Vec::new()
                 } else {
                     tcode_core::pull_request::watched(&meta.pull_requests)
-                        .map(|link| link.key.number)
+                        .map(|link| link.key.clone())
                         .collect()
                 },
                 scheduled_at: resident
