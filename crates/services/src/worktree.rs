@@ -542,9 +542,14 @@ pub fn merge_back(
     match run_git(destination, &["merge", "--no-ff", "--no-edit", branch]) {
         Ok(_) => Ok(MergeBackOutcome::MergeCommit),
         Err(error) => {
-            let conflicted = destination.join(".git/MERGE_HEAD").exists()
-                || run_git(destination, &["diff", "--name-only", "--diff-filter=U"])
-                    .is_ok_and(|paths| !paths.trim().is_empty());
+            // A merge stopped on conflicts leaves MERGE_HEAD in the
+            // destination's own Git directory, which Git resolves for a
+            // linked worktree too.
+            let conflicted = run_git(
+                destination,
+                &["rev-parse", "--quiet", "--verify", "MERGE_HEAD"],
+            )
+            .is_ok();
             if conflicted {
                 run_git(destination, &["merge", "--abort"]).map_err(MergeBackError::Git)?;
                 Err(MergeBackError::DivergedConflict)
@@ -1179,25 +1184,39 @@ mod tests {
         }
     }
 
+    /// The destination is the main checkout or a linked worktree, whose Git
+    /// directory is not `.git`.
     #[test]
     fn merge_back_aborts_conflict_and_restores_clean_destination() {
-        let (temp, root) = scratch_repo("tcode-merge-back-conflict-test");
-        let created = provision_for_test(&root, "conflict", &temp);
-        commit_file(&created.path, "tracked.txt", "worktree\n", "worktree edit");
-        commit_file(&root, "tracked.txt", "destination\n", "destination edit");
-        assert_eq!(
-            merge_back(&root, &created.path, &created.branch),
-            Err(MergeBackError::DivergedConflict)
-        );
-        assert!(
-            run_git(&root, &["status", "--porcelain"])
-                .unwrap()
-                .trim()
-                .is_empty()
-        );
-        assert!(!root.join(".git/MERGE_HEAD").exists());
-        remove(&root, &created.path).unwrap();
-        let _ = std::fs::remove_dir_all(temp);
+        for linked in [false, true] {
+            let (temp, root) = scratch_repo("tcode-merge-back-conflict-test");
+            let created = provision_for_test(&root, "conflict", &temp);
+            commit_file(&created.path, "tracked.txt", "worktree\n", "worktree edit");
+            let destination = if linked {
+                provision_for_test(&root, "destination", &temp).path
+            } else {
+                root.clone()
+            };
+            commit_file(
+                &destination,
+                "tracked.txt",
+                "destination\n",
+                "destination edit",
+            );
+            assert_eq!(
+                merge_back(&destination, &created.path, &created.branch),
+                Err(MergeBackError::DivergedConflict)
+            );
+            assert!(
+                run_git(&destination, &["status", "--porcelain"])
+                    .unwrap()
+                    .trim()
+                    .is_empty()
+            );
+            assert!(run_git(&destination, &["rev-parse", "--verify", "MERGE_HEAD"]).is_err());
+            remove(&root, &created.path).unwrap();
+            let _ = std::fs::remove_dir_all(temp);
+        }
     }
 
     /// `.worktreeinclude` in the syntax Claude Code 2.1.322 reads it with:
