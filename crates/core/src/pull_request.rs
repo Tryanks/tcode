@@ -650,9 +650,6 @@ pub struct PullRequestStackLayer {
 pub struct PullRequestStack {
     pub id: String,
     pub number: u64,
-    /// The stack's page on the forge, when the forge gives one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
     pub base: String,
     /// The forge supplies the full topology, bottom to top, independently of links.
     pub layers: Vec<PullRequestStackLayer>,
@@ -1825,12 +1822,33 @@ mod tests {
             watch: None,
         }
     }
+
+    /// v0.4.0 stored a stack with a `url`, the API address GitHub's REST stack carries.
+    #[test]
+    fn a_stack_stored_with_its_api_url_still_reads() {
+        let stored = serde_json::json!({
+            "key": {"host": "github.com", "repository": "sample/project", "number": 2},
+            "source": "manual",
+            "stack": {"status": "native", "stack": {
+                "id": "4021", "number": 3,
+                "url": "https://api.github.com/repos/sample/project/stacks/3",
+                "base": "main",
+                "layers": [{"url": "https://github.com/sample/project/pull/2", "number": 2,
+                            "head_branch": "layer-2", "state": "open"}]
+            }}
+        });
+        let link: ThreadPullRequestLink = serde_json::from_value(stored).unwrap();
+        let PullRequestStackState::Native(stack) = link.stack else {
+            panic!("a native stack");
+        };
+        assert_eq!((stack.number, stack.layers.len()), (3, 1));
+    }
+
     #[test]
     fn unlinking_removes_a_link_and_tombstones_only_a_stack_layer() {
         let stack = PullRequestStack {
             id: "stack".into(),
             number: 1,
-            url: None,
             base: "main".into(),
             layers: [2, 3]
                 .map(|number| PullRequestStackLayer {

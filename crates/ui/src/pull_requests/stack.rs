@@ -414,18 +414,8 @@ pub(super) fn operation_chip(
                     .into_any_element()
             }))
     };
-    let (StackOperationKind::Merging {
-        id,
-        target: merged,
-        layers,
-        ..
-    }
-    | StackOperationKind::MergeUnconfirmed {
-        id,
-        target: merged,
-        layers,
-        ..
-    }) = &operation.kind
+    let (StackOperationKind::Merging { id, layers, .. }
+    | StackOperationKind::MergeUnconfirmed { id, layers, .. }) = &operation.kind
     else {
         return match target {
             Some(target) => Button::new(SharedString::from(format!(
@@ -445,11 +435,6 @@ pub(super) fn operation_chip(
         };
     };
     let id = id.clone();
-    let url = core_pr::stack_map(
-        links,
-        &PullRequestKey::new(&operation.host, &operation.repository, *merged),
-    )
-    .and_then(|map| map.stack.url.clone());
     let titles: Vec<(u64, String)> = layers
         .iter()
         .map(|&number| {
@@ -547,17 +532,6 @@ pub(super) fn operation_chip(
                                 }),
                         ),
                 )
-                .children(url.clone().map(|url| {
-                    Button::new("pr-stack-operation-open")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::ExternalLink)
-                        .label(crate::tr!(
-                            "pull_requests.open_on_host",
-                            host_name = tcode_core::pull_request::GITHUB.name
-                        ))
-                        .on_click(move |_, _, cx| cx.open_url(&url))
-                }))
         })
         .into_any_element()
 }

@@ -320,7 +320,7 @@ pub use wire::{
 // unreadable}, and SessionContentHits a SessionContentHits {hits, unreadable}.
 // tcode/group/1 no longer has the full rejection. RuntimeError gains
 // file_unreadable. GitStatusStatus carries git's error. HostProblem gains
-// cli_failed. PullRequestStack's url may be absent (GitHub gives none).
+// cli_failed. PullRequestStack has no url (GitHub gives no page for one).
 // GitDiffScope and SourceTool have no unknown value. ExternalImportState's
 // finished carries failed, the ImportFailure {file, error} of each thread an
 // import could not bring in, which skipped no longer counts.
