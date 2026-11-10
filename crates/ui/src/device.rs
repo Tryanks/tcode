@@ -196,7 +196,6 @@ impl DevicePreferences {
             .try_global::<Installed>()
             .map(|installed| installed.0.read(cx));
         this.and_then(|this| this.saved.device_name.clone())
-            .filter(|name| !name.trim().is_empty())
             .or_else(|| Some(this?.client.as_ref()?.device_name()))
             .unwrap_or_else(|| crate::tr!("app.name").into_owned())
     }
@@ -206,9 +205,7 @@ impl DevicePreferences {
     }
 
     pub(crate) fn set_device_name(name: Option<String>, cx: &mut App) {
-        Self::update(cx, |saved| {
-            saved.device_name = name.filter(|name| !name.trim().is_empty())
-        });
+        Self::update(cx, |saved| saved.device_name = name);
     }
 
     /// The per-image ceiling, in bytes, for attachments this device sends
@@ -225,9 +222,7 @@ impl DevicePreferences {
     }
 
     pub(crate) fn set_remote_attachment_limit_mib(limit: Option<u32>, cx: &mut App) {
-        Self::update(cx, |saved| {
-            saved.remote_attachment_limit_mib = limit.filter(|limit| *limit > 0)
-        });
+        Self::update(cx, |saved| saved.remote_attachment_limit_mib = limit);
     }
 
     /// The width the user dragged a right panel to, in points.
