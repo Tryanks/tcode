@@ -464,7 +464,7 @@ impl SessionActor for PiActor {
             }
             SessionCommand::Interrupt => {
                 self.mapper.interrupt_pending = true;
-                self.cancel_pending_ui()?;
+                self.cancel_pending_ui().await?;
                 send_json(&mut self.stdin, &json!({"type":"abort"})).map_err(|err| err.to_string())
             }
             SessionCommand::RespondApproval {
@@ -487,7 +487,7 @@ impl SessionActor for PiActor {
                 .map_err(|err| err.to_string())?;
                 if decision == ApprovalDecision::Cancel {
                     self.mapper.interrupt_pending = true;
-                    self.cancel_pending_ui()?;
+                    self.cancel_pending_ui().await?;
                     send_json(&mut self.stdin, &json!({"type":"abort"}))
                         .map_err(|err| err.to_string())?;
                 }
@@ -953,7 +953,7 @@ impl PiActor {
             return;
         }
         self.mapper.interrupt_pending = true;
-        let _ = self.cancel_pending_ui();
+        let _ = self.cancel_pending_ui().await;
         for event in self.mapper.complete_turn() {
             self.events.emit(event).await;
         }
@@ -1018,7 +1018,6 @@ impl PiActor {
             self.events.emit(event).await;
         }
         if let Some(turn_id) = turn_completed {
-            let _ = self.cancel_pending_ui();
             // Its prompt is now an entry: a point a fork can go back before.
             if let Err(err) = self.read_entries(Some(turn_id)) {
                 log::warn!("pi get_entries not sent: {err}");
@@ -1191,16 +1190,18 @@ impl PiActor {
         id
     }
 
-    fn cancel_pending_ui(&mut self) -> Result<(), String> {
-        for id in self.pending_approvals.drain() {
-            send_json(
-                &mut self.stdin,
-                &json!({"type":"extension_ui_response","id":id,"confirmed":false}),
-            )
-            .map_err(|err| err.to_string())?;
+    /// Dismiss every open extension prompt, as stopping the turn does.
+    async fn cancel_pending_ui(&mut self) -> Result<(), String> {
+        let dismissed = dismiss_prompts(
+            &mut self.stdin,
+            &mut self.pending_approvals,
+            &mut self.pending_dialogs,
+        )
+        .map_err(|err| err.to_string())?;
+        for event in dismissed {
+            self.events.emit(event).await;
         }
-        cancel_pending_dialogs(&mut self.stdin, &mut self.pending_dialogs)
-            .map_err(|err| err.to_string())
+        Ok(())
     }
 
     fn stop(&mut self) {
@@ -1770,17 +1771,35 @@ fn answer_dialog(
     }))
 }
 
-fn cancel_pending_dialogs(
+/// Decline every open confirmation and dismiss every open dialog, reporting
+/// each one resolved.
+fn dismiss_prompts(
     writer: &mut impl Write,
+    pending_approvals: &mut HashSet<String>,
     pending_dialogs: &mut HashSet<String>,
-) -> Result<(), AgentError> {
-    for id in pending_dialogs.drain() {
+) -> Result<Vec<AgentEvent>, AgentError> {
+    let mut dismissed = Vec::new();
+    for request_id in pending_approvals.drain() {
         send_json(
             writer,
-            &json!({"type":"extension_ui_response","id":id,"cancelled":true}),
+            &json!({"type":"extension_ui_response","id":request_id,"confirmed":false}),
         )?;
+        dismissed.push(AgentEvent::ApprovalResolved {
+            request_id,
+            decision: ApprovalDecision::Cancel,
+        });
     }
-    Ok(())
+    for request_id in pending_dialogs.drain() {
+        send_json(
+            writer,
+            &json!({"type":"extension_ui_response","id":request_id,"cancelled":true}),
+        )?;
+        dismissed.push(AgentEvent::UserInputResolved {
+            request_id,
+            answers: serde_json::Map::new(),
+        });
+    }
+    Ok(dismissed)
 }
 
 fn custom_message_id(message: &Value) -> String {
@@ -1932,18 +1951,28 @@ mod tests {
 
     #[test]
     fn responds_to_pending_extension_dialog_with_value_or_cancellation() {
-        let mut pending = HashSet::from(["dialog".to_owned()]);
+        let mut approvals = HashSet::from(["confirm".to_owned()]);
+        let mut dialogs = HashSet::from(["dialog".to_owned()]);
         let mut output = Vec::new();
-        cancel_pending_dialogs(&mut output, &mut pending).unwrap();
-        assert!(pending.is_empty());
-        let response: Value = serde_json::from_slice(&output).unwrap();
+        let dismissed = dismiss_prompts(&mut output, &mut approvals, &mut dialogs).unwrap();
+        assert!(approvals.is_empty() && dialogs.is_empty());
+        let responses: Vec<Value> = serde_json::Deserializer::from_slice(&output)
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
         assert_eq!(
-            response,
-            json!({
-                "type":"extension_ui_response",
-                "id":"dialog",
-                "cancelled":true
-            })
+            responses,
+            [
+                json!({"type":"extension_ui_response","id":"confirm","confirmed":false}),
+                json!({"type":"extension_ui_response","id":"dialog","cancelled":true}),
+            ]
+        );
+        assert!(
+            matches!(dismissed.as_slice(), [
+                AgentEvent::ApprovalResolved { request_id: approval, decision: ApprovalDecision::Cancel },
+                AgentEvent::UserInputResolved { request_id: dialog, answers },
+            ] if approval == "confirm" && dialog == "dialog" && answers.is_empty()),
+            "{dismissed:?}"
         );
 
         for (answer, response) in [
