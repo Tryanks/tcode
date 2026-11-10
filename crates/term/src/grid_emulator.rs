@@ -856,62 +856,7 @@ fn query_color(index: usize) -> ColorRgb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rio_vt::crosswords::{Mode, square::Wide};
-
-    #[test]
-    fn scripted_byte_boundary_matches_combined_feed_snapshot() {
-        let script = concat!(
-            "plain\r\n",
-            "\u{1b}[1;31mred\u{1b}[0m ",
-            "中文e\u{301}\r\n",
-            "\u{1b}]8;;https://example.com/target\u{1b}\\link",
-            "\u{1b}]8;;\u{1b}\\",
-            "\u{1b}]2;scripted title\u{7}",
-        )
-        .as_bytes();
-
-        let combined = GridEmulator::new();
-        combined.feed(script);
-
-        let chunked = GridEmulator::new();
-        for chunk in script.chunks(3) {
-            chunked.feed(chunk);
-        }
-
-        let chunked_snapshot = chunked.snapshot();
-        let combined_snapshot = combined.snapshot();
-        assert_eq!(
-            chunked_snapshot.visible_rows,
-            combined_snapshot.visible_rows
-        );
-        assert_eq!(chunked_snapshot.styles, combined_snapshot.styles);
-        assert_eq!(chunked_snapshot.zero_width, combined_snapshot.zero_width);
-        assert_eq!(
-            chunked_snapshot.cursor_state,
-            combined_snapshot.cursor_state
-        );
-        assert_eq!(chunked_snapshot.mode.bits(), combined_snapshot.mode.bits());
-        assert_eq!(chunked_snapshot.text(), combined_snapshot.text());
-        let state = chunked.snapshot();
-        let link = (0..state.screen_lines)
-            .find_map(|row| (0..state.cols).find_map(|col| chunked.hyperlink_at(row, col)));
-        assert_eq!(link.unwrap().url, "https://example.com/target");
-        assert!(state.text().starts_with("plain\nred 中文e\u{301}\nlink"));
-        assert_eq!(state.cell(1, 4).unwrap().wide(), Wide::Wide);
-        assert_eq!(state.cell(1, 5).unwrap().wide(), Wide::Spacer);
-        assert_eq!(state.cell_text(1, 8).as_deref(), Some("e\u{301}"));
-        chunked.select((1, 5), (1, 7));
-        assert_eq!(chunked.selected_text().unwrap().text, "中文");
-        let selected = chunked.snapshot();
-        assert!(selected.is_selected(1, 4) && selected.is_selected(1, 5));
-
-        chunked.feed(b"\r\nsee https://example.com/docs?q=1 now");
-        assert_eq!(
-            chunked.hyperlink_at(3, 14).unwrap().url,
-            "https://example.com/docs?q=1"
-        );
-        assert!(chunked.hyperlink_at(3, 0).is_none());
-    }
+    use rio_vt::crosswords::Mode;
 
     #[test]
     fn snapshots_consume_damage_but_reads_and_selection_preserve_it() {

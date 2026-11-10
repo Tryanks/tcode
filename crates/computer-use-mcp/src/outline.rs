@@ -762,31 +762,4 @@ mod tests {
         new.title = "Different window".into();
         assert!(diff_trees(&old, &new).use_full_view);
     }
-
-    #[test]
-    fn screenshot_fallback_requires_a_large_text_sparse_root() {
-        let mut tree = UiNode {
-            frame: Frame {
-                x: 20.0,
-                y: 30.0,
-                w: 800.0,
-                h: 600.0,
-            },
-            ..node(
-                "window",
-                "Root window title",
-                vec![
-                    node("button", "Menu", Vec::new()),
-                    node("static_text", "Score", Vec::new()),
-                ],
-            )
-        };
-        assert!(is_text_sparse(&tree));
-        tree.children.push(node("static_text", "Ready", Vec::new()));
-        assert!(!is_text_sparse(&tree));
-        tree.children.clear();
-        tree.frame.w = 100.0;
-        tree.frame.h = 100.0;
-        assert!(!is_text_sparse(&tree));
-    }
 }

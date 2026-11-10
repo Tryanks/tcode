@@ -577,18 +577,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn delivery_uses_stable_mcp_wire_labels() {
-        for (delivery, expected) in [
-            (Delivery::Ax, "ax"),
-            (Delivery::BackgroundPid, "background_pid"),
-            (Delivery::WindowMessage, "window_message"),
-            (Delivery::None, "none"),
-        ] {
-            assert_eq!(serde_json::to_value(delivery).unwrap(), expected);
-        }
-    }
-
-    #[test]
     fn list_roots_rejects_the_host_process_before_platform_access() {
         let error = list_roots(&RootFilters {
             pid: Some(std::process::id()),

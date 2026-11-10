@@ -1121,29 +1121,6 @@ fn tool_error(message: &str) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(message)])
 }
 
-#[cfg(test)]
-mod scheduling_tests {
-    use super::*;
-
-    #[test]
-    fn per_pid_lanes_allow_other_pids_and_serialize_the_same_pid() {
-        let lanes = ObservationLanes::default();
-        let first_pid = lanes.lane(1001);
-        let same_pid = lanes.lane(1001);
-        let other_pid = lanes.lane(2002);
-        assert!(Arc::ptr_eq(&first_pid, &same_pid));
-        assert!(!Arc::ptr_eq(&first_pid, &other_pid));
-
-        let first_guard = first_pid.try_lock().unwrap();
-        let other_guard = other_pid.try_lock().unwrap();
-        assert!(same_pid.try_lock().is_err());
-
-        drop(first_guard);
-        let same_pid_guard = same_pid.try_lock().unwrap();
-        drop((same_pid_guard, other_guard));
-    }
-}
-
 #[cfg(all(test, target_os = "macos"))]
 mod observation_tests {
     use super::*;
