@@ -111,6 +111,10 @@ enum Section {
     Remote,
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
     Spaces,
+    /// On a desktop, the shared spaces of the other machine this page
+    /// shows; [`Self::Spaces`] are this device's own.
+    #[cfg(feature = "remote-hosting")]
+    MachineSpaces,
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
     Group,
     #[cfg(feature = "remote-hosting")]
@@ -123,15 +127,17 @@ enum Section {
 /// Device-local settings come first; replicated settings for the attached
 /// machine follow. Remote, Shared spaces, Machine group and Traverse configure
 /// the local desktop listener, or the serving headless listener in a browser;
-/// Traverse, the least used, comes last. Choosing a machine lives in
-/// `crate::remote`.
+/// Traverse, the least used, comes last. A desktop over another machine also
+/// manages that machine's shared spaces, first of its settings. Choosing a
+/// machine lives in `crate::remote`.
 #[cfg(feature = "remote-hosting")]
-const SECTIONS: [Section; 15] = [
+const SECTIONS: [Section; 16] = [
     Section::General,
     Section::Remote,
     Section::Spaces,
     Section::Group,
     Section::Traverse,
+    Section::MachineSpaces,
     Section::Threads,
     Section::Control,
     Section::Providers,
@@ -200,6 +206,9 @@ fn remote_group() -> SectionGroup {
 struct RemotePanels {
     remote: gpui::AnyView,
     spaces: Entity<crate::remote::SpacesSection>,
+    /// The page's machine's spaces, where it is another machine.
+    #[cfg(feature = "remote-hosting")]
+    machine_spaces: Entity<crate::remote::SpacesSection>,
     group: Entity<crate::remote::GroupSection>,
     #[cfg(feature = "remote-hosting")]
     traverse: Entity<crate::remote::TraversePanel>,
@@ -229,6 +238,10 @@ impl RemotePanels {
         Self {
             remote,
             spaces: cx.new(|_| crate::remote::SpacesSection::new(store.clone(), resolve)),
+            #[cfg(feature = "remote-hosting")]
+            machine_spaces: cx.new(|_| {
+                crate::remote::SpacesSection::new(store.clone(), crate::remote::spaces::for_store)
+            }),
             group: cx.new(|_| crate::remote::GroupSection::new(store.clone(), resolve)),
             #[cfg(feature = "remote-hosting")]
             traverse: cx.new(|cx| crate::remote::TraversePanel::new(window, cx)),
@@ -284,6 +297,8 @@ impl Section {
             Self::Remote | Self::Spaces | Self::Group => remote_group(),
             #[cfg(feature = "remote-hosting")]
             Self::Traverse => remote_group(),
+            #[cfg(feature = "remote-hosting")]
+            Self::MachineSpaces => SectionGroup::Machine,
             Self::Threads
             | Self::ProjectThreadRules
             | Self::SourceControl
@@ -317,6 +332,8 @@ impl Section {
             Self::Remote | Self::Spaces | Self::Group => cx.hosting,
             #[cfg(feature = "remote-hosting")]
             Self::Traverse => cx.hosting,
+            #[cfg(feature = "remote-hosting")]
+            Self::MachineSpaces => cx.remote_attachment,
             Self::Threads
             | Self::ProjectThreadRules
             | Self::General
@@ -358,6 +375,8 @@ impl Section {
             Self::Remote => "settings-nav-remote",
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Spaces => "settings-nav-spaces",
+            #[cfg(feature = "remote-hosting")]
+            Self::MachineSpaces => "settings-nav-machine-spaces",
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Group => "settings-nav-group",
             #[cfg(feature = "remote-hosting")]
@@ -382,6 +401,8 @@ impl Section {
             Self::Remote => IconName::Network,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Spaces => IconName::Users,
+            #[cfg(feature = "remote-hosting")]
+            Self::MachineSpaces => IconName::Users,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Group => IconName::HardDrive,
             #[cfg(feature = "remote-hosting")]
@@ -408,6 +429,8 @@ impl Section {
             Self::Remote => crate::tr!("settings.remote"),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Spaces => crate::tr!("settings.spaces"),
+            #[cfg(feature = "remote-hosting")]
+            Self::MachineSpaces => crate::tr!("settings.spaces"),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Group => crate::tr!("settings.group"),
             #[cfg(feature = "remote-hosting")]
@@ -1667,6 +1690,8 @@ impl SettingsPage {
             Section::Remote => v_flex().child(self.remote.remote.clone()),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Section::Spaces => v_flex().child(self.remote.spaces.clone()),
+            #[cfg(feature = "remote-hosting")]
+            Section::MachineSpaces => v_flex().child(self.remote.machine_spaces.clone()),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Section::Group => v_flex().child(self.remote.group.clone()),
             #[cfg(feature = "remote-hosting")]
@@ -3861,18 +3886,22 @@ mod tests {
         // The navigation consumes capability values supplied by platform
         // owners. Exercise each policy row through its rendered section list;
         // local permission eligibility is a policy check, not an OS grant test.
-        for (capabilities, local_permissions, folded, browser, remote) in [
+        // `machine_spaces`: a desktop over another machine manages that
+        // machine's shared spaces, whether or not it hosts itself.
+        for (capabilities, local_permissions, folded, browser, remote, machine_spaces) in [
             (
                 capabilities(true, true, true, false),
                 true,
                 false,
                 true,
                 true,
+                false,
             ),
             (
                 capabilities(true, true, true, true),
                 false,
                 false,
+                true,
                 true,
                 true,
             ),
@@ -3882,6 +3911,7 @@ mod tests {
                 true,
                 false,
                 false,
+                true,
             ),
         ] {
             probe.update(cx, |probe, cx| {
@@ -3920,6 +3950,14 @@ mod tests {
             assert_eq!(cx.debug_bounds("settings-nav-remote").is_some(), remote);
             #[cfg(not(any(feature = "remote-hosting", target_family = "wasm")))]
             let _ = remote;
+            #[cfg(feature = "remote-hosting")]
+            assert_eq!(
+                cx.debug_bounds("settings-nav-machine-spaces").is_some(),
+                machine_spaces,
+                "{capabilities:?}"
+            );
+            #[cfg(not(feature = "remote-hosting"))]
+            let _ = machine_spaces;
             assert!(
                 cx.debug_bounds("settings-advanced-toggle").is_some(),
                 "{capabilities:?}: advanced disclosure remains available in either state"
