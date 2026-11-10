@@ -471,12 +471,8 @@ impl SessionActor for PiActor {
                 request_id,
                 decision,
             } => {
-                let confirmed = match &decision {
-                    ApprovalDecision::Option(id) if id == "confirm" => true,
-                    ApprovalDecision::Option(id) if id == "decline" => false,
-                    ApprovalDecision::Cancel | ApprovalDecision::Feedback(_) => false,
-                    ApprovalDecision::Option(_) => return Ok(()),
-                };
+                let confirmed =
+                    matches!(&decision, ApprovalDecision::Option(id) if id == "confirm");
                 if !self.pending_approvals.remove(&request_id) {
                     return Ok(());
                 }

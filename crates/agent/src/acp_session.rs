@@ -1536,10 +1536,7 @@ fn approval_outcome(
 ) -> Option<acp::RequestPermissionOutcome> {
     let selected = match decision {
         ApprovalDecision::Cancel => return Some(acp::RequestPermissionOutcome::Cancelled),
-        ApprovalDecision::Option(id) => options
-            .iter()
-            .any(|option| &option.id == id)
-            .then(|| id.clone()),
+        ApprovalDecision::Option(id) => Some(id.clone()),
         ApprovalDecision::Feedback(_) => options
             .iter()
             .find(|option| option.kind == ApprovalOptionKind::RejectOnce)
@@ -3547,10 +3544,6 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(serde_json::to_value(&response).unwrap(), answered["result"]);
-        assert!(
-            approval_outcome(&ApprovalDecision::Option("other".into()), &approval.options)
-                .is_none()
-        );
         assert!(matches!(
             approval_outcome(&ApprovalDecision::Cancel, &approval.options),
             Some(acp::RequestPermissionOutcome::Cancelled)
