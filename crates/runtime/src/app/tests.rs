@@ -627,9 +627,7 @@ fn assert_native_mirror_turn_lifecycle(
         let id = state
             .sessions
             .iter()
-            .find(|m| {
-                m.native_subagent.is_some() && m.parent_session_id.as_deref() == Some(parent)
-            })
+            .find(|m| m.native_subagent.is_some() && m.parent_session_id.as_deref() == Some(parent))
             .unwrap()
             .id
             .clone();
@@ -642,11 +640,7 @@ fn assert_native_mirror_turn_lifecycle(
         }
         match end {
             MirrorEnd::SubagentCompleted => {
-                state.on_event(
-                    parent,
-                    native_mirror_parent_item(ItemStatus::Completed),
-                    cx,
-                );
+                state.on_event(parent, native_mirror_parent_item(ItemStatus::Completed), cx);
             }
             MirrorEnd::ParentTurnThenSubagentCompleted => {
                 state.on_event(
@@ -665,11 +659,7 @@ fn assert_native_mirror_turn_lifecycle(
                 );
                 assert!(evict || state.turn_running_for(&id));
                 state.on_event(parent, native_mirror_child_item(3), cx);
-                state.on_event(
-                    parent,
-                    native_mirror_parent_item(ItemStatus::Completed),
-                    cx,
-                );
+                state.on_event(parent, native_mirror_parent_item(ItemStatus::Completed), cx);
             }
             MirrorEnd::SessionClosed => {
                 state.on_event(parent, AgentEvent::SessionClosed { reason: None }, cx);
@@ -2256,8 +2246,7 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
     );
     cx.run_until_parked();
     cx.drain_outgoing();
-    for ((outcome, raw_title, status, output_tokens, expected), id) in cases.into_iter().zip(ids)
-    {
+    for ((outcome, raw_title, status, output_tokens, expected), id) in cases.into_iter().zip(ids) {
         if outcome == "cached" {
             state.update(cx, |state, cx| {
                 state.record_event(
@@ -3941,9 +3930,8 @@ fn a_child_waking_itself_reports_to_its_lead_once() {
         "one report, one callback: {callbacks:?}"
     );
     assert!(
-        callbacks[0].starts_with(
-            "[orchestrate] thread child (\"改写样例说明（10 条）\") reported."
-        )
+        callbacks[0]
+            .starts_with("[orchestrate] thread child (\"改写样例说明（10 条）\") reported.")
     );
     assert!(callbacks[0].ends_with("\n<report>"));
     assert!(
@@ -8766,7 +8754,12 @@ fn a_drafts_terminal_starts_in_its_project_directory() {
     state.read(|state| {
         let workspace = &state.resident(&draft_id).unwrap().terminal_workspace;
         assert_eq!(workspace.terminals.len(), 1);
-        assert!(state.session_status_snapshot(&draft_id).unwrap().terminal_open);
+        assert!(
+            state
+                .session_status_snapshot(&draft_id)
+                .unwrap()
+                .terminal_open
+        );
         assert_eq!(workspace.terminals[0].terminal.cwd(), project_cwd);
     });
 }
@@ -9370,7 +9363,10 @@ fn a_threads_activity_reads_the_same_viewed_or_parked() {
                 "{label} parked"
             );
             assert_eq!(
-                state.index_snapshot().summary.activity[&id].background.tasks > 0,
+                state.index_snapshot().summary.activity[&id]
+                    .background
+                    .tasks
+                    > 0,
                 expected_background,
                 "{label} parked"
             );
