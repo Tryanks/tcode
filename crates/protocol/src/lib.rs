@@ -317,6 +317,7 @@ pub use wire::{
 // no "turn_running". SourceTool gains claude_agent_sdk.
 // QueryResponse::ExternalHistory carries an ExternalHistory {dirs,
 // unreadable}, and SessionContentHits a SessionContentHits {hits, unreadable}.
+// tcode/group/1 no longer has the full rejection.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

@@ -14,12 +14,11 @@
 //! does a machine presenting it over `tcode/group/1`. Every full-access
 //! device of a member is a member; only space members stay on their machine.
 use serde::{Deserialize, Serialize};
-use tcode_client::pairing::{MAX_ADDRS, MAX_TRAVERSE, valid_host_id, valid_invitation_secret};
+use tcode_client::pairing::{MAX_ADDRS, MAX_TRAVERSE, valid_host_id};
 
 pub const ALPN_GROUP: &[u8] = b"tcode/group/1";
-pub const MAX_GROUP_MACHINES: usize = 64;
-pub const MAX_GROUP_DEVICES: usize = 1024;
-/// Bound on one `tcode/group/1` line: the whole state at its largest.
+/// Bound on one `tcode/group/1` line, read before the dialer is known to be
+/// a member.
 pub const MAX_GROUP_LINE: usize = 512 * 1024;
 /// Bound on a pairing or hello reply that carries the group's machines.
 pub const MAX_ROSTER_LINE: usize = 64 * 1024;
@@ -207,14 +206,12 @@ pub enum GroupRejection {
     Busy,
     /// The dialer is not a member, or the group is not this machine's.
     NotMember,
-    Full,
 }
 
 impl JoiningMachine {
     pub fn is_valid(&self) -> bool {
         valid_name(&self.name)
             && valid_hints(&self.traverse, self.relay.as_deref(), &self.addrs)
-            && self.devices.len() <= MAX_GROUP_DEVICES
             && self.devices.iter().all(|device| {
                 valid_host_id(&device.id)
                     && valid_name(&device.name)
@@ -240,10 +237,6 @@ fn valid_hints(traverse: &[String], relay: Option<&str>, addrs: &[String]) -> bo
             .all(|addr| addr.parse::<std::net::SocketAddr>().is_ok())
 }
 
-fn valid_entry(entry: &Entry) -> bool {
-    valid_host_id(&entry.by)
-}
-
 impl GroupState {
     pub fn new(id: String, name: String) -> Self {
         Self {
@@ -252,29 +245,6 @@ impl GroupState {
             machines: Vec::new(),
             devices: Vec::new(),
         }
-    }
-
-    /// Whether a state received from another machine is well formed.
-    pub fn is_valid(&self) -> bool {
-        valid_invitation_secret(&self.id)
-            && valid_name(&self.name)
-            && self.machines.len() <= MAX_GROUP_MACHINES
-            && self.devices.len() <= MAX_GROUP_DEVICES
-            && self.machines.iter().all(|machine| {
-                valid_host_id(&machine.id)
-                    && valid_name(&machine.name)
-                    && valid_hints(&machine.traverse, machine.relay.as_deref(), &machine.addrs)
-                    && valid_entry(&machine.entry)
-            })
-            && self.devices.iter().all(|device| {
-                valid_host_id(&device.id)
-                    && valid_name(&device.name)
-                    && device
-                        .platform
-                        .as_deref()
-                        .is_none_or(|platform| platform.len() <= 256)
-                    && valid_entry(&device.entry)
-            })
     }
 
     pub fn machine(&self, id: &str) -> Option<&GroupMachine> {
@@ -349,7 +319,7 @@ impl GroupState {
     }
 
     /// Take every entry of `other` that outranks this state's. Returns
-    /// whether anything changed. Entries past the size limits are dropped.
+    /// whether anything changed.
     pub fn merge(&mut self, other: GroupState) -> bool {
         let mut changed = false;
         for machine in other.machines {
@@ -364,11 +334,10 @@ impl GroupState {
                         changed = true;
                     }
                 }
-                None if self.machines.len() < MAX_GROUP_MACHINES => {
+                None => {
                     self.machines.push(machine);
                     changed = true;
                 }
-                None => {}
             }
         }
         for device in other.devices {
@@ -379,11 +348,10 @@ impl GroupState {
                         changed = true;
                     }
                 }
-                None if self.devices.len() < MAX_GROUP_DEVICES => {
+                None => {
                     self.devices.push(device);
                     changed = true;
                 }
-                None => {}
             }
         }
         changed
@@ -466,21 +434,5 @@ mod tests {
         a_then_b.set_device(PHONE, "Phone", None, Membership::Member, A);
         assert!(b_then_a.merge(a_then_b.clone()));
         assert!(b_then_a.device(PHONE).unwrap().entry.is_member());
-    }
-
-    #[test]
-    fn a_state_from_another_machine_must_be_well_formed() {
-        let mut valid = state();
-        valid.set_device(PHONE, "Phone", None, Membership::Member, A);
-        assert!(valid.is_valid());
-        let mut bad_device = valid.clone();
-        bad_device.devices[0].id = "phone".into();
-        assert!(!bad_device.is_valid());
-        let mut bad_author = valid.clone();
-        bad_author.devices[0].entry.by = String::new();
-        assert!(!bad_author.is_valid());
-        let mut bad_id = valid;
-        bad_id.id = "home".into();
-        assert!(!bad_id.is_valid());
     }
 }

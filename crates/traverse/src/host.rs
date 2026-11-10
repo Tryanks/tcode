@@ -30,7 +30,7 @@ use tcode_protocol::{
 use crate::{
     group::{
         ALPN_GROUP, GroupLine, GroupMachine, GroupRecord, GroupRejection, GroupState,
-        JoiningDevice, JoiningMachine, MAX_GROUP_LINE, MAX_GROUP_MACHINES, Membership, Roster,
+        JoiningDevice, JoiningMachine, MAX_GROUP_LINE, Membership, Roster,
     },
     identity::{DeviceGrant, DeviceRecord, HostIdentity, SpaceRecord, existing_device, now_unix},
     lan,
@@ -1636,7 +1636,6 @@ fn rejection_error(reason: GroupRejection) -> io::Error {
         GroupRejection::Disabled => "that machine is not accepting new devices",
         GroupRejection::Busy => "that machine could not record the change; try again",
         GroupRejection::NotMember => "that machine is not in this group",
-        GroupRejection::Full => "the group has as many machines as it can hold",
     };
     io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
@@ -1897,11 +1896,7 @@ impl Shared {
         let (reply, hints) =
             run_blocking(self.dial_group(&invite.host_id, invite.relay.as_deref(), &typed, &line))?;
         let joined = match reply {
-            GroupLine::Joined { state }
-                if state.is_valid() && state.id == group_id && state.is_member_machine(&id) =>
-            {
-                state
-            }
+            GroupLine::Joined { state } => state,
             GroupLine::Rejected { reason } => return Err(rejection_error(reason)),
             other => {
                 return Err(io::Error::new(
@@ -2061,7 +2056,7 @@ impl Shared {
         let Some(group) = &state.identity.group else {
             return Ok(());
         };
-        if theirs.id != group.state.id || !theirs.is_valid() {
+        if theirs.id != group.state.id {
             return Ok(());
         }
         let previous = state.identity.clone();
@@ -2148,11 +2143,6 @@ impl Shared {
         }
         if !self.allow_pairing || !state.identity.pairing_enabled {
             return rejected(GroupRejection::Disabled);
-        }
-        if !record.state.is_member_machine(remote)
-            && record.state.member_machines().count() >= MAX_GROUP_MACHINES
-        {
-            return rejected(GroupRejection::Full);
         }
         if !self.take_invitation(&mut state, secret) {
             return rejected(GroupRejection::Invalid);
