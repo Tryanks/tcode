@@ -191,16 +191,35 @@ impl NativeClientHost {
         self.data_dir.join("mobile.json")
     }
 
-    fn prefs(&self) -> serde_json::Value {
-        fs::read(self.prefs_path())
+    /// The saved preferences; a missing file is none. `ClientHost` gives
+    /// reads no way to report a failure, so one is logged and the caller
+    /// sees the defaults.
+    fn prefs(&self) -> Option<serde_json::Value> {
+        let read = match fs::read(self.prefs_path()) {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+                .map_err(io::Error::other)
+                .and_then(|value| {
+                    if value.is_object() {
+                        Ok(value)
+                    } else {
+                        Err(io::Error::new(io::ErrorKind::InvalidData, "not an object"))
+                    }
+                }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(serde_json::json!({})),
+            Err(error) => Err(error),
+        };
+        read.inspect_err(|error| log::error!("could not read mobile.json: {error}"))
             .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .filter(serde_json::Value::is_object)
-            .unwrap_or_else(|| serde_json::json!({}))
     }
 
-    fn write_prefs(&self, prefs: &serde_json::Value) {
-        let result = serde_json::to_vec_pretty(prefs)
+    /// Change the saved preferences. A file that cannot be read is left as
+    /// it is rather than replaced by the change alone.
+    fn update_prefs(&self, update: impl FnOnce(&mut serde_json::Value)) {
+        let Some(mut prefs) = self.prefs() else {
+            return;
+        };
+        update(&mut prefs);
+        let result = serde_json::to_vec_pretty(&prefs)
             .map_err(io::Error::other)
             .and_then(|bytes| write_private(&self.data_dir, &self.prefs_path(), &bytes));
         if let Err(error) = result {
@@ -241,7 +260,9 @@ impl ClientHost for NativeClientHost {
     }
 
     fn load_preferences(&self) -> ClientPreferences {
-        let prefs = self.prefs();
+        let Some(prefs) = self.prefs() else {
+            return ClientPreferences::default();
+        };
         let value = |key: &str| prefs.get(key).and_then(|v| v.as_str()).map(str::to_owned);
         ClientPreferences {
             appearance: value("appearance"),
@@ -270,18 +291,18 @@ impl ClientHost for NativeClientHost {
     }
 
     fn save_preferences(&self, preferences: &ClientPreferences) {
-        let mut prefs = self.prefs();
-        prefs["appearance"] = serde_json::json!(preferences.appearance);
-        prefs["language"] = serde_json::json!(preferences.language);
-        prefs["device_name"] = serde_json::json!(preferences.device_name);
-        prefs["navigation"] = serde_json::json!(preferences.navigation);
-        prefs["remote_attachment_limit_mib"] =
-            serde_json::json!(preferences.remote_attachment_limit_mib);
-        prefs["right_panel_width"] = serde_json::json!(preferences.right_panel_width);
-        prefs["sidebar_collapsed"] = serde_json::json!(preferences.sidebar_collapsed);
-        prefs["sidebar_layout"] = serde_json::json!(preferences.sidebar_layout);
-        prefs["workspace"] = serde_json::json!(preferences.workspace);
-        self.write_prefs(&prefs);
+        self.update_prefs(|prefs| {
+            prefs["appearance"] = serde_json::json!(preferences.appearance);
+            prefs["language"] = serde_json::json!(preferences.language);
+            prefs["device_name"] = serde_json::json!(preferences.device_name);
+            prefs["navigation"] = serde_json::json!(preferences.navigation);
+            prefs["remote_attachment_limit_mib"] =
+                serde_json::json!(preferences.remote_attachment_limit_mib);
+            prefs["right_panel_width"] = serde_json::json!(preferences.right_panel_width);
+            prefs["sidebar_collapsed"] = serde_json::json!(preferences.sidebar_collapsed);
+            prefs["sidebar_layout"] = serde_json::json!(preferences.sidebar_layout);
+            prefs["workspace"] = serde_json::json!(preferences.workspace);
+        });
     }
 
     fn outbox_storage(&self, host_id: &str) -> Option<Arc<dyn tcode_client::outbox::Storage>> {
@@ -348,19 +369,19 @@ impl ClientHost for NativeClientHost {
     }
 
     fn last_host_id(&self) -> Option<String> {
-        self.prefs()
+        self.prefs()?
             .get("last_host_id")
             .and_then(|value| value.as_str())
             .map(str::to_owned)
     }
 
     fn set_last_host_id(&self, host_id: Option<&str>) {
-        let mut prefs = self.prefs();
-        prefs["last_host_id"] = match host_id {
-            Some(id) => serde_json::Value::String(id.to_owned()),
-            None => serde_json::Value::Null,
-        };
-        self.write_prefs(&prefs);
+        self.update_prefs(|prefs| {
+            prefs["last_host_id"] = match host_id {
+                Some(id) => serde_json::Value::String(id.to_owned()),
+                None => serde_json::Value::Null,
+            };
+        });
     }
 
     /// Pairing runs on the Traverse runtime; the UI executor only awaits the
@@ -799,6 +820,21 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn unreadable_preferences_are_not_replaced_by_a_save() {
+        let dir = TestDir::new();
+        let damaged = br#"{"appearance": "dark","#;
+        fs::write(dir.0.join("mobile.json"), damaged).unwrap();
+        let host = NativeClientHost::new(dir.0.clone(), "fallback");
+        assert_eq!(host.load_preferences(), ClientPreferences::default());
+        host.save_preferences(&ClientPreferences {
+            appearance: Some("light".into()),
+            ..Default::default()
+        });
+        host.set_last_host_id(Some(MACHINE_ID));
+        assert_eq!(fs::read(dir.0.join("mobile.json")).unwrap(), damaged);
     }
 
     #[test]
