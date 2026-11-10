@@ -321,6 +321,9 @@ pub struct WorkspaceStore {
     /// Where an Ack the host refused goes to be shown, and the executor that
     /// waits for it.
     refused: async_channel::Sender<ProtocolError>,
+    /// A space's settings on their way to the device's preferences, under
+    /// the key that names the space.
+    member_settings: async_channel::Sender<(String, serde_json::Value)>,
     background: gpui::BackgroundExecutor,
 }
 
@@ -456,6 +459,7 @@ impl WorkspaceStore {
         });
         let remote = matches!(attachment, WorkspaceAttachment::Remote { .. });
         let (refused, refusals) = async_channel::unbounded();
+        let (member_settings, member_settings_changes) = async_channel::unbounded();
         let mut store = Self {
             host: host.clone(),
             scope: WorkspaceScope::Full,
@@ -512,8 +516,21 @@ impl WorkspaceStore {
             draft_fallback_pending: false,
             creation_request_generation: 0,
             refused,
+            member_settings,
             background: cx.background_executor().clone(),
         };
+        store.attachment_tasks.push(cx.spawn(async move |this, cx| {
+            while let Ok((key, settings)) = member_settings_changes.recv().await {
+                if this
+                    .update(cx, |_, cx| {
+                        crate::device::DevicePreferences::set_member_settings(&key, settings, cx)
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
         store.attachment_tasks.push(cx.spawn(async move |this, cx| {
             while let Ok(error) = refusals.recv().await {
                 if this
@@ -707,22 +724,17 @@ impl WorkspaceStore {
         }
     }
 
+    /// Hand this space's settings to the device's preferences, which the
+    /// next turn of the executor saves: the changes come from places that
+    /// hold no context.
     fn save_member_settings(&self) {
         if self.member_settings_unreadable {
             return;
         }
-        if let Some(host) = &self.client_host
-            && let Ok(mut preferences) = host.load_preferences()
-        {
-            let navigation = preferences
-                .navigation
-                .get_or_insert_with(|| serde_json::json!({}));
-            navigation["member_settings"][self.member_settings_key()] =
-                serde_json::to_value(&self.settings_replica).unwrap();
-            if let Err(error) = host.save_preferences(&preferences) {
-                log::error!("could not save member settings: {error}");
-            }
-        }
+        let _ = self.member_settings.try_send((
+            self.member_settings_key(),
+            serde_json::to_value(&self.settings_replica).unwrap(),
+        ));
     }
 
     fn apply_scope(&mut self, scope: &Scope, cx: &mut Context<Self>) {
@@ -805,16 +817,10 @@ impl WorkspaceStore {
                 ..
             } => {
                 if changed {
-                    let saved = self
-                        .client_host
-                        .as_ref()
-                        .and_then(|host| host.load_preferences().ok()?.navigation)
-                        .and_then(|navigation| {
-                            navigation
-                                .get("member_settings")?
-                                .get(self.member_settings_key())
-                                .cloned()
-                        });
+                    let saved = crate::device::DevicePreferences::member_settings(
+                        &self.member_settings_key(),
+                        cx,
+                    );
                     self.member_settings_unreadable = false;
                     self.settings_replica = match saved.map(serde_json::from_value) {
                         None => Settings::default(),
@@ -4844,6 +4850,7 @@ pub(crate) mod tests {
             })),
             ..ClientPreferences::default()
         })));
+        cx.update(|cx| crate::device::DevicePreferences::install(device.clone(), cx));
         let mut space = ScriptedSpace::new();
         let workspace = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -4875,6 +4882,7 @@ pub(crate) mod tests {
             )]
         ));
         workspace.update(cx, |store, cx| store.cycle_project_sort(cx));
+        cx.run_until_parked();
         assert_ne!(
             workspace.read_with(cx, |store, _| store.project_sort()),
             Settings::default().project_sort
@@ -4883,6 +4891,54 @@ pub(crate) mod tests {
             device.0.borrow().navigation.as_ref().unwrap()["member_settings"]["machine:space-one"],
             saved
         );
+    }
+
+    /// A member's change to its space's settings is saved among the device's
+    /// preferences, and a later change of the device's own keeps it.
+    #[gpui::test]
+    fn member_settings_are_saved_among_the_device_preferences(cx: &mut TestAppContext) {
+        use tcode_client::host::ClientHost as _;
+        use tcode_core::settings::SidebarLayout;
+        cx.update(crate::theme::init);
+        let root = scratch_root("member-settings-saved");
+        std::fs::create_dir_all(&root).unwrap();
+        let device = std::rc::Rc::new(tcode_traverse::NativeClientHost::new(
+            root.clone(),
+            "member",
+        ));
+        cx.update(|cx| crate::device::DevicePreferences::install(device.clone(), cx));
+        let mut space = ScriptedSpace::new();
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                space.link.clone(),
+                WorkspaceAttachment::Remote {
+                    host_id: "machine".into(),
+                    host_name: "Studio".into(),
+                },
+                Some(device.clone()),
+                None,
+                cx,
+            )
+        });
+        space
+            .driver
+            .wait_until(cx, &workspace, "space baseline", |cx| {
+                workspace.read_with(cx, |store, _| store.baseline_ready())
+            });
+        workspace.update(cx, |store, cx| store.cycle_project_sort(cx));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            crate::device::DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx)
+        });
+        let sort = workspace.read_with(cx, |store, _| store.project_sort());
+        assert_ne!(sort, Settings::default().project_sort);
+        let saved = device.load_preferences().unwrap();
+        assert_eq!(
+            saved.navigation.unwrap()["member_settings"]["machine:space-one"]["project_sort"],
+            serde_json::to_value(sort).unwrap()
+        );
+        assert_eq!(saved.sidebar_layout, Some(SidebarLayout::Grouped));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Another account runs the CLI the default one does, so both pickers list

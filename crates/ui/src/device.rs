@@ -42,16 +42,15 @@ impl DevicePreferences {
                     this.saved = saved;
                     this.unreadable = None;
                 }
-                Err(error) => this.refuse(error, cx),
+                Err(error) => {
+                    log::error!("running on default device preferences: {error}");
+                    this.saved = ClientPreferences::default();
+                    this.unreadable = Some(error.clone());
+                    cx.emit(PreferencesFailure::Unreadable(error));
+                }
             }
             cx.notify();
         });
-    }
-
-    fn refuse(&mut self, error: FileFailure, cx: &mut gpui::Context<Self>) {
-        log::error!("running on default device preferences: {error}");
-        self.unreadable = Some(error.clone());
-        cx.emit(PreferencesFailure::Unreadable(error));
     }
 
     /// The owner, holding nothing saved until a shell installs its client.
@@ -74,32 +73,20 @@ impl DevicePreferences {
 
     fn update(cx: &mut App, change: impl FnOnce(&mut ClientPreferences)) {
         Self::entity(cx).update(cx, |this, cx| {
-            // Read again rather than from `saved`: a space's store writes its
-            // member settings into the same preferences.
-            let mut preferences = match (&this.client, &this.unreadable) {
-                (Some(client), None) => match client.load_preferences() {
-                    Ok(preferences) => preferences,
-                    Err(error) => {
-                        this.refuse(error, cx);
-                        this.saved.clone()
-                    }
-                },
-                _ => this.saved.clone(),
-            };
-            let loaded = preferences.clone();
+            let mut preferences = this.saved.clone();
             change(&mut preferences);
-            if preferences != loaded
-                && this.unreadable.is_none()
+            if preferences == this.saved {
+                return;
+            }
+            if this.unreadable.is_none()
                 && let Some(client) = &this.client
                 && let Err(error) = client.save_preferences(&preferences)
             {
                 log::error!("could not save device preferences: {error}");
                 cx.emit(PreferencesFailure::Unsaved(error));
             }
-            if preferences != this.saved {
-                this.saved = preferences;
-                cx.notify();
-            }
+            this.saved = preferences;
+            cx.notify();
         });
     }
 
@@ -288,6 +275,25 @@ impl DevicePreferences {
                 .navigation
                 .get_or_insert_with(|| serde_json::json!({}))["remote_zed_note_dismissed"] =
                 serde_json::json!(true);
+        });
+    }
+
+    /// The settings this device keeps as a member of the space `key` names;
+    /// the space's store owns their schema.
+    pub(crate) fn member_settings(key: &str, cx: &App) -> Option<serde_json::Value> {
+        Self::saved(cx)?
+            .navigation
+            .as_ref()?
+            .get("member_settings")?
+            .get(key)
+            .cloned()
+    }
+
+    pub(crate) fn set_member_settings(key: &str, settings: serde_json::Value, cx: &mut App) {
+        Self::update(cx, |saved| {
+            saved
+                .navigation
+                .get_or_insert_with(|| serde_json::json!({}))["member_settings"][key] = settings;
         });
     }
 

@@ -9274,14 +9274,8 @@ pub(crate) mod tests {
                     expected_tab
                 );
             });
-            // A preference changed during the debounce must survive the checkpoint.
-            client.preferences.borrow_mut().language = Some("zh-CN".into());
             cx.executor().advance_clock(Duration::from_millis(151));
             draw(cx);
-            assert_eq!(
-                client.load_preferences().unwrap().language.as_deref(),
-                Some("zh-CN")
-            );
             assert_eq!(
                 client.load_preferences().unwrap().navigation.unwrap()["panel"],
                 saved_panel
