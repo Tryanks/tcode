@@ -491,19 +491,15 @@ pub fn parse_status(
             } else {
                 branch = Some(value.to_string());
             }
-        } else if let Some(value) = line.strip_prefix("# branch.upstream ") {
-            has_upstream = !value.trim().is_empty();
+        } else if line.starts_with("# branch.upstream ") {
+            has_upstream = true;
         } else if let Some(value) = line.strip_prefix("# branch.ab ") {
             let (a, b) = parse_branch_ab(value.trim());
             ahead = a;
             behind = b;
-        } else if !line.starts_with('#') && !line.trim().is_empty() {
+        } else if !line.starts_with('#') {
             has_working_tree_changes = true;
-            if let Some(path) = parse_porcelain_path(line)
-                && !paths.contains(&path)
-            {
-                paths.push(path);
-            }
+            paths.extend(parse_porcelain_path(line));
         }
     }
 
@@ -560,29 +556,19 @@ fn parse_branch_ab(value: &str) -> (u32, u32) {
     (ahead, behind)
 }
 
-/// Extract the file path from a porcelain=2 changed-entry line.
+/// Extract the file path from a porcelain=2 changed-entry line, in the line
+/// formats git-status(1) gives under "Porcelain Format Version 2". Ignored
+/// items (`!`) are printed only for `--ignored`, which Tcode does not pass.
 fn parse_porcelain_path(line: &str) -> Option<String> {
-    let mut chars = line.chars();
-    let kind = chars.next()?;
-    match kind {
-        // Untracked / ignored: "? path" or "! path".
-        '?' | '!' => Some(line[2..].trim().to_string()),
-        // Ordinary "1 ..." (8 metadata fields then path) or rename "2 ..."
-        // (9 fields then "path\torig").
-        '1' | '2' => {
-            let skip = if kind == '1' { 8 } else { 9 };
-            let rest = line.splitn(skip + 1, ' ').nth(skip)?;
-            // Rename entries encode "path\torig"; take the new path.
-            let path = rest.split('\t').next().unwrap_or(rest);
-            Some(path.trim().to_string())
-        }
-        // Unmerged "u ..." (10 fields then path).
-        'u' => {
-            let rest = line.splitn(11, ' ').nth(10)?;
-            Some(rest.trim().to_string())
-        }
-        _ => None,
-    }
+    let path = match line.split_once(' ')? {
+        ("?", path) => path,
+        ("1", rest) => rest.splitn(8, ' ').nth(7)?,
+        // `<path><TAB><origPath>`: the target path comes first.
+        ("2", rest) => rest.splitn(9, ' ').nth(8)?.split('\t').next()?,
+        ("u", rest) => rest.splitn(10, ' ').nth(9)?,
+        _ => return None,
+    };
+    Some(path.to_string())
 }
 
 #[cfg(test)]
@@ -922,9 +908,22 @@ mod tests {
         assert_eq!(sanitize_commit_message("   "), "");
     }
 
+    /// Line shapes from git-status(1), "Porcelain Format Version 2", as of
+    /// Git 2.54: the branch headers, then one line per changed path (ordinary
+    /// `1`, renamed `2` with `<path><TAB><origPath>`, unmerged `u`, untracked
+    /// `?`). Without `-z` a space is not quoted, so a path keeps its own.
     #[test]
     fn porcelain_status_preserves_branch_state_and_changed_paths() {
-        let porcelain = "# branch.oid abc123\n# branch.head feature/x\n# branch.upstream origin/feature/x\n# branch.ab +2 -1\n1 .M N... 100644 100644 100644 abc def src/app.rs\n? new file.txt\n? new file.txt\n";
+        let porcelain = concat!(
+            "# branch.oid 1111111111111111111111111111111111111111\n",
+            "# branch.head feature/x\n",
+            "# branch.upstream origin/feature/x\n",
+            "# branch.ab +2 -1\n",
+            "1 .M N... 100644 100644 100644 2222222222222222222222222222222222222222 2222222222222222222222222222222222222222 src/app.rs\n",
+            "2 R. N... 100644 100644 100644 3333333333333333333333333333333333333333 3333333333333333333333333333333333333333 R100 docs/new name.md\tdocs/old name.md\n",
+            "u UU N... 100644 100644 100644 100644 4444444444444444444444444444444444444444 5555555555555555555555555555555555555555 6666666666666666666666666666666666666666 merged.rs\n",
+            "? new file.txt \n",
+        );
         let status = parse_status(
             porcelain,
             &[("src/app.rs".into(), 5, 3)],
@@ -946,7 +945,17 @@ mod tests {
                 behind: 1,
                 changed_files: vec![
                     GitFileEntry {
-                        path: "new file.txt".into(),
+                        path: "docs/new name.md".into(),
+                        insertions: 0,
+                        deletions: 0
+                    },
+                    GitFileEntry {
+                        path: "merged.rs".into(),
+                        insertions: 0,
+                        deletions: 0
+                    },
+                    GitFileEntry {
+                        path: "new file.txt ".into(),
                         insertions: 0,
                         deletions: 0
                     },
