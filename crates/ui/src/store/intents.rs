@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use agent::{ApprovalDecision, PluginAction, ProviderKind, RewindMode};
 use gpui::{App, Context, Task};
+use tcode_client::ConnectionState;
 use tcode_core::{
     acp::AcpAgentPatch,
     control::{ControlGrant, FollowUp, SettlementAutomation},
@@ -131,9 +132,7 @@ impl WorkspaceStore {
                     if Self::host_global_command(&command) {
                         return;
                     }
-                    if let Err(error) = self.host.dispatch(command) {
-                        log::error!("failed to dispatch host command: {}", error.message);
-                    }
+                    self.send(command);
                     return;
                 }
             }
@@ -146,9 +145,39 @@ impl WorkspaceStore {
         {
             return;
         }
-        if let Err(error) = self.host.dispatch(command) {
-            log::error!("failed to dispatch host command: {}", error.message);
-        }
+        self.send(command);
+    }
+
+    /// Send `command` now; a refusal reaches the window in the host's words.
+    /// A message the composer sent shows its own failure in its thread. A
+    /// link that closed or dropped answers nothing of the host's: its
+    /// connection state says so, and a retained write waits in the outbox
+    /// for the next link.
+    fn send(&self, command: Command) {
+        let shown_in_thread = matches!(
+            command,
+            Command::SendTurn { .. }
+                | Command::ScheduleTurn { .. }
+                | Command::Steer { .. }
+                | Command::ConfirmRelayAndSend { .. }
+        );
+        let ack = self.host.command(command);
+        let link = self.host.clone();
+        let refused = self.refused.clone();
+        self.background
+            .spawn(async move {
+                if let Err(error) = ack.await
+                    && !shown_in_thread
+                    && error.code != "transport_closed"
+                    && !matches!(
+                        link.connection_state(),
+                        ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
+                    )
+                {
+                    let _ = refused.send(error).await;
+                }
+            })
+            .detach();
     }
 
     pub(crate) fn command(

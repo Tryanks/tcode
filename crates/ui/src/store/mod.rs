@@ -314,6 +314,10 @@ pub struct WorkspaceStore {
     /// ask for one more draft per index event while it resolves.
     draft_fallback_pending: bool,
     creation_request_generation: u64,
+    /// Where an Ack the host refused goes to be shown, and the executor that
+    /// waits for it.
+    refused: async_channel::Sender<ProtocolError>,
+    background: gpui::BackgroundExecutor,
 }
 
 /// What an envelope changed, and so whom applying it tells.
@@ -447,6 +451,7 @@ impl WorkspaceStore {
             store.rename_preview_client(crate::device::DevicePreferences::device_name(cx))
         });
         let remote = matches!(attachment, WorkspaceAttachment::Remote { .. });
+        let (refused, refusals) = async_channel::unbounded();
         let mut store = Self {
             host: host.clone(),
             scope: WorkspaceScope::Full,
@@ -502,7 +507,23 @@ impl WorkspaceStore {
             open_pull_requests: HashMap::new(),
             draft_fallback_pending: false,
             creation_request_generation: 0,
+            refused,
+            background: cx.background_executor().clone(),
         };
+        store.attachment_tasks.push(cx.spawn(async move |this, cx| {
+            while let Ok(error) = refusals.recv().await {
+                if this
+                    .update(cx, |_, cx| {
+                        cx.emit(RuntimeEvent::Error(tcode_protocol::RuntimeError::External(
+                            error.message,
+                        )))
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
         let _ = host.subscribe(Subscription {
             known_index: None,
             topic: Topic::Scope,
@@ -7936,6 +7957,45 @@ pub(crate) mod tests {
             "the drawer opened on a conversation with no shell"
         );
         assert!(terminals(cx).is_empty());
+
+        driver.shutdown(cx, &workspace, &host);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    fn a_command_the_host_refuses_is_shown_in_the_hosts_words(cx: &mut TestAppContext) {
+        let root = scratch_root("refused-command");
+        let host = test_host(SessionStore::open_at(root.clone()).expect("open test store"));
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = driver.workspace(cx);
+        let reported = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let reported = reported.clone();
+            cx.subscribe(&workspace, move |_, event: &super::RuntimeEvent, _| {
+                reported.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        workspace.update(cx, |store, _| store.set_auto_settle_after_days(Some(0.5)));
+        // The host answers in order: once a later ping is answered, the
+        // refusal has arrived too.
+        let link = driver.link.clone();
+        driver
+            .await_with_events(cx, &workspace, link.query(tcode_protocol::Query::Ping))
+            .expect("ping");
+        cx.run_until_parked();
+        let refusal = Settings::default()
+            .apply(tcode_core::settings::SettingsPatch::AutoSettleAfterDays(
+                Some(0.5),
+            ))
+            .expect_err("the host refuses half a day");
+        assert_eq!(
+            reported.borrow().as_slice(),
+            [super::RuntimeEvent::Error(
+                tcode_protocol::RuntimeError::External(refusal.into())
+            )]
+        );
 
         driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);

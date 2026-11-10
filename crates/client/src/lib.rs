@@ -177,12 +177,12 @@ pub struct HostLink {
 }
 
 /// A request owns its waiter, including when its future is cancelled.
-struct PendingRequest<'a> {
-    link: &'a HostLink,
+struct PendingRequest {
+    link: HostLink,
     id: u64,
 }
 
-impl Drop for PendingRequest<'_> {
+impl Drop for PendingRequest {
     fn drop(&mut self) {
         self.link.inner.pending.lock().unwrap().remove(&self.id);
     }
@@ -685,7 +685,10 @@ impl HostLink {
 
     async fn request(&self, payload: ClientPayload) -> Result<HostMessage, ProtocolError> {
         let id = self.next_id();
-        let _pending = PendingRequest { link: self, id };
+        let _pending = PendingRequest {
+            link: self.clone(),
+            id,
+        };
         self.begin_request(id, payload)?
             .recv()
             .await
@@ -701,10 +704,24 @@ impl HostLink {
         }
     }
 
-    pub async fn command(&self, command: Command) -> Result<CommandResponse, ProtocolError> {
-        match self.request(ClientPayload::Command(command)).await? {
-            HostMessage::Ack { result, .. } => result,
-            other => Err(unexpected_response("command ack", &other)),
+    /// Send `command` now, in order with every other line; the future
+    /// answers with the host's Ack.
+    pub fn command(
+        &self,
+        command: Command,
+    ) -> impl Future<Output = Result<CommandResponse, ProtocolError>> + Send + 'static {
+        let id = self.next_id();
+        let pending = PendingRequest {
+            link: self.clone(),
+            id,
+        };
+        let sent = self.begin_request(id, ClientPayload::Command(command));
+        async move {
+            let _pending = pending;
+            match sent?.recv().await.map_err(transport_error)? {
+                HostMessage::Ack { result, .. } => result,
+                other => Err(unexpected_response("command ack", &other)),
+            }
         }
     }
 
