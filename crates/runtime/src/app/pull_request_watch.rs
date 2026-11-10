@@ -290,21 +290,10 @@ impl AppState {
         let host = cx.clone();
         cx.spawn_background(async move {
             let keys: Vec<_> = groups.iter().map(|group| group.key.1.clone()).collect();
-            let mut fingerprints = {
+            let fingerprints = {
                 let forge = forge.clone();
                 host.unblock(move || forge.fingerprints(&keys)).await
             };
-            if fingerprints.len() != groups.len() {
-                let error = ForgeError {
-                    kind: ForgeErrorKind::Uncertain,
-                    description: format!(
-                        "{} fingerprints answered for {} pull requests",
-                        fingerprints.len(),
-                        groups.len()
-                    ),
-                };
-                fingerprints = groups.iter().map(|_| Err(error.clone())).collect();
-            }
             let mut fingerprinted = Vec::new();
             for (group, fingerprint) in groups.into_iter().zip(fingerprints) {
                 match fingerprint {
