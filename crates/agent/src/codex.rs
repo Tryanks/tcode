@@ -718,8 +718,6 @@ struct Actor {
     usage_by_turn: HashMap<String, TokenUsage>,
     active_turn: Option<String>,
     retry: Option<crate::TurnRetry>,
-    retry_deadline: Option<std::time::Instant>,
-    capacity_retries: usize,
     last_turn_options: Option<TurnOptions>,
     interrupted: bool,
     /// Steers the server acknowledged but has not yet consumed, as
@@ -819,8 +817,6 @@ async fn run_actor(
         usage_by_turn: HashMap::new(),
         active_turn: None,
         retry: None,
-        retry_deadline: None,
-        capacity_retries: 0,
         last_turn_options: None,
         interrupted: false,
         pending_steers: Vec::new(),
@@ -896,8 +892,6 @@ impl SessionActor for Actor {
                 attachments,
             } => {
                 self.retry = None;
-                self.retry_deadline = None;
-                self.capacity_retries = 0;
                 self.last_turn_options = options.clone();
                 self.interrupted = false;
                 let params = self.build_turn_params(&text, options.as_ref(), &attachments);
@@ -921,7 +915,7 @@ impl SessionActor for Actor {
                     .as_ref()
                     .is_some_and(|retry| retry.turn_id == turn_id)
                 {
-                    self.wake().await?;
+                    self.retry_turn()?;
                 }
                 Ok(())
             }
@@ -1255,10 +1249,7 @@ impl SessionActor for Actor {
     }
 
     fn wake_at(&self) -> Option<std::time::Instant> {
-        [self.retry_deadline, self.background_terminal_read]
-            .into_iter()
-            .flatten()
-            .min()
+        self.background_terminal_read
     }
 
     async fn wake(&mut self) -> Result<(), String> {
@@ -1269,27 +1260,7 @@ impl SessionActor for Actor {
             self.background_terminal_read = None;
             return self.read_background_terminals();
         }
-        if self.retry.is_none()
-            || self
-                .pending_requests
-                .values()
-                .any(|request| matches!(request, PendingRequest::TurnStart { .. }))
-        {
-            return Ok(());
-        }
-        self.retry_deadline = None;
-        let mut params = self.build_turn_params("", self.last_turn_options.as_ref(), &[]);
-        params["input"] = json!([]);
-        self.continuing = true;
-        self.request(
-            "turn/start",
-            params,
-            PendingRequest::TurnStart {
-                permission: self.requested_permission.clone(),
-                settings: None,
-                moved_to: self.moved_to.clone(),
-            },
-        )
+        Ok(())
     }
 
     async fn settle_shutdown(&mut self) {
@@ -1981,12 +1952,35 @@ impl Actor {
     }
 
     async fn clear_retry(&mut self) {
-        self.retry_deadline = None;
         if self.retry.take().is_some() {
             self.events
                 .emit(AgentEvent::TurnRetry { retry: None })
                 .await;
         }
+    }
+
+    /// The user's Retry of a turn that failed on an overloaded server: the
+    /// thread goes on with empty input, as ChatGPT.app's Retry does.
+    fn retry_turn(&mut self) -> Result<(), String> {
+        if self
+            .pending_requests
+            .values()
+            .any(|request| matches!(request, PendingRequest::TurnStart { .. }))
+        {
+            return Ok(());
+        }
+        let mut params = self.build_turn_params("", self.last_turn_options.as_ref(), &[]);
+        params["input"] = json!([]);
+        self.continuing = true;
+        self.request(
+            "turn/start",
+            params,
+            PendingRequest::TurnStart {
+                permission: self.requested_permission.clone(),
+                settings: None,
+                moved_to: self.moved_to.clone(),
+            },
+        )
     }
 
     fn build_turn_params(
@@ -2581,7 +2575,6 @@ impl Actor {
                     }
                     self.active_turn = Some(id.into());
                     self.retry = None;
-                    self.retry_deadline = None;
                     if self.interrupted {
                         let _ = self.request(
                             "turn/interrupt",
@@ -2615,22 +2608,11 @@ impl Actor {
                         .and_then(Value::as_str)
                         == Some("serverOverloaded")
                 {
-                    // Codex App retries overload failures with empty input at these intervals.
-                    // app-server ends the native turn instead of scheduling this continuation.
-                    let delay = [10, 30, 120, 300].get(self.capacity_retries).copied();
-                    self.capacity_retries = self.capacity_retries.saturating_add(1);
-                    self.retry_deadline = delay.map(|seconds| {
-                        std::time::Instant::now() + std::time::Duration::from_secs(seconds)
-                    });
+                    // Only Retry, with no countdown: ChatGPT.app 26.1103 continues on
+                    // its own only for an app-server older than 0.162.0-alpha.18.
                     self.retry = Some(crate::TurnRetry {
                         turn_id: id.clone(),
-                        retry_at: delay.map(|seconds| {
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs()
-                                + seconds
-                        }),
+                        retry_at: None,
                     });
                     self.events
                         .emit(AgentEvent::TurnRetry {
@@ -2639,7 +2621,6 @@ impl Actor {
                         .await;
                 } else {
                     self.clear_retry().await;
-                    self.capacity_retries = 0;
                 }
                 self.active_turn = None;
                 self.async_questions = None;
@@ -4882,8 +4863,6 @@ mod tests {
                 usage_by_turn: HashMap::new(),
                 active_turn: None,
                 retry: None,
-                retry_deadline: None,
-                capacity_retries: 0,
                 last_turn_options: None,
                 interrupted: false,
                 moved_to: None,
@@ -5985,75 +5964,74 @@ mod tests {
         });
     }
 
+    /// A turn that fails on an overloaded server offers Retry with no
+    /// countdown, as ChatGPT.app 26.1103 does against app-server 0.162.0-alpha.18
+    /// and later. Retry continues the thread with empty input, once, even when
+    /// the background-terminal read the failed turn scheduled has come due.
     #[test]
-    fn capacity_failure_offers_native_continuation_after_ten_seconds() {
+    fn capacity_failure_offers_a_manual_retry() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            for (attempt, delay) in [Some(10), Some(30), Some(120), Some(300), None]
-                .into_iter()
-                .enumerate()
-            {
-                let turn_id = format!("capacity-{attempt}");
-                actor
-                    .handle_notification(
-                        "turn/started",
-                        &json!({"threadId": "thread-1", "turn":{"id":turn_id}}),
-                    )
-                    .await;
-                let before = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                actor.handle_notification("error", &json!({
-                    "threadId": "thread-1", "turnId": turn_id, "willRetry": false,
-                    "error": {"message": "Selected model is capacity. Please try a different model.",
-                              "codexErrorInfo": "serverOverloaded"}
-                })).await;
-                actor.handle_notification("turn/completed", &json!({
-                    "threadId": "thread-1", "turn": {"id": turn_id, "status": "failed",
-                    "error": {"message": "Selected model is capacity. Please try a different model.",
-                              "codexErrorInfo": "serverOverloaded"}}
-                })).await;
-                let mut offered = None;
-                while let Ok(event) = events.try_recv() {
-                    if let AgentEvent::TurnRetry { retry: Some(retry) } = event {
-                        offered = Some(retry);
-                    }
-                }
-                let offered = offered.expect("capacity failure must offer a native retry");
-                assert_eq!(offered.turn_id, turn_id);
-                assert_eq!(offered.retry_at.is_some(), delay.is_some());
-                if let Some(delay) = delay {
-                    let deadline = offered.retry_at.unwrap();
-                    let after = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-                    assert!((before + delay..=after + delay).contains(&deadline));
-                }
-                // Both automatic and manual paths must continue without duplicating input.
-                if attempt == 0 {
-                    actor.wake().await.unwrap();
-                } else {
-                    actor
-                        .handle_command(SessionCommand::RetryTurn {
-                            turn_id: turn_id.clone(),
-                        })
-                        .await
-                        .unwrap();
-                }
-                let request = sent(&mut actor).await;
-                assert_eq!(request["method"], "turn/start");
-                assert_eq!(request["params"]["threadId"], "thread-1");
-                assert_eq!(request["params"]["input"], json!([]));
-                // A second client cannot submit the same retry while start is pending.
-                actor
-                    .handle_command(SessionCommand::RetryTurn { turn_id })
-                    .await
-                    .unwrap();
-                assert!(written(&mut actor).await.is_empty());
-                actor.handle_line(&json!({"id":request["id"], "result":{"turn":{"id":format!("capacity-{}",attempt + 1)}}}).to_string()).await;
-            }
+            actor
+                .handle_notification(
+                    "turn/started",
+                    &json!({"threadId": "thread-1", "turn": {"id": "overloaded"}}),
+                )
+                .await;
+            // `v2/TurnCompletedNotification.ts` and `v2/TurnError.ts` of 0.167.0.
+            actor
+                .handle_line(
+                    &json!({"method": "turn/completed", "params": {
+                        "threadId": "thread-1",
+                        "turn": {"id": "overloaded", "rootTurnId": null, "items": [],
+                            "itemsView": "summary", "status": "failed",
+                            "error": {"message": "Selected model is at capacity.",
+                                "codexErrorInfo": "serverOverloaded",
+                                "additionalDetails": null, "misalignment": null},
+                            "startedAt": 1767225600, "completedAt": 1767225601,
+                            "durationMs": 1000}}})
+                    .to_string(),
+                )
+                .await;
+            let offered: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+                .filter_map(|event| match event {
+                    AgentEvent::TurnRetry { retry } => Some(retry),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                offered,
+                [Some(crate::TurnRetry {
+                    turn_id: "overloaded".into(),
+                    retry_at: None,
+                })]
+            );
+            // The turn's end scheduled a background-terminal read; it has come due.
+            actor.background_terminal_read = Some(std::time::Instant::now());
+            actor
+                .handle_command(SessionCommand::RetryTurn {
+                    turn_id: "overloaded".into(),
+                })
+                .await
+                .unwrap();
+            let request = sent(&mut actor).await;
+            assert_eq!(request["method"], "turn/start");
+            assert_eq!(request["params"]["threadId"], "thread-1");
+            assert_eq!(request["params"]["input"], json!([]));
+            // A second client cannot submit the same retry while start is pending.
+            actor
+                .handle_command(SessionCommand::RetryTurn {
+                    turn_id: "overloaded".into(),
+                })
+                .await
+                .unwrap();
+            assert!(written(&mut actor).await.is_empty());
+            actor
+                .handle_line(
+                    &json!({"id": request["id"], "result": {"turn": {"id": "continued"}}})
+                        .to_string(),
+                )
+                .await;
             actor
                 .handle_command(SessionCommand::Interrupt)
                 .await
@@ -6061,7 +6039,7 @@ mod tests {
             actor
                 .handle_notification(
                     "turn/started",
-                    &json!({"threadId": "thread-1", "turn":{"id":"capacity-5"}}),
+                    &json!({"threadId": "thread-1", "turn": {"id": "continued"}}),
                 )
                 .await;
             assert_eq!(sent(&mut actor).await["method"], "turn/interrupt");
@@ -6105,7 +6083,6 @@ mod tests {
                 events.try_recv(),
                 Ok(AgentEvent::TurnRetry { retry: None })
             ));
-            actor.wake().await.unwrap();
             actor
                 .handle_command(SessionCommand::RetryTurn {
                     turn_id: "serverOverloaded".into(),
