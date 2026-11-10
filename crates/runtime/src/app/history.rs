@@ -26,9 +26,9 @@ impl std::io::Write for ByteCount {
     }
 }
 
-fn wire_len(record: &SessionEventRecord) -> usize {
+fn wire_len(value: &impl serde::Serialize) -> usize {
     let mut count = ByteCount(0);
-    serde_json::to_writer(&mut count, record).expect("serializable record");
+    serde_json::to_writer(&mut count, value).expect("serializable value");
     count.0
 }
 
@@ -713,14 +713,36 @@ impl SessionLog {
                 code: "unknown_item_output".into(),
                 message: format!("no output for item {item_id} in {session_id}"),
             })?;
-        if output.len() > MAX_SESSION_HISTORY_BYTES {
-            return Err(tcode_protocol::ProtocolError {
-                code: "item_output_too_large".into(),
-                message: "The output exceeds the 8 MiB response limit.".into(),
-            });
-        }
         Ok(QueryResponse::ItemOutput(output))
     }
+}
+
+/// `response` when its reply fits one line of the asking client's connection,
+/// escapes included: a network connection closes on a longer one, so the client
+/// is told instead. An in-process client's connection has no line limit.
+fn whole_output_reply(
+    response: QueryResponse,
+    line_limit: Option<usize>,
+) -> Result<QueryResponse, ProtocolError> {
+    let Some(line_limit) = line_limit else {
+        return Ok(response);
+    };
+    let envelope = HostMessage::QueryResult {
+        id: u64::MAX,
+        result: Ok(QueryResponse::ItemOutput(String::new())),
+    };
+    let reply = wire_overhead(&envelope) - wire_len(&QueryResponse::ItemOutput(String::new()))
+        + wire_len(&response);
+    if reply > line_limit {
+        return Err(ProtocolError {
+            code: "item_output_too_large".into(),
+            message: format!(
+                "The output takes {reply} bytes to send, more than the {line_limit} bytes one reply \
+                 to this device can carry."
+            ),
+        });
+    }
+    Ok(response)
 }
 
 /// The last rows of a log, as many as a baseline window can use, read with
@@ -1382,10 +1404,13 @@ impl AppState {
         decode_image_read(read, cx)
     }
 
+    /// The whole output of one item, for a client whose connection carries
+    /// lines of at most `line_limit` bytes.
     pub(crate) fn item_output(
         &mut self,
         session_id: &str,
         item_id: String,
+        line_limit: Option<usize>,
         cx: &mut HostCx,
     ) -> HostTask<Result<QueryResponse, tcode_protocol::ProtocolError>> {
         let read_id = session_id.to_string();
@@ -1394,13 +1419,15 @@ impl AppState {
             session_id,
             item_id.clone(),
             move |log| {
-                log.item_output(&read_id, &item_id).map_err(|error| {
-                    if scoped && error.code == "unknown_item_output" {
-                        ProtocolError::out_of_scope("item is outside this session")
-                    } else {
-                        error
-                    }
-                })
+                log.item_output(&read_id, &item_id)
+                    .map_err(|error| {
+                        if scoped && error.code == "unknown_item_output" {
+                            ProtocolError::out_of_scope("item is outside this session")
+                        } else {
+                            error
+                        }
+                    })
+                    .and_then(|response| whole_output_reply(response, line_limit))
             },
             cx,
         )

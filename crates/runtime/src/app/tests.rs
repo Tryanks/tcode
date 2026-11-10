@@ -11333,6 +11333,77 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
     });
 }
 
+/// A whole output is sent when one line of the asking client's connection
+/// holds its reply: an in-process client takes any size, and a client over
+/// the network is told by name when the escaped reply is longer than its
+/// connection's line, which would otherwise close the connection.
+#[test]
+fn a_whole_output_is_sent_when_the_clients_line_holds_it() {
+    use tcode_client::attachment::AttachmentPolicy;
+    use tcode_protocol::{ClientMessage, ClientPayload, MAX_LINE_BYTES, Query};
+
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("whole-output-line");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    // Longer than half a network line, and short of one.
+    let long = "a".repeat(MAX_LINE_BYTES / 2 + 1);
+    // A quarter of a network line, each byte of which takes six in the reply.
+    let escapes = "\u{1b}".repeat(MAX_LINE_BYTES / 4);
+    state.update(cx, |state, _| {
+        state.event_records.insert(
+            "outputs".into(),
+            session_log([
+                tool_call("long", long.clone()),
+                tool_call("escapes", escapes.clone()),
+            ]),
+        );
+    });
+    let mut read = |id: u64, item_id: &str, policy: AttachmentPolicy| {
+        state.update(cx, |state, host_cx| {
+            crate::pipe::handle_client_message(
+                state,
+                host_cx,
+                ClientMessage {
+                    principal: None,
+                    key: None,
+                    id,
+                    payload: ClientPayload::Query(Query::ReadItemOutput {
+                        session_id: "outputs".into(),
+                        item_id: item_id.into(),
+                    }),
+                },
+                policy,
+            )
+        });
+        answered(cx, id)
+            .into_iter()
+            .find_map(|message| match message {
+                HostMessage::QueryResult { id: reply, result } if reply == id => Some(result),
+                _ => None,
+            })
+            .expect("the read is answered")
+    };
+
+    assert_eq!(
+        read(1, "long", AttachmentPolicy::LOCAL),
+        Ok(QueryResponse::ItemOutput(long.clone()))
+    );
+    assert_eq!(
+        read(2, "long", AttachmentPolicy::network()),
+        Ok(QueryResponse::ItemOutput(long))
+    );
+    assert_eq!(
+        read(3, "escapes", AttachmentPolicy::LOCAL),
+        Ok(QueryResponse::ItemOutput(escapes))
+    );
+    assert_eq!(
+        read(4, "escapes", AttachmentPolicy::network())
+            .unwrap_err()
+            .code,
+        "item_output_too_large"
+    );
+}
+
 /// Every update of a turn's changes carries the whole diff set; only the last
 /// one decides what the turn shows, so the earlier ones cross without diffs.
 #[test]

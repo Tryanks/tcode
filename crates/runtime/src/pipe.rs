@@ -3,7 +3,9 @@
 use std::sync::{Arc, OnceLock};
 
 use tcode_client::HostLink;
-use tcode_client::attachment::{AttachmentMessage, AttachmentPolicy, AttachmentSender};
+use tcode_client::attachment::{
+    AttachmentMessage, AttachmentPolicy, AttachmentSender, QueuePolicy,
+};
 use tcode_core::thread_sort::ThreadSection;
 use tcode_protocol::{
     ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, Principal, ProtocolError,
@@ -1477,7 +1479,13 @@ fn dispatch_query(
         Query::ReadItemOutput {
             session_id,
             item_id,
-        } => app.item_output(&session_id, item_id, cx),
+        } => {
+            let line_limit = match policy.queue {
+                QueuePolicy::Disconnect { max_line_bytes, .. } => Some(max_line_bytes),
+                QueuePolicy::Unbounded => None,
+            };
+            app.item_output(&session_id, item_id, line_limit, cx)
+        }
         Query::ThreadAnchorTurn {
             session_id,
             position,
