@@ -135,17 +135,10 @@ impl Mr<'_> {
             .json()
     }
     pub(super) fn mr(&self) -> Result<Value, ForgeError> {
-        let mr = self.get(
+        self.get(
             self.path("?include_diverged_commits_count=true"),
             "MergeRequest",
-        )?;
-        if mr["iid"].as_u64() != Some(self.key.number) {
-            return Err(error(
-                ForgeErrorKind::Uncertain,
-                "GitLab answered another merge request",
-            ));
-        }
-        Ok(mr)
+        )
     }
     pub(super) fn graphql(
         &self,

@@ -3,7 +3,7 @@
 //! anonymous reads; a write names it by its identity id.
 
 use super::{
-    api::{Api, PREVIEW, Request, error},
+    api::{Api, PREVIEW, Request},
     repository,
 };
 use crate::forge::{ForgeError, ForgeErrorKind};
@@ -85,14 +85,7 @@ impl Pr<'_> {
             .json()
     }
     pub(super) fn pr(&self) -> Result<Value, ForgeError> {
-        let pr = self.get(self.path(""), "PullRequest")?;
-        if pr["pullRequestId"].as_u64() != Some(self.key.number) {
-            return Err(error(
-                ForgeErrorKind::Uncertain,
-                "Azure DevOps answered another pull request",
-            ));
-        }
-        Ok(pr)
+        self.get(self.path(""), "PullRequest")
     }
     /// The account the credential reads as; `None` anonymously.
     pub(super) fn viewer(&self) -> Result<Option<Value>, ForgeError> {
