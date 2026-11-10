@@ -115,6 +115,7 @@ pub fn import_thread(
     let converted = match thread.source {
         SourceTool::ClaudeCode
         | SourceTool::ClaudeDesktop
+        | SourceTool::ClaudeAgentSdk
         | SourceTool::T3Code
         | SourceTool::Unknown => claude::convert(&thread.file, &thread.external_id),
         SourceTool::CodexCli | SourceTool::CodexDesktop => {

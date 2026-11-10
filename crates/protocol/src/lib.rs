@@ -316,6 +316,7 @@ pub use wire::{
 // RuntimeNotice::WorktreeSeeded has no limit_reached.
 // RewindStatus's.
 // running_turn has no "refuse" and its blocked no "turn_running".
+// SourceTool gains claude_agent_sdk.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

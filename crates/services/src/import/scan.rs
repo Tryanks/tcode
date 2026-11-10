@@ -69,7 +69,8 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Vec
             continue;
         };
         // `entrypoint` is the CLAUDE_CODE_ENTRYPOINT the session ran under:
-        // T3 Code sets "t3-code"; "sdk-ts" is any Agent SDK application.
+        // T3 Code sets "t3-code"; the Agent SDKs set "sdk-ts", "sdk-py" and
+        // "sdk-cli" for any application built on them.
         let joined = desktop.get(&id);
         let source = if joined.is_some() {
             SourceTool::ClaudeDesktop
@@ -77,6 +78,7 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Vec
             match entrypoint.as_deref() {
                 Some("t3-code") => SourceTool::T3Code,
                 Some("claude-desktop") => SourceTool::ClaudeDesktop,
+                Some("sdk-ts" | "sdk-py" | "sdk-cli") => SourceTool::ClaudeAgentSdk,
                 _ => SourceTool::ClaudeCode,
             }
         };

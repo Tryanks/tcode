@@ -1357,6 +1357,7 @@ fn tool_counts(threads: &[ExternalThread]) -> String {
     [
         SourceTool::ClaudeCode,
         SourceTool::ClaudeDesktop,
+        SourceTool::ClaudeAgentSdk,
         SourceTool::T3Code,
         SourceTool::CodexCli,
         SourceTool::CodexDesktop,

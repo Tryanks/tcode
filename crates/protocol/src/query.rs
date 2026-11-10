@@ -376,6 +376,8 @@ impl PathEntry {
 pub enum SourceTool {
     ClaudeCode,
     ClaudeDesktop,
+    /// An application built on the Claude Agent SDK.
+    ClaudeAgentSdk,
     T3Code,
     CodexCli,
     CodexDesktop,
@@ -388,6 +390,7 @@ impl SourceTool {
         match self {
             Self::ClaudeCode => "Claude Code",
             Self::ClaudeDesktop => "Claude Desktop",
+            Self::ClaudeAgentSdk => "Claude Agent SDK",
             Self::T3Code => "T3 Code",
             Self::CodexCli => "Codex CLI",
             Self::CodexDesktop => "Codex Desktop",
