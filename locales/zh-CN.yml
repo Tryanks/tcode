@@ -1533,7 +1533,6 @@ toast:
   show_details: "展开详情"
   hide_details: "收起详情"
   copy_error: "复制错误"
-  unknown: "无法识别的通知"
   on_host: "%{host}：%{message}"
 remote:
   failed: "无法更新远程连接：%{error}"

@@ -1540,7 +1540,6 @@ toast:
   show_details: "Show details"
   hide_details: "Hide details"
   copy_error: "Copy error"
-  unknown: "Unknown runtime notification"
   on_host: "%{host}: %{message}"
 remote:
   failed: "Could not update remote access: %{error}"

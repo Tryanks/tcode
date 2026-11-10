@@ -1540,7 +1540,6 @@ toast:
   show_details: "詳細を表示"
   hide_details: "詳細を隠す"
   copy_error: "エラーをコピー"
-  unknown: "不明なランタイム通知"
   on_host: "%{host}：%{message}"
 remote:
   failed: "リモートアクセスを更新できませんでした：%{error}"

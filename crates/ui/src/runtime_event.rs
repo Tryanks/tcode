@@ -295,7 +295,7 @@ fn plugin_operation_toast_titles(target: &PluginOperationTarget) -> [String; 3] 
 }
 
 pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToast {
-    match toast {
+    let (disposition, kind, title, detail, action) = match toast {
         RuntimeToast::ProviderUpdatesAvailable { updates } => {
             let automatic: Vec<_> = updates
                 .iter()
@@ -386,9 +386,6 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
                     .then_some(100. * run.completed as f32 / run.total.max(1) as f32),
             };
         }
-        _ => {}
-    }
-    let (disposition, kind, title, detail, action) = match toast {
         RuntimeToast::GitBusy => (
             RuntimeToastDisposition::Push,
             ToastKind::Warning,
@@ -499,13 +496,9 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
                 None,
             )
         }
-        _ => (
-            RuntimeToastDisposition::Push,
-            ToastKind::Warning,
-            crate::tr!("toast.unknown").into_owned(),
-            Some(format!("{toast:?}")),
-            None,
-        ),
+        RuntimeToast::PullRequestWatch { .. } | RuntimeToast::PullRequestStack { .. } => {
+            unreachable!("the shell presents pull request toasts")
+        }
     };
 
     PresentedRuntimeToast {
