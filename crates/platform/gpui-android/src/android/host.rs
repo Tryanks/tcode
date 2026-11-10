@@ -402,6 +402,32 @@ pub fn scroll_capture_rendered(request: u64, scrolled: Option<i32>) {
     );
 }
 
+/// How long a touch must be held to count as a long press: the user's
+/// "Touch & hold delay" accessibility setting, as
+/// `ViewConfiguration.getLongPressTimeout()` reports it.
+pub(crate) fn long_press_timeout() -> anyhow::Result<std::time::Duration> {
+    let app = APP
+        .lock()
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Android host not initialized"))?;
+    // SAFETY: Android owns this VM for the duration of the process.
+    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    vm.attach_current_thread(|env| -> anyhow::Result<std::time::Duration> {
+        let timeout = env
+            .call_static_method(
+                jni_str!("android/view/ViewConfiguration"),
+                jni_str!("getLongPressTimeout"),
+                jni_sig!("()I"),
+                &[],
+            )
+            .and_then(|value| value.i());
+        if timeout.is_err() {
+            env.exception_clear();
+        }
+        Ok(std::time::Duration::from_millis(u64::try_from(timeout?)?))
+    })
+}
+
 /// Rasterize on the calling render thread; a software Canvas needs no UI-thread hop.
 pub(crate) fn rasterize_emoji(glyph: u32, size: f32) -> anyhow::Result<Option<Vec<i32>>> {
     let app = APP

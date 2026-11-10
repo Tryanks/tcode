@@ -105,8 +105,10 @@ the motion stream's monotonic down time so a reused Android id cannot collide
 with an earlier GPUI touch.
 
 Gesture interpretation lives in GPUI's portable gesture arena, the same
-path used by `gpui-ios`. Android supplies only platform tuning: a 450 ms long
-press and `ScrollPhysics::android()`. Tap synthesis, touch slop, scroll capture,
+path used by `gpui-ios`. Android supplies only platform tuning: the long-press
+timeout `ViewConfiguration.getLongPressTimeout()` reports, which is the user's
+"Touch & hold delay" accessibility setting, read when the window opens, and
+`ScrollPhysics::android()`. Tap synthesis, touch slop, scroll capture,
 drag-cancels-click, velocity sampling, and momentum are therefore shared with
 iOS rather than reimplemented in this backend.
 

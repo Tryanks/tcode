@@ -26,7 +26,6 @@ use std::{
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::Arc,
-    time::Duration,
 };
 
 #[derive(Default)]
@@ -422,11 +421,17 @@ struct AndroidKeyboardLayout;
 struct AndroidGestures;
 
 impl PlatformGestures for AndroidGestures {
+    /// Read once, when GPUI opens the window.
     fn tuning(&self) -> GestureTuning {
+        let defaults = GestureTuning::default();
+        let long_press_duration = host::long_press_timeout().unwrap_or_else(|error| {
+            log::error!("ViewConfiguration.getLongPressTimeout failed: {error:#}");
+            defaults.long_press_duration
+        });
         GestureTuning {
-            long_press_duration: Duration::from_millis(450),
+            long_press_duration,
             scroll_physics: ScrollPhysics::android(),
-            ..GestureTuning::default()
+            ..defaults
         }
     }
 }
