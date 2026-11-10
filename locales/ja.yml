@@ -3313,7 +3313,6 @@ tools:
   until_absent: "消失"
   timed_out: "タイムアウト"
   page_elements: "操作可能な要素"
-  visible_text: "表示中のテキスト"
   copy_selector: "セレクターをコピー"
   hits_one: "1 件のヒット"
   hits: "%{count} 件のヒット"

@@ -3313,7 +3313,6 @@ tools:
   until_absent: "absent"
   timed_out: "timed out"
   page_elements: "Interactive elements"
-  visible_text: "Visible text"
   copy_selector: "Copy selector"
   hits_one: "1 hit"
   hits: "%{count} hits"

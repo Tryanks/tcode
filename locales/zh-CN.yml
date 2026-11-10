@@ -3306,7 +3306,6 @@ tools:
   until_absent: "消失"
   timed_out: "已超时"
   page_elements: "可交互元素"
-  visible_text: "可见文本"
   copy_selector: "复制选择器"
   hits_one: "1 处命中"
   hits: "%{count} 处命中"
