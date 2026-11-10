@@ -2995,7 +2995,11 @@ impl Mapper {
         let Some(status) = msg.pointer("/patch/status").and_then(Value::as_str) else {
             return Vec::new();
         };
-        let status = subagent_status(status);
+        let status = match status {
+            "completed" => ItemStatus::Completed,
+            "failed" | "killed" => ItemStatus::Failed,
+            _ => ItemStatus::InProgress,
+        };
         if status != ItemStatus::InProgress {
             self.tail_requests.push(TailRequest::Stop {
                 parent_id: tool_use_id.clone(),
@@ -3033,11 +3037,13 @@ impl Mapper {
         self.tail_requests.push(TailRequest::Stop {
             parent_id: tool_use_id.clone(),
         });
-        let status = subagent_status(
-            msg.get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("completed"),
-        );
+        // A notification is the task's terminal frame: `completed`, `failed`
+        // or `stopped`.
+        let status = if msg.get("status").and_then(Value::as_str) == Some("completed") {
+            ItemStatus::Completed
+        } else {
+            ItemStatus::Failed
+        };
         let summary = handback_summary(
             msg.get("handback"),
             msg.get("handback_report"),
@@ -4376,16 +4382,6 @@ fn api_retry_notice(msg: &Value) -> AgentEvent {
 
 fn is_file_tool(name: &str) -> bool {
     matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit")
-}
-
-fn subagent_status(status: &str) -> ItemStatus {
-    match status {
-        "completed" | "done" | "succeeded" => ItemStatus::Completed,
-        "failed" | "error" | "cancelled" | "canceled" | "stopped" | "killed" | "interrupted" => {
-            ItemStatus::Failed
-        }
-        _ => ItemStatus::InProgress,
-    }
 }
 
 pub(crate) fn one_line_summary(text: &str) -> String {
