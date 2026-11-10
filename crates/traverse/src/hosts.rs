@@ -223,7 +223,7 @@ mod tests {
         let dir = temp_dir("legacy");
         fs::write(
             dir.join("hosts.json"),
-            r#"[{"host_id":"94c9ac85-0a47-4387-86ba-524d3fd7995f","name":"Desk",
+            r#"[{"host_id":"0000beef-0000-4000-8000-000000000001","name":"Desk",
                 "origin":"http://192.168.1.5:47420","candidates":[],"token":"t",
                 "last_connected_unix":1}]"#,
         )
@@ -235,7 +235,7 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].host_id, MACHINE_ID);
         let written = fs::read_to_string(dir.join("hosts.json")).unwrap();
-        assert!(!written.contains("94c9ac85"), "{written}");
+        assert!(!written.contains("0000beef"), "{written}");
         fs::remove_dir_all(dir).unwrap();
     }
 
