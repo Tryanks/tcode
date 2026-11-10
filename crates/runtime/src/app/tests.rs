@@ -2989,6 +2989,9 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
     let mut profile = history(ProviderKind::ClaudeCode, "target", "k3[1m]", 500);
     profile.profile_id = Some("klaude-kode".into());
     let codex = history(ProviderKind::Codex, "target", "gpt-5.2-codex", 500);
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-draft-defaults");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
     for (name, sessions, provider, model, agent, profile, effort) in [
         (
             "project",
@@ -3054,19 +3057,18 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
             false,
         ),
     ] {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("tcode-draft-defaults");
-        let state = cx.new_entity(TestClientState::new((*store).clone()));
+        // A draft in a directory of its own, so no row's draft is another's.
+        let cwd = PathBuf::from(format!("/new-project/{name}"));
         state.update(cx, |state, cx| {
             state.sessions = sessions.into();
-            state.start_draft("target".into(), PathBuf::from("/new-project"), cx);
+            state.start_draft("target".into(), cwd.clone(), cx);
             let draft = state.selected_session().unwrap();
             assert!(draft.draft, "{name}");
             assert_eq!(draft.meta.provider, provider, "{name}");
             assert_eq!(draft.meta.model.as_deref(), model, "{name}");
             assert_eq!(draft.meta.acp_agent_id.as_deref(), agent, "{name}");
             assert_eq!(draft.meta.profile_id.as_deref(), profile, "{name}");
-            assert_eq!(draft.meta.cwd, PathBuf::from("/new-project"));
+            assert_eq!(draft.meta.cwd, cwd);
             assert_eq!(draft.meta.project_id.as_deref(), Some("target"));
             let mut expected = if effort {
                 vec![OptionSelection {
