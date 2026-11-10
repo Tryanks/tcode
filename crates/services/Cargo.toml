@@ -12,6 +12,7 @@ chrono = "0.4"
 dirs = "7"
 flate2 = "1"
 futures-lite = "2"
+ignore = "0.4"
 log = "0.4"
 memchr = "2"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }

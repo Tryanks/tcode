@@ -12282,6 +12282,7 @@ dependencies = [
  "dirs 7.0.0",
  "flate2",
  "futures-lite",
+ "ignore",
  "image",
  "imara-diff",
  "jpeg-decoder",
