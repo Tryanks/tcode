@@ -11241,6 +11241,115 @@ pub(crate) mod tests {
         })
     }
 
+    /// The rows of either timeline painted between `left` and `right`, by
+    /// index. The lead's and the agent's rows share their selectors, so
+    /// each is told apart by where it is painted.
+    fn rows_between(
+        left: Pixels,
+        right: Pixels,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(usize, gpui::Bounds<Pixels>)> {
+        (0..400)
+            .filter_map(|index| {
+                let row = cx.debug_bounds(format!("timeline-row-{index}").leak())?;
+                (row.center().x > left && row.center().x < right).then_some((index, row))
+            })
+            .collect()
+    }
+
+    /// A trackpad's wheel at `at`, moving the content down `by`.
+    fn wheel_at(at: gpui::Point<Pixels>, by: f32, cx: &mut VisualTestContext) {
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+        draw(cx);
+        for (phase, delta) in [
+            (gpui::TouchPhase::Started, 0.),
+            (gpui::TouchPhase::Moved, by),
+            (gpui::TouchPhase::Ended, 0.),
+        ] {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: at,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(delta))),
+                touch_phase: phase,
+                ..Default::default()
+            });
+            draw(cx);
+        }
+        crate::test_frames::draw_settled(cx);
+    }
+
+    /// Beside its lead, the agent's card takes the wheel over it and leaves
+    /// the lead's timeline where it was; the wheel over the lead's column,
+    /// and over the gap between that column and the card, where the card's
+    /// edge is grabbed, scrolls the lead and leaves the agent where it was.
+    ///
+    /// The gap is wheeled once the lead is off its end: from the end it
+    /// does not move the lead today.
+    #[gpui::test]
+    fn the_wheel_scrolls_the_timeline_it_is_over_beside_an_agent(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_lead_with_agent(cx);
+        // A running agent's mark never rests; the wheel is what is read.
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let store = store_of(&shell, cx);
+        serve_finished_turns(&host, "thread-1", 60, false);
+        await_restore_update(&shell, cx, |store, cx| {
+            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx)
+                == Some(60)
+        });
+        serve_finished_turns(&host, "agent-1", 30, false);
+        cx.update(|window, cx| {
+            crate::agents_panel::open_agent(
+                &store,
+                "agent-1".into(),
+                crate::shell::side_host_for(&store.read(cx).thread_key("thread-1"), cx),
+                None,
+                window,
+                cx,
+            )
+        });
+        draw(cx);
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("agent-1"), cx) && store.timeline_settled_for("agent-1")
+        });
+        crate::test_frames::draw_settled(cx);
+        let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
+        let timeline = cx
+            .debug_bounds("chat-side-timeline")
+            .expect("the agent's timeline");
+        let grip = cx
+            .debug_bounds("chat-side-grip")
+            .expect("the grip of the card's edge");
+        let pane = pane_bounds(&shell, cx)[0];
+        // The topmost row of each, which stays on screen as the wheel moves
+        // its content down.
+        let (lead_row, mut lead_at) = rows_between(pane.left(), card.left(), cx)[0];
+        let (agent_row, mut agent_at) = rows_between(card.left(), card.right(), cx)[0];
+        let at = |row: usize, cx: &mut VisualTestContext| {
+            cx.debug_bounds(format!("timeline-row-{row}").leak())
+                .unwrap_or_else(|| panic!("row {row} stays on screen"))
+        };
+
+        for (over, x, lead_moves) in [
+            ("the agent's card", timeline.center().x, false),
+            ("the lead's column", pane.left() + px(300.), true),
+            ("the gap before the card", grip.center().x, true),
+        ] {
+            wheel_at(gpui::point(x, timeline.center().y), 120., cx);
+            let (lead_now, agent_now) = (at(lead_row, cx), at(agent_row, cx));
+            let (moved, moved_at, still, still_at) = if lead_moves {
+                (lead_now, lead_at, agent_now, agent_at)
+            } else {
+                (agent_now, agent_at, lead_now, lead_at)
+            };
+            assert!(
+                moved.top() > moved_at.top() + px(60.),
+                "a wheel over {over} scrolls it: {moved_at:?} -> {moved:?}"
+            );
+            assert_eq!(still, still_at, "a wheel over {over} leaves the other");
+            (lead_at, agent_at) = (lead_now, agent_now);
+        }
+    }
+
     /// On a tablet: an agent beside its lead is neither drawn nor held open
     /// while the window is compact, which shows the lead alone, and is beside
     /// its lead again once the window is wide. An agent opened from its lead
