@@ -513,7 +513,7 @@ impl AppState {
         let armed = session
             .idle_since
             .filter(|_| matches!(session.runtime, Runtime::Live(_)));
-        let idle_since = armed.unwrap_or_else(Instant::now);
+        let idle_since = armed.unwrap_or_else(|| cx.clock().now());
         session.idle_since = Some(idle_since);
 
         let mut residents: Vec<_> = self
@@ -567,10 +567,10 @@ impl AppState {
             return;
         }
         let session_id = session_id.to_string();
-        let deadline = idle_since + self.resident_idle_grace;
+        let grace = cx.clock().timer_at(idle_since + RESIDENT_IDLE_GRACE);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            smol::Timer::at(deadline).await;
+            grace.await;
             host_cx.enqueue(move |state, cx| state.reap_idle_resident(&session_id, idle_since, cx));
         });
     }

@@ -572,7 +572,7 @@ impl AppState {
             action: action.to_owned(),
             detail,
         };
-        let at = now_millis();
+        let at = cx.clock().unix_millis();
         self.record_event(target, &AgentEvent::ControlAction(action.clone()), cx);
         if target != caller.thread_id {
             let in_caller = ControlAction {

@@ -1143,7 +1143,9 @@ impl AppState {
                     .providers
                     .provider_usage
                     .get(&profile_id)
-                    .is_some_and(|usage| now_secs().saturating_sub(usage.fetched_at) < 120)
+                    .is_some_and(|usage| {
+                        cx.clock().unix_secs().saturating_sub(usage.fetched_at) < 120
+                    })
         {
             return;
         }

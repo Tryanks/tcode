@@ -420,7 +420,7 @@ fn send_message_queues_steers_and_schedules_as_the_agent() {
             request_id: None,
         })
     };
-    let at = now_secs() + 3600;
+    let at = cx.now_secs() + 3600;
     let hosts = ControlOp::SendMessage(SendMessageParams {
         attachments: Some(vec![std::env::temp_dir().display().to_string()]),
         ..match send(&["later"], SendMode::Queue) {

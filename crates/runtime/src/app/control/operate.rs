@@ -582,7 +582,7 @@ impl AppState {
             return None;
         }
         let superseded = meta.report().pending();
-        let mut expectation = ChildExpectation::opened(now_secs());
+        let mut expectation = ChildExpectation::opened(cx.clock().unix_secs());
         // A report made before this message answers the previous one.
         expectation.delivered_item = self
             .loaded_child_timeline(target)

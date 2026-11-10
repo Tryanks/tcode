@@ -58,7 +58,8 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
     let store = TestStore::new("tcode-control-update-threads");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let (commands, _received) = smol::channel::unbounded();
-    let last_activity = now_millis() - 60_000;
+    let last_activity = cx.now_millis();
+    cx.clock.advance(Duration::from_secs(60));
     state.update(cx, |state, _| {
         state.sessions.push(thread("caller", store.root()));
         let mut done = thread("done", store.root());
@@ -247,7 +248,8 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
 #[test]
 fn follow_up_parked_and_the_suggest_tier_hold_automatic_settlement() {
     let store = TestStore::new("tcode-control-protections");
-    let stamp = now_millis() - 10 * 86_400_000;
+    // The threads' activity was ten days before the host starts.
+    let stamp = test_start_millis();
     for id in ["plain", "follow", "parked"] {
         let mut meta = thread(id, store.root());
         match id {
@@ -279,6 +281,7 @@ fn follow_up_parked_and_the_suggest_tier_hold_automatic_settlement() {
     )
     .unwrap();
     let cx = &mut TestAppContext::default();
+    cx.clock.advance(Duration::from_secs(10 * 86_400));
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(cx, |state, cx| state.start_activity(cx));
     cx.run_until_parked();

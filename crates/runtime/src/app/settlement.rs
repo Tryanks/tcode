@@ -136,7 +136,7 @@ impl AppState {
     }
 
     pub(super) fn evaluate_all_settlement(&mut self, cx: &mut HostCx) {
-        let now = now_millis();
+        let now = cx.clock().unix_millis();
         let projection = super::snapshots::ActivityProjection::new(self);
         let decisions: Vec<_> = self
             .sessions
@@ -165,7 +165,7 @@ impl AppState {
             next = meta
                 .as_ref()
                 .and_then(|meta| meta.parent_session_id.clone());
-            let now = now_millis();
+            let now = cx.clock().unix_millis();
             let projection = super::snapshots::ActivityProjection::new(self);
             let due = meta
                 .as_ref()
@@ -193,7 +193,7 @@ impl AppState {
     }
 
     pub(super) fn rearm_settlement_timer(&mut self, cx: &mut HostCx) {
-        let now = now_millis();
+        let now = cx.clock().unix_millis();
         let deadline = self.settlement_deadlines.values().copied().min();
         if self.settlement_timer.as_ref().map(|(at, _)| *at) == deadline {
             return;
@@ -205,9 +205,10 @@ impl AppState {
         // Monotonic timers exclude system sleep; bound the wait before checking wall time again.
         let delay =
             Duration::from_millis(deadline.saturating_sub(now)).min(Duration::from_secs(5 * 60));
+        let due = cx.clock().timer(delay);
         let host_cx = cx.clone();
         let task = cx.spawn_background(async move {
-            smol::Timer::after(delay).await;
+            due.await;
             host_cx.enqueue(move |state, cx| {
                 if state
                     .settlement_timer

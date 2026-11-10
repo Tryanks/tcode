@@ -189,7 +189,7 @@ impl AppState {
                 }
             }
             if !in_progress || title_changed || settings_changed {
-                mirror.meta.updated_at = now_secs();
+                mirror.meta.updated_at = cx.clock().unix_secs();
                 Some(mirror.meta.clone())
             } else {
                 None
@@ -391,7 +391,7 @@ impl AppState {
                 cx,
             );
             let meta = self.meta_mut(&mirror_id).map(|meta| {
-                meta.updated_at = now_secs();
+                meta.updated_at = cx.clock().unix_secs();
                 meta.clone()
             });
             if let Some(meta) = meta {

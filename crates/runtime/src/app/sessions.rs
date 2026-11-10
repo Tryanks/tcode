@@ -607,7 +607,7 @@ impl AppState {
 
         let moved = move_meta(&mut meta, cwd);
         meta.project_id = Some(project.id.clone());
-        meta.updated_at = now_secs();
+        meta.updated_at = cx.clock().unix_secs();
         if !by_own_turn && moved.is_none() {
             self.detach_provider_to_idle(session_id, cx);
         }
@@ -661,7 +661,7 @@ impl AppState {
             meta.worktree = Some(meta.other_worktrees.remove(index).info);
         }
         meta.cwd = cwd.to_path_buf();
-        meta.updated_at = now_secs();
+        meta.updated_at = cx.clock().unix_secs();
         session.live_cwd = cwd.to_path_buf();
         session.git_branch = None;
         session.branches.clear();
@@ -1287,7 +1287,7 @@ impl AppState {
         if self.settle_thread_busy(id) {
             return None;
         }
-        self.settle_session_at(id, now_secs(), cx)
+        self.settle_session_at(id, cx.clock().unix_secs(), cx)
     }
 
     /// What settling the thread now would do beyond marking it settled.
@@ -1368,7 +1368,7 @@ impl AppState {
         }
         meta.settled_override = Some(SettledOverride::Active);
         meta.settled_at = None;
-        meta.unsettled_at = Some(now_secs());
+        meta.unsettled_at = Some(cx.clock().unix_secs());
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
@@ -1387,7 +1387,7 @@ impl AppState {
             return;
         }
         if meta.pinned_at.is_none() {
-            meta.pinned_at = Some(now_secs());
+            meta.pinned_at = Some(cx.clock().unix_secs());
             meta.pin_order = order_key;
         }
         if promotes {
@@ -1449,7 +1449,7 @@ impl AppState {
         if enabled == meta.auto_settle_disabled_at.is_none() {
             return;
         }
-        meta.auto_settle_disabled_at = (!enabled).then(now_secs);
+        meta.auto_settle_disabled_at = (!enabled).then(|| cx.clock().unix_secs());
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
@@ -1478,7 +1478,7 @@ impl AppState {
             meta.self_settle = None;
         }
         if meta.is_settled() {
-            meta.unsettled_at = Some(now_secs());
+            meta.unsettled_at = Some(cx.clock().unix_secs());
         }
         meta.settled_override = None;
         meta.settled_at = None;
@@ -1501,7 +1501,7 @@ impl AppState {
         {
             return;
         }
-        self.archive_session_ids(&[session_id.to_owned()], now_secs(), cx);
+        self.archive_session_ids(&[session_id.to_owned()], cx.clock().unix_secs(), cx);
     }
 
     /// Restore an archived thread (Settings → Archived Threads → Unarchive).
@@ -1515,7 +1515,7 @@ impl AppState {
         else {
             return;
         };
-        let now = now_secs();
+        let now = cx.clock().unix_secs();
         let mut visited_changed = false;
         let ids = descendant_session_ids(&self.sessions, session_id);
         for id in ids {
@@ -1599,7 +1599,7 @@ impl AppState {
         }
         if let Some(mut meta) = self.sessions.iter().find(|m| m.id == session_id).cloned() {
             meta.title = title.to_string();
-            meta.updated_at = now_secs();
+            meta.updated_at = cx.clock().unix_secs();
             let meta = meta.clone();
             self.persist_meta(&meta, cx);
         }
@@ -2336,7 +2336,7 @@ impl AppState {
             .event_records
             .get(id)
             .and_then(|log| log.records().last()?.ts)
-            .unwrap_or_else(now_millis);
+            .unwrap_or_else(|| cx.clock().unix_millis());
         if mirror_of.is_some() {
             self.native_subagent_turns.insert(id.to_string(), false);
         }

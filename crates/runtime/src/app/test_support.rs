@@ -13,11 +13,22 @@ enum Arrival<T> {
     Other(T),
 }
 
-/// A host clock for a test, whose wall starts at a fixed moment.
+/// The wall time a test's host clock starts at.
+pub(super) fn test_start() -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_780_000_000)
+}
+
+/// [`test_start`] in unix milliseconds.
+pub(super) fn test_start_millis() -> u64 {
+    test_start()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+/// A host clock for a test, whose wall starts at [`test_start`].
 pub(super) fn test_clock() -> std::sync::Arc<crate::clock::ManualClock> {
-    crate::clock::ManualClock::starting_at(
-        std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_780_000_000),
-    )
+    crate::clock::ManualClock::starting_at(test_start())
 }
 
 pub(super) struct TestStore(SessionStore);
@@ -90,6 +101,16 @@ impl TestAppContext {
         self.domain_diff = Some(DomainDiff::new(&state.borrow()));
         self.state = Some(Rc::downgrade(&state));
         TestEntity(state)
+    }
+
+    /// The host's wall time in unix milliseconds.
+    pub(super) fn now_millis(&self) -> u64 {
+        self.clock.host_clock().unix_millis()
+    }
+
+    /// The host's wall time in unix seconds.
+    pub(super) fn now_secs(&self) -> u64 {
+        self.clock.host_clock().unix_secs()
     }
 
     pub(super) fn host_cx(&self) -> HostCx {

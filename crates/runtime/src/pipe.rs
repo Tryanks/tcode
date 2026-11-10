@@ -1146,7 +1146,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             task_id,
         } => {
             return CommandOutcome::Immediate(
-                app.stop_background_task(&session_id, task_id)
+                app.stop_background_task(&session_id, task_id, cx)
                     .map(|()| CommandResponse::Unit),
             );
         }

@@ -820,7 +820,7 @@ impl AppState {
         &mut self,
         _caller: &Caller,
         params: GetThreadParams,
-        _cx: &mut HostCx,
+        cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
         let meta = self
             .find_meta(&params.thread_id)
@@ -854,7 +854,7 @@ impl AppState {
         let mut thread = self.thread_row(&meta);
         thread.worktree = Some(worktree_facts(&meta));
         let detail = ThreadDetail {
-            settlement: self.settlement_explanation(&meta, now_millis(), &projection),
+            settlement: self.settlement_explanation(&meta, cx.clock().unix_millis(), &projection),
             activity: projection.session_activity(&meta, resident),
             queue,
             pending_approvals: resident
@@ -1345,7 +1345,7 @@ impl AppState {
             .scope
             .clone()
             .unwrap_or_else(|| caller.grant.scope.clone());
-        let now = now_millis();
+        let now = cx.clock().unix_millis();
         let since = params
             .since
             .unwrap_or_else(|| now.saturating_sub(REVIEW_WINDOW_MS));

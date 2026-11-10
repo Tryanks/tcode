@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use agent::{
     AgentEvent, ProviderKind, RewindFailure, RewindFailureReason, RewindMode, SessionCommand,
     TurnStatus,
@@ -124,7 +122,6 @@ fn a_cold_rewind_answers_the_client_that_asked_and_lets_the_provider_go() {
         state
     });
     state.update(cx, |state, cx| {
-        state.resident_idle_grace = Duration::from_millis(1);
         install(state, ProviderKind::ClaudeCode, cwd, Runtime::Idle);
         checkpoint_two_turns(state, cx);
     });
@@ -173,6 +170,8 @@ fn a_cold_rewind_answers_the_client_that_asked_and_lets_the_provider_go() {
         .collect();
     assert_eq!(prefills, [("phone".into(), "the second prompt".into())]);
 
+    cx.run_until_parked();
+    cx.clock.advance(RESIDENT_IDLE_GRACE);
     cx.run_until(|state| {
         matches!(
             state.residents.live["rewound-thread"].runtime,

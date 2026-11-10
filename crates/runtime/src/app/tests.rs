@@ -3963,7 +3963,8 @@ fn a_follow_up_to_an_unloaded_subagent_is_not_answered_by_its_earlier_report() {
         ..ChildExpectation::opened(1)
     });
     store.upsert_meta(&child).unwrap();
-    let earlier = now_millis() - 60_000;
+    let earlier = cx.now_millis();
+    cx.clock.advance(Duration::from_secs(60));
     for event in [
         AgentEvent::TurnStarted {
             turn_id: "turn-1".into(),
@@ -4950,7 +4951,7 @@ fn moved_queue_entries_dispatch_in_their_new_order() {
     active.move_queued(first, None);
 
     let mut sent = Vec::new();
-    while active.dispatch_next_pending() == Ok(true) {
+    while active.dispatch_next_pending(test_start()) == Ok(true) {
         let Ok(SessionCommand::SendTurn {
             delivery_id, text, ..
         }) = receiver.try_recv()
@@ -4971,11 +4972,11 @@ fn future_scheduled_head_does_not_block_ordinary_dispatch_or_acceptance() {
     let scheduled_id = active.push_scheduled(
         "later".into(),
         Vec::new(),
-        SystemTime::now() + Duration::from_secs(3_600),
+        test_start() + Duration::from_secs(3_600),
     );
     let ordinary_id = active.push_queued("now".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
     assert!(matches!(
         receiver.try_recv(),
         Ok(SessionCommand::SendTurn {
@@ -4997,7 +4998,7 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
     let store = (*test_store).clone();
     let state = cx.new_entity(TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
-    let fire_at = now_secs() + 3_600;
+    let fire_at = cx.now_secs() + 3_600;
 
     state.update(cx, |state, cx| {
         let mut active = live_session(ProviderKind::Codex, commands);
@@ -5038,7 +5039,7 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
         let drop_id = active.push_scheduled(
             "drop me".into(),
             Vec::new(),
-            SystemTime::now() + Duration::from_secs(7_200),
+            cx.clock().wall() + Duration::from_secs(7_200),
         );
         state.drop_queued("scheduled-active", drop_id, cx);
         assert!(state.selected_session().unwrap().queue.is_empty());
@@ -5068,7 +5069,7 @@ fn native_retry_keeps_queue_waiting_and_cancellation_releases_it() {
             );
             let retry = agent::TurnRetry {
                 turn_id: "failed".into(),
-                retry_at: automatic.then(|| now_secs() + 10),
+                retry_at: automatic.then(|| cx.clock().unix_secs() + 10),
             };
             state.on_event(
                 "retry",
@@ -5139,7 +5140,7 @@ fn usage_limit_event_schedules_resume_when_enabled_only() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-usage-limit-resume-test");
     let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let resets_at = now_secs() + 3_600;
+    let resets_at = cx.now_secs() + 3_600;
 
     state.update(cx, |state, cx| {
         let (commands, _) = smol::channel::unbounded();
@@ -5188,7 +5189,7 @@ fn due_scheduled_message_reenters_the_ordinary_send_path() {
         active.push_scheduled(
             "due now".into(),
             Vec::new(),
-            SystemTime::now() - Duration::from_secs(1),
+            cx.clock().wall() - Duration::from_secs(1),
         );
         state.install_selected(active);
 
@@ -5327,7 +5328,7 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
             "mid-turn-relay",
             "check the logs".into(),
             Vec::new(),
-            now_secs(),
+            cx.clock().unix_secs(),
             cx,
         );
 
@@ -6665,7 +6666,7 @@ fn effort_changes_use_per_turn_overrides_or_require_provider_restart() {
         assert_eq!(active.options_changed_while_live(), restart, "{provider:?}");
         if !restart {
             active.push_queued("next turn".into(), Vec::new());
-            assert_eq!(active.dispatch_next_pending(), Ok(true));
+            assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
             let SessionCommand::SendTurn {
                 options: Some(options),
                 ..
@@ -6708,7 +6709,7 @@ fn queued_message_stamps_live_context_window_change() {
     assert_eq!(active.queue[1].context_window_changed, None);
 
     active.runtime = Runtime::Idle;
-    active.push_scheduled("idle".into(), Vec::new(), SystemTime::now());
+    active.push_scheduled("idle".into(), Vec::new(), test_start());
     active.stamp_context_window_change(Some(1_000_000));
     assert_eq!(active.queue[2].context_window_changed, None);
 }
@@ -6838,7 +6839,7 @@ fn image_only_message_gets_placeholder_on_the_wire_only() {
     };
     active.push_queued(String::new(), vec![attachment.clone()]);
 
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
     let delivery_id = match receiver.try_recv() {
         Ok(SessionCommand::SendTurn {
             delivery_id,
@@ -6884,7 +6885,7 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
     active.queue[0].relay_transcript = Some("# prior work".into());
     active.push_queued("follow up".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
     let first = receiver.try_recv().unwrap();
     let SessionCommand::SendTurn {
         delivery_id, text, ..
@@ -6895,7 +6896,7 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
     assert!(text.starts_with(tcode_core::relay::RELAY_PREAMBLE));
     assert!(text.contains("<conversation-transcript>\n# prior work\n</conversation-transcript>"));
     assert!(text.contains("<new-user-message>\ncontinue here\n</new-user-message>"));
-    assert_eq!(active.dispatch_next_pending(), Ok(false));
+    assert_eq!(active.dispatch_next_pending(test_start()), Ok(false));
     assert!(receiver.try_recv().is_err());
     assert_eq!(active.queue.len(), 2, "an unaccepted head stays queued");
 
@@ -6904,7 +6905,7 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
         "continue here"
     );
     active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(test_start()), Ok(true));
     assert!(matches!(
         receiver.try_recv(),
         Ok(SessionCommand::SendTurn { text, .. }) if text == "follow up"
@@ -7200,7 +7201,9 @@ fn select_session_readopts_idle_resident_without_changing_recency_or_shutdown() 
     let (commands, actor) = smol::channel::unbounded();
     let mut session = live_session(ProviderKind::ClaudeCode, commands);
     session.meta.id = "idle-resident".into();
-    let updated_at = now_secs() - 3600;
+    // The thread was last active an hour ago.
+    let updated_at = cx.now_secs();
+    cx.clock.advance(Duration::from_secs(3600));
     session.meta.updated_at = updated_at;
     let meta = session.meta.clone();
     test_store.upsert_meta(&meta).unwrap();
@@ -7261,12 +7264,11 @@ fn resident_idle_reaper_shuts_down_untouched_provider() {
     session.meta.id = "idle-resident".into();
 
     state.update(cx, |state, cx| {
-        state.resident_idle_grace = Duration::from_millis(1);
         state.install_selected(session);
         state.park_active(cx);
     });
-    // The grace timer runs on the background executor, so wait for its
-    // completion to land rather than for the mailbox to look idle.
+    cx.clock.advance(RESIDENT_IDLE_GRACE);
+    // The grace timer's completion lands through the mailbox.
     cx.run_until(|state| !state.residents.parked.contains_key("idle-resident"));
 
     assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
@@ -7301,10 +7303,12 @@ fn idle_grace_runs_from_the_last_turn_end_whether_viewed_or_parked() {
         state.residents.live["idle-resident"].idle_since.unwrap()
     };
 
+    let clock = cx.clock.clone();
     state.update(cx, |state, cx| {
         state.sessions.push(meta);
         state.install_selected(session);
         let first_turn_end = complete_turn(state, "first", cx);
+        clock.advance(Duration::from_secs(60));
         state.park_active(cx);
         assert_eq!(
             state.residents.parked["idle-resident"].idle_since,
@@ -7332,7 +7336,7 @@ fn resident_idle_lru_evicts_only_oldest_provider() {
     let test_store = TestStore::new("tcode-idle-resident-lru-test");
     let store = (*test_store).clone();
     let state = cx.new_entity(TestClientState::new(store));
-    let base = Instant::now();
+    let base = cx.clock.host_clock().now();
     let mut actors = Vec::new();
 
     state.update(cx, |state, cx| {
@@ -9179,11 +9183,14 @@ fn an_accepted_user_message_moves_the_thread_updated_time() {
         };
         assert_eq!(state.find_meta(&id).unwrap().updated_at, 100);
         state.on_event(&id, AgentEvent::TurnAccepted { delivery_id }, cx);
-        assert!(state.find_meta(&id).unwrap().updated_at >= now_secs() - 60);
+        assert_eq!(
+            state.find_meta(&id).unwrap().updated_at,
+            cx.clock().unix_secs()
+        );
     });
     cx.run_until_parked();
     let persisted = test_store.load_index().unwrap();
-    assert!(persisted[0].updated_at >= now_secs() - 60);
+    assert_eq!(persisted[0].updated_at, cx.now_secs());
 
     let _ = std::fs::remove_dir_all(&cwd);
 }
@@ -12574,7 +12581,14 @@ fn next_host_event(events: &async_channel::Receiver<EventEnvelope>) -> EventEnve
 fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename() {
     use crate::pipe::{HostServices, spawn_host};
     let store = TestStore::new("cold-settlement");
-    let stamp = now_millis() - 10 * 86_400_000;
+    // The threads' activity was ten days before the host starts.
+    let clock = test_clock();
+    let stamp = clock.host_clock().unix_millis();
+    clock.advance(Duration::from_secs(10 * 86_400));
+    let services = || HostServices {
+        clock: clock.host_clock(),
+        ..HostServices::default()
+    };
     for id in ["inherit", "never"] {
         let mut project = Project::from_root(store.root().join(id));
         project.id = id.into();
@@ -12620,7 +12634,7 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     }"#,
     )
     .unwrap();
-    let host = spawn_host((*store).clone(), HostServices::default()).unwrap();
+    let host = spawn_host((*store).clone(), services()).unwrap();
     let link = host.link();
     let events = crate::pipe::p4b_tests::observed_events(&link);
     link.subscribe(Subscription {
@@ -12670,7 +12684,7 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     host.stopped.recv_blocking().unwrap();
     let restarted = spawn_host(
         SessionStore::open_at(store.root().clone()).unwrap(),
-        HostServices::default(),
+        services(),
     )
     .unwrap();
     let link = restarted.link();
@@ -12727,7 +12741,10 @@ fn first_index_snapshot_includes_persisted_child_runs_and_human_resume_status() 
 
     let store = TestStore::new("startup-human-clock");
     let hour = 3_600_000;
-    let created = now_millis() - 10 * hour;
+    // The thread was created ten hours before the host starts.
+    let clock = test_clock();
+    let created = clock.host_clock().unix_millis();
+    clock.advance(Duration::from_secs(10 * 3_600));
     let merged = created + 2 * hour;
     let resumed = created + 4 * hour;
     let completed = created + 5 * hour;
@@ -12825,8 +12842,14 @@ fn first_index_snapshot_includes_persisted_child_runs_and_human_resume_status() 
         store.apply(&mutations).unwrap();
     }
 
-    let host =
-        crate::pipe::spawn_host((*store).clone(), crate::pipe::HostServices::default()).unwrap();
+    let host = crate::pipe::spawn_host(
+        (*store).clone(),
+        crate::pipe::HostServices {
+            clock: clock.host_clock(),
+            ..crate::pipe::HostServices::default()
+        },
+    )
+    .unwrap();
     let link = host.link();
     let events = crate::pipe::p4b_tests::observed_events(&link);
     link.subscribe(Subscription {
@@ -13018,7 +13041,7 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
             session_id: "parent".into(),
             text: "human later".into(),
             attachment_paths: vec![],
-            fire_at_unix_secs: now_secs() + 3600,
+            fire_at_unix_secs: cx.now_secs() + 3600,
         }),
     );
     let denied = through_pipe(
@@ -13401,7 +13424,8 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
 
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("agent-delivery");
-    let stamp = now_millis() - 10 * 86_400_000;
+    let stamp = cx.now_millis();
+    cx.clock.advance(Duration::from_secs(10 * 86_400));
     // A removed directory makes the reopened child's provider start fail
     // instead of spawning a real CLI.
     let gone = std::env::temp_dir().join(format!("tcode-removed-{}", uuid::Uuid::new_v4()));
@@ -13574,7 +13598,8 @@ fn an_agent_archived_before_settle_stays_not_delivered_when_restored() {
 
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("agent-archived-before-settle");
-    let stamp = now_millis() - 60_000;
+    let stamp = cx.now_millis();
+    cx.clock.advance(Duration::from_secs(60));
     for (id, parent) in [("lead", None), ("worker", Some("lead"))] {
         let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
         meta.id = id.into();
@@ -13635,7 +13660,8 @@ fn an_agent_archived_before_settle_stays_not_delivered_when_restored() {
 fn settling_detaches_only_its_own_provider_and_releases_its_parent() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("settlement-own-provider");
-    let stamp = now_millis() - 10 * 86_400_000;
+    let stamp = cx.now_millis();
+    cx.clock.advance(Duration::from_secs(10 * 86_400));
     let mut lead = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
     lead.id = "lead".into();
     lead.created_at = stamp / 1000;
@@ -13773,7 +13799,8 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
     use tcode_core::project::SettledOverride;
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("pinned-threads");
-    let stamp = now_millis() - 10 * 86_400_000;
+    let stamp = cx.now_millis();
+    cx.clock.advance(Duration::from_secs(10 * 86_400));
     for (id, settled) in [("parked", true), ("idle", false), ("arranged", false)] {
         let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
         meta.id = id.into();
@@ -14309,7 +14336,10 @@ fn an_old_profiles_activity_backfills_and_updates_the_index() {
 #[test]
 fn deleting_the_last_child_releases_its_leads_automatic_settlement() {
     let store = TestStore::new("deleted-child-settlement");
-    let stamp = now_millis() - 10 * 86_400_000;
+    // The child finished ten days before the host starts.
+    let clock = test_clock();
+    let stamp = clock.host_clock().unix_millis();
+    clock.advance(Duration::from_secs(10 * 86_400));
     for (id, parent) in [("lead", None), ("worker", Some("lead"))] {
         let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
         meta.id = id.into();
@@ -14327,8 +14357,14 @@ fn deleting_the_last_child_releases_its_leads_automatic_settlement() {
             )
             .unwrap();
     }
-    let host =
-        crate::pipe::spawn_host((*store).clone(), crate::pipe::HostServices::default()).unwrap();
+    let host = crate::pipe::spawn_host(
+        (*store).clone(),
+        crate::pipe::HostServices {
+            clock: clock.host_clock(),
+            ..crate::pipe::HostServices::default()
+        },
+    )
+    .unwrap();
     let link = host.link();
     let events = crate::pipe::p4b_tests::observed_events(&link);
     link.subscribe(Subscription {
@@ -14489,7 +14525,7 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
         }),
     ];
     // The host stopped an hour before the thread was opened again.
-    let stopped = now_millis() - 3_600_000;
+    let stopped = test_clock().host_clock().unix_millis();
     if restarted {
         let mut cx = TestAppContext::default();
         let state = cx.new_entity(TestClientState::new((*test_store).clone()));
@@ -14511,6 +14547,7 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
     let scripted = scripted_provider(ProviderKind::ClaudeCode);
     let commands = scripted.commands.clone();
     let mut cx = TestAppContext::default();
+    cx.clock.advance(Duration::from_secs(3_600));
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
         state.set_provider_launcher_for_test(scripted.launcher);

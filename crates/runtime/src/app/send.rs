@@ -92,11 +92,12 @@ impl AppState {
             return;
         };
         let delay = fire_at
-            .duration_since(SystemTime::now())
+            .duration_since(cx.clock().wall())
             .unwrap_or(Duration::ZERO);
+        let fire = cx.clock().timer(delay);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            smol::Timer::after(delay).await;
+            fire.await;
             host_cx.enqueue(move |state, cx| {
                 if state.scheduler_generation != generation {
                     return;
@@ -111,7 +112,7 @@ impl AppState {
     /// centralized in `send_turn_assembled`; parked messages instead clear the
     /// deadline in place to preserve their captured options before dispatch.
     pub(super) fn fire_due_scheduled(&mut self, cx: &mut HostCx) {
-        let now = SystemTime::now();
+        let now = cx.clock().wall();
         let due: Vec<_> = self
             .residents
             .live
@@ -505,7 +506,7 @@ impl AppState {
             prompt: Some(assemble_relay_prompt(&transcript, text)),
             moved_from,
         };
-        active.meta.updated_at = now_secs();
+        active.meta.updated_at = cx.clock().unix_secs();
         let meta = active.meta.clone();
         self.persist_meta(&meta, cx);
         self.close_abandoned_turn(&meta.id, cx);
@@ -530,7 +531,7 @@ impl AppState {
     fn hand_off_conversation(&mut self, target_id: &str, cx: &mut HostCx) -> bool {
         if self
             .resident(target_id)
-            .and_then(ActiveSession::handoff_message)
+            .and_then(|active| active.handoff_message(cx.clock().wall()))
             .is_none()
         {
             return true;
@@ -545,7 +546,7 @@ impl AppState {
         let Some(active) = self.resident(target_id) else {
             return true;
         };
-        let Some((message_id, text)) = active.handoff_message() else {
+        let Some((message_id, text)) = active.handoff_message(cx.clock().wall()) else {
             return true;
         };
         if !self
@@ -606,7 +607,7 @@ impl AppState {
         let sent = self
             .resident_mut(target_id)
             .ok_or(())?
-            .dispatch_next_pending()?;
+            .dispatch_next_pending(cx.clock().wall())?;
         if sent {
             let space = self.turn_space_of(target_id);
             self.enter_turn_space(target_id, space);
@@ -639,7 +640,7 @@ impl AppState {
         cx.author = author;
         cx.origin = origin;
         if let Some(meta) = self.meta_mut(session_id) {
-            meta.updated_at = now_secs();
+            meta.updated_at = cx.clock().unix_secs();
             let meta = meta.clone();
             self.persist_meta(&meta, cx);
         }
@@ -994,7 +995,9 @@ impl AppState {
             .map_err(provider_command_error)?;
         if let Some(active) = self.resident_mut(target_id) {
             active.interrupt_requested = true;
-            active.interrupt_requested_at.get_or_insert_with(now_millis);
+            active
+                .interrupt_requested_at
+                .get_or_insert(cx.clock().unix_millis());
         }
         self.cancel_computer_use_feedback(target_id);
         Ok(())
@@ -1054,6 +1057,7 @@ impl AppState {
         &mut self,
         target_id: &str,
         task_id: Option<String>,
+        cx: &HostCx,
     ) -> Result<(), tcode_protocol::ProtocolError> {
         let active = self
             .resident_mut(target_id)
@@ -1077,7 +1081,9 @@ impl AppState {
                 task_id: task_id.clone(),
             })
             .map_err(provider_command_error)?;
-        active.background.stopping(task_id.as_deref(), now_millis());
+        active
+            .background
+            .stopping(task_id.as_deref(), cx.clock().unix_millis());
         Ok(())
     }
 

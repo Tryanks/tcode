@@ -1000,7 +1000,7 @@ impl AppState {
                 // A message whose handoff waited for this log waits on.
                 let handoff_waits = self
                     .resident(&session_id)
-                    .and_then(ActiveSession::handoff_message)
+                    .and_then(|active| active.handoff_message(cx.clock().wall()))
                     .is_some();
                 if hydration.timeline.is_some() || handoff_waits {
                     self.report_error(
@@ -1059,7 +1059,7 @@ impl AppState {
         // A message whose handoff waited for this log goes now.
         if self
             .resident(&session_id)
-            .and_then(ActiveSession::handoff_message)
+            .and_then(|active| active.handoff_message(cx.clock().wall()))
             .is_some()
             && self.dispatch_next_queued(&session_id, cx).is_err()
         {

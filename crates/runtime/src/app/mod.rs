@@ -71,7 +71,7 @@ use tcode_services::import::{
 use tcode_services::provider_probe::{probe_provider, run_capture_env};
 use tcode_services::session_search::SessionSearch;
 use tcode_services::settings::SettingsStore;
-use tcode_services::store::{CommandsCacheKey, SessionStore, now_millis, now_secs};
+use tcode_services::store::{CommandsCacheKey, SessionStore, now_secs};
 use tcode_services::user_files;
 use tcode_services::version_check::provider_updates::{
     self, CheckInput as ProviderCheckInput, Installation,
@@ -424,7 +424,6 @@ pub struct AppState {
     /// Invalidates detached scheduled-wake tasks whenever the earliest deadline
     /// changes; stale timers must never fire or reschedule superseded work.
     scheduler_generation: u64,
-    resident_idle_grace: Duration,
     /// Kept off in unit tests so dispatching a synthetic turn never launches a
     /// real provider process. Production titles are generated in the background.
     ai_title_generation_enabled: bool,
@@ -666,7 +665,6 @@ impl AppState {
             pending_terminal_spawns: HashMap::new(),
             next_start_generation: 0,
             scheduler_generation: 0,
-            resident_idle_grace: RESIDENT_IDLE_GRACE,
             ai_title_generation_enabled,
             title_generating: Default::default(),
             provider_launcher: ProviderLauncher::default(),

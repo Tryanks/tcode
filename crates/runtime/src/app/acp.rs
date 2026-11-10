@@ -241,7 +241,7 @@ impl AppState {
         if active.draft {
             return;
         }
-        active.meta.updated_at = now_secs();
+        active.meta.updated_at = cx.clock().unix_secs();
         let meta = active.meta.clone();
         self.persist_meta(&meta, cx);
     }

@@ -344,7 +344,7 @@ impl AppState {
                 .request_id
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             thread_id: caller.thread_id.clone(),
-            recorded_at: now_secs(),
+            recorded_at: cx.clock().unix_secs(),
             coverage: params.coverage,
             items,
         };
@@ -410,7 +410,7 @@ impl AppState {
         let grant = SelfSettleGrant {
             when: params.when,
             consent_quote: consent_quote.to_owned(),
-            granted_at: now_secs(),
+            granted_at: cx.clock().unix_secs(),
         };
         let when = describe_when(&grant.when);
         let detail = grant.consent_quote.clone();
@@ -524,16 +524,18 @@ impl AppState {
     }
 
     pub fn set_parked(&mut self, session_id: &str, parked: bool, cx: &mut HostCx) {
+        let now = cx.clock().unix_secs();
         self.change_meta(session_id, cx, |meta| {
             if parked != meta.parked_at.is_some() {
-                meta.parked_at = parked.then(now_secs);
+                meta.parked_at = parked.then_some(now);
             }
         });
     }
 
     pub fn dismiss_settle_suggestion(&mut self, session_id: &str, cx: &mut HostCx) {
+        let now = cx.clock().unix_secs();
         self.change_meta(session_id, cx, |meta| {
-            meta.settle_suggestion_dismissed_at = Some(now_secs());
+            meta.settle_suggestion_dismissed_at = Some(now);
         });
     }
 
@@ -557,7 +559,7 @@ impl AppState {
         if meta == before {
             return;
         }
-        meta.updated_at = now_secs();
+        meta.updated_at = cx.clock().unix_secs();
         self.store_meta(meta, cx);
     }
 }

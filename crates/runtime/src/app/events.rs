@@ -317,7 +317,7 @@ impl AppState {
                         meta.model = model.clone();
                         filled_default_model = model.is_some();
                     }
-                    meta.updated_at = now_secs();
+                    meta.updated_at = cx.clock().unix_secs();
                     let meta = meta.clone();
                     self.persist_meta(&meta, cx);
                 }
@@ -336,7 +336,7 @@ impl AppState {
             }
             AgentEvent::TurnCompleted { .. } => {
                 if let Some(meta) = self.meta_mut(session_id) {
-                    meta.updated_at = now_secs();
+                    meta.updated_at = cx.clock().unix_secs();
                     let meta = meta.clone();
                     self.persist_meta(&meta, cx);
                 }
@@ -589,7 +589,7 @@ impl AppState {
     /// The same wall-clock timestamp is persisted and folded exactly once so
     /// the on-disk log and the loaded timeline agree.
     pub(super) fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut HostCx) {
-        self.record_event_at(session_id, now_millis(), event, Vec::new(), cx);
+        self.record_event_at(session_id, cx.clock().unix_millis(), event, Vec::new(), cx);
     }
 
     /// Record `event`, which says the lead's provider took `reports`, in one
@@ -603,8 +603,14 @@ impl AppState {
         reports: &[ReportHandover],
         cx: &mut HostCx,
     ) {
-        let metas = self.settle_reports(reports);
-        self.record_event_at(session_id, now_millis(), event, metas.clone(), cx);
+        let metas = self.settle_reports(reports, cx.clock().unix_secs());
+        self.record_event_at(
+            session_id,
+            cx.clock().unix_millis(),
+            event,
+            metas.clone(),
+            cx,
+        );
         for meta in metas {
             if let Some(child) = self.resident_mut(&meta.id) {
                 child.meta = meta.clone();
@@ -793,7 +799,7 @@ impl AppState {
         let Some(fallback_meta) = self.resident_mut(target_id).and_then(|active| {
             active.meta.title.starts_with("New ").then(|| {
                 active.meta.title = fallback.clone();
-                active.meta.updated_at = now_secs();
+                active.meta.updated_at = cx.clock().unix_secs();
                 active.meta.clone()
             })
         }) else {

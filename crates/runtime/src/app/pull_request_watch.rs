@@ -918,7 +918,7 @@ impl AppState {
                 key.clone(),
                 url,
                 PullRequestSource::Agent,
-                now_secs(),
+                cx.clock().unix_secs(),
                 true,
             ),
             (false, None) => return Err(refused("This pull request is not linked.")),
@@ -928,7 +928,7 @@ impl AppState {
             .iter_mut()
             .find(|link| &link.key == key && link.visible())
         {
-            link.watch = Some(PullRequestWatch::new(now_millis()));
+            link.watch = Some(PullRequestWatch::new(cx.clock().unix_millis()));
         }
         self.save_pull_request_meta(meta, cx);
         if linked {
