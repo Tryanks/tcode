@@ -4781,9 +4781,6 @@ fn is_todo_tool(name: &str) -> bool {
 /// Completed/InProgress, else Pending). `activeForm` is ignored.
 fn extract_plan_steps_from_todo(input: &Value) -> Option<Vec<PlanStep>> {
     let todos = input.get("todos").and_then(Value::as_array)?;
-    if todos.is_empty() {
-        return None;
-    }
     let steps = todos
         .iter()
         .filter(|todo| todo.is_object())
@@ -6386,6 +6383,15 @@ mod tests {
             }
             other => panic!("expected PlanUpdated, got {other:?}"),
         }
+
+        let cleared = feed(
+            &mut m,
+            r#"{"type":"assistant","message":{"id":"msg_c","content":[{"type":"tool_use","id":"toolu_clear","name":"TodoWrite","input":{"todos":[]}}]}}"#,
+        );
+        assert!(matches!(
+            cleared.as_slice(),
+            [AgentEvent::PlanUpdated { steps, .. }] if steps.is_empty()
+        ));
     }
 
     #[test]
