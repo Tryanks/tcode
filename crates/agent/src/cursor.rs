@@ -7,7 +7,7 @@
 
 mod updates;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests;
 
 use std::path::PathBuf;
