@@ -77,7 +77,7 @@ pub fn apply_roster(
         return;
     };
     for machine in &roster.machines {
-        if Some(machine.id.as_str()) == local || !valid_host_id(&machine.id) {
+        if Some(machine.id.as_str()) == local {
             continue;
         }
         match hosts.iter_mut().find(|host| host.host_id == machine.id) {
