@@ -684,11 +684,15 @@ impl Platform for AndroidPlatform {
     }
 
     fn read_credentials(&self, _url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
-        Task::ready(Ok(None))
+        Task::ready(Err(anyhow!(
+            "credential storage is not implemented on Android"
+        )))
     }
 
     fn delete_credentials(&self, _url: &str) -> Task<Result<()>> {
-        Task::ready(Ok(()))
+        Task::ready(Err(anyhow!(
+            "credential storage is not implemented on Android"
+        )))
     }
 
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout> {
