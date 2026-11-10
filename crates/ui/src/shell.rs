@@ -5521,8 +5521,10 @@ impl AppShell {
         self.panel_shows_terminal = id == "terminal";
         store.update(cx, |store, cx| match id {
             "terminal" => {
-                if !panel.terminal_open {
-                    store.toggle_terminal_panel_for(session.unwrap_or_default(), cx);
+                if !panel.terminal_open
+                    && let Some(session) = &session
+                {
+                    store.toggle_terminal_panel_for(session.clone(), cx);
                 }
             }
             tab => {
