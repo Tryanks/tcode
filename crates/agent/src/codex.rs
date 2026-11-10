@@ -718,8 +718,8 @@ struct Actor {
     /// gives completion activities a fresh item id, so the activity id cannot
     /// be the lifecycle identity after spawn.
     subagent_parent_by_thread: HashMap<String, String>,
-    /// The v2 item lifecycle and its legacy fan-out describe the same activity.
-    /// Track their provider identity so only one canonical transition is sent.
+    /// An activity item may come with both `item/started` and `item/completed`;
+    /// its provider identity keeps it to one canonical transition.
     seen_subagent_activities: HashSet<String>,
     usage_by_turn: HashMap<String, TokenUsage>,
     active_turn: Option<String>,
@@ -2948,18 +2948,10 @@ impl Actor {
     }
 
     async fn handle_subagent_activity(&mut self, activity: &Value) {
-        let Some(activity_id) = activity
-            .get("event_id")
-            .or_else(|| activity.get("id"))
-            .and_then(Value::as_str)
-        else {
+        let Some(activity_id) = activity.get("id").and_then(Value::as_str) else {
             return;
         };
-        let Some(thread_id) = activity
-            .get("agent_thread_id")
-            .or_else(|| activity.get("agentThreadId"))
-            .and_then(Value::as_str)
-        else {
+        let Some(thread_id) = activity.get("agentThreadId").and_then(Value::as_str) else {
             return;
         };
         // Codex 0.154 also reports the root thread's own activity (`agentPath`
@@ -2988,8 +2980,7 @@ impl Actor {
                 .clone()
         };
         let path = activity
-            .get("agent_path")
-            .or_else(|| activity.get("agentPath"))
+            .get("agentPath")
             .and_then(Value::as_str)
             .unwrap_or("subagent");
         let spawn_input = self
@@ -4159,15 +4150,9 @@ fn collab_tool_input(item: &Value) -> Value {
 }
 
 fn find_subagent_activity(value: &Value) -> Option<&Value> {
-    if let Some(item) = value
+    value
         .get("item")
         .filter(|item| item.get("type").and_then(Value::as_str) == Some("subAgentActivity"))
-    {
-        return Some(item);
-    }
-    value
-        .pointer("/event/payload")
-        .filter(|payload| payload.get("type").and_then(Value::as_str) == Some("sub_agent_activity"))
 }
 
 fn item_status(content: &ItemContent) -> ItemStatus {
