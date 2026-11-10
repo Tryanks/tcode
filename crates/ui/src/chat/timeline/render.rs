@@ -167,15 +167,19 @@ impl TimelineView {
                     ));
                 }
                 Segment::Images(images) => {
-                    column = column.child(components::images::image_tiles(
-                        self.workspace_store.read(cx).image_host(),
-                        images,
-                        cwd,
-                        self.session_key.as_deref().unwrap_or_default(),
-                        &self.motion.clone(),
-                        window,
-                        cx,
-                    ));
+                    // Images are read through their thread; a timeline with
+                    // none has nothing to read them from.
+                    if let Some(session) = self.session_key.clone() {
+                        column = column.child(components::images::image_tiles(
+                            self.workspace_store.read(cx).image_host(),
+                            images,
+                            cwd,
+                            &session,
+                            &self.motion.clone(),
+                            window,
+                            cx,
+                        ));
+                    }
                     for entry in images {
                         if matches!(
                             &entry.content,
