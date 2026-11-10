@@ -7,8 +7,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tcode_core::{
     pull_request::{
-        ChecksState, Mergeability, PullRequestAuthor, PullRequestKey, PullRequestSnapshot,
-        PullRequestState,
+        ChecksState, Mergeability, PullRequestAuthor, PullRequestKey, PullRequestMergeMethod,
+        PullRequestSnapshot, PullRequestState,
     },
     pull_request_watch::{CheckStatus, PullRequestCheck, PullRequestRemark},
     session::ReviewSide,
@@ -250,6 +250,44 @@ pub(super) fn snapshot(
         // Conflicts are a read of their own, which the summary leaves to the detail.
         mergeability: Mergeability::Unknown,
     })
+}
+
+/// Bitbucket's name for a merge method. Rebase is the linear history GitHub calls rebase and
+/// merge.
+pub(super) fn merge_strategy(method: PullRequestMergeMethod) -> &'static str {
+    match method {
+        PullRequestMergeMethod::Merge => "merge_commit",
+        PullRequestMergeMethod::Squash => "squash",
+        PullRequestMergeMethod::Rebase => "rebase_fast_forward",
+    }
+}
+
+/// The methods the destination branch allows, its default first: `destination.branch`'s
+/// `merge_strategies` and `default_merge_strategy`. A strategy Tcode has no method for is
+/// left out.
+pub(super) fn merge_methods(pr: &Value) -> Vec<PullRequestMergeMethod> {
+    let branch = &pr["destination"]["branch"];
+    let method = |strategy: &str| {
+        [
+            PullRequestMergeMethod::Merge,
+            PullRequestMergeMethod::Squash,
+            PullRequestMergeMethod::Rebase,
+        ]
+        .into_iter()
+        .find(|method| merge_strategy(*method) == strategy)
+    };
+    let mut methods: Vec<_> = branch["merge_strategies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|strategy| method(strategy.as_str()?))
+        .collect();
+    if let Some(default) = branch["default_merge_strategy"].as_str().and_then(method)
+        && let Some(at) = methods.iter().position(|method| *method == default)
+    {
+        methods[..=at].rotate_right(1);
+    }
+    methods
 }
 
 /// The second a timestamp names, which Bitbucket writes to the microsecond.
@@ -576,6 +614,41 @@ mod tests {
     /// Shape: `paginated_file_conflicts`, the answer `/pullrequests/{id}/conflicts` redirects to
     /// (Bitbucket Cloud OpenAPI, GET /repositories/{workspace}/{repo_slug}/file-conflicts/{spec},
     /// whose documented example this follows). Content is invented.
+    /// The destination branch's strategies as Bitbucket lists them (shape: Bitbucket Cloud
+    /// OpenAPI, `pullrequest_endpoint.branch`'s `merge_strategies` and
+    /// `default_merge_strategy`; content invented): the default comes first, and a strategy
+    /// Tcode has no method for is left out.
+    #[test]
+    fn the_destination_branch_names_the_merge_methods() {
+        let pr = |strategies: Value, default: &str| {
+            json!({ "destination": { "branch": {
+                "name": "main",
+                "merge_strategies": strategies,
+                "default_merge_strategy": default,
+            } } })
+        };
+        assert_eq!(
+            merge_methods(&pr(
+                json!([
+                    "merge_commit",
+                    "squash",
+                    "fast_forward",
+                    "rebase_fast_forward"
+                ]),
+                "rebase_fast_forward"
+            )),
+            [
+                PullRequestMergeMethod::Rebase,
+                PullRequestMergeMethod::Merge,
+                PullRequestMergeMethod::Squash,
+            ]
+        );
+        assert_eq!(
+            merge_methods(&pr(json!(["squash", "squash_fast_forward"]), "squash")),
+            [PullRequestMergeMethod::Squash]
+        );
+    }
+
     #[test]
     fn a_conflicts_page_with_a_path_is_a_conflict() {
         let conflicting = json!({

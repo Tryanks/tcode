@@ -23,7 +23,7 @@ use std::{
 };
 use tcode_core::{
     pull_request::{
-        BITBUCKET, HostKind, HostTerms, Mergeability, PullRequestKey, PullRequestMergeMethod,
+        BITBUCKET, HostKind, HostTerms, Mergeability, PullRequestKey,
         PullRequestReviewDraftComment, PullRequestStackState,
     },
     pull_request_watch::{CheckStatus, PullRequestRemark, PullRequestWatchRead},
@@ -420,13 +420,7 @@ impl Bitbucket {
             // Bitbucket says nothing of how far the destination has moved on.
             behind_by: None,
             merge_queue: false,
-            // Bitbucket publishes no repository's allowed strategies; it refuses one it
-            // does not allow.
-            merge_methods: vec![
-                PullRequestMergeMethod::Merge,
-                PullRequestMergeMethod::Squash,
-                PullRequestMergeMethod::Rebase,
-            ],
+            merge_methods: reads::merge_methods(&read),
             auto_merge_allowed: false,
             auto_merge: None,
             queued: false,
