@@ -1662,11 +1662,13 @@ impl ChatView {
                     .items_center()
                     .cursor_pointer()
                     .text_body(false, cx)
+                    .whitespace_nowrap()
                     .child(Icon::new(icon).text_color(muted))
                     .child(label)
                 };
+                // As wide as its longest item, at least the width it had.
                 v_flex()
-                    .w(px(180.))
+                    .min_w(px(180.))
                     .p_1()
                     .gap_0p5()
                     .child(
