@@ -1,4 +1,4 @@
-use agent::{RewindFailure, RewindFailureReason, RewindPreviewResult, RunningTurnPolicy};
+use agent::{RewindFailure, RewindFailureReason, RewindPreviewResult};
 use tcode_core::session::EntryContent;
 use tcode_protocol::{PendingRewind, RewindBlocked, RewindStatus};
 
@@ -78,10 +78,6 @@ impl AppState {
             Some(RewindBlocked::InProgress)
         } else if active.delivery_in_flight.is_some() {
             Some(RewindBlocked::Delivering)
-        } else if (active.turn_in_flight || active.timeline.turn_running)
-            && control.running_turn == RunningTurnPolicy::Refuse
-        {
-            Some(RewindBlocked::TurnRunning)
         } else {
             None
         };
