@@ -66,15 +66,6 @@ impl Submissions {
             publication: self.reserve(None, now),
         })
     }
-
-    #[cfg(test)]
-    pub(crate) fn enabled() -> Self {
-        Self {
-            enabled: true,
-            revision: 0,
-            owner: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -280,6 +271,14 @@ pub(crate) fn drag(
 mod tests {
     use super::*;
 
+    fn enabled() -> Submissions {
+        Submissions {
+            enabled: true,
+            revision: 0,
+            owner: None,
+        }
+    }
+
     fn action(publication: Publication) -> QueuedCommand {
         QueuedCommand {
             publication,
@@ -294,7 +293,7 @@ mod tests {
     #[test]
     fn delayed_callbacks_cannot_restore_cleared_superseded_or_expired_feedback() {
         let now = Instant::now();
-        let mut submissions = Submissions::enabled();
+        let mut submissions = enabled();
         let first = action(submissions.reserve(None, now));
         assert!(submissions.accepts(&first, now));
         let clear = submissions.clear(None, None, now).unwrap();
@@ -322,7 +321,7 @@ mod tests {
     #[test]
     fn cancelling_one_session_does_not_clear_another_sessions_newer_feedback() {
         let now = Instant::now();
-        let mut submissions = Submissions::enabled();
+        let mut submissions = enabled();
         let first = crate::feedback::FeedbackSession::new();
         let second = crate::feedback::FeedbackSession::new();
         let old_run = first.begin(None);

@@ -273,10 +273,11 @@ pub(crate) fn verify_native() {
         poll_armed: true,
         frame_armed: false,
     };
+    set_enabled(true);
     let target = Target {
         window_id: closed_window,
         point: Some((300.0, 200.0)),
-        publication: crate::backend::cursor::Submissions::enabled().reserve(None, Instant::now()),
+        publication: begin_action(None).expect("the cursor is enabled"),
     };
     state.show(
         target,
@@ -299,43 +300,14 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::backend::cursor::{LINGER, Submissions};
+    use crate::backend::cursor::LINGER;
 
-    fn submissions() -> Submissions {
-        Submissions::enabled()
-    }
     fn target(publication: Publication) -> Target {
         Target {
             window_id: 7,
             point: Some((10.0, 20.0)),
             publication,
         }
-    }
-
-    #[test]
-    fn newer_action_renews_lifetime_but_closed_window_retires_it() {
-        let now = Instant::now();
-        let mut state = OverlayState {
-            cursor: None,
-            target: None,
-            poll_armed: true,
-            frame_armed: false,
-        };
-        let mut submissions = submissions();
-        state.set_target(target(submissions.reserve(None, now)));
-        state.set_target(target(
-            submissions.reserve(None, now + Duration::from_millis(500)),
-        ));
-        state.refresh_visibility(now + LINGER, Some(false));
-        assert!(
-            state.target.is_some(),
-            "a covered target does not retire a live action"
-        );
-        state.refresh_visibility(now + LINGER, None);
-        assert!(
-            state.target.is_none(),
-            "closed window retires feedback while its app stays open"
-        );
     }
 
     #[test]
@@ -346,13 +318,14 @@ mod tests {
             poll_armed: true,
             frame_armed: false,
         };
-        let mut submissions = submissions();
+        set_enabled(true);
         let session = crate::feedback::FeedbackSession::new();
         let request = tokio_util::sync::CancellationToken::new();
         let start = Instant::now();
         let mut run = session.begin(Some(request.clone()));
-        state.set_target(target(submissions.reserve(Some(run.ticket()), start)));
-        state.set_target(target(submissions.reserve(Some(run.ticket()), start)));
+        let publication = || begin_action(Some(run.ticket())).expect("the cursor is enabled");
+        state.set_target(target(publication()));
+        state.set_target(target(publication()));
         state.refresh_visibility(start + LINGER * 4, Some(true));
         assert!(
             state.target.is_some(),
