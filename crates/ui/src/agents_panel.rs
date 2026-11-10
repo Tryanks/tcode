@@ -305,13 +305,10 @@ impl Agents {
             let status = (!archived).then(|| store.agent_status(&meta.id)).flatten();
             let (execution, delivery) = match status {
                 Some(status) => (Some(status.execution), status.delivery),
-                // Nor does a settled one; an unsettled agent is running
-                // until the host reports it.
-                None => {
-                    let delivery = AgentDelivery::of(meta, AgentExecution::Working);
-                    let running = matches!(delivery, AgentDelivery::Running);
-                    (running.then_some(AgentExecution::Working), delivery)
-                }
+                // Nor does a settled one. An unsettled one is listed with
+                // the running agents, its state unknown until the host
+                // reports it.
+                None => (None, AgentDelivery::of(meta, AgentExecution::Working)),
             };
             let row = AgentRow {
                 key: meta.id.clone(),
