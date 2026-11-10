@@ -301,7 +301,9 @@ pub(super) fn decode_stack(raw: &Value, repository: &Repository) -> Option<PullR
     Some(PullRequestStack {
         id,
         number,
-        url: string(raw, "html_url").or_else(|| string(raw, "url"))?,
+        // GitHub's stack has only `url`, its API address, and no page of its own
+        // (REST "Stacks" schema).
+        url: None,
         base,
         layers: layers?,
     })
@@ -478,6 +480,7 @@ mod tests {
         let stack = decode_stack(&stack, &repository).expect("a documented stack");
         assert_eq!((stack.id.as_str(), stack.number), ("4021", 3));
         assert_eq!(stack.base, "main");
+        assert_eq!(stack.url, None, "its url is the API's, no page to open");
         assert_eq!(
             stack
                 .layers

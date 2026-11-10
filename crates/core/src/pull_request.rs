@@ -657,7 +657,9 @@ pub struct PullRequestStackLayer {
 pub struct PullRequestStack {
     pub id: String,
     pub number: u64,
-    pub url: String,
+    /// The stack's page on the forge, when the forge gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     pub base: String,
     /// The forge supplies the full topology, bottom to top, independently of links.
     pub layers: Vec<PullRequestStackLayer>,
@@ -1838,7 +1840,7 @@ mod tests {
         let stack = PullRequestStack {
             id: "stack".into(),
             number: 1,
-            url: "https://github.com/sample/project/stacks/1".into(),
+            url: None,
             base: "main".into(),
             layers: [2, 3]
                 .map(|number| PullRequestStackLayer {
