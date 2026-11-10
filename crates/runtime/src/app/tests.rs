@@ -9688,16 +9688,15 @@ fn recv_dispatch_reply<T>(cx: &mut TestAppContext, rx: &smol::channel::Receiver<
 /// A repository at `root` on `main` with one commit of `tracked.txt`.
 fn init_git_repo(root: &Path) {
     std::fs::create_dir_all(root).unwrap();
-    for args in [
-        &["init", "-b", "main"][..],
-        &["config", "commit.gpgsign", "false"],
-        &["config", "core.hooksPath", ".no-hooks"],
-        &["config", "core.autocrlf", "false"],
-        &["config", "user.name", "tcode"],
-        &["config", "user.email", "tcode@localhost"],
-    ] {
-        run_git(root, args).unwrap();
-    }
+    run_git(root, &["init", "-b", "main"]).unwrap();
+    let config = root.join(".git/config");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str(
+        "[commit]\n\tgpgsign = false\n\
+         [core]\n\thooksPath = .no-hooks\n\tautocrlf = false\n\
+         [user]\n\tname = tcode\n\temail = tcode@localhost\n",
+    );
+    std::fs::write(&config, text).unwrap();
     std::fs::write(root.join("tracked.txt"), "initial\n").unwrap();
     run_git(root, &["add", "tracked.txt"]).unwrap();
     run_git(root, &["commit", "-m", "initial"]).unwrap();
