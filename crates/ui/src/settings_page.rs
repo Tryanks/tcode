@@ -968,8 +968,8 @@ impl SettingsPage {
         }
     }
 
-    /// Ask the host where its home is, until it answers: listing `~` answers
-    /// with it. A failed ask is made again the next time the rows are drawn.
+    /// Ask the host where its home is, once: listing `~` answers with it. A
+    /// failed ask says why, and the rows keep `~`.
     pub(super) fn fetch_host_home(&mut self, cx: &mut Context<Self>) {
         if self.host_home_requested || !self.store.read(cx).can_manage_host() {
             return;
@@ -987,7 +987,13 @@ impl SettingsPage {
                         .map(|home| home.to_string_lossy().into_owned().into());
                     cx.notify();
                 }
-                Err(_) => page.host_home_requested = false,
+                Err(error) => page.store.update(cx, |_, cx| {
+                    cx.emit(tcode_protocol::RuntimeNotification::Error(
+                        tcode_protocol::RuntimeError::External(
+                            crate::tr!("sidebar.folders_failed", reason = error).into_owned(),
+                        ),
+                    ))
+                }),
             });
         })
         .detach();
@@ -4244,14 +4250,11 @@ mod tests {
     }
 
     /// The new project folder's placeholder is written under the host's
-    /// home, which the page asks the host for; a failed ask is asked again
-    /// when the page is next drawn, rather than leaving `~` for good.
+    /// home, which the page asks the host for; a failed ask says why and is
+    /// not made again with every drawing.
     #[gpui::test]
-    fn the_host_home_is_asked_again_after_a_failed_ask(cx: &mut TestAppContext) {
-        use tcode_protocol::{
-            ClientPayload, DirectoryListing, HostMessage, Query, QueryResponse, decode_client_line,
-            encode_line,
-        };
+    fn a_failed_ask_for_the_host_home_says_why_once(cx: &mut TestAppContext) {
+        use tcode_protocol::{ClientPayload, HostMessage, Query, decode_client_line, encode_line};
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
         let (store, outgoing, incoming, _pump) = scripted_store(WorkspaceAttachment::Local, cx);
@@ -4263,6 +4266,17 @@ mod tests {
             gpui_base::Root::new(view, window, cx)
         });
         let page = page.unwrap();
+        let reported = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|_, cx| {
+            let reported = reported.clone();
+            cx.subscribe(
+                &store,
+                move |_, event: &tcode_protocol::RuntimeNotification, _| {
+                    reported.borrow_mut().push(event.clone());
+                },
+            )
+            .detach();
+        });
         let asked_home = |outgoing: &async_channel::Receiver<String>| {
             std::iter::from_fn(|| outgoing.try_recv().ok())
                 .filter_map(|line| {
@@ -4308,21 +4322,20 @@ mod tests {
             }),
         );
         assert_eq!(drawn(cx), "~/TcodeProjects");
-
-        let [again] = asked_home(&outgoing)[..] else {
-            panic!("the next drawing asks again");
-        };
-        answer(
-            again,
-            Ok(QueryResponse::Directories(DirectoryListing {
-                directory: "/host/home".into(),
-                parent: Some("/host".into()),
-                home: Some("/host/home".into()),
-                entries: vec![],
-            })),
+        assert_eq!(drawn(cx), "~/TcodeProjects");
+        assert!(
+            asked_home(&outgoing).is_empty(),
+            "drawing does not ask again"
         );
-        assert_eq!(drawn(cx), "/host/home/TcodeProjects");
-        assert!(asked_home(&outgoing).is_empty(), "an answer is kept");
+        assert_eq!(
+            reported.borrow().as_slice(),
+            [tcode_protocol::RuntimeNotification::Error(
+                tcode_protocol::RuntimeError::External(
+                    crate::tr!("sidebar.folders_failed", reason = "The host went away.")
+                        .into_owned()
+                )
+            )]
+        );
     }
 
     #[gpui::test]
