@@ -261,18 +261,14 @@ pub(crate) async fn opencode_global_config(
     global_documents(&config, Path::new(config_dir.trim()))
 }
 
-/// The plugins the documents name. An entry may be a specifier or a
-/// `[specifier, options]` pair.
+/// The plugins the documents name. An entry is a specifier or a
+/// `{"package", "options"}` object.
 fn configured_plugins(documents: &[Value]) -> Vec<String> {
     documents
         .iter()
         .filter_map(|document| document.get("plugins")?.as_array())
         .flatten()
-        .filter_map(|plugin| {
-            plugin
-                .as_str()
-                .or_else(|| plugin.as_array()?.first()?.as_str())
-        })
+        .filter_map(|plugin| plugin.as_str().or_else(|| plugin.get("package")?.as_str()))
         .map(str::to_string)
         .collect()
 }
@@ -443,12 +439,15 @@ mod tests {
 
     /// `opencode debug config --standalone` prints the server's configuration
     /// sources (OpenCode 2.2.6, `cli.debug.config`); a plugin entry is a
-    /// specifier (`cli.plugin.list`). Only the global document's plugins count.
+    /// specifier or a `{package, options}` object (the configuration schema's
+    /// `plugins` union, read the same way by `cli.plugin.list`). Only the
+    /// global document's plugins count.
     #[test]
     fn opencode_lists_what_the_global_configuration_names() {
         let config = r#"[
             {"type":"document","path":"/home/me/.config/opencode/opencode.json",
-             "info":{"plugins":["opencode-wakatime"]}},
+             "info":{"plugins":["opencode-wakatime",
+                                {"package":"opencode-notify@2.0.0","options":{"sound":false}}]}},
             {"type":"document","path":"/work/proj/opencode.json","info":{"plugins":["project-only"]}},
             {"type":"directory","path":"/home/me/.config/opencode"}
         ]"#;
@@ -456,7 +455,7 @@ mod tests {
             configured_plugins(
                 &global_documents(config, Path::new("/home/me/.config/opencode")).unwrap()
             ),
-            ["opencode-wakatime"]
+            ["opencode-wakatime", "opencode-notify@2.0.0"]
         );
     }
 
