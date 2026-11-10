@@ -2701,6 +2701,7 @@ impl Mapper {
             }
             Some("user") => self.on_user(&msg),
             Some("control_request") => self.on_control_request(&msg),
+            Some("control_cancel_request") => self.on_control_cancel_request(&msg),
             Some("control_response") => self.on_control_response(&msg),
             Some("rate_limit_event") => self.on_rate_limit_event(&msg),
             Some("result") => self.on_result(&msg),
@@ -4037,6 +4038,27 @@ impl Mapper {
                     }]
                 }
             }
+        }
+    }
+
+    /// Claude Code withdrew one of its own prompts, as it does for a pending
+    /// `can_use_tool` when the turn is interrupted.
+    fn on_control_cancel_request(&mut self, msg: &Value) -> Vec<AgentEvent> {
+        let Some(request_id) = msg.get("request_id").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        if self.pending_approvals.remove(request_id).is_some() {
+            vec![AgentEvent::ApprovalResolved {
+                request_id: request_id.to_owned(),
+                decision: ApprovalDecision::Cancel,
+            }]
+        } else if self.pending_user_input.remove(request_id).is_some() {
+            vec![AgentEvent::UserInputResolved {
+                request_id: request_id.to_owned(),
+                answers: serde_json::Map::new(),
+            }]
+        } else {
+            Vec::new()
         }
     }
 
@@ -7185,6 +7207,52 @@ mod tests {
                 AgentEvent::ApprovalRequested(ApprovalRequest { kind: ApprovalKind::Plan { item_id, .. }, .. }),
             ] if id == "toolu_early" && item_id == id && markdown == plan),
             "a prompt that arrives before its tool block still shows the plan it decides: {events:?}"
+        );
+    }
+
+    /// `control_cancel_request {request_id}` as Claude Code 2.1.322's SDK
+    /// schema describes it: the sender no longer needs the answer to its own
+    /// request, "for example a pending can_use_tool prompt after the turn was
+    /// interrupted". Its `sendRequest` writes one when the turn's abort signal
+    /// fires.
+    #[test]
+    fn prompts_claude_code_withdraws_are_reported_resolved() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"ctrl-bash","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"cargo test"},"tool_use_id":"toolu_bash"}}"#,
+        );
+        feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"ctrl-ask","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which DB?","header":"DB"}]},"tool_use_id":"toolu_ask"}}"#,
+        );
+        let events = feed(
+            &mut m,
+            r#"{"type":"control_cancel_request","request_id":"ctrl-bash"}"#,
+        );
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::ApprovalResolved { request_id, decision: ApprovalDecision::Cancel }] if request_id == "ctrl-bash"),
+            "{events:?}"
+        );
+        let events = feed(
+            &mut m,
+            r#"{"type":"control_cancel_request","request_id":"ctrl-ask"}"#,
+        );
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::UserInputResolved { request_id, answers }] if request_id == "ctrl-ask" && answers.is_empty()),
+            "{events:?}"
+        );
+        assert!(
+            m.build_approval_response("ctrl-bash", ApprovalDecision::Option("allow".into()))
+                .is_none()
+        );
+        assert!(
+            feed(
+                &mut m,
+                r#"{"type":"control_cancel_request","request_id":"ctrl-bash"}"#
+            )
+            .is_empty()
         );
     }
 
