@@ -498,15 +498,6 @@ pub fn linking_instructions(hosts: &[&HostTerms]) -> String {
     text
 }
 
-/// The rest of a stored turn's injected context when it leads with the linking instructions,
-/// whichever host's they were: turns recorded before the instructions moved to the provider's
-/// instruction channel carry them.
-pub fn strip_linking_instructions(context: &str) -> Option<&str> {
-    let block = context.strip_prefix(LINKING_OPEN)?;
-    let end = block.find(LINKING_CLOSE)?;
-    Some(&block[end + LINKING_CLOSE.len()..])
-}
-
 /// Whether an agent's command merges or closes a pull request through any host's CLI:
 /// upstream's `\b(?:gh\s+pr|glab\s+mr)\s+(?:merge|close)\b` over the raw text.
 pub fn merges_or_closes(command: &str) -> bool {
@@ -1705,10 +1696,6 @@ mod tests {
         assert!(!merges_or_closes(
             "az repos pr update --id 3 --status completed"
         ));
-        assert!(
-            strip_linking_instructions(&format!("{}typed", linking_instructions(&all)))
-                == Some("typed")
-        );
     }
 
     /// What Add host accepts, and what the host's validation of a settings write accepts: a

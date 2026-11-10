@@ -123,7 +123,7 @@ chat:
   steered: "已追加提示"
   plan_title: "计划"
   plan_feedback_hint: "批准这份计划，或在下方回复让它继续规划。"
-  orchestrate_skill: "编排技能"
+  injected_context: "Tcode 添加的内容"
   orchestrate_state_completed: "已完成"
   orchestrate_state_failed: "已失败"
   orchestrate_state_reported: "已汇报"
@@ -2112,7 +2112,6 @@ pull_requests:
   watch_unreadable: "已停止关注 #%{number}：连续 8 次无法读取。"
   watch_comment_limit: "连续 10 次仅有评论更新后，已停止关注 #%{number}。"
   open_thread: "打开线程"
-  instructions_disclosure: "拉取请求说明"
   notice_failed: "无法读取拉取请求状态，将在下次同步时重试。"
   detail:
     back: "拉取请求"

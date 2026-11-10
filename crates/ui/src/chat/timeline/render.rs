@@ -1052,7 +1052,7 @@ impl TimelineView {
             .child(self.compose_disclosure(
                 turn,
                 format!("orchestrate-context-{entry_id}"),
-                injected_context_label(context).into(),
+                crate::tr!("chat.injected_context").into_owned().into(),
                 context,
                 cx,
             ))
@@ -1212,7 +1212,7 @@ impl TimelineView {
                 column.child(self.compose_disclosure(
                     turn,
                     format!("orchestrate-context-{}", entry.id),
-                    injected_context_label(context).into(),
+                    crate::tr!("chat.injected_context").into_owned().into(),
                     context,
                     cx,
                 ))
@@ -2089,22 +2089,6 @@ impl TimelineView {
             });
         })
         .detach();
-    }
-}
-
-/// A recorded turn's injected context is named by what it holds.
-fn injected_context_label(context: &str) -> String {
-    let orchestrate = || crate::tr!("chat.orchestrate_skill").into_owned();
-    match tcode_core::pull_request::strip_linking_instructions(context) {
-        None => orchestrate(),
-        Some(rest) => {
-            let instructions = crate::tr!("pull_requests.instructions_disclosure").into_owned();
-            if rest.trim().is_empty() {
-                instructions
-            } else {
-                format!("{instructions} · {}", orchestrate())
-            }
-        }
     }
 }
 

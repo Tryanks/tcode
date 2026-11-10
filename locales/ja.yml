@@ -123,7 +123,7 @@ chat:
   steered: "追加指示済み"
   plan_title: "計画"
   plan_feedback_hint: "計画を承認するか、下に返信して計画を続けてください。"
-  orchestrate_skill: "オーケストレーションスキル"
+  injected_context: "Tcode が追加した内容"
   orchestrate_state_completed: "完了"
   orchestrate_state_failed: "失敗"
   orchestrate_state_reported: "報告済み"
@@ -2119,7 +2119,6 @@ pull_requests:
   watch_unreadable: "#%{number} のウォッチを停止しました：8 回連続で読み取れませんでした。"
   watch_comment_limit: "コメントのみの更新が 10 回続いたため、#%{number} のウォッチを停止しました。"
   open_thread: "スレッドを開く"
-  instructions_disclosure: "プルリクエストに関する指示"
   notice_failed: "プルリクエストの状態を読み取れませんでした。次回の同期で再試行します。"
   detail:
     back: "プルリクエスト"

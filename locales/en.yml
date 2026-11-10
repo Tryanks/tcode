@@ -123,7 +123,7 @@ chat:
   steered: "Steered"
   plan_title: "Plan"
   plan_feedback_hint: "Approve the plan, or reply below to keep planning."
-  orchestrate_skill: "Orchestrate Skill"
+  injected_context: "Added by Tcode"
   orchestrate_state_completed: "completed"
   orchestrate_state_failed: "failed"
   orchestrate_state_reported: "reported"
@@ -2119,7 +2119,6 @@ pull_requests:
   watch_unreadable: "Stopped watching #%{number}: it could not be read 8 times in a row."
   watch_comment_limit: "Stopped watching #%{number} after 10 comment-only updates."
   open_thread: "Open thread"
-  instructions_disclosure: "Pull request instructions"
   notice_failed: "Could not read pull request status. Retrying on the next sweep."
   detail:
     back: "Pull requests"
