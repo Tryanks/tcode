@@ -414,28 +414,28 @@ impl PullRequestView {
     }
 
     /// Asks the host one read of the pull request on view and hands the answer to `land`.
-    pub(super) fn read(
+    pub(super) fn read<T: 'static>(
         &mut self,
         read: PullRequestRead,
+        answer: impl FnOnce(PullRequestReadResponse) -> Option<T> + 'static,
         cx: &mut Context<Self>,
-        land: impl FnOnce(&mut PullRequestPage, Result<(PullRequestReadResponse, u64), ProtocolError>)
-        + 'static,
+        land: impl FnOnce(&mut PullRequestPage, Result<(T, u64), ProtocolError>) + 'static,
     ) {
         if let Some(current) = self.current.clone() {
-            self.read_of(current, read, cx, land);
+            self.read_of(current, read, answer, cx, land);
         }
     }
 
-    fn read_of(
+    fn read_of<T: 'static>(
         &mut self,
         (session, key): (String, PullRequestKey),
         read: PullRequestRead,
+        answer: impl FnOnce(PullRequestReadResponse) -> Option<T> + 'static,
         cx: &mut Context<Self>,
-        land: impl FnOnce(&mut PullRequestPage, Result<(PullRequestReadResponse, u64), ProtocolError>)
-        + 'static,
+        land: impl FnOnce(&mut PullRequestPage, Result<(T, u64), ProtocolError>) + 'static,
     ) {
         let task = self.store.update(cx, |store, cx| {
-            store.read_pull_request(session.clone(), key.clone(), read, cx)
+            store.read_pull_request(session.clone(), key.clone(), read, answer, cx)
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -454,12 +454,13 @@ impl PullRequestView {
         page.files.loading = true;
         self.read(
             PullRequestRead::Files { cursor: None },
+            PullRequestReadResponse::files,
             cx,
             |page, result| {
                 page.files.loading = false;
                 page.refreshing = false;
                 match result {
-                    Ok((PullRequestReadResponse::Files(files), expires_at)) => {
+                    Ok((files, expires_at)) => {
                         page.files.expires_at = expires_at;
                         page.files.error = None;
                         page.files.loaded_at = now();
@@ -488,7 +489,6 @@ impl PullRequestView {
                             page.files.data = Some(files);
                         }
                     }
-                    Ok(_) => {}
                     Err(error) => page.files.error = Some(error),
                 }
             },
@@ -501,11 +501,12 @@ impl PullRequestView {
         page.files_view.page_error = None;
         self.read(
             PullRequestRead::Files { cursor: Some(next) },
+            PullRequestReadResponse::files,
             cx,
             move |page, result| {
                 page.files_view.page_loading = false;
                 match result {
-                    Ok((PullRequestReadResponse::Files(more), _)) => {
+                    Ok((more, _)) => {
                         let Some(files) = page.files.data.as_mut() else {
                             return;
                         };
@@ -518,7 +519,6 @@ impl PullRequestView {
                         files.next_cursor = more.next_cursor;
                         files.complete = more.complete;
                     }
-                    Ok(_) => {}
                     Err(error) => page.files_view.page_error = Some(error),
                 }
             },
@@ -528,59 +528,67 @@ impl PullRequestView {
     pub(super) fn read_conversation(&mut self, cx: &mut Context<Self>) {
         let Some(page) = self.page_mut() else { return };
         page.conversation.loading = true;
-        self.read(PullRequestRead::Conversation, cx, |page, result| {
-            page.conversation.loading = false;
-            page.refreshing = false;
-            match result {
-                Ok((PullRequestReadResponse::Conversation(conversation), expires_at)) => {
-                    page.conversation.expires_at = expires_at;
-                    page.conversation.error = None;
-                    page.conversation.loaded_at = now();
-                    let account_changed = page
-                        .conversation
-                        .data
-                        .as_ref()
-                        .is_some_and(|held| held.account != conversation.account);
-                    if account_changed {
-                        // What the previous account read is its own: read it all again.
-                        page.files = Read::default();
-                        page.files_view = FilesView::default();
-                        page.viewed = Read::default();
-                        page.viewed_marks.clear();
-                        page.viewed_batch.clear();
-                        page.viewed_flush = None;
-                        page.conversation_view.replies.clear();
+        self.read(
+            PullRequestRead::Conversation,
+            PullRequestReadResponse::conversation,
+            cx,
+            |page, result| {
+                page.conversation.loading = false;
+                page.refreshing = false;
+                match result {
+                    Ok((conversation, expires_at)) => {
+                        page.conversation.expires_at = expires_at;
+                        page.conversation.error = None;
+                        page.conversation.loaded_at = now();
+                        let account_changed = page
+                            .conversation
+                            .data
+                            .as_ref()
+                            .is_some_and(|held| held.account != conversation.account);
+                        if account_changed {
+                            // What the previous account read is its own: read it all again.
+                            page.files = Read::default();
+                            page.files_view = FilesView::default();
+                            page.viewed = Read::default();
+                            page.viewed_marks.clear();
+                            page.viewed_batch.clear();
+                            page.viewed_flush = None;
+                            page.conversation_view.replies.clear();
+                        }
+                        page.conversation.data = Some(*conversation);
+                        // The read is GitHub's answer to whatever this client wrote before it.
+                        page.writes.waiting = false;
+                        page.writes.reactions.clear();
                     }
-                    page.conversation.data = Some(*conversation);
-                    // The read is GitHub's answer to whatever this client wrote before it.
-                    page.writes.waiting = false;
-                    page.writes.reactions.clear();
+                    Err(error) => page.conversation.error = Some(error),
                 }
-                Ok(_) => {}
-                Err(error) => page.conversation.error = Some(error),
-            }
-        });
+            },
+        );
     }
 
     pub(super) fn read_viewed(&mut self, cx: &mut Context<Self>) {
         let Some(page) = self.page_mut() else { return };
         page.viewed.loading = true;
-        self.read(PullRequestRead::ViewedFiles, cx, |page, result| {
-            page.viewed.loading = false;
-            match result {
-                Ok((PullRequestReadResponse::ViewedFiles(viewed), expires_at)) => {
-                    page.viewed.expires_at = expires_at;
-                    page.viewed.error = None;
-                    page.viewed.loaded_at = now();
-                    page.viewed.data = Some(viewed);
-                    // The host's answer now carries every mark already sent.
-                    page.viewed_marks
-                        .retain(|path, _| page.viewed_batch.contains_key(path));
+        self.read(
+            PullRequestRead::ViewedFiles,
+            PullRequestReadResponse::viewed_files,
+            cx,
+            |page, result| {
+                page.viewed.loading = false;
+                match result {
+                    Ok((viewed, expires_at)) => {
+                        page.viewed.expires_at = expires_at;
+                        page.viewed.error = None;
+                        page.viewed.loaded_at = now();
+                        page.viewed.data = Some(viewed);
+                        // The host's answer now carries every mark already sent.
+                        page.viewed_marks
+                            .retain(|path, _| page.viewed_batch.contains_key(path));
+                    }
+                    Err(error) => page.viewed.error = Some(error),
                 }
-                Ok(_) => {}
-                Err(error) => page.viewed.error = Some(error),
-            }
-        });
+            },
+        );
     }
 
     pub(super) fn read_action_state(&mut self, cx: &mut Context<Self>) {
@@ -595,21 +603,26 @@ impl PullRequestView {
             .or_default()
             .action_state
             .loading = true;
-        self.read_of(page, PullRequestRead::ActionState, cx, |page, result| {
-            page.action_state.loading = false;
-            match result {
-                Ok((PullRequestReadResponse::ActionState(state), expires_at)) => {
-                    page.action_state.expires_at = expires_at;
-                    page.action_state.error = None;
-                    page.action_state.loaded_at = now();
-                    page.action_state.data = Some(state);
-                    // GitHub's state as it now is answers a write that went unanswered.
-                    page.writes.waiting = false;
+        self.read_of(
+            page,
+            PullRequestRead::ActionState,
+            PullRequestReadResponse::action_state,
+            cx,
+            |page, result| {
+                page.action_state.loading = false;
+                match result {
+                    Ok((state, expires_at)) => {
+                        page.action_state.expires_at = expires_at;
+                        page.action_state.error = None;
+                        page.action_state.loaded_at = now();
+                        page.action_state.data = Some(state);
+                        // GitHub's state as it now is answers a write that went unanswered.
+                        page.writes.waiting = false;
+                    }
+                    Err(error) => page.action_state.error = Some(error),
                 }
-                Ok(_) => {}
-                Err(error) => page.action_state.error = Some(error),
-            }
-        });
+            },
+        );
     }
 
     /// Whether a lifecycle write to the pull request is in flight, or went unanswered and

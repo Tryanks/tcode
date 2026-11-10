@@ -518,6 +518,31 @@ pub enum PullRequestReadResponse {
     StackState(PullRequestStackActionState),
 }
 
+/// The answer of one kind, `None` for an answer of another.
+macro_rules! answers {
+    ($($method:ident: $variant:ident($answer:ty)),* $(,)?) => {
+        impl PullRequestReadResponse {
+            $(pub fn $method(self) -> Option<$answer> {
+                match self {
+                    Self::$variant(answer) => Some(answer),
+                    _ => None,
+                }
+            })*
+        }
+    };
+}
+answers!(
+    files: Files(PullRequestFiles),
+    file_text: FileText(PullRequestFileText),
+    conversation: Conversation(Box<PullRequestConversation>),
+    thread_replies: ThreadReplies(PullRequestThreadReplies),
+    viewed_files: ViewedFiles(PullRequestViewedFiles),
+    label_candidates: LabelCandidates(PullRequestLabelCandidates),
+    reviewer_candidates: ReviewerCandidates(PullRequestReviewerCandidates),
+    action_state: ActionState(PullRequestActionState),
+    stack_state: StackState(PullRequestStackActionState),
+);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PullRequestReviewVerdict {

@@ -1239,17 +1239,17 @@ impl PullRequestView {
                 thread_id: id,
                 after,
             },
+            PullRequestReadResponse::thread_replies,
             cx,
             move |page, result| {
                 let replies = page.conversation_view.replies.entry(key).or_default();
                 replies.loading = false;
                 match result {
-                    Ok((PullRequestReadResponse::ThreadReplies(more), _)) => {
+                    Ok((more, _)) => {
                         replies.comments.extend(more.comments);
                         replies.after = more.after;
                         page.conversation_view.list.remeasure();
                     }
-                    Ok(_) => {}
                     Err(error) => {
                         replies.error = Some(reason(&error));
                         page.conversation_view.list.remeasure();

@@ -270,45 +270,46 @@ impl PullRequestView {
             path: path.clone(),
         };
         let created = entry.kind == FileChangeKind::Create;
-        self.read(read, cx, move |page, result| {
-            let state = match result {
-                Ok((PullRequestReadResponse::FileText(PullRequestFileText::Text(text)), _)) => {
-                    if created {
-                        TextState::Loaded {
-                            old: String::new(),
-                            new: text,
-                        }
-                    } else {
-                        match reconstruct_from_text(text, &patch) {
-                            Some((old, new)) => TextState::Loaded { old, new },
-                            None => TextState::Unreadable,
+        self.read(
+            read,
+            PullRequestReadResponse::file_text,
+            cx,
+            move |page, result| {
+                let state = match result {
+                    Ok((PullRequestFileText::Text(text), _)) => {
+                        if created {
+                            TextState::Loaded {
+                                old: String::new(),
+                                new: text,
+                            }
+                        } else {
+                            match reconstruct_from_text(text, &patch) {
+                                Some((old, new)) => TextState::Loaded { old, new },
+                                None => TextState::Unreadable,
+                            }
                         }
                     }
-                }
-                Ok((PullRequestReadResponse::FileText(PullRequestFileText::Missing), _)) => {
-                    TextState::Missing
-                }
-                Ok((PullRequestReadResponse::FileText(PullRequestFileText::Oversized), _)) => {
-                    TextState::Oversized
-                }
-                Ok(_) => TextState::Unreadable,
-                Err(error) => {
-                    page.files_view.texts.remove(&path);
-                    page.files_view.pending_expand = None;
-                    page.files_view.text_failure = Some(
-                        crate::tr!(
-                            "pull_requests.files.text_failed",
-                            path = path,
-                            revision = head.get(..7).unwrap_or(&head).to_owned(),
-                            reason = reason(&error)
-                        )
-                        .into_owned(),
-                    );
-                    return;
-                }
-            };
-            page.files_view.texts.insert(path, state);
-        });
+                    Ok((PullRequestFileText::Missing, _)) => TextState::Missing,
+                    Ok((PullRequestFileText::Oversized, _)) => TextState::Oversized,
+                    Ok((PullRequestFileText::Binary, _)) => TextState::Unreadable,
+                    Err(error) => {
+                        page.files_view.texts.remove(&path);
+                        page.files_view.pending_expand = None;
+                        page.files_view.text_failure = Some(
+                            crate::tr!(
+                                "pull_requests.files.text_failed",
+                                path = path,
+                                revision = head.get(..7).unwrap_or(&head).to_owned(),
+                                reason = reason(&error)
+                            )
+                            .into_owned(),
+                        );
+                        return;
+                    }
+                };
+                page.files_view.texts.insert(path, state);
+            },
+        );
     }
 
     /// Redraws a file once its text arrived, then applies the expansion that asked for it.

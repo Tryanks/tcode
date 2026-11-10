@@ -1691,6 +1691,7 @@ impl MergeStackDialog {
                 self.target.session.clone(),
                 self.target.offer.key.clone(),
                 PullRequestRead::StackState { rebase: false },
+                PullRequestReadResponse::stack_state,
                 cx,
             )
         });
@@ -1698,7 +1699,7 @@ impl MergeStackDialog {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.state = Some(match result {
-                    Ok((PullRequestReadResponse::StackState(state), _)) => {
+                    Ok((state, _)) => {
                         this.method = super::lifecycle::merge_method(
                             &state.merge_methods,
                             this.target.offer.method,
@@ -1706,7 +1707,6 @@ impl MergeStackDialog {
                         );
                         Ok(state)
                     }
-                    Ok(_) => Err(String::new()),
                     Err(error) => Err(super::detail::reason(&error)),
                 });
                 cx.notify();
@@ -2358,6 +2358,7 @@ impl RebaseStackDialog {
                 self.target.session.clone(),
                 self.target.offer.key.clone(),
                 PullRequestRead::StackState { rebase: true },
+                PullRequestReadResponse::stack_state,
                 cx,
             )
         });
@@ -2365,8 +2366,7 @@ impl RebaseStackDialog {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.state = Some(match result {
-                    Ok((PullRequestReadResponse::StackState(state), _)) => Ok(state),
-                    Ok(_) => Err(String::new()),
+                    Ok((state, _)) => Ok(state),
                     Err(error) => Err(super::detail::reason(&error)),
                 });
                 cx.notify();

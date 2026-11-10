@@ -3602,13 +3602,17 @@ impl WorkspaceStore {
         )
     }
 
-    pub fn read_pull_request(
+    /// One read of a linked pull request, its answer taken out by `answer`, such as
+    /// [`tcode_protocol::PullRequestReadResponse::files`]. An answer of another kind than the
+    /// read asks is a protocol error.
+    pub fn read_pull_request<T: 'static>(
         &self,
         session_id: String,
         key: tcode_core::pull_request::PullRequestKey,
         read: tcode_protocol::PullRequestRead,
+        answer: impl FnOnce(tcode_protocol::PullRequestReadResponse) -> Option<T> + 'static,
         cx: &mut App,
-    ) -> Task<Result<(tcode_protocol::PullRequestReadResponse, u64), ProtocolError>> {
+    ) -> Task<Result<(T, u64), ProtocolError>> {
         let host = self.host.clone();
         cx.spawn(async move |_| {
             match host
@@ -3622,11 +3626,10 @@ impl WorkspaceStore {
                 QueryResponse::PullRequest {
                     response,
                     expires_at,
-                } => Ok((*response, expires_at)),
-                _ => Err(ProtocolError {
-                    code: "invalid_pull_request_response".into(),
-                    message: "Unexpected pull request response".into(),
-                }),
+                } => answer(*response)
+                    .map(|answer| (answer, expires_at))
+                    .ok_or_else(unexpected_pull_request_response),
+                _ => Err(unexpected_pull_request_response()),
             }
         })
     }
@@ -4420,6 +4423,14 @@ impl Drop for WorkspaceStore {
 }
 
 impl EventEmitter<RuntimeEvent> for WorkspaceStore {}
+/// What the host answered a pull request read or write with, when it is not the kind asked.
+pub(crate) fn unexpected_pull_request_response() -> ProtocolError {
+    ProtocolError {
+        code: "invalid_pull_request_response".into(),
+        message: "Unexpected pull request response".into(),
+    }
+}
+
 impl EventEmitter<StoreChange> for WorkspaceStore {}
 impl EventEmitter<TerminalChange> for WorkspaceStore {}
 impl EventEmitter<ShowThread> for WorkspaceStore {}
