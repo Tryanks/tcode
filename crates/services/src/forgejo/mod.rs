@@ -186,7 +186,7 @@ impl Forgejo {
                             .filter(|path| !path.is_empty()),
                         kind: match status {
                             "added" => agent::FileChangeKind::Create,
-                            "deleted" | "removed" => agent::FileChangeKind::Delete,
+                            "deleted" => agent::FileChangeKind::Delete,
                             "renamed" => agent::FileChangeKind::Rename,
                             _ => agent::FileChangeKind::Modify,
                         },
