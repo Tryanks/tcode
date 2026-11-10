@@ -1,8 +1,8 @@
 //! What Tcode reads of a Bitbucket Cloud pull request, in Tcode's terms. Users carry no
 //! username on Bitbucket: an account shows by its nickname, and a write names it by its uuid.
 
-use super::api::{Api, PAGE_LIMIT, Request, error};
-use crate::forge::{ForgeError, ForgeErrorKind};
+use super::api::{Api, PAGE_LIMIT, Request};
+use crate::forge::ForgeError;
 use serde_json::Value;
 use std::collections::HashMap;
 use tcode_core::{
@@ -67,14 +67,7 @@ impl Pr<'_> {
         self.api.send(Request::get(path, operation))?.json()
     }
     pub(super) fn pr(&self) -> Result<Value, ForgeError> {
-        let pr = self.get(self.path("?fields=-rendered"), "PullRequest")?;
-        if pr["id"].as_u64() != Some(self.key.number) {
-            return Err(error(
-                ForgeErrorKind::Uncertain,
-                "Bitbucket answered another pull request",
-            ));
-        }
-        Ok(pr)
+        self.get(self.path("?fields=-rendered"), "PullRequest")
     }
     /// The build statuses of `head`, one page of them.
     pub(super) fn checks(&self, head: &str) -> Result<Vec<PullRequestCheck>, ForgeError> {

@@ -1,7 +1,7 @@
 //! What Tcode reads of a Forgejo or Gitea pull request, in Tcode's terms.
 
-use super::api::{Api, Request, Server, error};
-use crate::forge::{ForgeError, ForgeErrorKind};
+use super::api::{Api, Request, Server};
+use crate::forge::ForgeError;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use tcode_core::{
@@ -67,14 +67,7 @@ impl Pull<'_> {
             .json()
     }
     pub(super) fn pull(&self) -> Result<Value, ForgeError> {
-        let pr = self.get(&format!("pulls/{}", self.key.number), "PullRequest")?;
-        if pr["number"].as_u64() != Some(self.key.number) {
-            return Err(error(
-                ForgeErrorKind::Uncertain,
-                "Forgejo answered another pull request",
-            ));
-        }
-        Ok(pr)
+        self.get(&format!("pulls/{}", self.key.number), "PullRequest")
     }
     pub(super) fn repository(&self) -> Result<Value, ForgeError> {
         self.get("", "Repository")
