@@ -4406,7 +4406,7 @@ fn api_retry_notice(msg: &Value) -> AgentEvent {
 }
 
 fn is_file_tool(name: &str) -> bool {
-    matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit")
+    matches!(name, "Write" | "Edit" | "NotebookEdit")
 }
 
 pub(crate) fn one_line_summary(text: &str) -> String {
