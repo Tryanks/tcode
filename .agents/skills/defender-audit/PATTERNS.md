@@ -111,10 +111,21 @@ entries in other areas.
   written by tests across `crates/agent`, `crates/runtime`, `crates/services`
   and `crates/ui`, and the `FakeClaude`, `FakeServer`, `FakeCli` types. Not
   yet inventoried; some only need a file to exist, others speak for a harness.
-- **Hand-typed wire lines** called fixtures: `codex/v2_messages.jsonl`, lines
-  9–10 of Claude's `usage_scope.jsonl`. A defence that relied on one of these
-  (`result_ids`, de-duplicating a `result` by uuid) has no recording behind
-  it.
+- **Wire lines whose shape nothing backs**: `codex/v2_messages.jsonl`, lines
+  9–10 of Claude's `usage_scope.jsonl` name no schema or source. A defence
+  that relied on one of these (`result_ids`, de-duplicating a `result` by
+  uuid) rests on Tcode's guess.
+- **Recordings of real runs, committed.** The opposite fault. The fixtures
+  that are real captures carried what the run saw:
+  `runtime/src/app/fixtures/monitor_wakeups_child.jsonl` and
+  `plugins/claude/real-home-marketplace-list.json` hold the maintainer's
+  home directory, toolchain paths and the name of another project, in a
+  public repository. No token or address was found.
+  > I do not agree to using real data. Oversight slips, I iterate fast; what
+  > if something leaks? — the maintainer
+
+  So a fixture takes its shape from the harness's schema or source and its
+  content is invented.
 - What stood up instead: the interrupt change was shown with the probe
   against the real Claude Code (`--interrupt-after`), which still reported
   the turn interrupted.
