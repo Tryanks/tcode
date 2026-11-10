@@ -238,6 +238,18 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
     });
     stranger.to_host.close();
 
+    // A switch the allow list cannot record is answered as a failure and
+    // changes nothing. The file is written through `traverse.tmp`; a
+    // directory in its place fails the write on every platform.
+    let blocker = host_dir.0.join("traverse.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    assert!(matches!(
+        host.hosting(tcode_protocol::HostingAction::SetEnabled(false)),
+        Err(tcode_protocol::ProtocolError { code, .. }) if code == "pairing_update_failed"
+    ));
+    assert!(host.pairing_enabled());
+    std::fs::remove_dir(&blocker).unwrap();
+
     host.set_pairing_enabled(false);
     let minted = host.new_invitation();
     assert_eq!(pair(&minted.invite, &other), Err(PairError::Disabled));

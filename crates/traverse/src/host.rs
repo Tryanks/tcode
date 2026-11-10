@@ -388,8 +388,13 @@ impl TraverseHost {
         self.shared.allow_pairing && self.shared.state.lock().unwrap().identity.pairing_enabled
     }
 
+    /// Turn pairing on or off. A switch the machine cannot write is
+    /// logged and left as it was; [`TraverseHost::hosting`] answers it as a
+    /// failure.
     pub fn set_pairing_enabled(&self, enabled: bool) {
-        self.shared.set_pairing_enabled(enabled);
+        if let Err(error) = self.shared.set_pairing_enabled(enabled) {
+            log::error!("could not persist the pairing switch: {error}");
+        }
     }
 
     /// Paired devices, oldest first, with how each connected one reaches us.
@@ -898,19 +903,19 @@ impl Shared {
         }
     }
 
-    fn set_pairing_enabled(&self, enabled: bool) {
+    fn set_pairing_enabled(&self, enabled: bool) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
         let previous = state.identity.clone();
         state.identity.pairing_enabled = enabled;
         self.revise(&mut state.identity);
         if let Err(error) = state.identity.save() {
             state.identity = previous;
-            log::error!("could not persist the pairing switch: {error}");
-            return;
+            return Err(error);
         }
         if !enabled && state.invitation.take().is_some() {
             self.notify(None);
         }
+        Ok(())
     }
 
     fn devices(&self) -> Vec<DeviceInfo> {
@@ -1228,7 +1233,11 @@ impl Shared {
             }
             HostingAction::State => {}
             HostingAction::SetEnabled(enabled) => {
-                self.set_pairing_enabled(enabled);
+                self.set_pairing_enabled(enabled)
+                    .map_err(|error| ProtocolError {
+                        code: "pairing_update_failed".into(),
+                        message: error.to_string(),
+                    })?;
                 if enabled && self.allow_pairing {
                     self.mint();
                 }
