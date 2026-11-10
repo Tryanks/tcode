@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(at("field", cx), beside, "the field starts where it was");
         assert_eq!(at("button", cx).x, px(250.), "the button follows the width");
 
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.executor().advance_clock(super::GLIDE / 2);
         draw(cx);
         let gliding = at("field", cx);
         assert!(
@@ -519,7 +519,7 @@ mod tests {
         });
         draw(cx);
         assert_eq!(left(cx), px(0.), "the meter starts where it was");
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.executor().advance_clock(super::GLIDE / 2);
         draw(cx);
         let gliding = left(cx);
         assert!(gliding > px(0.) && gliding < px(360.), "{gliding:?}");

@@ -913,7 +913,7 @@ mod tests {
         cx.simulate_click(leaving.center(), Default::default());
         assert_eq!(clicks.get(), 1, "a leaving state takes no clicks");
 
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        cx.executor().advance_clock(CHANGE);
         draw(cx);
         assert!(cx.debug_bounds("first").is_none(), "gone once faded out");
         assert!(cx.debug_bounds("second").is_some());
@@ -976,7 +976,7 @@ mod tests {
             draw(cx);
         };
         set(false, cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.executor().advance_clock(SHOW / 2);
         draw(cx);
         let leaving = cx
             .debug_bounds("section-body-1")

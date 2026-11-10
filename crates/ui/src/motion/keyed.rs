@@ -629,7 +629,7 @@ mod tests {
             "a takes presses where it is drawn"
         );
 
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.executor().advance_clock(ROWS / 2);
         draw(cx);
         let gliding = top("a", cx);
         assert!(gliding > first && gliding < second, "a is on its way");
@@ -680,7 +680,7 @@ mod tests {
         };
 
         set(vec!["b"], cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.executor().advance_clock(ROWS / 2);
         draw(cx);
         let moving = left("b", cx);
         assert!(moving > first && moving < second, "b is on its way over");
@@ -689,7 +689,7 @@ mod tests {
         assert_eq!(left("b", cx), first);
 
         set(vec!["a", "b"], cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.executor().advance_clock(ROWS / 2);
         draw(cx);
         let pushed = left("b", cx);
         assert!(pushed > first && pushed < second, "a widens in, pushing b");

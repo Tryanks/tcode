@@ -991,7 +991,7 @@ mod tests {
 
         turn(true, cx);
         assert_eq!(at("control", cx), beside, "the control starts where it was");
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.executor().advance_clock(NOTE / 2);
         draw(cx);
         let (control, below) = (at("control", cx), at("below", cx));
         draw_settled(cx);
