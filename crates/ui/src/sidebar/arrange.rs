@@ -350,12 +350,7 @@ impl SessionsSidebar {
             from: thread_section(meta),
             scope: self.list_scope(cx),
             title: meta.title.clone().into(),
-            can_settle: !store.turn_running_for(&meta.id)
-                && !store.pending_approval_for(&meta.id)
-                && !store.pending_user_input_for(&meta.id)
-                && store
-                    .activity(&meta.id)
-                    .is_none_or(|activity| activity.background.tasks == 0),
+            can_settle: !store.settle_blocked_for(&meta.id),
             compact: self.compact(cx),
         })
     }

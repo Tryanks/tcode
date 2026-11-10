@@ -2718,6 +2718,14 @@ impl WorkspaceStore {
             .is_some_and(|activity| activity.working)
     }
 
+    /// Whether the host refuses to settle the thread now.
+    pub fn settle_blocked_for(&self, session_id: &str) -> bool {
+        self.index_summary
+            .activity
+            .get(session_id)
+            .is_some_and(|activity| activity.settle_blocked)
+    }
+
     pub fn failed_for(&self, session_id: &str) -> bool {
         self.index_summary
             .activity

@@ -690,6 +690,9 @@ pub struct SessionActivity {
     pub wakes: ThreadWakes,
     pub waiting_for_approval: bool,
     pub waiting_for_input: bool,
+    /// The host refuses to settle the thread now: something of it runs or
+    /// waits on the user.
+    pub settle_blocked: bool,
     /// The latest run ended in an error and nothing has run since.
     pub failed: bool,
     pub unread: bool,

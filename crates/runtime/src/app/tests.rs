@@ -12865,6 +12865,37 @@ fn first_index_snapshot_includes_persisted_child_runs_and_human_resume_status() 
 }
 
 #[test]
+fn a_thread_the_host_will_not_settle_says_so_in_its_activity() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("settle-blocked");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (commands, _received) = smol::channel::unbounded();
+    state.update(cx, |state, _| {
+        let mut session = live_session(ProviderKind::Codex, commands);
+        session.meta.id = "background".into();
+        session.background_task_count = 1;
+        state.sessions.push(session.meta.clone());
+        state.install_selected(session);
+    });
+    let activity =
+        state.read(|state| state.index_snapshot().summary.activity["background"].clone());
+    assert!(!activity.working);
+    assert!(activity.settle_blocked);
+    let refused = through_pipe(
+        &state,
+        cx,
+        1,
+        tcode_protocol::ClientPayload::Command(Command::SettleSession {
+            session_id: "background".into(),
+        }),
+    );
+    assert!(refused.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack { id: 1, result: Err(error) } if error.code == "thread_busy"
+    )));
+}
+
+#[test]
 fn archiving_a_thread_with_a_turn_in_flight_is_refused() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("archive-busy");

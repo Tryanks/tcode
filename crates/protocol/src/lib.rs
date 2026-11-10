@@ -331,6 +331,7 @@ pub use wire::{
 // PullRequestFile gains url, the file's page on the host.
 // ThreadWakes' pull_requests are PullRequestKeys, not numbers.
 // GitDiffResult's default_base is base, the one a branch diff was read against.
+// SessionActivity gains settle_blocked.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

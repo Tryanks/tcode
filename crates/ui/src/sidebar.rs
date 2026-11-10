@@ -411,6 +411,8 @@ struct ThreadFlags {
     waiting_for_approval: bool,
     waiting_for_input: bool,
     working: bool,
+    /// The host refuses to settle the thread now.
+    settle_blocked: bool,
     failed: bool,
     /// Pieces of background work and agents still running.
     background: (u32, u32),
@@ -428,6 +430,8 @@ struct ThreadRowState {
     row_key: String,
     waiting_for_approval: bool,
     waiting_for_input: bool,
+    /// The host refuses to settle the thread now.
+    settle_blocked: bool,
     /// Pieces of background work and agents still running.
     background: (u32, u32),
     unsettled: bool,
@@ -1075,6 +1079,7 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
                     waiting_for_approval: store.pending_approval_for(&meta.id),
                     waiting_for_input: store.pending_user_input_for(&meta.id),
                     working: store.turn_running_for(&meta.id),
+                    settle_blocked: store.settle_blocked_for(&meta.id),
                     failed: store.failed_for(&meta.id),
                     background: store.activity(&meta.id).map_or((0, 0), |activity| {
                         (activity.background.tasks, activity.background.agents)
@@ -3827,6 +3832,7 @@ impl SessionsSidebar {
             row_key,
             waiting_for_approval: own_flags.waiting_for_approval,
             waiting_for_input: own_flags.waiting_for_input,
+            settle_blocked: own_flags.settle_blocked,
             background: own_flags.background,
             unsettled: own_flags.unsettled,
             wakes: own_flags.wakes,
@@ -4371,7 +4377,7 @@ impl SessionsSidebar {
         let can_fork = state.menu_can_fork;
         let is_worktree = state.is_worktree;
         let title_generating = state.title_generating;
-        let blocked = state.waiting_for_approval || state.waiting_for_input;
+        let settle_blocked = state.settle_blocked;
         let auto_settle_enabled = state.auto_settle_enabled;
         let follow_up = meta.follow_up.is_some();
         let parked = meta.parked_at.is_some();
@@ -4461,7 +4467,7 @@ impl SessionsSidebar {
                     } else {
                         Box::new(ThreadSettle(id.clone()))
                     },
-                    settled || (!running && !blocked),
+                    settled || !settle_blocked,
                 )
                 .when_some(moves, |menu, (up, down)| {
                     menu.menu_with_enable(
@@ -4660,13 +4666,11 @@ impl SessionsSidebar {
                     cx,
                 ),
                 |row, shown| {
-                    let blocked = store.read(cx).pending_approval_for(&meta.id)
-                        || store.read(cx).pending_user_input_for(&meta.id);
                     let slot = self.render_flat_thread_right_slot(
                         meta,
                         &state,
                         project_view_timestamp(meta),
-                        !blocked,
+                        !state.settle_blocked,
                         window,
                         cx,
                     );
@@ -4843,8 +4847,6 @@ impl SessionsSidebar {
                 .children(dot)
                 .child(title_or_input)
                 .when(!renaming, |line| {
-                    let blocked = store.read(cx).pending_approval_for(&meta.id)
-                        || store.read(cx).pending_user_input_for(&meta.id);
                     line.children(Self::follow_up_glyph(meta, &name, window, cx))
                         .children(self.pin_glyph(meta, &state, window, cx))
                         .children(self.pane_glyph(&state, window, cx))
@@ -4852,7 +4854,7 @@ impl SessionsSidebar {
                             meta,
                             &state,
                             tcode_core::thread_sort::shown_timestamp(meta),
-                            !working && !blocked,
+                            !state.settle_blocked,
                             window,
                             cx,
                         ))
@@ -7054,6 +7056,7 @@ mod tests {
                     },
                     waiting_for_approval: false,
                     waiting_for_input: false,
+                    settle_blocked: false,
                     failed: false,
                     unread: false,
                     fork: ForkAvailability::Available,
