@@ -875,7 +875,7 @@ impl MarkdownState {
         })
     }
 
-    /// Record where the document was placed; whether its size changed.
+    /// Record where the document was placed.
     fn update_layout(&mut self, bounds: Bounds<Pixels>) {
         self.bounds = bounds;
     }
@@ -1091,11 +1091,9 @@ mod tests {
         (view, cx)
     }
 
-    /// A code block streaming in fades in what each append adds and
-    /// nothing it held already, however long the block: the rest of a line
-    /// being written, then the lines after it.
     /// A formula streaming into a reply is laid out anew as its source
-    /// grows, while the words fading in were measured on its last layout.
+    /// grows, while the words fading in were measured on its last layout;
+    /// the draw panicked before 1fb54dc6.
     #[gpui::test]
     fn a_formula_streaming_in_draws_while_its_words_fade(cx: &mut TestAppContext) {
         let (view, cx) = open("", cx);
@@ -1107,6 +1105,9 @@ mod tests {
         }
     }
 
+    /// A code block streaming in fades in what each append adds and
+    /// nothing it held already, however long the block: the rest of a line
+    /// being written, then the lines after it.
     #[gpui::test]
     fn a_streaming_code_block_fades_in_only_what_an_append_adds(cx: &mut TestAppContext) {
         let (view, cx) = open("", cx);
