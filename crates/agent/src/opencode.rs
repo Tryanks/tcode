@@ -2610,11 +2610,10 @@ impl Server {
     }
 
     fn subscribe(&self) -> Result<(Receiver<Transport>, Sender<Transport>), AgentError> {
-        // The event stream idles between turns (with a heartbeat every 15 s),
-        // so it gets its own agent without the REST read timeout.
+        // The event stream idles between turns, so it gets its own agent
+        // without the REST read timeout; stopping the server ends the read.
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(1))
-            .timeout_read(Duration::from_secs(24 * 60 * 60))
             .build();
         let response = agent
             .get(&format!("{}/api/event", self.http.base))
