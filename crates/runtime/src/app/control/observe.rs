@@ -18,7 +18,6 @@ const SEARCH_CAP: u32 = 50;
 const PER_TURN_CAP: usize = 200;
 /// How many collapsed threads, and how many left-out thread ids, a review lists by name.
 const REVIEW_LIST_CAP: usize = 100;
-const ASSISTANT_HEAD_CHARS: usize = 300;
 /// A thread active this recently is still in progress for a review, whatever its run state.
 const JUST_ACTIVE_MS: u64 = 10 * 60 * 1000;
 const REVIEW_WINDOW_MS: u64 = 7 * DAY_MS;
@@ -319,8 +318,8 @@ struct TerminalAnswer {
 #[derive(Debug, Clone, Serialize)]
 struct LastTurn {
     status: Option<TurnStatus>,
-    /// The head of the latest assistant message, redacted and fenced as data.
-    assistant_head: Option<String>,
+    /// The latest assistant message, redacted and fenced as data.
+    assistant_message: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -457,14 +456,6 @@ fn tail(text: &str, max: usize) -> (&str, bool) {
     (&text[start..], true)
 }
 
-fn head_chars(text: &str, max: usize) -> String {
-    let mut head: String = text.chars().take(max).collect();
-    if head.len() < text.len() {
-        head.push('…');
-    }
-    head
-}
-
 fn approval_kind(kind: &agent::ApprovalKind) -> &'static str {
     match kind {
         agent::ApprovalKind::ExecCommand { .. } => "exec_command",
@@ -485,12 +476,11 @@ fn last_turn(thread_id: &str, timeline: &Timeline) -> (LastTurn, usize) {
             EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => Some(text.as_str()),
             _ => None,
         });
-    let (assistant_head, redacted) = match message {
+    let (assistant_message, redacted) = match message {
         Some(text) => {
             let (text, redacted) = redact(text);
-            let head = head_chars(&text, ASSISTANT_HEAD_CHARS);
             (
-                Some(fence(&format!("{thread_id} last assistant message"), &head)),
+                Some(fence(&format!("{thread_id} last assistant message"), &text)),
                 redacted,
             )
         }
@@ -499,7 +489,7 @@ fn last_turn(thread_id: &str, timeline: &Timeline) -> (LastTurn, usize) {
     (
         LastTurn {
             status: timeline.last_turn_status,
-            assistant_head,
+            assistant_message,
         },
         redacted,
     )

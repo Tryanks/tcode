@@ -375,7 +375,7 @@ fn review_candidates_changes_no_state_and_reports_coverage() {
     let forgotten = &review["candidates"][1];
     assert_eq!(forgotten["idle_days"], 40);
     assert!(
-        forgotten["last_turn"]["assistant_head"]
+        forgotten["last_turn"]["assistant_message"]
             .as_str()
             .unwrap()
             .contains("Next step is wiring the importer."),
