@@ -3197,30 +3197,6 @@ tools:
       running: "Requesting access"
       done: "Requested access"
       asked: "Request access"
-    dispatch:
-      running: "Dispatching"
-      done: "Dispatched"
-      asked: "Dispatch"
-    result:
-      running: "Reading the result of"
-      done: "Read the result of"
-      asked: "Read the result of"
-    check_threads:
-      running: "Checking"
-      done: "Checked"
-      asked: "Check"
-    settle:
-      running: "Settling"
-      done: "Settled"
-      asked: "Settle"
-    archive:
-      running: "Archiving"
-      done: "Archived"
-      asked: "Archive"
-    cancel:
-      running: "Cancelling"
-      done: "Cancelled"
-      asked: "Cancel"
     approve:
       running: "Answering an approval"
       done: "Answered an approval"
@@ -3320,7 +3296,6 @@ tools:
   threads: "%{count} threads"
   threads_caption: "Threads"
   message: "Message"
-  brief: "Brief"
   reason: "Reason"
   copy_link: "Copy link"
   tools_one: "1 tool"

@@ -3190,30 +3190,6 @@ tools:
       running: "申请权限中"
       done: "已申请权限"
       asked: "申请权限"
-    dispatch:
-      running: "派发中"
-      done: "已派发"
-      asked: "派发"
-    result:
-      running: "读取结果中"
-      done: "已读取结果"
-      asked: "读取结果"
-    check_threads:
-      running: "查看状态中"
-      done: "已查看状态"
-      asked: "查看状态"
-    settle:
-      running: "收尾中"
-      done: "已收尾"
-      asked: "收尾"
-    archive:
-      running: "归档中"
-      done: "已归档"
-      asked: "归档"
-    cancel:
-      running: "取消中"
-      done: "已取消"
-      asked: "取消"
     approve:
       running: "答复审批中"
       done: "已答复审批"
@@ -3313,7 +3289,6 @@ tools:
   threads: "%{count} 个线程"
   threads_caption: "线程"
   message: "消息"
-  brief: "任务说明"
   reason: "理由"
   copy_link: "复制链接"
   tools_one: "1 个工具"

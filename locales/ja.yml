@@ -3197,30 +3197,6 @@ tools:
       running: "アクセス権を要求中"
       done: "アクセス権を要求済み"
       asked: "アクセス権を要求"
-    dispatch:
-      running: "委任中"
-      done: "委任済み"
-      asked: "委任"
-    result:
-      running: "結果を読み取り中"
-      done: "結果を読み取り済み"
-      asked: "結果を読み取り"
-    check_threads:
-      running: "状態を確認中"
-      done: "状態を確認済み"
-      asked: "状態を確認"
-    settle:
-      running: "完了処理中"
-      done: "完了済み"
-      asked: "完了にする"
-    archive:
-      running: "アーカイブ中"
-      done: "アーカイブ済み"
-      asked: "アーカイブ"
-    cancel:
-      running: "キャンセル中"
-      done: "キャンセル済み"
-      asked: "キャンセル"
     approve:
       running: "承認リクエストに回答中"
       done: "承認リクエストに回答済み"
@@ -3320,7 +3296,6 @@ tools:
   threads: "%{count} 件のスレッド"
   threads_caption: "スレッド"
   message: "メッセージ"
-  brief: "タスクの説明"
   reason: "理由"
   copy_link: "リンクをコピー"
   tools_one: "1 個のツール"

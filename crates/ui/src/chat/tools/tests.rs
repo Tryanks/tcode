@@ -1615,28 +1615,6 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
             notify,
             read("Set a watch on", None, Some("00000053, 00000065"), None),
         ),
-        (
-            "toolu_010000000000000000000102",
-            with(
-                read(
-                    "Dispatched",
-                    None,
-                    Some("Investigate cache persistence/replay lifecycle"),
-                    None,
-                ),
-                Some("codex · gpt-5.6-sol"),
-                Vec::new(),
-            ),
-        ),
-        (
-            "toolu_010000000000000000000104",
-            read(
-                "Read the result of",
-                None,
-                Some("00000067"),
-                Some("thread is still running"),
-            ),
-        ),
     ] {
         assert_eq!(thread.header(id, cx), expected, "{id}");
     }
