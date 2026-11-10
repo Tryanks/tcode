@@ -260,7 +260,6 @@ markdown:
   image_copy_address: "复制图片地址"
   mermaid_diagram: "Mermaid 图表"
   mermaid_drawing: "正在绘制图表…"
-  mermaid_error: "无法绘制图表"
   mermaid_error_detail: "无法绘制图表：%{message}"
   mermaid_show_source: "显示 Mermaid 源码"
   mermaid_show_diagram: "显示图表"

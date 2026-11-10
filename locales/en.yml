@@ -260,7 +260,6 @@ markdown:
   image_copy_address: "Copy image address"
   mermaid_diagram: "Mermaid diagram"
   mermaid_drawing: "Drawing diagram…"
-  mermaid_error: "Diagram could not be drawn"
   mermaid_error_detail: "Diagram could not be drawn: %{message}"
   mermaid_show_source: "Show Mermaid source"
   mermaid_show_diagram: "Show diagram"

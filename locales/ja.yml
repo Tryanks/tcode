@@ -260,7 +260,6 @@ markdown:
   image_copy_address: "画像のアドレスをコピー"
   mermaid_diagram: "Mermaid 図"
   mermaid_drawing: "図を描画中…"
-  mermaid_error: "図を描画できませんでした"
   mermaid_error_detail: "図を描画できませんでした：%{message}"
   mermaid_show_source: "Mermaid ソースを表示"
   mermaid_show_diagram: "図を表示"
