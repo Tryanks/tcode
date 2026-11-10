@@ -70,8 +70,7 @@ impl SettingsPage {
             .trim()
             .parse::<f64>()
             .ok()
-            .filter(|value| value.is_finite())
-            .map(|value| value.clamp(*AUTO_SETTLE_DAYS.start(), *AUTO_SETTLE_DAYS.end()));
+            .filter(|value| value.is_finite());
         let value = parsed.unwrap_or(stored);
         self.auto_settle_input.dirty = false;
         self.auto_settle_input.push(value.to_string(), window, cx);
@@ -842,8 +841,7 @@ impl ProjectRulesEditor {
             .trim()
             .parse::<f64>()
             .ok()
-            .filter(|value| value.is_finite())
-            .map(|value| value.clamp(*AUTO_SETTLE_DAYS.start(), *AUTO_SETTLE_DAYS.end()));
+            .filter(|value| value.is_finite());
         let value = parsed.unwrap_or(stored);
         self.days.update(cx, |input, cx| {
             input.set_value(value.to_string(), window, cx)
