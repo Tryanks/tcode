@@ -1371,12 +1371,9 @@ impl SessionActor for Actor {
         self.background_terminal_read
     }
 
+    /// The actor loop calls this once [`Self::wake_at`] has come.
     async fn wake(&mut self) -> Result<(), String> {
-        if self
-            .background_terminal_read
-            .is_some_and(|at| at <= std::time::Instant::now())
-        {
-            self.background_terminal_read = None;
+        if self.background_terminal_read.take().is_some() {
             return self.read_background_terminals();
         }
         Ok(())
@@ -6017,7 +6014,7 @@ mod tests {
                 )
                 .await;
             while events.try_recv().is_ok() {}
-            actor.background_terminal_read = Some(std::time::Instant::now());
+            assert!(actor.wake_at().is_some(), "the turn's end schedules a read");
             actor.wake().await.unwrap();
             let list = sent(&mut actor).await;
             assert_eq!(list["method"], "thread/backgroundTerminals/list");
@@ -6054,7 +6051,6 @@ mod tests {
                 Ok(AgentEvent::BackgroundTasksChanged { count: 1 })
             ));
 
-            actor.background_terminal_read = Some(std::time::Instant::now());
             actor.wake().await.unwrap();
             let again = sent(&mut actor).await;
             answer(&mut actor, &again, running).await;
@@ -6203,8 +6199,6 @@ mod tests {
                     retry_at: None,
                 })]
             );
-            // The turn's end scheduled a background-terminal read; it has come due.
-            actor.background_terminal_read = Some(std::time::Instant::now());
             actor
                 .handle_command(SessionCommand::RetryTurn {
                     turn_id: "overloaded".into(),
