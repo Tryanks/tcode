@@ -1622,9 +1622,6 @@ impl PiMapper {
             tool.output = output;
             tool.result = result.cloned();
         }
-        if status == ItemStatus::Failed {
-            self.failed = true;
-        }
         let item = tool_item(&id, tool, status);
         vec![match status {
             ItemStatus::InProgress if has_result => AgentEvent::ItemUpdated(item),
@@ -2292,11 +2289,13 @@ mod tests {
     /// `read` tools returned in a scratch directory (`createToolDefinition(..)
     /// .execute`), in the `tool_execution_*` events `pi --mode rpc` forwards
     /// verbatim. The items keep bash's exit code, edit's unified patch, the
-    /// written text and the read image.
+    /// written text and the read image; the failed bash fails its own item,
+    /// not the turn pi finished.
     #[test]
     fn tool_results_keep_exit_code_patch_and_images() {
         let mut mapper = PiMapper::new();
         let mut completed = Vec::new();
+        mapper.on_message(&json!({"type":"agent_start"}));
         for line in include_str!("../tests/fixtures/pi/tool_results.jsonl").lines() {
             for event in mapper.on_message(&serde_json::from_str(line).unwrap()) {
                 if let AgentEvent::ItemCompleted(item) = event {
@@ -2304,6 +2303,15 @@ mod tests {
                 }
             }
         }
+        assert!(matches!(
+            mapper
+                .on_message(&json!({"type":"agent_settled","aborted":false}))
+                .as_slice(),
+            [AgentEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                ..
+            }]
+        ));
         assert_eq!(
             completed,
             [
