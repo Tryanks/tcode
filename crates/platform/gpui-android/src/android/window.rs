@@ -491,9 +491,6 @@ impl AndroidWindow {
 
     pub(crate) fn handle_motion(&self, event: &android_activity::input::MotionEvent<'_>) -> bool {
         let action = event.action();
-        if event.pointer_count() == 0 {
-            return false;
-        }
         if !matches!(
             action,
             MotionAction::Down
@@ -512,9 +509,7 @@ impl AndroidWindow {
         );
         host::request_frame();
 
-        let action_pointer = event
-            .pointer_index()
-            .min(event.pointer_count().saturating_sub(1));
+        let action_pointer = event.pointer_index();
         let scale = self.scale_factor();
         let down_time = u64::try_from(event.down_time()).unwrap_or_default();
         // ACTION_DOWN begins every gesture, so no finger of an earlier one is
