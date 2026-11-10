@@ -1,7 +1,8 @@
-//! Creating `tcode.db`, once: from the JSON index (`sessions.json`) and the
-//! per-thread JSONL logs older builds wrote, or empty on a fresh install.
-//! The file is built in the layout of `user_version` 1, which the store then
-//! turns over to its own like any older build's ([`super::source`]).
+//! Creating `tcode.db`, once: empty in the current schema on a fresh install,
+//! or from the JSON index (`sessions.json`) and the per-thread JSONL logs
+//! older builds wrote. A migrated file is built in the layout of
+//! `user_version` 1, which the store then turns over to its own like any
+//! older build's ([`super::source`]).
 //!
 //! The database is built and verified under a staging name and published by
 //! a rename, so a file at the final name is always complete:
@@ -38,7 +39,7 @@ use std::time::Instant;
 
 use tcode_core::project::{IndexFile, SessionMeta, migrate_index};
 
-use super::db::{Db, V1_SCHEMA, V1_VERSION, blob, integer, wal_path};
+use super::db::{Db, SCHEMA, SCHEMA_VERSION, V1_SCHEMA, V1_VERSION, blob, integer, wal_path};
 use super::{DB_FILE, read_index};
 
 const STAGING_FILE: &str = "tcode.db.migrating";
@@ -128,6 +129,10 @@ pub(super) fn run(
         return Ok(Migration::Completed);
     }
     remove_staging(root)?;
+    if legacy_sources(root)?.is_empty() {
+        create_empty(root)?;
+        return Ok(Migration::Completed);
+    }
     let started = Instant::now();
     let mut progress = Progress {
         report,
@@ -175,6 +180,29 @@ pub(super) fn run(
     progress.finish(MigrationPhase::Archiving);
     archive_sources(root)?;
     Ok(Migration::Completed)
+}
+
+/// A fresh install's `tcode.db`, in the current schema, staged and published
+/// like a migrated one.
+fn create_empty(root: &Path) -> io::Result<()> {
+    let staging = root.join(STAGING_FILE);
+    let db = Db::open(&staging, Some(SCHEMA))?;
+    db.write(|db, connection| {
+        db.execute(
+            connection,
+            &format!("PRAGMA user_version = {SCHEMA_VERSION}"),
+            (),
+        )
+        .map(drop)
+    })?;
+    db.checkpoint()?;
+    drop(db);
+    match fs::remove_file(wal_path(&staging)) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    sync_file(&staging)?;
+    publish(root, &[])
 }
 
 #[derive(Debug)]
