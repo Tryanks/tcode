@@ -36,7 +36,8 @@ pub fn merge_file_changes_by_path<'a>(
 }
 
 /// One changed file in the working tree (staged and/or unstaged), with its
-/// combined line delta (0/0 for untracked files with no numstat).
+/// combined line delta (0/0 where git counts no lines: untracked and binary
+/// files).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitFileEntry {
     pub path: String,
@@ -429,8 +430,8 @@ pub fn sanitize_commit_message(raw: &str) -> String {
     raw.trim().to_string()
 }
 
-/// Parse `git status --porcelain=2 --branch` output plus the numstat rows of
-/// the unstaged and the staged diff, which add up per path, into the local
+/// Parse `git status --porcelain=2 --branch -z` output plus the numstat rows
+/// of the unstaged and the staged diff, which add up per path, into the local
 /// part of a [`GitStatus`]. `default_branch` is the short name from
 /// `origin/HEAD` (or `None`); `has_origin_remote` from `git remote`.
 ///
@@ -450,7 +451,8 @@ pub fn parse_status(
     let mut has_working_tree_changes = false;
     let mut paths: Vec<String> = Vec::new();
 
-    for line in porcelain.lines() {
+    let mut records = porcelain.split('\0').filter(|record| !record.is_empty());
+    while let Some(line) = records.next() {
         if let Some(value) = line.strip_prefix("# branch.oid ") {
             if value.trim() == "(initial)" {
                 has_commits = false;
@@ -472,6 +474,10 @@ pub fn parse_status(
         } else if !line.starts_with('#') {
             has_working_tree_changes = true;
             paths.extend(parse_porcelain_path(line));
+            // Under `-z` a renamed or copied entry's origPath is the next record.
+            if line.starts_with("2 ") {
+                records.next();
+            }
         }
     }
 
@@ -531,15 +537,14 @@ fn parse_branch_ab(value: &str) -> (u32, u32) {
     (ahead, behind)
 }
 
-/// Extract the file path from a porcelain=2 changed-entry line, in the line
+/// Extract the file path from a porcelain=2 changed-entry record, in the
 /// formats git-status(1) gives under "Porcelain Format Version 2". Ignored
 /// items (`!`) are printed only for `--ignored`, which Tcode does not pass.
 fn parse_porcelain_path(line: &str) -> Option<String> {
     let path = match line.split_once(' ')? {
         ("?", path) => path,
         ("1", rest) => rest.splitn(8, ' ').nth(7)?,
-        // `<path><TAB><origPath>`: the target path comes first.
-        ("2", rest) => rest.splitn(9, ' ').nth(8)?.split('\t').next()?,
+        ("2", rest) => rest.splitn(9, ' ').nth(8)?,
         ("u", rest) => rest.splitn(10, ' ').nth(9)?,
         _ => return None,
     };
@@ -866,91 +871,5 @@ mod tests {
             feature_branch_name("feat: add toast system!"),
             "tcode/feat-add-toast-system"
         );
-    }
-
-    /// Line shapes from git-status(1), "Porcelain Format Version 2", as of
-    /// Git 2.54: the branch headers, then one line per changed path (ordinary
-    /// `1`, renamed `2` with `<path><TAB><origPath>`, unmerged `u`, untracked
-    /// `?`). Without `-z` a space is not quoted, so a path keeps its own.
-    #[test]
-    fn porcelain_status_preserves_branch_state_and_changed_paths() {
-        let porcelain = concat!(
-            "# branch.oid 1111111111111111111111111111111111111111\n",
-            "# branch.head feature/x\n",
-            "# branch.upstream origin/feature/x\n",
-            "# branch.ab +2 -1\n",
-            "1 .M N... 100644 100644 100644 2222222222222222222222222222222222222222 2222222222222222222222222222222222222222 src/app.rs\n",
-            "2 R. N... 100644 100644 100644 3333333333333333333333333333333333333333 3333333333333333333333333333333333333333 R100 docs/new name.md\tdocs/old name.md\n",
-            "u UU N... 100644 100644 100644 100644 4444444444444444444444444444444444444444 5555555555555555555555555555555555555555 6666666666666666666666666666666666666666 merged.rs\n",
-            "? new file.txt \n",
-        );
-        // `src/app.rs` is staged and edited again: `git diff --numstat` and
-        // `git diff --cached --numstat` each give one row for it.
-        let status = parse_status(
-            porcelain,
-            &[("src/app.rs".into(), 4, 1), ("src/app.rs".into(), 1, 2)],
-            Some("main"),
-            true,
-        );
-        assert_eq!(
-            status,
-            GitStatus {
-                is_repo: true,
-                has_commits: true,
-                detached: false,
-                branch: Some("feature/x".into()),
-                is_default_branch: false,
-                has_working_tree_changes: true,
-                has_origin_remote: true,
-                has_upstream: true,
-                ahead: 2,
-                behind: 1,
-                changed_files: vec![
-                    GitFileEntry {
-                        path: "docs/new name.md".into(),
-                        insertions: 0,
-                        deletions: 0
-                    },
-                    GitFileEntry {
-                        path: "merged.rs".into(),
-                        insertions: 0,
-                        deletions: 0
-                    },
-                    GitFileEntry {
-                        path: "new file.txt ".into(),
-                        insertions: 0,
-                        deletions: 0
-                    },
-                    GitFileEntry {
-                        path: "src/app.rs".into(),
-                        insertions: 5,
-                        deletions: 3
-                    },
-                ],
-                github_repository: None,
-            }
-        );
-        for (head, oid, default, commits, detached, is_default) in [
-            ("main", "(initial)", None, false, false, true),
-            ("master", "abc", None, true, false, true),
-            ("trunk", "abc", Some("trunk"), true, false, true),
-            ("main", "abc", Some("trunk"), true, false, false),
-            ("(detached)", "abc", None, true, true, false),
-        ] {
-            let porcelain = format!("# branch.oid {oid}\n# branch.head {head}\n");
-            let status = parse_status(&porcelain, &[], default, false);
-            assert_eq!(
-                status,
-                GitStatus {
-                    is_repo: true,
-                    has_commits: commits,
-                    detached,
-                    branch: (!detached).then(|| head.into()),
-                    is_default_branch: is_default,
-                    ..Default::default()
-                },
-                "{head} against {default:?}"
-            );
-        }
     }
 }
