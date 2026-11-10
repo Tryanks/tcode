@@ -542,10 +542,10 @@ fn refresh_process_info(
 }
 
 /// The foreground process's name and directory, refreshed on one worker per
-/// terminal that sleeps until it is asked.
+/// terminal that sleeps until it is asked. A request made while a refresh
+/// waits is covered by that refresh's trailing read.
 #[derive(Clone)]
 struct ProcessRefresh {
-    info: Arc<pty_info::PtyInfo>,
     running: Arc<AtomicBool>,
     wake: std::sync::mpsc::Sender<()>,
 }
@@ -559,31 +559,26 @@ impl ProcessRefresh {
     ) -> io::Result<Self> {
         let (wake, woken) = std::sync::mpsc::channel::<()>();
         let running = Arc::new(AtomicBool::new(false));
-        let worker_info = info.clone();
         let worker_running = running.clone();
         thread::Builder::new()
             .name("tcode-terminal-pty-info".into())
             .spawn(move || {
                 while woken.recv().is_ok() {
-                    refresh_process_info(&worker_info, &shared, &notifications);
+                    refresh_process_info(&info, &shared, &notifications);
                     // Input/output can precede the shell applying `cd` or
-                    // launching its foreground process. One bounded trailing
-                    // refresh catches that transition even when the command
-                    // itself is silent.
+                    // launching its foreground process, and the OS announces
+                    // neither. One trailing refresh catches that transition
+                    // even when the command itself is silent.
                     thread::sleep(Duration::from_millis(300));
-                    refresh_process_info(&worker_info, &shared, &notifications);
+                    refresh_process_info(&info, &shared, &notifications);
                     worker_running.store(false, Ordering::Release);
                 }
             })?;
-        Ok(Self {
-            info,
-            running,
-            wake,
-        })
+        Ok(Self { running, wake })
     }
 
     fn schedule(&self) {
-        if !self.info.should_refresh() || self.running.swap(true, Ordering::AcqRel) {
+        if self.running.swap(true, Ordering::AcqRel) {
             return;
         }
         if self.wake.send(()).is_err() {
