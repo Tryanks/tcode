@@ -4511,9 +4511,6 @@ fn subagent_description(input: &Value) -> String {
         })
 }
 
-/// Classify approvals with an ordered substring matcher. Read-only matches
-/// take precedence (`WebSearch` → `FileRead`); agent tools use `ToolUse` even
-/// when their names also match command or file-change substrings.
 /// The tool Claude Code calls to present its plan and leave plan mode.
 const EXIT_PLAN_MODE: &str = "ExitPlanMode";
 
@@ -4527,35 +4524,15 @@ fn plan_markdown(input: &Value) -> String {
         .to_owned()
 }
 
+/// The Claude Code tools (2.1.322) whose approval has a category of its own;
+/// every other tool, an MCP tool included, asks as itself.
 fn classify_claude_tool(name: &str) -> ClaudeRequestType {
-    let n = name.to_lowercase();
-    if n == "read"
-        || n.contains("read file")
-        || n.contains("view")
-        || n.contains("grep")
-        || n.contains("glob")
-        || n.contains("search")
-    {
-        return ClaudeRequestType::FileRead;
+    match name {
+        "Read" | "Glob" | "Grep" | "WebSearch" => ClaudeRequestType::FileRead,
+        "Bash" | "PowerShell" => ClaudeRequestType::ExecCommand,
+        "Write" | "Edit" | "NotebookEdit" => ClaudeRequestType::FileChange,
+        _ => ClaudeRequestType::ToolUse,
     }
-    if is_agent_tool(&n) {
-        return ClaudeRequestType::ToolUse;
-    }
-    if n.contains("bash") || n.contains("command") || n.contains("shell") || n.contains("terminal")
-    {
-        return ClaudeRequestType::ExecCommand;
-    }
-    if n.contains("edit")
-        || n.contains("write")
-        || n.contains("file")
-        || n.contains("patch")
-        || n.contains("replace")
-        || n.contains("create")
-        || n.contains("delete")
-    {
-        return ClaudeRequestType::FileChange;
-    }
-    ClaudeRequestType::ToolUse
 }
 
 /// Summarize a command, subagent brief, or tool input for its approval prompt.
@@ -4652,7 +4629,6 @@ fn file_changes(name: &str, input: &Value) -> Vec<FileChange> {
     let path = input
         .get("file_path")
         .or_else(|| input.get("notebook_path"))
-        .or_else(|| input.get("path"))
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
@@ -7091,6 +7067,49 @@ mod tests {
                 assert!(detail.ends_with("..."));
                 assert!(detail.len() < input["blob"].as_str().unwrap().len());
             }
+        }
+    }
+
+    /// Tools that write no file and run no command ask as themselves, under
+    /// their own name and input: Claude Code 2.1.322's task tools (inputs from
+    /// their schemas in the bundle) and Tcode's control MCP tools as Claude
+    /// Code names them (inputs from `crates/control-mcp/src/params.rs`).
+    #[test]
+    fn a_tool_that_changes_no_file_asks_as_itself() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        for (tool, input) in [
+            (
+                "TodoWrite",
+                json!({"todos":[{"content":"Wire the parser","status":"pending","activeForm":"Wiring the parser"}]}),
+            ),
+            (
+                "TaskCreate",
+                json!({"subject":"Wire the parser","description":"Map the new frames"}),
+            ),
+            (
+                "mcp__tcode_control__create_project",
+                json!({"root":"/work/parser"}),
+            ),
+            (
+                "mcp__tcode_control__read_terminal",
+                json!({"terminal_id":3}),
+            ),
+        ] {
+            let events = m.on_message(json!({
+                "type": "control_request",
+                "request_id": "ask-as-itself",
+                "request": {"subtype":"can_use_tool", "tool_name":tool, "input":input, "tool_use_id":"toolu_ask"},
+            }));
+            let [AgentEvent::ApprovalRequested(request)] = events.as_slice() else {
+                panic!("expected one approval request for {tool}, got {events:?}");
+            };
+            assert!(
+                matches!(&request.kind, ApprovalKind::ToolUse { name, input: asked, .. }
+                    if name == tool && *asked == input),
+                "{tool}: {:?}",
+                request.kind
+            );
         }
     }
 
