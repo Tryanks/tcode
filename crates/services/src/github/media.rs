@@ -22,8 +22,6 @@ const MAX_REDIRECTS: usize = 3;
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a client may reuse the bytes before asking again.
 const EXPIRY: Duration = Duration::from_secs(3600);
-const MAX_SIDE: u32 = 8192;
-const MAX_PIXELS: u64 = 24_000_000;
 
 /// How the host reads a URL a pull request names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,17 +142,14 @@ pub(crate) fn type_from_name(url: &Url) -> Option<&'static str> {
 }
 
 /// An SVG is a document; the client draws it as an image only, so its dimensions are the
-/// layout's. Every other image must decode to bounded dimensions.
+/// layout's. Every other image must be one whose dimensions the image crate reads.
 pub(crate) fn bounded(mime: &str, bytes: &[u8]) -> Result<(), GitHubError> {
     if mime != "image/svg+xml" {
-        let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
+        image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()
             .ok()
             .and_then(|reader| reader.into_dimensions().ok())
             .ok_or(GitHubError::UnsupportedMedia)?;
-        if width > MAX_SIDE || height > MAX_SIDE || width as u64 * height as u64 > MAX_PIXELS {
-            return Err(GitHubError::BodyTooLarge);
-        }
     }
     Ok(())
 }
