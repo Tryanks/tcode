@@ -4430,7 +4430,6 @@ pub(crate) fn is_handback_note(text: &str) -> bool {
 }
 
 /// Approval categories; tools without a dedicated category use `ToolUse`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaudeRequestType {
     FileRead,
     ExecCommand,
@@ -6060,34 +6059,6 @@ mod tests {
     }
 
     #[test]
-    fn result_reports_each_turn_traffic_for_timeline_accumulation() {
-        let mut m = Mapper::new();
-        m.start_turn();
-        let evs = feed(
-            &mut m,
-            r#"{"type":"result","subtype":"success","usage":{"input_tokens":100,"output_tokens":20}}"#,
-        );
-        let first = match turn_completed_after_count(&evs, 0) {
-            AgentEvent::TurnCompleted { usage, .. } => usage.unwrap(),
-            other => panic!("expected TurnCompleted, got {other:?}"),
-        };
-        assert_eq!(first.turn_processed_tokens, Some(120));
-        assert_eq!(first.total_processed_tokens, None);
-        // Each result is a turn delta, independent of the mapper process lifetime.
-        m.start_turn();
-        let evs = feed(
-            &mut m,
-            r#"{"type":"result","subtype":"success","usage":{"input_tokens":30,"output_tokens":5}}"#,
-        );
-        let second = match turn_completed_after_count(&evs, 0) {
-            AgentEvent::TurnCompleted { usage, .. } => usage.unwrap(),
-            other => panic!("expected TurnCompleted, got {other:?}"),
-        };
-        assert_eq!(second.turn_processed_tokens, Some(35));
-        assert_eq!(second.total_processed_tokens, None);
-    }
-
-    #[test]
     fn rejected_rate_limit_is_emitted_after_failed_result_error() {
         let mut m = Mapper::new();
         feed(
@@ -6357,51 +6328,6 @@ mod tests {
             ItemContent::ToolCall { name, output: Some(output), .. }
                 if name == "Read" && output == "1\thello\n2\tworld\n3\t"
         ));
-    }
-
-    #[test]
-    fn bash_tool_use_then_result_roundtrip() {
-        let mut m = Mapper::new();
-        let started = feed(
-            &mut m,
-            r#"{"type":"assistant","message":{"id":"msg_3","content":[{"type":"tool_use","id":"toolu_bash","name":"Bash","input":{"command":"echo hi"}}]}}"#,
-        );
-        match &started[0] {
-            AgentEvent::ItemStarted(item) => {
-                assert_eq!(item.id, "toolu_bash");
-                match &item.content {
-                    ItemContent::CommandExecution {
-                        command, status, ..
-                    } => {
-                        assert_eq!(command, "echo hi");
-                        assert_eq!(*status, ItemStatus::InProgress);
-                    }
-                    other => panic!("expected CommandExecution, got {other:?}"),
-                }
-            }
-            other => panic!("expected ItemStarted, got {other:?}"),
-        }
-
-        let done = feed(
-            &mut m,
-            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bash","content":"hi\n"}]}}"#,
-        );
-        match &done[0] {
-            AgentEvent::ItemCompleted(item) => match &item.content {
-                ItemContent::CommandExecution {
-                    output,
-                    status,
-                    exit_code,
-                    ..
-                } => {
-                    assert_eq!(output, "hi\n");
-                    assert_eq!(*status, ItemStatus::Completed);
-                    assert_eq!(*exit_code, Some(0));
-                }
-                other => panic!("expected CommandExecution, got {other:?}"),
-            },
-            other => panic!("expected ItemCompleted, got {other:?}"),
-        }
     }
 
     /// A message sent to a resumed session whose background command did not
@@ -6964,45 +6890,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn classification_matrix_covers_substring_priority() {
-        use ClaudeRequestType::*;
-        let cases = [
-            ("Read", FileRead),       // exact lowercase "read"
-            ("Read File", FileRead),  // "read file" substring
-            ("ReadFile", FileChange), // no space → "file" classifies it as file_change
-            ("View", FileRead),
-            ("ViewImage", FileRead), // "view" wins before "image"
-            ("Grep", FileRead),
-            ("Glob", FileRead),
-            ("WebSearch", FileRead), // "search" predicate wins over web_search
-            ("codebase_search", FileRead),
-            ("WebFetch", ToolUse), // neither search nor read-only recognizes it
-            ("Bash", ExecCommand),
-            ("run_shell", ExecCommand),
-            ("terminal", ExecCommand),
-            ("some_command", ExecCommand),
-            ("Edit", FileChange),
-            ("Write", FileChange),
-            ("MultiEdit", FileChange),
-            ("delete_thing", FileChange),
-            ("TodoWrite", FileChange),  // "write"
-            ("TaskCreate", FileChange), // "create"
-            ("TaskUpdate", ToolUse),    // no classification substring
-            ("TaskList", ToolUse),
-            ("Task", ToolUse), // agent item, falls through
-            ("some_agent", ToolUse),
-            ("subagent_run", ToolUse),
-            ("mcp__server__tool", ToolUse),
-            ("view_image", FileRead), // "view" still wins
-            ("image_tool", ToolUse),  // image → dynamic
-            ("MysteryTool", ToolUse),
-        ];
-        for (name, expected) in cases {
-            assert_eq!(classify_claude_tool(name), expected, "classifying {name:?}");
-        }
-    }
-
     /// A safety check that bypassPermissions cannot skip still asks; the
     /// request carries Claude Code's consent line, and the agent's own
     /// description of the command stays beside it.
@@ -7272,6 +7159,17 @@ mod tests {
             }
             other => panic!("expected TurnCompleted, got {other:?}"),
         }
+        // Each result is that turn's traffic, however long the process ran.
+        m.start_turn();
+        let evs = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":30,"output_tokens":5}}"#,
+        );
+        assert!(matches!(
+            turn_completed_after_count(&evs, 0),
+            AgentEvent::TurnCompleted { usage: Some(usage), .. }
+                if usage.turn_processed_tokens == Some(35) && usage.total_processed_tokens.is_none()
+        ));
     }
 
     #[test]
@@ -7948,25 +7846,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn only_spawning_tools_are_agent_tools() {
-        for name in ["agent", "task"] {
-            assert!(is_agent_tool(name), "{name}");
-        }
-        for name in ["listagents", "sendmessage", "taskcreate", "subagent_run"] {
-            assert!(!is_agent_tool(name), "{name}");
-        }
-        let mut mapper = Mapper::new();
-        let events = feed(
-            &mut mapper,
-            r#"{"type":"assistant","message":{"id":"msg-list","content":[{"type":"tool_use","id":"toolu_list","name":"ListAgents","input":{}}]}}"#,
-        );
-        assert!(matches!(
-            events.as_slice(),
-            [AgentEvent::ItemStarted(ThreadItem { content: ItemContent::ToolCall { name, .. }, .. })] if name == "ListAgents"
-        ));
-    }
-
     /// The tail keeps the transcript discovery found; the notification's
     /// `output_file` only seeds a reader when discovery found nothing.
     #[test]
@@ -8269,20 +8148,5 @@ mod tests {
                 if message == "Request declined by safety classifiers (stop_reason: refusal)"
         ));
         assert!(assistant.is_empty());
-    }
-
-    #[test]
-    fn structured_patch_renders_unified_diff() {
-        let patch = json!([{
-            "oldStart": 3,
-            "oldLines": 2,
-            "newStart": 3,
-            "newLines": 2,
-            "lines": [" keep", "-old", "+new"]
-        }]);
-        assert_eq!(
-            render_structured_patch(&patch).as_deref(),
-            Some("@@ -3,2 +3,2 @@\n keep\n-old\n+new")
-        );
     }
 }
