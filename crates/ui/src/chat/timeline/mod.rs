@@ -195,6 +195,8 @@ impl TimelineView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // GPUI's list, not gpui-base's `VirtualList`, which takes every row's
+        // size up front: a row's height here is known only once it is laid out.
         // Measure enough rows to establish the six-screen window even when
         // distant rows still have unknown heights in ListState's summary.
         let height = f32::from(window.bounds().size.height);
