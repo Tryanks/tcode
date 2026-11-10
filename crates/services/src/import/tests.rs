@@ -66,7 +66,9 @@ fn tool(
 /// `codex app-server generate-ts` prints it for that release, and
 /// `context_compacted` is an `EventMsg` variant of it. "aborted before
 /// dispatch" is the text its tool dispatcher (`core/src/tools/parallel.rs`)
-/// gives a call it dropped.
+/// gives a call it dropped. `thread_rolled_back` is the `EventMsg` variant
+/// (`ThreadRolledBackEvent { num_turns }`, `protocol/src/protocol.rs` at
+/// `rust-v0.167.0`) that release keeps replaying from existing rollouts.
 const CODEX_ROLLOUT: &str = r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000001","timestamp":"2026-01-02T03:04:05.000Z","cwd":"/work/example","originator":"codex_cli_rs","cli_version":"0.167.0"}}
 {"timestamp":"2026-01-02T03:04:07.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"List the files"}]}}
 {"timestamp":"2026-01-02T03:04:08.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Listing first."}],"encrypted_content":null}}
@@ -78,11 +80,16 @@ const CODEX_ROLLOUT: &str = r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"s
 {"timestamp":"2026-01-02T03:04:14.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"make\",\"test\"]}","call_id":"call_open"}}
 {"timestamp":"2026-01-02T03:04:15.000Z","type":"event_msg","payload":{"type":"context_compacted"}}
 {"timestamp":"2026-01-02T03:04:16.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}
+{"timestamp":"2026-01-02T03:04:17.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Delete the build"}]}}
+{"timestamp":"2026-01-02T03:04:18.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"rm\",\"-r\",\"build\"]}","call_id":"call_rolled_back"}}
+{"timestamp":"2026-01-02T03:04:19.000Z","type":"event_msg","payload":{"type":"thread_rolled_back","num_turns":1}}
+{"timestamp":"2026-01-02T03:04:20.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Keep the build"}]}}
 "#;
 
 /// A rollout shows what Codex recorded: a local shell call shows the
 /// command in its `action`, a call shows the output answered to its
-/// `call_id`, and a call Codex dropped or never answered is interrupted.
+/// `call_id`, a call Codex dropped or never answered is interrupted, and a
+/// turn the user rolled back is gone.
 #[test]
 fn a_codex_rollout_imports_as_codex_recorded_it() {
     let rollout = Transcript::new(CODEX_ROLLOUT);
@@ -123,6 +130,7 @@ fn a_codex_rollout_imports_as_codex_recorded_it() {
                 text: "Done.".into(),
                 summarized: false,
             }),
+            user("Keep the build"),
         ]
     );
 }

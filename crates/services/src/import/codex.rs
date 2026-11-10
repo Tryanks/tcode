@@ -268,12 +268,16 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                     _ => {}
                 }
             }
-            Some("event_msg")
-                if value.pointer("/payload/type").and_then(Value::as_str)
-                    == Some("context_compacted") =>
-            {
-                entries.push(ConvertedEntry::Compacted { ts });
-            }
+            Some("event_msg") => match value.pointer("/payload/type").and_then(Value::as_str) {
+                Some("context_compacted") => entries.push(ConvertedEntry::Compacted { ts }),
+                Some("thread_rolled_back") => {
+                    if let Some(turns) = value.pointer("/payload/num_turns").and_then(Value::as_u64)
+                    {
+                        roll_back(&mut entries, &mut pending, turns);
+                    }
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -292,6 +296,37 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
         title: None,
         entries,
     })
+}
+
+/// Drop the last `turns` user turns, as Codex replays a rollback
+/// (`ContextManager::drop_last_n_user_turns`): everything from the user
+/// message that opens the first dropped turn on, and when there are no more
+/// turns than that, from the first user message on.
+fn roll_back(entries: &mut Vec<ConvertedEntry>, pending: &mut HashMap<String, usize>, turns: u64) {
+    let starts: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            matches!(
+                entry,
+                ConvertedEntry::Item {
+                    item: ThreadItem {
+                        content: ItemContent::UserMessage { .. },
+                        ..
+                    },
+                    ..
+                }
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let turns = usize::try_from(turns).unwrap_or(usize::MAX);
+    if turns == 0 || starts.is_empty() {
+        return;
+    }
+    let cut = starts[starts.len().saturating_sub(turns)];
+    entries.truncate(cut);
+    pending.retain(|_, index| *index < cut);
 }
 
 fn push_item(
