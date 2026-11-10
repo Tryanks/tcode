@@ -216,10 +216,12 @@ pub(super) fn mergeability(pr: &Value) -> Mergeability {
     }
 }
 
-/// The strategy auto-complete or a completion was set with.
+/// The strategy auto-complete or a completion was set with, among GitPullRequestMergeStrategy's
+/// values. `rebaseMerge` rebases the source and then writes the same two-parent merge commit
+/// `noFastForward` does, and Tcode names no method of its own for it.
 pub(super) fn merge_method(strategy: &str) -> Option<PullRequestMergeMethod> {
     match strategy {
-        "noFastForward" => Some(PullRequestMergeMethod::Merge),
+        "noFastForward" | "rebaseMerge" => Some(PullRequestMergeMethod::Merge),
         "squash" => Some(PullRequestMergeMethod::Squash),
         "rebase" => Some(PullRequestMergeMethod::Rebase),
         _ => None,
@@ -236,20 +238,19 @@ pub(super) fn merge_strategy(method: PullRequestMergeMethod) -> &'static str {
     }
 }
 
-/// What auto-complete is armed with, when someone set it.
+/// What auto-complete is armed with, when someone set it. An explicit `mergeStrategy` decides
+/// and the deprecated `squashMerge` is then ignored; without one, `squashMerge` picks squash or
+/// a no-fast-forward merge (GitPullRequestCompletionOptions).
 pub(super) fn auto_complete(pr: &Value) -> Option<PullRequestMergeMethod> {
     pr["autoCompleteSetBy"]["id"].as_str()?;
     let options = &pr["completionOptions"];
-    Some(
-        options["mergeStrategy"]
-            .as_str()
-            .and_then(merge_method)
-            .unwrap_or(if options["squashMerge"].as_bool() == Some(true) {
-                PullRequestMergeMethod::Squash
-            } else {
-                PullRequestMergeMethod::Merge
-            }),
-    )
+    match options["mergeStrategy"].as_str() {
+        Some(strategy) => merge_method(strategy),
+        None if options["squashMerge"].as_bool() == Some(true) => {
+            Some(PullRequestMergeMethod::Squash)
+        }
+        None => Some(PullRequestMergeMethod::Merge),
+    }
 }
 
 /// Each status context's latest state: a later post to the same context replaces the earlier.
@@ -843,6 +844,10 @@ mod tests {
         assert_eq!(
             armed(json!({ "mergeStrategy": "rebase", "squashMerge": true })),
             Some(PullRequestMergeMethod::Rebase)
+        );
+        assert_eq!(
+            armed(json!({ "mergeStrategy": "rebaseMerge", "squashMerge": true })),
+            Some(PullRequestMergeMethod::Merge)
         );
         assert_eq!(
             armed(json!({ "squashMerge": true })),
