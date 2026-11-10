@@ -272,9 +272,7 @@ impl AndroidPlatform {
     }
 
     fn process_host_events(&self) {
-        // The Java Choreographer queues a frame every vsync. When drawing
-        // outlasts one, drawing each queued frame in turn would keep input
-        // unread for the whole backlog, so a drain draws at most once.
+        // A frame draws once, after every other event the drain holds.
         let mut frame = false;
         for event in host::drain() {
             if let HostEvent::RefreshRate(rate) = event {

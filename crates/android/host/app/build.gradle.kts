@@ -6,7 +6,7 @@ android {
 
     defaultConfig {
         applicationId = "com.tryanks.tcode"
-        minSdk = 26
+        minSdk = 30
         targetSdk = 36
         versionCode = 1
         versionName = System.getenv("TCODE_BUILD_VERSION") ?: "0.1.0"

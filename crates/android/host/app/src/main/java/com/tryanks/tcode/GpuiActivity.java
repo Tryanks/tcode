@@ -18,9 +18,7 @@ import android.hardware.display.DisplayManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
-import android.view.Choreographer;
 import android.view.Display;
-import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.net.ConnectivityManager;
 import android.net.LinkAddress;
@@ -56,27 +54,15 @@ import java.util.Set;
 
 /** Minimal NativeActivity host for GPUI. */
 public final class GpuiActivity extends NativeActivity {
-    private boolean framePosted;
-    private boolean framesActive;
-    private Surface renderSurface;
-    private float maximumFrameRate;
     private DisplayManager displayManager;
-    /** API 29 and later only; below, the thermal state stays nominal. */
     private PowerManager.OnThermalStatusChangedListener thermalListener;
     private BroadcastReceiver powerSaveReceiver;
-    private final Choreographer.FrameCallback frameCallback = frameTimeNanos -> {
-        framePosted = false;
-        if (renderSurface == null || !renderSurface.isValid()) return;
-        if (nativeFrame()) postFrame();
-    };
     private final DisplayManager.DisplayListener displayListener = new DisplayManager.DisplayListener() {
         @Override public void onDisplayAdded(int id) { updateDisplayRate(); }
         @Override public void onDisplayRemoved(int id) { updateDisplayRate(); }
         @Override public void onDisplayChanged(int id) { updateDisplayRate(); }
     };
 
-    /** Returns whether frames should continue on the next vsync. */
-    private native boolean nativeFrame();
     private native void nativeRefreshRate(float rate);
     private native void nativeThermalStatus(int status);
     private native void nativePowerSaveMode(boolean enabled);
@@ -85,7 +71,7 @@ public final class GpuiActivity extends NativeActivity {
         Display display = getWindow().getDecorView().getDisplay();
         if (display == null) return;
         Display.Mode current = display.getMode();
-        maximumFrameRate = current.getRefreshRate();
+        float maximumFrameRate = current.getRefreshRate();
         for (Display.Mode mode : display.getSupportedModes()) {
             if (mode.getPhysicalWidth() == current.getPhysicalWidth()
                     && mode.getPhysicalHeight() == current.getPhysicalHeight()) {
@@ -93,59 +79,11 @@ public final class GpuiActivity extends NativeActivity {
             }
         }
         nativeRefreshRate(maximumFrameRate);
-        if (framesActive) hintFrameRate(maximumFrameRate);
-    }
-
-    private void hintFrameRate(float rate) {
-        if (renderSurface == null || !renderSurface.isValid()) return;
-        if (Build.VERSION.SDK_INT >= 31) {
-            renderSurface.setFrameRate(rate, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
-                    Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS);
-        } else if (Build.VERSION.SDK_INT >= 30) {
-            renderSurface.setFrameRate(rate, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
-        }
-    }
-
-    /**
-     * Rust starts and stops frames here only where the NDK's AChoreographer
-     * path is unavailable; otherwise it drives vsync and the frame-rate vote
-     * itself and this activity never posts a callback or votes.
-     */
-    public void gpuiRequestFrame() {
-        if (renderSurface == null || !renderSurface.isValid()) return;
-        if (!framesActive) {
-            framesActive = true;
-            hintFrameRate(maximumFrameRate);
-        }
-        postFrame();
-    }
-
-    private void postFrame() {
-        if (framePosted) return;
-        framePosted = true;
-        Choreographer.getInstance().postFrameCallback(frameCallback);
-    }
-
-    public void gpuiPauseFrames() {
-        if (framePosted) Choreographer.getInstance().removeFrameCallback(frameCallback);
-        framePosted = false;
-        if (framesActive) {
-            framesActive = false;
-            // Zero releases the vote while the last buffer remains visible.
-            hintFrameRate(0);
-        }
     }
 
     @Override public void surfaceCreated(SurfaceHolder holder) {
-        renderSurface = holder.getSurface();
         updateDisplayRate();
         super.surfaceCreated(holder);
-    }
-
-    @Override public void surfaceDestroyed(SurfaceHolder holder) {
-        gpuiPauseFrames();
-        renderSurface = null;
-        super.surfaceDestroyed(holder);
     }
 
     private static final int REQUEST_CAMERA = 6102;
@@ -374,7 +312,6 @@ public final class GpuiActivity extends NativeActivity {
     }
 
     private void watchThermalStatus() {
-        if (Build.VERSION.SDK_INT < 29) return;
         PowerManager power = (PowerManager) getSystemService(Context.POWER_SERVICE);
         if (power == null) return;
         nativeThermalStatus(power.getCurrentThermalStatus());
@@ -404,7 +341,6 @@ public final class GpuiActivity extends NativeActivity {
                     .removeThermalStatusListener(thermalListener);
         }
         if (powerSaveReceiver != null) unregisterReceiver(powerSaveReceiver);
-        gpuiPauseFrames();
         unwatchDefaultNetwork();
         super.onDestroy();
     }
@@ -443,28 +379,14 @@ public final class GpuiActivity extends NativeActivity {
                     & Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_YES;
         window.setStatusBarColor(Color.TRANSPARENT);
         window.setNavigationBarColor(Color.TRANSPARENT);
-        if (Build.VERSION.SDK_INT >= 29) {
-            window.setStatusBarContrastEnforced(false);
-            window.setNavigationBarContrastEnforced(false);
-        }
-        if (Build.VERSION.SDK_INT >= 30) {
-            window.setDecorFitsSystemWindows(false);
-            WindowInsetsController controller = window.getInsetsController();
-            if (controller != null) {
-                int lightBars = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
-                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
-                controller.setSystemBarsAppearance(lightAppearance ? lightBars : 0, lightBars);
-            }
-        } else {
-            int visibility =
-                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
-            if (lightAppearance) {
-                visibility |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
-                        | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
-            }
-            window.getDecorView().setSystemUiVisibility(visibility);
+        window.setStatusBarContrastEnforced(false);
+        window.setNavigationBarContrastEnforced(false);
+        window.setDecorFitsSystemWindows(false);
+        WindowInsetsController controller = window.getInsetsController();
+        if (controller != null) {
+            int lightBars = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                    | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+            controller.setSystemBarsAppearance(lightAppearance ? lightBars : 0, lightBars);
         }
     }
 
@@ -479,26 +401,17 @@ public final class GpuiActivity extends NativeActivity {
         configureEdgeToEdgeWindow();
     }
 
-    @SuppressWarnings("deprecation")
     private void publishInsets(WindowInsets insets) {
-        boolean visible = Build.VERSION.SDK_INT >= 30
-                ? insets.isVisible(WindowInsets.Type.ime())
-                : insets.getSystemWindowInsetBottom() > insets.getStableInsetBottom();
+        boolean visible = insets.isVisible(WindowInsets.Type.ime());
         if (keyboardVisible && !visible) {
             keyboardShowPending = false;
             releaseInputFocus();
         }
         keyboardVisible = visible;
-        if (Build.VERSION.SDK_INT >= 30) {
-            android.graphics.Insets safe = insets.getInsets(
-                    WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-            android.graphics.Insets ime = insets.getInsets(WindowInsets.Type.ime());
-            nativeOnInsets(safe.left, safe.top, safe.right, safe.bottom, ime.bottom);
-        } else {
-            nativeOnInsets(insets.getStableInsetLeft(), insets.getStableInsetTop(),
-                    insets.getStableInsetRight(), insets.getStableInsetBottom(),
-                    insets.getSystemWindowInsetBottom());
-        }
+        android.graphics.Insets safe = insets.getInsets(
+                WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+        android.graphics.Insets ime = insets.getInsets(WindowInsets.Type.ime());
+        nativeOnInsets(safe.left, safe.top, safe.right, safe.bottom, ime.bottom);
     }
 
     @Override
@@ -633,16 +546,9 @@ public final class GpuiActivity extends NativeActivity {
     }
 
     /** Snapshot used by the Rust shell at startup; restart after changing the OS language. */
-    @SuppressWarnings("deprecation")
     public String gpuiSystemLocale() {
-        Configuration configuration = getResources().getConfiguration();
-        Locale locale = null;
-        if (Build.VERSION.SDK_INT >= 24 && !configuration.getLocales().isEmpty()) {
-            locale = configuration.getLocales().get(0);
-        } else {
-            locale = configuration.locale;
-        }
-        if (locale == null) locale = Locale.getDefault();
+        android.os.LocaleList locales = getResources().getConfiguration().getLocales();
+        Locale locale = locales.isEmpty() ? Locale.getDefault() : locales.get(0);
         return locale.toLanguageTag();
     }
 
