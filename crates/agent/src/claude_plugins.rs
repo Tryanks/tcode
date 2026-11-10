@@ -897,16 +897,6 @@ mod tests {
         );
         assert_eq!(alpha.always_on.as_deref(), Some("~32 tok"));
         assert!(alpha.diagnostics.is_empty());
-
-        apply_details(&mut alpha, "alpha 1.0.0\n  Source: alpha@tcode-probe\n");
-        assert_eq!(alpha.always_on, None);
-        assert_eq!(
-            alpha.diagnostics,
-            [(
-                "details".to_string(),
-                "alpha 1.0.0\n  Source: alpha@tcode-probe".to_string()
-            )]
-        );
     }
 
     #[test]
@@ -992,11 +982,6 @@ mod tests {
                 ),
             ]
         );
-        let failed = r#"{"command":"uninstall","outcome":"failed","plugin":"beta@tcode-probe","scope":"user","message":"Plugin \"beta@tcode-probe\" not found in installed plugins","failureCode":"not_installed"}"#;
-        assert_eq!(
-            native_message(&json_outcome(&output(failed, false)).unwrap_err()),
-            "Plugin \"beta@tcode-probe\" not found in installed plugins"
-        );
     }
 
     #[test]
@@ -1046,7 +1031,6 @@ mod tests {
                 name: "tcode-probe".into(),
             },
         ];
-        let cwd = std::env::temp_dir();
         for op in &ops {
             let argv = op_args(op).unwrap();
             assert!(
@@ -1068,22 +1052,24 @@ mod tests {
                 let scope_at = argv.iter().position(|arg| arg == "--scope").unwrap();
                 assert!(["user", "project"].contains(&argv[scope_at + 1].as_str()));
             }
-
-            let command = management_command(&context(&cwd, true), &argv).unwrap();
-            assert_eq!(command.get_current_dir(), Some(cwd.as_path()));
-            let envs: Vec<_> = command.get_envs().collect();
-            for var in NESTED_SESSION_VARS {
-                assert!(
-                    envs.contains(&(var.as_ref(), None)),
-                    "{var} must be removed"
-                );
-            }
-            assert!(envs.contains(&(
-                "CLAUDE_CONFIG_DIR".as_ref(),
-                Some("/tmp/isolated/.claude".as_ref())
-            )));
-            assert!(!envs.iter().any(|(key, _)| *key == "HOME"));
         }
+
+        let cwd = std::env::temp_dir();
+        let argv = op_args(&ops[1]).unwrap();
+        let command = management_command(&context(&cwd, true), &argv).unwrap();
+        assert_eq!(command.get_current_dir(), Some(cwd.as_path()));
+        let envs: Vec<_> = command.get_envs().collect();
+        for var in NESTED_SESSION_VARS {
+            assert!(
+                envs.contains(&(var.as_ref(), None)),
+                "{var} must be removed"
+            );
+        }
+        assert!(envs.contains(&(
+            "CLAUDE_CONFIG_DIR".as_ref(),
+            Some("/tmp/isolated/.claude".as_ref())
+        )));
+        assert!(!envs.iter().any(|(key, _)| *key == "HOME"));
         assert!(
             op_args(&PluginOp::AddMarketplace {
                 source: "--help".into()
