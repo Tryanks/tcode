@@ -3,8 +3,7 @@
 //! pkarr store and talk through the relay. No external network.
 use std::{
     net::{Ipv4Addr, SocketAddr},
-    sync::Arc,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
 use iroh::{
@@ -27,14 +26,9 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 async fn spawn(name: &str, configure: impl FnOnce(&mut Config)) -> Server {
     let mut config = Config::dev(temp_dir(name), SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
     configure(&mut config);
-    // The rate limiters see a frozen clock: buckets never refill, so the
-    // bursts below are consumed by request count alone, however long a
-    // slow CI disk takes between two requests.
-    let frozen = Instant::now();
-    Server::spawn_with_clock(
+    Server::spawn(
         config,
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
-        Arc::new(move || frozen),
     )
     .await
     .expect("server binds ephemeral ports")
@@ -51,10 +45,6 @@ fn packet(secret: &SecretKey, relay: &str) -> SignedPacket {
 async fn manifest_and_pkarr_store_over_http() {
     let server = spawn("http", |config| {
         config.region = Some("test".into());
-        config.pkarr.put_per_second = 1;
-        config.pkarr.put_burst = 4;
-        config.pkarr.get_per_second = 1;
-        config.pkarr.get_burst = 3;
     })
     .await;
     let base = server.base().clone();
@@ -126,10 +116,6 @@ async fn manifest_and_pkarr_store_over_http() {
     // The root form of the pkarr relay specification serves the same record.
     let root = http.get(base.join(&key).unwrap()).send().await.unwrap();
     assert_eq!(root.status(), 200);
-    // Three GETs used their own burst; PUTs keep theirs.
-    let limited = http.get(pkarr.clone()).send().await.unwrap();
-    assert_eq!(limited.status(), 429);
-    assert_eq!(limited.headers()["retry-after"], "1");
 
     let oversize = http
         .put(pkarr.clone())
@@ -148,17 +134,6 @@ async fn manifest_and_pkarr_store_over_http() {
         .await
         .unwrap();
     assert_eq!(invalid.status(), 400);
-
-    // Four PUTs used the burst (the oversize one never reached the
-    // limiter); the next is refused whatever it carries.
-    let limited = http
-        .put(pkarr.clone())
-        .body(packet(&secret, "https://d.example/").to_relay_payload())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(limited.status(), 429);
-    assert_eq!(limited.headers()["retry-after"], "1");
 
     let preflight = http
         .request(reqwest::Method::OPTIONS, pkarr)

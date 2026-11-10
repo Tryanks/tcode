@@ -139,22 +139,12 @@ impl Store {
     }
 }
 
-/// The limiter's source of time. Production reads `Instant::now`; a test
-/// freezes it so a slow disk between two requests cannot refill a bucket
-/// the test expects to be empty.
-pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
-
-pub fn system_clock() -> Clock {
-    Arc::new(Instant::now)
-}
-
 /// A token bucket per client address: `burst` tokens, refilled at
 /// `per_second`. Idle buckets are dropped once the table grows past
 /// `PRUNE_ABOVE` entries.
 pub struct RateLimiter {
     per_second: f64,
     burst: f64,
-    clock: Clock,
     buckets: Mutex<HashMap<IpAddr, Bucket>>,
 }
 
@@ -166,17 +156,16 @@ struct Bucket {
 const PRUNE_ABOVE: usize = 4096;
 
 impl RateLimiter {
-    pub fn new(per_second: u32, burst: u32, clock: Clock) -> Self {
+    pub fn new(per_second: u32, burst: u32) -> Self {
         Self {
             per_second: f64::from(per_second),
             burst: f64::from(burst),
-            clock,
             buckets: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn allow(&self, ip: IpAddr) -> bool {
-        self.allow_at(ip, (self.clock)())
+        self.allow_at(ip, Instant::now())
     }
 
     pub fn allow_at(&self, ip: IpAddr, now: Instant) -> bool {
@@ -407,7 +396,7 @@ mod tests {
 
     #[test]
     fn rate_limit_is_a_per_ip_token_bucket() {
-        let limiter = RateLimiter::new(4, 8, system_clock());
+        let limiter = RateLimiter::new(4, 8);
         let start = Instant::now();
         let a: IpAddr = "10.0.0.1".parse().unwrap();
         let b: IpAddr = "10.0.0.2".parse().unwrap();
