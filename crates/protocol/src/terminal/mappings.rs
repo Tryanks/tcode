@@ -216,25 +216,28 @@ fn kitty_functional_key(key: &str) -> Option<(String, char)> {
     {
         return Some(((57_363 + number).to_string(), 'u'));
     }
+    // The names GPUI gives these keys: the DOM key value lowercased on the
+    // web, the xkb keysym name lowercased on Linux, and `menu` for the
+    // application key on Windows and Linux.
     let code = match key {
         // Kitty deliberately differs from traditional terminfo for F3.
         "f3" => return Some(("13".to_string(), '~')),
-        "scrolllock" => 57_359,
-        "printscreen" => 57_361,
+        "scrolllock" | "scroll_lock" => 57_359,
+        "printscreen" | "print" => 57_361,
         "pause" => 57_362,
-        "contextmenu" => 57_363,
-        "mediaplay" => 57_428,
-        "mediapause" => 57_429,
+        "contextmenu" | "menu" => 57_363,
+        "mediaplay" | "xf86audioplay" => 57_428,
+        "mediapause" | "xf86audiopause" => 57_429,
         "mediaplaypause" => 57_430,
-        "mediastop" => 57_432,
-        "mediafastforward" => 57_433,
-        "mediarewind" => 57_434,
-        "medianext" => 57_435,
-        "mediaprevious" => 57_436,
-        "mediarecord" => 57_437,
-        "volumedown" => 57_438,
-        "volumeup" => 57_439,
-        "volumemute" => 57_440,
+        "mediastop" | "xf86audiostop" => 57_432,
+        "mediafastforward" | "xf86audioforward" => 57_433,
+        "mediarewind" | "xf86audiorewind" => 57_434,
+        "mediatracknext" | "xf86audionext" => 57_435,
+        "mediatrackprevious" | "xf86audioprev" => 57_436,
+        "mediarecord" | "xf86audiorecord" => 57_437,
+        "audiovolumedown" | "xf86audiolowervolume" => 57_438,
+        "audiovolumeup" | "xf86audioraisevolume" => 57_439,
+        "audiovolumemute" | "xf86audiomute" => 57_440,
         _ => return None,
     };
     Some((code.to_string(), 'u'))
@@ -285,17 +288,14 @@ fn kitty_all_key(key: &str, mode: KeyboardModes) -> Option<(String, char)> {
     if !mode.contains(KeyboardModes::REPORT_ALL_KEYS_AS_ESC) {
         return None;
     }
-    // GPUI does not expose left/right key location here, so generic modifier
-    // names use kitty's left-side codes.
+    // Every platform reports Shift, Control, Alt, Command and Caps Lock as a
+    // modifier change, never as a key; these are the lock and modifier keys
+    // the web reports as keys. GPUI does not expose left/right key location,
+    // so they use kitty's left-side codes.
     let code = match key {
-        "capslock" => 57_358,
         "numlock" => 57_360,
-        "shift" => 57_441,
-        "control" | "ctrl" => 57_442,
-        "alt" => 57_443,
-        "super" | "command" => 57_444,
+        "super" => 57_444,
         "hyper" => 57_445,
-        "meta" => 57_446,
         _ => return None,
     };
     Some((code.to_string(), 'u'))
