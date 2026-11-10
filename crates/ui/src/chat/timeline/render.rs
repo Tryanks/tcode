@@ -571,6 +571,7 @@ impl TimelineView {
                             &turn,
                             requested_model.as_deref(),
                             actions,
+                            window,
                             cx,
                         )
                         .into_any_element()

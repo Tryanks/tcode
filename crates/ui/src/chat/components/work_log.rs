@@ -102,12 +102,13 @@ pub(crate) fn work_log(
         .owned(&motion)
         .text_color(muted),
     )
-    .child(capsule_label)
+    .child(capsule_label.clone())
     .child(settled_state(
         &motion,
         SharedString::from(format!("worklog-state-{index}-{segment_id}")),
         running,
         outcome,
+        capsule_label,
         duration,
         cx,
     ));
@@ -132,11 +133,13 @@ pub(crate) fn work_log_body(rows: Vec<AnyElement>) -> Div {
 
 /// The spinner while the run goes on; once it settles, how long it took and,
 /// only for a bad ending, a chip saying so. One cross-fades into the other.
+/// The duration sits on the baseline of the header's `label`.
 fn settled_state(
     motion: &crate::motion::owned::Owned,
     id: SharedString,
     running: bool,
     outcome: TurnStatus,
+    label: String,
     duration: String,
     cx: &App,
 ) -> AnyElement {
@@ -144,39 +147,57 @@ fn settled_state(
     let danger = cx.theme().danger;
     let motion = motion.clone();
     crate::motion::Sampled::new(move |window, cx| {
-        motion.cross_fade_part(id, running, CHANGE, window, cx, move |running, _, cx| {
-            if *running {
-                return Spinner::new().color(primary).into_any_element();
-            }
-            // A settled run needs no badge; only a bad ending is called out.
-            let failure = match outcome {
-                TurnStatus::Completed => None,
-                TurnStatus::Failed => Some(crate::tr!("chat.work_log_failed")),
-                TurnStatus::Interrupted => Some(crate::tr!("chat.work_log_interrupted")),
-            };
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .when_some(failure, |row, label| {
-                    row.child(crate::material::semantic_chip(
-                        label,
-                        danger.opacity(0.12),
-                        danger,
-                        cx,
-                    ))
-                })
-                .child(
-                    div()
-                        .flex_none()
-                        .text_meta_mono(false, cx)
-                        // Baseline compensation: flex can't baseline-align text boxes,
-                        // and the smaller digits sit visibly high beside the label.
-                        .relative()
-                        .top(px(1.))
-                        .child(duration.clone()),
-                )
-                .into_any_element()
-        })
+        motion.cross_fade_part(
+            id,
+            running,
+            CHANGE,
+            window,
+            cx,
+            move |running, window, cx| {
+                if *running {
+                    return Spinner::new().color(primary).into_any_element();
+                }
+                // A settled run needs no badge; only a bad ending is called out.
+                let failure = match outcome {
+                    TurnStatus::Completed => None,
+                    TurnStatus::Failed => Some(crate::tr!("chat.work_log_failed")),
+                    TurnStatus::Interrupted => Some(crate::tr!("chat.work_log_interrupted")),
+                };
+                let theme = cx.theme();
+                let typography = &theme.tokens.typography;
+                let drop = crate::typography::baseline_below_centre(
+                    SharedString::from(label.clone()),
+                    theme.font_family.clone(),
+                    typography.sm.size,
+                    window,
+                ) - crate::typography::baseline_below_centre(
+                    SharedString::from(duration.clone()),
+                    typography.mono.clone(),
+                    typography.xs.size,
+                    window,
+                );
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .when_some(failure, |row, failure| {
+                        row.child(crate::material::semantic_chip(
+                            failure,
+                            danger.opacity(0.12),
+                            danger,
+                            cx,
+                        ))
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_meta_mono(false, cx)
+                            .relative()
+                            .top(drop)
+                            .child(duration.clone()),
+                    )
+                    .into_any_element()
+            },
+        )
     })
     .into_any_element()
 }

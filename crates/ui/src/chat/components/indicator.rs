@@ -7,8 +7,8 @@ use crate::typography::TextRole as _;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, Div, ElementId,
-    Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    RenderOnce, SharedString, Stateful, Styled as _, StyledText, Task, Window, div,
+    Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, RenderOnce,
+    SharedString, Stateful, Styled as _, StyledText, Task, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::h_flex;
@@ -158,41 +158,19 @@ pub(crate) fn working_indicator(
     let elapsed_ms = started_at.map_or(0, |start| now_millis().saturating_sub(start));
     let label = crate::tr!("chat.working");
     let elapsed = format_elapsed(elapsed_ms);
-    // `items_baseline` cannot align these: gpui-fast's measured leaves (text)
-    // hand taffy a size and no baseline, and taffy then takes a box's bottom
-    // edge for its baseline. So the row centres the label's line and the
-    // smaller timer's, and the timer is moved onto the label's baseline,
-    // until gpui-fast reports text baselines. A line is painted with its
-    // baseline (ascent - descent) / 2 below its centre, from the metrics
-    // shaping found, which depend on the platform's monospace and the
-    // locale's fallback font, so both lines are shaped to measure it.
+    // The timer is moved onto the label's baseline.
     let theme = cx.theme();
     let typography = &theme.tokens.typography;
-    let below_centre = |text: SharedString, family: SharedString, size: Pixels| {
-        let font = gpui::Font {
-            family,
-            fallbacks: crate::i18n::cjk_font_fallbacks(),
-            ..Default::default()
-        };
-        let run = gpui::TextRun {
-            len: text.len(),
-            font,
-            color: Hsla::default(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let line = window.text_system().shape_line(text, size, &[run], None);
-        (line.ascent - line.descent) / 2.
-    };
-    let drop = below_centre(
+    let drop = crate::typography::baseline_below_centre(
         SharedString::from(label.clone().into_owned()),
         theme.font_family.clone(),
         typography.sm.size,
-    ) - below_centre(
+        window,
+    ) - crate::typography::baseline_below_centre(
         SharedString::from(elapsed.clone()),
         typography.mono.clone(),
         typography.xs.size,
+        window,
     );
     h_flex()
         .gap(px(10.))
@@ -264,10 +242,24 @@ fn turn_time_footer(
     id: SharedString,
     clauses: Vec<TurnTimeClause>,
     actions: Option<AnyElement>,
+    window: &Window,
     cx: &App,
 ) -> Stateful<Div> {
     let warning = cx.theme().warning;
     let last = clauses.len().saturating_sub(1);
+    // A clause the mono face lacks glyphs for, such as a duration in CJK,
+    // paints its baseline lower than the others; each is moved back onto the
+    // mono face's own, which the separators keep.
+    let typography = &cx.theme().tokens.typography;
+    let below_centre = |text: &str| {
+        crate::typography::baseline_below_centre(
+            SharedString::from(text.to_owned()),
+            typography.mono.clone(),
+            typography.xs.size,
+            window,
+        )
+    };
+    let mono_baseline = below_centre("0");
     h_flex()
         .id(id)
         .w_full()
@@ -286,11 +278,14 @@ fn turn_time_footer(
                 .gap_y(px(2.))
                 .children(clauses.into_iter().enumerate().map(|(index, clause)| {
                     let selector = clause.selector;
+                    let drop = mono_baseline - below_centre(&clause.text);
                     // The clause alone triggers its tooltip, which stands
                     // beside what it explains.
                     let text = div()
                         .id(selector)
                         .min_w_0()
+                        .relative()
+                        .top(drop)
                         .debug_selector(move || selector.into())
                         .child(clause.text)
                         .when_some(clause.tooltip, |text, tooltip| {
@@ -312,6 +307,7 @@ pub(crate) fn finished_turn_time(
     turn: &TurnMeta,
     requested_model: Option<&str>,
     actions: Option<AnyElement>,
+    window: &Window,
     cx: &App,
 ) -> Stateful<Div> {
     let clauses = timestamp.map_or_else(Vec::new, |timestamp| {
@@ -327,6 +323,7 @@ pub(crate) fn finished_turn_time(
         SharedString::from(format!("turn-time-{}", timestamp.unwrap_or_default())),
         clauses,
         actions,
+        window,
         cx,
     )
 }
