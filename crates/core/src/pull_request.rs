@@ -637,7 +637,6 @@ pub struct PullRequestSnapshot {
     pub changed_files: Option<u64>,
     pub review_decision: Option<ReviewDecision>,
     pub checks_state: Option<ChecksState>,
-    #[serde(default)]
     pub mergeability: Mergeability,
 }
 
@@ -1402,7 +1401,6 @@ pub struct PullRequestReviewDraft {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<PullRequestReviewDraftComment>,
     /// Never reused, so an edit naming a removed comment cannot reach a later one.
-    #[serde(default)]
     pub next_id: u64,
     /// The last submission got no answer, so it may have been posted; set until the pull request
     /// is read again.
