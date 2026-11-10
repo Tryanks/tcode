@@ -2069,13 +2069,7 @@ mod tests {
                 .collect::<String>()
         };
 
-        for (requested, cols, first_line_rows) in [
-            (0, 20, 2),
-            (4, 20, 2),
-            (20, 20, 2),
-            (40, 40, 1),
-            (4000, 400, 1),
-        ] {
+        for (requested, cols, first_line_rows) in [(20, 20, 2), (40, 40, 1), (4000, 400, 1)] {
             let rendered = reply(&topic("cmd-1", requested));
             assert_eq!(rendered.cols, cols);
             assert_eq!(usize::from(rendered.rows), first_line_rows + 2);

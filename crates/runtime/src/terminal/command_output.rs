@@ -5,7 +5,7 @@
 //! blocking-I/O executor: it is pure CPU over one string.
 
 use tcode_protocol::{
-    STORED_OUTPUT_BYTES, STORED_OUTPUT_COLS, STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS,
+    MAX_STORED_OUTPUT_COLS, STORED_OUTPUT_BYTES, STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS,
     terminal::{
         HISTORY_LIMIT, TerminalDelta, TerminalExit, TerminalFrame, TerminalHistoryUpdate,
         TerminalRow, TerminalRowUpdate,
@@ -24,10 +24,10 @@ const RUNNING_BYTES: usize = 512 * 1024;
 /// once the command has finished, up to the ceiling. What it leaves out, it
 /// counts in `lines_evicted`.
 ///
-/// `cols` is clamped into [`STORED_OUTPUT_COLS`], so the frame's own `cols` is
-/// the authority on what the caller actually got.
+/// `cols` is capped at [`MAX_STORED_OUTPUT_COLS`], so the frame's own `cols`
+/// is the authority on what the caller actually got.
 pub fn render(output: &str, cols: u16, running: bool) -> TerminalFrame {
-    let cols = cols.clamp(*STORED_OUTPUT_COLS.start(), *STORED_OUTPUT_COLS.end());
+    let cols = cols.min(MAX_STORED_OUTPUT_COLS);
     let (bytes, history) = if running {
         (RUNNING_BYTES, HISTORY_LIMIT)
     } else {
@@ -52,7 +52,7 @@ pub fn render(output: &str, cols: u16, running: bool) -> TerminalFrame {
     }
 
     TerminalFrame {
-        cols,
+        cols: snapshot.cols as u16,
         rows: visible.len().min(u16::MAX as usize) as u16,
         styles: projector.into_styles(),
         visible,

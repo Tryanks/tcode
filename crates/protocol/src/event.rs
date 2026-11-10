@@ -48,7 +48,7 @@ pub enum Topic {
         terminal_id: u64,
     },
     /// One command execution's output, rendered by the host at `cols`
-    /// (clamped into [`crate::STORED_OUTPUT_COLS`]). Answered on subscribe and
+    /// (capped at [`crate::MAX_STORED_OUTPUT_COLS`]). Answered on subscribe and
     /// again while the output grows.
     CommandOutput {
         session_id: String,

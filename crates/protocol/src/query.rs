@@ -205,9 +205,9 @@ pub enum Query {
     },
 }
 
-/// Widths the host will render command output at. Narrower than the low bound is
-/// unreadable; wider is a client asking for a grid nobody can see.
-pub const STORED_OUTPUT_COLS: std::ops::RangeInclusive<u16> = 20..=400;
+/// The widest the host renders command output: a client asks for any width up
+/// to it, and the bound is what one render may cost the host.
+pub const MAX_STORED_OUTPUT_COLS: u16 = 400;
 
 /// Screen rows the host emulates command output into. Trailing blank rows are
 /// trimmed, so a shorter output returns a shorter frame.
