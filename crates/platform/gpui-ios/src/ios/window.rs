@@ -478,10 +478,6 @@ impl IosWindow {
         result
     }
 
-    pub(crate) fn text_input_active(&self) -> bool {
-        self.text_input_active.get()
-    }
-
     pub(crate) fn delete_backward(&self) {
         for input in self.keyboard.delete_backward() {
             self.dispatch_input(input);

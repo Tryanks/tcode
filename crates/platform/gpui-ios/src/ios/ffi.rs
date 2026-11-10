@@ -626,9 +626,6 @@ pub extern "C" fn gpui_ios_low_power_mode_changed(enabled: u8) {
 pub extern "C" fn gpui_ios_text_range(kind: u32) -> TextRange {
     let mut result = None;
     with_window(|window| {
-        if !window.text_input_active() {
-            return;
-        }
         result = window
             .with_input_handler(|handler| match kind {
                 0 => handler
