@@ -5977,54 +5977,23 @@ mod tests {
         assert_eq!(commands[1].description.as_deref(), Some("charts"));
     }
 
-    /// A codex binary that dies at startup (the npm-packaging failure mode:
-    /// a JS loader error on stderr, then exit 1) must surface its exit status
-    /// and stderr in the startup error, not just "exited during startup".
+    /// A configured codex that dies at startup (as a broken npm install does)
+    /// says why in the startup error: its exit status and its stderr, not
+    /// just "exited during startup". `cat app-server` is such a process.
     #[cfg(unix)]
     #[test]
     fn startup_failure_reports_exit_status_and_stderr_tail() {
-        use std::os::unix::fs::PermissionsExt;
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("agent-codex-crash-{nonce}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("codex");
-        std::fs::write(
-            &bin,
-            "#!/bin/sh\n\
-             echo 'node:internal/modules/cjs/loader:1215' >&2\n\
-             echo \"Error: Cannot find module './dist/cli.js'\" >&2\n\
-             exit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        // Concurrently-forked test children can hold the freshly written
-        // script's fd open, making exec fail with ETXTBSY on Linux — retry
-        // until the spawn reaches the script's own failure.
-        let mut attempts = 0;
-        let message = loop {
-            let err = smol::block_on(list_models(
-                Some(bin.clone()),
-                LaunchEnv {
-                    env: Vec::new(),
-                    home: None,
-                },
-            ))
-            .unwrap_err();
-            let message = err.to_string();
-            if message.contains("Text file busy") && attempts < 20 {
-                attempts += 1;
-                std::thread::sleep(std::time::Duration::from_millis(25));
-                continue;
-            }
-            break message;
-        };
-        assert!(message.contains("Cannot find module"), "{message}");
+        let message = smol::block_on(list_models(
+            Some(PathBuf::from("/bin/cat")),
+            LaunchEnv::default(),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("cat: app-server: No such file or directory"),
+            "{message}"
+        );
         assert!(message.contains("exit status: 1"), "{message}");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A running app-server answers a usage read itself:
