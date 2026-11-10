@@ -386,7 +386,7 @@ impl AppState {
         Ok(StartPlan::Install {
             meta: Box::new(meta),
             message: params.message,
-            attachments: read_attachments(attachment_paths),
+            attachments: read_attachments(attachment_paths)?,
             isolate,
         })
     }
@@ -472,14 +472,14 @@ impl AppState {
         if params.text.trim().is_empty() && attachment_paths.is_empty() {
             return Err("text is empty".into());
         }
+        let attachments = read_attachments(attachment_paths)?;
         let mut results = Vec::new();
         for target in &params.thread_ids {
-            let attachments = read_attachments(attachment_paths.clone());
             results.push(self.send_agent_message(
                 caller,
                 target,
                 params.text.clone(),
-                attachments,
+                attachments.clone(),
                 &params.mode,
                 cx,
             ));

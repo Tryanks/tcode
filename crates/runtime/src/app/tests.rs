@@ -13362,6 +13362,41 @@ fn an_unindexed_cold_thread_opens_through_hydration() {
     assert!(store.turn_index("legacy").unwrap().is_none());
 }
 
+/// A message whose attachment cannot be read is not sent without it: nothing
+/// reaches the provider or the queue, and the error names the file.
+#[test]
+fn a_message_with_an_unreadable_attachment_is_not_sent() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("unreadable-attachment");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (commands, received) = smol::channel::unbounded();
+    let mut session = live_session(ProviderKind::Codex, commands);
+    session.meta.id = "thread".into();
+    state.update(cx, |state, _| state.install_selected(session));
+    let readable = store.root().join("readable.png");
+    std::fs::write(&readable, b"png").unwrap();
+    let missing = store.root().join("missing.png");
+    state.dispatch_command(
+        cx,
+        1,
+        Command::SendTurn {
+            session_id: "thread".into(),
+            text: "what is in these?".into(),
+            attachment_paths: vec![readable, missing.clone()],
+        },
+    );
+    let (error, _) = cx.run_until_sent(|message| match message {
+        HostMessage::Event(EventEnvelope {
+            event: ServerEvent::Runtime(RuntimeEvent::Error(RuntimeError::External(error))),
+            ..
+        }) => Some(error.clone()),
+        _ => None,
+    });
+    assert!(error.starts_with(&missing.display().to_string()), "{error}");
+    assert!(received.try_recv().is_err());
+    state.read(|state| assert!(state.resident("thread").unwrap().queue.is_empty()));
+}
+
 #[test]
 fn message_origins_survive_queue_acknowledgement_and_callback_steering() {
     let cx = &mut TestAppContext::default();
