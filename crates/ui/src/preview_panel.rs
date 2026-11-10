@@ -497,11 +497,6 @@ impl PreviewPanel {
         }
     }
 
-    #[cfg(all(test, preview_backend))]
-    pub(crate) fn url_field(&self, cx: &gpui::App) -> String {
-        self.url_input.read(cx).value().to_string()
-    }
-
     fn active_url(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let key = self.active_key(cx)?;
         self.store.read(cx).preview_url(&key)

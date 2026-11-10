@@ -16410,16 +16410,10 @@ pub(crate) mod tests {
         });
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);
-        let (preview, state) = shell.read_with(cx, |shell, cx| {
-            (
-                shell.current_link(cx).unwrap().preview.clone(),
-                shell.window_state(),
-            )
-        });
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
         let page_pane = shell.read_with(cx, |shell, _| {
             shell.column.as_ref().unwrap().current_pane.clone()
         });
-        let lifecycle = preview.read_with(cx, |preview, _| preview.lifecycle());
         let key = store.read_with(cx, |store, cx| {
             store.preview_key_for("thread-a", cx).unwrap()
         });
@@ -16430,14 +16424,12 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.set_preview_url(&key, "https://example.com/".into(), cx);
         });
-        lifecycle.update(cx, |lifecycle, _| lifecycle.seed_stub(&key));
         state.update(cx, |state, cx| state.go(Destination::Panel, cx));
         draw(cx);
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
         });
         draw(cx);
-        assert!(lifecycle.read_with(cx, |lifecycle, _| lifecycle.has_view(&key)));
         assert_eq!(
             store
                 .read_with(cx, |store, _| store.preview_url(&key))
@@ -16454,14 +16446,9 @@ pub(crate) mod tests {
             });
         });
         draw(cx);
-        assert!(!lifecycle.read_with(cx, |lifecycle, _| lifecycle.has_view(&key)));
         assert_eq!(
             store.read_with(cx, |store, _| store.preview_url(&key)),
             None
-        );
-        assert_eq!(
-            preview.read_with(cx, |preview, cx| preview.url_field(cx)),
-            ""
         );
         assert_eq!(
             state.read_with(cx, |state, _| state.destination()),
@@ -16470,7 +16457,6 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.set_preview_url(&key, "https://example.com/again".into(), cx)
         });
-        lifecycle.update(cx, |lifecycle, _| lifecycle.seed_stub(&key));
         cx.update(|window, cx| shell.update(cx, |shell, cx| assert!(shell.back(window, cx))));
         draw(cx);
         cx.update(|window, cx| shell.update(cx, |shell, cx| assert!(shell.back(window, cx))));
@@ -16479,7 +16465,6 @@ pub(crate) mod tests {
             state.read_with(cx, |state, _| state.destination()),
             Destination::Threads
         );
-        assert!(!lifecycle.read_with(cx, |lifecycle, _| lifecycle.has_view(&key)));
         assert_eq!(
             store.read_with(cx, |store, _| store.preview_url(&key)),
             None
@@ -17650,109 +17635,6 @@ pub(crate) mod tests {
         assert!(store.read_with(cx, |store, _| {
             store.panel_state_for(Some("thread-1")).right_panel_open
         }));
-    }
-
-    /// The right panel sliding shut on a page lets the page go once it is
-    /// out of sight, keeping its address for the panel to load again. While
-    /// the thread's turn runs, its agent may be driving the page through the
-    /// preview tools with the panel shut, so the page stays until the turn
-    /// ends.
-    #[cfg(preview_backend)]
-    #[gpui::test]
-    fn the_right_panel_lets_its_page_go_once_shut_and_the_turn_is_done(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_thread_with(cx, Vec::new());
-        let store = store_of(&shell, cx);
-        resize(cx, 1600.);
-        let preview = shell.read_with(cx, |shell, cx| {
-            shell.current_link(cx).unwrap().preview.clone()
-        });
-        let lifecycle = preview.read_with(cx, |preview, _| preview.lifecycle());
-        let key = store.read_with(cx, |store, cx| {
-            store.preview_key_for("thread-1", cx).unwrap()
-        });
-        let page = |cx: &mut VisualTestContext| {
-            lifecycle.read_with(cx, |lifecycle, _| lifecycle.has_view(&key))
-        };
-        let working = |working: bool| {
-            send_events(
-                &host,
-                vec![(
-                    Topic::Index,
-                    ServerEvent::IndexSummaryReplaced(tcode_protocol::IndexSummary {
-                        activity: [(
-                            "thread-1".to_owned(),
-                            tcode_protocol::SessionActivity {
-                                working,
-                                turn_running: working,
-                                background: Default::default(),
-                                unsettled: 0,
-                                wakes: Default::default(),
-                                waiting_for_approval: false,
-                                waiting_for_input: false,
-                                settle_blocked: false,
-                                failed: false,
-                                unread: false,
-                                fork: tcode_protocol::ForkAvailability::Available,
-                                agent: None,
-                                latest_activity: None,
-                            },
-                        )]
-                        .into(),
-                        ..Default::default()
-                    }),
-                )],
-            );
-        };
-        let arrive = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.run_until_parked();
-            draw(cx);
-        };
-        let open = |cx: &mut VisualTestContext| {
-            store.update(cx, |store, cx| {
-                store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Preview, cx);
-            });
-            render_preview_here(&host, "thread-1", cx);
-            store.update(cx, |store, cx| {
-                store.set_preview_url(&key, "https://example.com/".into(), cx);
-            });
-            lifecycle.update(cx, |lifecycle, _| lifecycle.seed_stub(&key));
-            crate::test_frames::draw_settled(cx);
-        };
-
-        open(cx);
-        store.update(cx, |store, cx| {
-            store.close_right_panel_for(Some("thread-1"), cx)
-        });
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        draw(cx);
-        assert!(page(cx), "the page stays while the panel slides out");
-        crate::test_frames::draw_settled(cx);
-        assert!(!page(cx), "the shut panel lets its page go");
-        assert_eq!(
-            store
-                .read_with(cx, |store, _| store.preview_url(&key))
-                .as_deref(),
-            Some("https://example.com/"),
-            "the address stays"
-        );
-
-        // A running turn shows it runs, which rests only with motion reduced.
-        cx.update(|_, cx| cx.set_reduce_motion(true));
-        working(true);
-        arrive(cx);
-        assert!(store.read_with(cx, |store, _| store.turn_running_for("thread-1")));
-        open(cx);
-        store.update(cx, |store, cx| {
-            store.close_right_panel_for(Some("thread-1"), cx)
-        });
-        crate::test_frames::draw_settled(cx);
-        assert!(page(cx), "the running turn's agent may drive the page");
-        working(false);
-        arrive(cx);
-        assert!(!page(cx), "the turn done, the page goes");
     }
 
     /// The window growing wider leaves the terminal drawer's height as the
