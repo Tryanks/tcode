@@ -151,11 +151,13 @@ const CLAUDE_TRANSCRIPT: &str = r#"{"type":"user","message":{"role":"user","cont
 {"type":"user","message":{"role":"user","content":"<local-command-caveat>The command below was run directly in Claude Code.</local-command-caveat>"},"isMeta":true,"uuid":"00000000-0000-4000-8000-000000000021","parentUuid":"00000000-0000-4000-8000-000000000020","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:14.000Z"}
 {"type":"user","message":{"role":"user","content":"<command-message>cost</command-message>\n<command-name>/cost</command-name>"},"uuid":"00000000-0000-4000-8000-000000000022","parentUuid":"00000000-0000-4000-8000-000000000021","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:14.000Z"}
 {"type":"user","message":{"role":"user","content":"<local-command-stdout>Total cost: $0.00</local-command-stdout>"},"uuid":"00000000-0000-4000-8000-000000000023","parentUuid":"00000000-0000-4000-8000-000000000022","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:14.000Z"}
+{"type":"assistant","message":{"id":"msg_example_4","type":"message","role":"assistant","model":"claude-example","content":[{"type":"tool_use","id":"toolu_test","name":"Bash","input":{"command":"make test"}}]},"uuid":"00000000-0000-4000-8000-000000000024","parentUuid":"00000000-0000-4000-8000-000000000023","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:15.000Z"}
 "#;
 
 /// A transcript shows what Claude Code recorded: a meta message is passed
 /// over, a tool call shows the result answered to its id and fails when the
-/// result is an error, a compaction is marked where it happened, and a slash
+/// result is an error, a call never answered is interrupted, a compaction is
+/// marked where it happened, and a slash
 /// command shows as the command line the user typed, a local one with its
 /// output.
 #[test]
@@ -193,6 +195,12 @@ fn a_claude_transcript_imports_as_claude_recorded_it() {
                 provider_kind: "local-command-stdout".into(),
                 summary: "Total cost: $0.00".into(),
             }),
+            tool(
+                "Bash",
+                json!({"command": "make test"}),
+                None,
+                ItemStatus::Interrupted,
+            ),
         ]
     );
 }

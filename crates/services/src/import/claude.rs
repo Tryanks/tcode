@@ -156,11 +156,12 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
             path.display()
         ));
     }
+    // A call the transcript never answered was cut off with its turn.
     for index in pending.into_values() {
         if let Some(ConvertedEntry::Item { item, .. }) = entries.get_mut(index)
             && let ItemContent::ToolCall { status, .. } = &mut item.content
         {
-            *status = ItemStatus::Completed;
+            *status = ItemStatus::Interrupted;
         }
     }
     let created_ms = first_ts.unwrap_or(fallback_ts);
