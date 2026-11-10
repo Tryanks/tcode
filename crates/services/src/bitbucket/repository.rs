@@ -104,26 +104,26 @@ mod tests {
     #[test]
     fn urls_and_remotes_name_the_repository_on_bitbucket_org() {
         let (key, url) = pull_request_url(
-            "https://bitbucket.org/Atlassian/ACE.js/pull-requests/547/diff#comment-1",
+            "https://bitbucket.org/Acme/Widget.js/pull-requests/547/diff#comment-1",
         )
         .unwrap();
-        assert_eq!(key, PullRequestKey::new(HOST, "atlassian/ace.js", 547));
+        assert_eq!(key, PullRequestKey::new(HOST, "acme/widget.js", 547));
         assert_eq!(
             url,
-            "https://bitbucket.org/atlassian/ace.js/pull-requests/547"
+            "https://bitbucket.org/acme/widget.js/pull-requests/547"
         );
-        let project = repository(&["atlassian", "ace.js"]);
+        let project = repository(&["acme", "widget.js"]);
         for remote_url in [
-            "https://user@bitbucket.org/atlassian/ace.js.git",
-            "https://bitbucket.org/atlassian/ace.js",
-            "git@bitbucket.org:atlassian/ace.js.git",
-            "ssh://git@bitbucket.org/atlassian/ace.js.git",
+            "https://user@bitbucket.org/acme/widget.js.git",
+            "https://bitbucket.org/acme/widget.js",
+            "git@bitbucket.org:acme/widget.js.git",
+            "ssh://git@bitbucket.org/acme/widget.js.git",
         ] {
             assert_eq!(remote(remote_url), project, "{remote_url}");
         }
-        assert_eq!(selector("bitbucket.org/atlassian/ace.js"), project);
-        assert_eq!(selector("atlassian/ace.js"), project);
-        assert!(remote("git@bitbucket.acme.test:atlassian/ace.js.git").is_none());
+        assert_eq!(selector("bitbucket.org/acme/widget.js"), project);
+        assert_eq!(selector("acme/widget.js"), project);
+        assert!(remote("git@bitbucket.acme.test:acme/widget.js.git").is_none());
         assert!(pull_request_url("https://bitbucket.acme.test/a/b/pull-requests/1").is_none());
         assert!(pull_request_url("https://bitbucket.org/a/b/pull-requests/0").is_none());
         assert!(pull_request_url("https://bitbucket.org/a/b/c/pull-requests/1").is_none());
