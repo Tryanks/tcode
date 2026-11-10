@@ -1605,10 +1605,8 @@ impl Render for CommandPalette {
             })
             .flex_col()
             .items_center()
-            .when(compact, |host| host.justify_end().pb(insets.bottom))
-            .when(!compact, |host| {
-                host.justify_start().pt(insets.top + px(DESKTOP_TOP_OFFSET))
-            });
+            .justify_start()
+            .pt(insets.top + px(DESKTOP_TOP_OFFSET));
         reflow.render(dialog)
     }
 }
