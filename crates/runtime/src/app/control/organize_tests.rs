@@ -33,7 +33,6 @@ fn update(changes: Vec<ThreadChange>, dry_run: bool) -> ControlOp {
     ControlOp::UpdateThreads(UpdateThreadsParams {
         changes,
         dry_run: Some(dry_run),
-        request_id: None,
     })
 }
 

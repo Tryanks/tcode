@@ -4294,7 +4294,6 @@ fn control_calls_in_a_members_turn_stay_inside_the_space() {
         let push = control_mcp::ControlOp::Git(control_mcp::GitParams {
             thread_id: "same".into(),
             op: control_mcp::GitOp::Push,
-            request_id: None,
         });
         let settings =
             || control_mcp::ControlOp::GetSettings(control_mcp::GetSettingsParams { keys: None });
@@ -4410,7 +4409,6 @@ fn child_questions_reach_the_lead_and_respond_input_answers_them() {
                     thread_id: "child".into(),
                     question_id: question.map(str::to_string),
                     answers,
-                    request_id: None,
                 }),
             )
         };
@@ -13633,7 +13631,6 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
                 expect: None,
             }],
             dry_run: None,
-            request_id: None,
         }),
     ));
     assert_eq!(

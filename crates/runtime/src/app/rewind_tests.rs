@@ -382,7 +382,6 @@ fn a_control_rewind_answers_with_the_harness_outcome() {
                 thread_id: "rewound-thread".into(),
                 turn: 1,
                 mode: control_mcp::RewindScope::Conversation,
-                request_id: None,
             }),
             reply,
             cx,

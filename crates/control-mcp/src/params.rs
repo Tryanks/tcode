@@ -316,9 +316,6 @@ pub struct UpdateThreadsParams {
     #[serde(default)]
     #[schemars(description = "Report would_apply and the side effects without changing anything.")]
     pub dry_run: Option<bool>,
-    #[serde(default)]
-    #[schemars(description = "Idempotency key: a retry with the same key does not apply twice.")]
-    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -363,9 +360,6 @@ pub struct SettleSelfParams {
         description = "The user's words, quoted verbatim, that consent to this thread settling itself."
     )]
     pub consent_quote: String,
-    #[serde(default)]
-    #[schemars(description = "Idempotency key.")]
-    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -551,9 +545,6 @@ pub struct PullRequestParams {
         description = "link, unlink, watch, unwatch, refresh, or a write: {\"comment\": {\"body\"}}, {\"reply\": {\"review_thread_id\", \"body\"}} (a reply in a review comment thread), {\"resolve\": {\"review_thread_id\"}}. Writes need pr_write."
     )]
     pub op: PullRequestOp,
-    #[serde(default)]
-    #[schemars(description = "Idempotency key.")]
-    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -591,18 +582,12 @@ pub struct GitParams {
         description = "{\"checkout_branch\": {\"branch\"}}, {\"commit\": {\"message\", \"included\"?}}, or with git_remote: push, pull, {\"commit_push\": {\"message\", \"included\"?}}, publish_branch, merge_worktree."
     )]
     pub op: GitOp,
-    #[serde(default)]
-    #[schemars(description = "Idempotency key.")]
-    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CreateProjectParams {
     #[schemars(description = "Absolute path of an existing directory on the host.")]
     pub root: String,
-    #[serde(default)]
-    #[schemars(description = "Idempotency key.")]
-    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -665,9 +650,6 @@ pub struct RespondInputParams {
     pub question_id: Option<String>,
     #[schemars(description = "Answers keyed by question id, as the request defines them.")]
     pub answers: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)]
-    #[schemars(description = "Idempotency key.")]
-    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -715,9 +697,6 @@ pub struct TerminalParams {
         description = "open, {\"input\": {\"terminal_id\", \"text\"}} or {\"close\": {\"terminal_id\"}}."
     )]
     pub op: TerminalOp,
-    #[serde(default)]
-    #[schemars(description = "Idempotency key.")]
-    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -730,9 +709,6 @@ pub struct DeleteThreadsParams {
     #[serde(default)]
     #[schemars(description = "Report what would be deleted and delete nothing.")]
     pub dry_run: Option<bool>,
-    #[serde(default)]
-    #[schemars(description = "Idempotency key.")]
-    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -753,9 +729,6 @@ pub struct RewindParams {
         description = "files, conversation or files_and_conversation: what the provider restores."
     )]
     pub mode: RewindScope,
-    #[serde(default)]
-    #[schemars(description = "Idempotency key.")]
-    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -764,9 +737,6 @@ pub struct PatchSettingsParams {
         description = "A settings patch as {\"type\": <patch>, \"content\": <value>}, as get_settings shows the fields. Credentials, hosting, tcode_control grants and the settlement automation tier are refused whatever the grant."
     )]
     pub patch: serde_json::Value,
-    #[serde(default)]
-    #[schemars(description = "Idempotency key.")]
-    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

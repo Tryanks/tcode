@@ -860,7 +860,6 @@ fn git_answers_with_the_outcome_and_refuses_unsafe_checkouts() {
                 ControlOp::Git(GitParams {
                     thread_id: "target".into(),
                     op,
-                    request_id: None,
                 }),
                 reply,
                 cx,
