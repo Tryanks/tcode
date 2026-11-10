@@ -673,10 +673,10 @@ mod tests {
             output.for_each(drop);
             let _ = closed.send(());
         });
-        // Only a failure waits this out; the work then ends once `_stdin`
-        // closes with the test.
+        // Work that outlives the harness holds its stdout open, and the test
+        // runner ends the wait.
         everyone_gone
-            .recv_timeout(std::time::Duration::from_secs(10))
+            .recv()
             .unwrap_or_else(|_| panic!("the harness's background work {work} outlived it"));
     }
 
