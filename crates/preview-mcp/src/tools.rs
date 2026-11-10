@@ -11,6 +11,7 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use crate::{Broker, PREVIEW_PRESETS, PreviewOp, PreviewReply};
 
@@ -209,16 +210,21 @@ impl PreviewTools {
                        For browser work, call preview_status first and call preview_open if no automation-capable preview is attached before concluding the browser is unavailable. \
                        Do not fall back to Chrome, Playwright, or another browser merely because the preview is initially closed or a first call fails; fall back only when preview_open explicitly reports unsupported or unavailable."
     )]
-    async fn preview_open(&self, Parameters(params): Parameters<OpenParams>) -> CallToolResult {
-        self.run(PreviewOp::Open { url: params.url }).await
+    async fn preview_open(
+        &self,
+        ct: CancellationToken,
+        Parameters(params): Parameters<OpenParams>,
+    ) -> CallToolResult {
+        self.run(&ct, PreviewOp::Open { url: params.url }).await
     }
 
     #[tool(description = "Navigate the Tcode preview browser to a URL and return its status.")]
     async fn preview_navigate(
         &self,
+        ct: CancellationToken,
         Parameters(params): Parameters<NavigateParams>,
     ) -> CallToolResult {
-        self.run(PreviewOp::Navigate { url: params.url }).await
+        self.run(&ct, PreviewOp::Navigate { url: params.url }).await
     }
 
     #[tool(
@@ -228,8 +234,8 @@ impl PreviewTools {
                        Includes load_error with the platform error when the last navigation failed, e.g. an untrusted certificate, \
                        and the console messages since the page last navigated: counts, with the latest errors, each marked engine or script by where it was recorded."
     )]
-    async fn preview_status(&self) -> CallToolResult {
-        self.run(PreviewOp::Status).await
+    async fn preview_status(&self, ct: CancellationToken) -> CallToolResult {
+        self.run(&ct, PreviewOp::Status).await
     }
 
     #[tool(
@@ -237,49 +243,72 @@ impl PreviewTools {
     )]
     async fn preview_evaluate(
         &self,
+        ct: CancellationToken,
         Parameters(params): Parameters<EvaluateParams>,
     ) -> CallToolResult {
-        self.run(PreviewOp::Evaluate { js: params.js }).await
+        self.run(&ct, PreviewOp::Evaluate { js: params.js }).await
     }
 
     #[tool(
         description = "Click an element in the preview page: its ref from preview_snapshot, or the first match of a CSS selector."
     )]
-    async fn preview_click(&self, Parameters(params): Parameters<ClickParams>) -> CallToolResult {
-        self.run(PreviewOp::Click {
-            selector: params.selector,
-            r#ref: params.reference,
-        })
+    async fn preview_click(
+        &self,
+        ct: CancellationToken,
+        Parameters(params): Parameters<ClickParams>,
+    ) -> CallToolResult {
+        self.run(
+            &ct,
+            PreviewOp::Click {
+                selector: params.selector,
+                r#ref: params.reference,
+            },
+        )
         .await
     }
 
     #[tool(
         description = "Type text into a field in the preview page: its ref from preview_snapshot, or the first match of a CSS selector."
     )]
-    async fn preview_type(&self, Parameters(params): Parameters<TypeParams>) -> CallToolResult {
-        self.run(PreviewOp::Type {
-            selector: params.selector,
-            r#ref: params.reference,
-            text: params.text,
-        })
+    async fn preview_type(
+        &self,
+        ct: CancellationToken,
+        Parameters(params): Parameters<TypeParams>,
+    ) -> CallToolResult {
+        self.run(
+            &ct,
+            PreviewOp::Type {
+                selector: params.selector,
+                r#ref: params.reference,
+                text: params.text,
+            },
+        )
         .await
     }
 
     #[tool(
         description = "Resize the preview canvas. mode is fill or fixed. Fixed mode accepts width/height or one preset: iphone-se, iphone-xr, iphone-12-pro, iphone-14-pro-max, pixel-7, galaxy-s20-ultra, ipad-mini, ipad-air, ipad-pro-12-9, surface-pro-7."
     )]
-    async fn preview_resize(&self, Parameters(params): Parameters<ResizeParams>) -> CallToolResult {
+    async fn preview_resize(
+        &self,
+        ct: CancellationToken,
+        Parameters(params): Parameters<ResizeParams>,
+    ) -> CallToolResult {
         let op = match resize_op(params) {
             Ok(op) => op,
             Err(message) => return tool_error(message),
         };
-        self.run(op).await
+        self.run(&ct, op).await
     }
 
     #[tool(
         description = "Press a key in the preview page, optionally with Alt, Control, Meta, or Shift modifiers."
     )]
-    async fn preview_press(&self, Parameters(params): Parameters<PressParams>) -> CallToolResult {
+    async fn preview_press(
+        &self,
+        ct: CancellationToken,
+        Parameters(params): Parameters<PressParams>,
+    ) -> CallToolResult {
         if let Some(modifier) = params
             .modifiers
             .iter()
@@ -289,26 +318,36 @@ impl PreviewTools {
                 "invalid modifier {modifier:?}; use Alt, Control, Meta, or Shift"
             ));
         }
-        self.run(PreviewOp::Press {
-            key: params.key,
-            modifiers: params.modifiers,
-        })
+        self.run(
+            &ct,
+            PreviewOp::Press {
+                key: params.key,
+                modifiers: params.modifiers,
+            },
+        )
         .await
     }
 
     #[tool(
         description = "Scroll the preview window, or a container by its ref from preview_snapshot or a CSS selector, by deltaX and deltaY."
     )]
-    async fn preview_scroll(&self, Parameters(params): Parameters<ScrollParams>) -> CallToolResult {
+    async fn preview_scroll(
+        &self,
+        ct: CancellationToken,
+        Parameters(params): Parameters<ScrollParams>,
+    ) -> CallToolResult {
         if params.delta_x.is_none() && params.delta_y.is_none() {
             return tool_error("preview_scroll requires deltaX or deltaY");
         }
-        self.run(PreviewOp::Scroll {
-            delta_x: params.delta_x.unwrap_or(0.0),
-            delta_y: params.delta_y.unwrap_or(0.0),
-            selector: params.selector,
-            r#ref: params.reference,
-        })
+        self.run(
+            &ct,
+            PreviewOp::Scroll {
+                delta_x: params.delta_x.unwrap_or(0.0),
+                delta_y: params.delta_y.unwrap_or(0.0),
+                selector: params.selector,
+                r#ref: params.reference,
+            },
+        )
         .await
     }
 
@@ -317,6 +356,7 @@ impl PreviewTools {
     )]
     async fn preview_wait_for(
         &self,
+        ct: CancellationToken,
         Parameters(params): Parameters<WaitForParams>,
     ) -> CallToolResult {
         if params.selector.is_none() && params.text.is_none() && params.url_includes.is_none() {
@@ -324,20 +364,23 @@ impl PreviewTools {
         }
         // The host gives a client 60 seconds to answer any preview request.
         let timeout_ms = params.timeout_ms.unwrap_or(15_000).min(60_000);
-        self.run(PreviewOp::WaitFor {
-            selector: params.selector,
-            text: params.text,
-            url_includes: params.url_includes,
-            timeout_ms,
-        })
+        self.run(
+            &ct,
+            PreviewOp::WaitFor {
+                selector: params.selector,
+                text: params.text,
+                url_includes: params.url_includes,
+                timeout_ms,
+            },
+        )
         .await
     }
 
     #[tool(
         description = "Snapshot the preview page as an accessibility outline: one line per element, `@e7 button \"Save\"`, with its value and state; same-origin frames and open shadow roots inline. Act on elements by their ref (`e7`). Refs last for the document; after the user acts on the page, take a new snapshot."
     )]
-    async fn preview_snapshot(&self) -> CallToolResult {
-        self.run(PreviewOp::Snapshot).await
+    async fn preview_snapshot(&self, ct: CancellationToken) -> CallToolResult {
+        self.run(&ct, PreviewOp::Snapshot).await
     }
 
     #[tool(
@@ -345,31 +388,36 @@ impl PreviewTools {
     )]
     async fn preview_screenshot(
         &self,
+        ct: CancellationToken,
         Parameters(params): Parameters<ScreenshotParams>,
     ) -> CallToolResult {
         let full_page = params.full_page.unwrap_or(false);
         if full_page && params.reference.is_some() {
             return tool_error("give a ref or fullPage, not both");
         }
-        self.run(PreviewOp::Screenshot {
-            r#ref: params.reference,
-            full_page,
-        })
+        self.run(
+            &ct,
+            PreviewOp::Screenshot {
+                r#ref: params.reference,
+                full_page,
+            },
+        )
         .await
     }
 
     /// Route one op through the broker and map its reply into a tool result.
-    async fn run(&self, op: PreviewOp) -> CallToolResult {
+    /// A call the harness cancels drops its request, and the host forgets it.
+    async fn run(&self, ct: &CancellationToken, op: PreviewOp) -> CallToolResult {
         log::info!("preview-mcp: tool invoked: {op:?}");
-        match self
-            .broker
-            .invoke(|reply| crate::BrokerRequest {
-                session_id: self.session_id.clone(),
-                op,
-                reply,
-            })
-            .await
-        {
+        let reply = ct.run_until_cancelled(self.broker.invoke(|reply| crate::BrokerRequest {
+            session_id: self.session_id.clone(),
+            op,
+            reply,
+        }));
+        let Some(reply) = reply.await else {
+            return tool_error("cancelled");
+        };
+        match reply {
             Ok(PreviewReply::Json(value)) => {
                 let text =
                     serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
@@ -428,8 +476,7 @@ pub fn service(broker: Broker, session_id: String) -> Service {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn tools_preserve_session_and_map_replies_and_disconnects() {
+    fn broker() -> (Broker, async_channel::Receiver<crate::BrokerRequest>) {
         let (tx, rx) = async_channel::unbounded::<crate::BrokerRequest>();
         let broker = Broker::new(
             tx,
@@ -438,6 +485,12 @@ mod tests {
                 dropped: "preview UI dropped the request",
             },
         );
+        (broker, rx)
+    }
+
+    #[tokio::test]
+    async fn tools_preserve_session_and_map_replies_and_disconnects() {
+        let (broker, rx) = broker();
         let resolver = tokio::spawn(async move {
             for (op, reply) in [
                 (
@@ -462,14 +515,17 @@ mod tests {
             }
         });
         let tools = PreviewTools::new(broker, "session-a".into());
-        let status = tools.preview_status().await;
+        let status = tools.preview_status(CancellationToken::new()).await;
         assert_eq!(status.is_error, Some(false));
         assert!(
             matches!(status.content.as_slice(), [ContentBlock::Text(text)]
             if serde_json::from_str::<serde_json::Value>(&text.text).unwrap() == serde_json::json!({"url":"https://x/"}))
         );
         let shot = tools
-            .preview_screenshot(Parameters(ScreenshotParams::default()))
+            .preview_screenshot(
+                CancellationToken::new(),
+                Parameters(ScreenshotParams::default()),
+            )
             .await;
         assert_eq!(shot.is_error, Some(false));
         assert!(
@@ -477,10 +533,26 @@ mod tests {
             if image.mime_type == "image/png" && image.data == "AAA")
         );
         resolver.await.unwrap();
-        let disconnected = tools.preview_status().await;
+        let disconnected = tools.preview_status(CancellationToken::new()).await;
         assert_eq!(disconnected.is_error, Some(true));
         assert!(
             matches!(disconnected.content.as_slice(), [ContentBlock::Text(text)] if text.text == "preview UI is not available")
         );
+    }
+
+    /// A call the harness cancels while the page has not answered closes its
+    /// reply channel, which is how the host learns to forget the request.
+    #[tokio::test]
+    async fn a_cancelled_call_drops_its_request() {
+        let (broker, rx) = broker();
+        let tools = PreviewTools::new(broker, "session-a".into());
+        let ct = CancellationToken::new();
+        let host = async {
+            let request = rx.recv().await.unwrap();
+            ct.cancel();
+            request.reply.closed().await;
+        };
+        let (result, ()) = tokio::join!(tools.preview_status(ct.clone()), host);
+        assert_eq!(result.is_error, Some(true));
     }
 }
