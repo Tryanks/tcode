@@ -316,7 +316,6 @@ pub trait OverlayExt {
     fn remove_notification<T: Sized + 'static>(&mut self, cx: &mut App);
     fn remove_notification1<T: Sized + 'static>(&mut self, key: impl Into<ElementId>, cx: &mut App);
     fn has_notification<T: Sized + 'static>(&mut self, cx: &mut App) -> bool;
-    fn clear_notifications(&mut self, cx: &mut App);
 }
 
 impl OverlayExt for Window {
@@ -397,13 +396,6 @@ impl OverlayExt for Window {
                 .read(cx)
                 .contains_type(std::any::TypeId::of::<T>())
         })
-    }
-
-    fn clear_notifications(&mut self, cx: &mut App) {
-        Overlays::update(self, cx, |host, window, cx| {
-            host.notifications
-                .update(cx, |list, cx| list.clear(window, cx));
-        });
     }
 }
 
@@ -995,7 +987,7 @@ mod tests {
     fn compact_toast_obeys_seam_replaces_and_wide_keeps_card(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
-        let (root, cx) = cx.add_window_view(|window, cx| {
+        let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)
         });
@@ -1023,9 +1015,7 @@ mod tests {
         assert!(bounds.size.width <= px(361.));
         assert!(bounds.size.height >= px(44.));
         cx.update(|window, cx| window.push_notification("Second", cx));
-        overlays(&root, cx).read_with(cx, |root, cx| {
-            root.notifications.read(cx).assert_messages(cx, &["Second"]);
-        });
+        assert_eq!(cx.update(notifications_said), ["Second"]);
         cx.simulate_resize(size(px(1200.), px(800.)));
         crate::window_seam::occlude_for_test(cx, gpui::Edges::default());
         cx.update(|window, cx| {
@@ -1104,12 +1094,15 @@ mod tests {
             gpui_base::Root::new(body, window, cx)
         });
         cx.simulate_resize(size(px(393.), px(852.)));
-        cx.update(|window, cx| window.push_notification(Notification::error("Failed"), cx));
+        struct Failed;
+        cx.update(|window, cx| {
+            window.push_notification(Notification::error("Failed").id::<Failed>(), cx)
+        });
         draw(cx);
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
 
-        cx.update(|window, cx| window.clear_notifications(cx));
+        cx.update(|window, cx| window.remove_notification::<Failed>(cx));
         draw(cx);
         let leaving = cx
             .debug_bounds("compact-toast")
@@ -1134,13 +1127,17 @@ mod tests {
     fn a_card_that_stays_leaves_when_closed_later(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
-        let (root, cx) = cx.add_window_view(|window, cx| {
+        let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)
         });
         cx.simulate_resize(size(px(1200.), px(800.)));
+        struct Stays;
         cx.update(|window, cx| {
-            window.push_notification(Notification::info("Stays").autohide(false), cx)
+            window.push_notification(
+                Notification::info("Stays").autohide(false).id::<Stays>(),
+                cx,
+            )
         });
         draw(cx);
         cx.executor()
@@ -1148,14 +1145,12 @@ mod tests {
         draw(cx);
         assert!(cx.debug_bounds("wide-toast").is_some());
 
-        cx.update(|window, cx| window.clear_notifications(cx));
+        cx.update(|window, cx| window.remove_notification::<Stays>(cx));
         draw(cx);
         cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
         draw(cx);
         assert!(cx.debug_bounds("wide-toast").is_none());
-        overlays(&root, cx).read_with(cx, |root, cx| {
-            root.notifications.read(cx).assert_messages(cx, &[]);
-        });
+        assert!(cx.update(notifications_said).is_empty());
     }
 
     #[gpui::test]
