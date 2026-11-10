@@ -8364,7 +8364,7 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
             state.index_snapshot().summary.activity[&source.id].fork,
             ForkAvailability::Running
         );
-        assert!(state.host.fork_thread(&source.id, cx).is_none());
+        assert!(state.host.fork_thread(&source.id, cx).is_err());
         state.selected_session_mut().unwrap().turn_in_flight = false;
         state.selected_session_mut().unwrap().background_task_count = 1;
         assert_eq!(
@@ -12892,6 +12892,32 @@ fn a_thread_the_host_will_not_settle_says_so_in_its_activity() {
     assert!(refused.iter().any(|message| matches!(
         message,
         HostMessage::Ack { id: 1, result: Err(error) } if error.code == "thread_busy"
+    )));
+}
+
+#[test]
+fn forking_a_thread_that_cannot_be_forked_is_refused_with_the_reason() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("fork-refused");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let mut empty = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+    empty.id = "empty".into();
+    store.upsert_meta(&empty).unwrap();
+    state.update(cx, |state, _| state.sessions.push(empty.clone()));
+    let answered = through_pipe(
+        &state,
+        cx,
+        1,
+        tcode_protocol::ClientPayload::Command(Command::ForkThread {
+            id: "empty".into(),
+            at: None,
+        }),
+    );
+    let refusal = super::sessions::fork_refusal(ForkAvailability::Empty).unwrap();
+    assert!(answered.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack { id: 1, result: Err(error) }
+            if error.code == "fork_unavailable" && error.message == refusal
     )));
 }
 

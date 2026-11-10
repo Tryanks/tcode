@@ -884,11 +884,14 @@ impl AppState {
             }
             Command::ForkThread { at, .. } => {
                 let fork = match at {
-                    Some(at) => self.fork_thread_at(target, &at, cx),
-                    None => self.fork_thread(target, cx),
+                    Some(at) => self
+                        .fork_thread_at(target, &at, cx)
+                        .ok_or_else(|| failed("the fork could not be made".into())),
+                    None => self
+                        .fork_thread(target, cx)
+                        .map_err(|refusal| failed(refusal.into())),
                 };
-                new_thread_id =
-                    Some(fork.ok_or_else(|| failed("the fork could not be made".into()))?);
+                new_thread_id = Some(fork?);
                 "forked"
             }
             Command::SteerQueued { id, .. } => {

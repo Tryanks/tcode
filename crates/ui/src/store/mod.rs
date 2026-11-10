@@ -2788,13 +2788,6 @@ impl WorkspaceStore {
             .is_some_and(|activity| activity.waiting_for_input)
     }
 
-    pub fn fork_availability(&self, session_id: &str) -> ForkAvailability {
-        self.index_summary
-            .activity
-            .get(session_id)
-            .map_or(ForkAvailability::Available, |activity| activity.fork)
-    }
-
     pub fn sidebar_sessions(&self) -> &[SessionMeta] {
         &self.index_replica.0
     }

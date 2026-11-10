@@ -41,7 +41,7 @@ use tcode_core::{
     settings::SidebarLayout,
 };
 
-use crate::store::{ForkAvailability, HostKey, StoreChange, ThreadKey, TopicKind, WorkspaceStore};
+use crate::store::{HostKey, StoreChange, ThreadKey, TopicKind, WorkspaceStore};
 use crate::time::{humanize_ago, now_secs};
 use crate::typography::TextRole as _;
 use crate::window_drag_area;
@@ -1940,32 +1940,11 @@ impl SessionsSidebar {
         }
     }
 
-    fn on_fork(&mut self, action: &ThreadFork, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_fork(&mut self, action: &ThreadFork, _: &mut Window, cx: &mut Context<Self>) {
         let Some(store) = self.store_of(&action.0.host) else {
             return;
         };
         let id = action.0.session_id.clone();
-        let refusal = match store.read(cx).fork_availability(&id) {
-            ForkAvailability::Available => None,
-            ForkAvailability::Unsupported => {
-                let store = store.read(cx);
-                let provider = store
-                    .sidebar_sessions()
-                    .iter()
-                    .find(|meta| meta.id == id)
-                    .map_or_else(
-                        || crate::tr!("providers.harness.unnamed").into_owned(),
-                        |meta| crate::settings::provider_label(meta.provider).to_owned(),
-                    );
-                Some(crate::tr!("sidebar.fork_unsupported", provider = provider).into_owned())
-            }
-            ForkAvailability::Empty => Some(crate::tr!("sidebar.fork_empty").into_owned()),
-            ForkAvailability::Running => Some(crate::tr!("sidebar.fork_running").into_owned()),
-        };
-        if let Some(message) = refusal {
-            window.push_notification(Notification::error(message), cx);
-            return;
-        }
         store.update(cx, |store, cx| {
             store.fork_thread(id, cx);
         });
@@ -7059,7 +7038,7 @@ mod tests {
                     settle_blocked: false,
                     failed: false,
                     unread: false,
-                    fork: ForkAvailability::Available,
+                    fork: tcode_protocol::ForkAvailability::Available,
                     agent: None,
                     latest_activity: None,
                 },

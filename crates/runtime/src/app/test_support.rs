@@ -420,7 +420,7 @@ impl TestClientState {
         }
     }
     pub(super) fn fork_thread(&mut self, id: &str, cx: &mut HostCx) {
-        if let Some(id) = self.host.fork_thread(id, cx) {
+        if let Ok(id) = self.host.fork_thread(id, cx) {
             self.park_active(cx);
             self.selected = Some(id);
         }

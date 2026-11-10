@@ -1018,9 +1018,15 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::RegenerateSessionTitle { session_id } => {
             app.regenerate_session_title(&session_id, cx)
         }
-        Command::ForkThread { id, at: None } => {
-            response = CommandResponse::SessionId(app.fork_thread(&id, cx));
-        }
+        Command::ForkThread { id, at: None } => match app.fork_thread(&id, cx) {
+            Ok(forked) => response = CommandResponse::SessionId(Some(forked)),
+            Err(refusal) => {
+                return CommandOutcome::Immediate(Err(ProtocolError {
+                    code: "fork_unavailable".into(),
+                    message: refusal.into(),
+                }));
+            }
+        },
         Command::ForkThread { id, at: Some(at) } => {
             let Some(forked) = app.fork_thread_at(&id, &at, cx) else {
                 return CommandOutcome::Immediate(Err(ProtocolError {
