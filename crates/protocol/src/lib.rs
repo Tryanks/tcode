@@ -307,6 +307,11 @@ pub use wire::{
 // SessionMeta's other_worktrees; spaces' SpacePolicy, carried by SpaceInfo,
 // the Space principal and scope and set by SpaceAction set_policy; and the
 // {"type":"ssh"} stream carrying an SSH connection to the machine.
+//
+// Unreleased: a field may be missing only where the sender leaves it out at
+// its empty value; a message missing any other field no longer decodes, and
+// nothing stands in for it (a principal, scope or space without a policy was
+// read as unrestricted). HostingAction no longer reads new_code.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

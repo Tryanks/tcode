@@ -187,7 +187,6 @@ pub enum Query {
     /// The latest `tcode_control` writes across every thread, newest first.
     ControlActivity {
         limit: u32,
-        #[serde(default)]
         filter: ControlActivityFilter,
     },
     /// The MCP servers a profile's harness is configured with in its own files.
@@ -433,7 +432,6 @@ pub enum HostingAction {
     State,
     SetEnabled(bool),
     /// Mint an invitation, replacing the current one.
-    #[serde(alias = "new_code")]
     NewInvitation,
     /// Remove a device; from every machine of the group when it is a group
     /// member.
@@ -535,7 +533,6 @@ pub struct SpaceInfo {
     pub link_enabled: bool,
     pub link_dead: bool,
     pub members: Vec<HostedDevice>,
-    #[serde(default = "SpacePolicy::unrestricted")]
     pub policy: SpacePolicy,
 }
 
@@ -549,20 +546,15 @@ pub struct SpacePolicy {
     pub agents: SpaceAgents,
     pub approval: SpaceApproval,
     /// Open, type into and restart terminals.
-    #[serde(default)]
     pub terminals: bool,
     /// Push, pull and publish branches, and work with pull requests, all
     /// under the machine's own credentials.
-    #[serde(default)]
     pub git_remote: bool,
     /// Reach the machine's local services through Preview tunnels.
-    #[serde(default)]
     pub preview: bool,
     /// Let a member's turn operate the machine's desktop through computer use.
-    #[serde(default)]
     pub computer_use: bool,
     /// Open the space's projects in an editor over the machine's SSH channel.
-    #[serde(default)]
     pub editor: bool,
 }
 
@@ -721,7 +713,6 @@ pub struct HostingState {
     pub created_space_id: Option<String>,
     pub enabled: bool,
     /// Seconds until `invite` expires; `0` without one.
-    #[serde(default)]
     pub expires_in_secs: u64,
     pub host_id: String,
     pub host_name: String,
@@ -732,11 +723,9 @@ pub struct HostingState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite: Option<String>,
     pub devices: Vec<HostedDevice>,
-    #[serde(default)]
     pub spaces: Vec<SpaceInfo>,
     /// How each Traverse source this machine publishes to is doing, in
     /// configured order; empty with none.
-    #[serde(default)]
     pub traverse: Vec<TraverseSourceStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<GroupInfo>,
@@ -822,7 +811,6 @@ pub enum TraverseLookupState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostedDevice {
-    #[serde(default)]
     pub access: DeviceAccess,
     pub id: String,
     pub name: String,
@@ -845,7 +833,7 @@ pub struct PathInfo {
     pub relay: Option<String>,
     /// The direct path's remote address is on this machine's own network
     /// (private, link-local or loopback) rather than punched across the
-    /// internet. A peer that predates the flag reads as punched.
+    /// internet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lan: bool,
     /// A relay carries the connection while a direct path is open but not

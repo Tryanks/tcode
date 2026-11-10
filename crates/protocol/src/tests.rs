@@ -66,22 +66,6 @@ fn provider_update_command_and_toasts_have_literal_wire_contracts() {
 }
 
 #[test]
-fn provider_update_status_accepts_older_hosts_and_preserves_terminal_requirement() {
-    let older = json!({
-        "installed": "1.0.0", "latest": "1.0.1", "update_available": true,
-        "checking": false, "updating": false, "update_command": "brew upgrade codex"
-    });
-    let status: ProviderVersionStatus = serde_json::from_value(older.clone()).unwrap();
-    assert!(!status.update_requires_terminal);
-    let mut terminal = older;
-    terminal["update_command"] = json!("sudo apt-get install --only-upgrade claude-code");
-    terminal["update_requires_terminal"] = json!(true);
-    let status: ProviderVersionStatus = serde_json::from_value(terminal.clone()).unwrap();
-    assert!(status.update_requires_terminal);
-    assert_eq!(serde_json::to_value(status).unwrap(), terminal);
-}
-
-#[test]
 fn client_ndjson_preserves_ids_text_and_record_boundaries() {
     let message = ClientMessage {
         principal: None,
@@ -233,36 +217,6 @@ fn binary_payloads_use_base64_and_reject_corrupt_input() {
         "/content/bytes",
     );
     assert_binary_wire(QueryResponse::FileBytes(bytes), "/content");
-}
-
-#[test]
-fn omitted_optional_subscription_index_and_queue_fields_default() {
-    let subscription: Subscription =
-        serde_json::from_value(json!({"topic": {"type": "index"}})).unwrap();
-    assert_eq!(
-        subscription,
-        Subscription {
-            known_index: None,
-            topic: Topic::Index,
-            after: None
-        }
-    );
-    let index: IndexSnapshot = serde_json::from_value(
-        json!({"sessions": [], "projects": [], "worktree_shared": [], "archived_revision": 0}),
-    )
-    .unwrap();
-    assert_eq!(index.summary, IndexSummary::default());
-    let queued: QueuedMessageStatus =
-        serde_json::from_value(json!({"id": 1, "text": "next", "editable": true})).unwrap();
-    assert_eq!(queued.fire_at_unix_secs, None);
-    let command = decode_client_line(r#"{"id":1,"payload":{"type":"command","content":{"type":"capture_terminal_selection","content":{"session_id":"s","terminal_id":9}}}}"#).unwrap();
-    assert!(matches!(
-        command.payload,
-        ClientPayload::Command(Command::CaptureTerminalSelection {
-            selection: None,
-            ..
-        })
-    ));
 }
 
 /// Import progress and content search are replicated host state and a host-run
@@ -996,18 +950,6 @@ fn history_paging_literal_json_contract() {
         serde_json::to_string(&snapshot).unwrap(),
         r#"{"type":"session_snapshot","content":{"from":1800,"end":2000,"records":[],"total":2000,"total_turns":0,"truncated":false}}"#
     );
-    assert!(matches!(
-        serde_json::from_str::<ServerEvent>(
-            r#"{"type":"session_snapshot","content":{"from":0,"end":0,"records":[]}}"#
-        )
-        .unwrap(),
-        ServerEvent::SessionSnapshot {
-            total: 0,
-            total_turns: 0,
-            truncated: false,
-            ..
-        }
-    ));
 }
 
 /// The activity entry as this and later builds write it, for each kind of
@@ -1287,71 +1229,30 @@ fn version_six_index_visits_output_and_elision_literal_json() {
 }
 
 #[test]
-fn command_key_is_optional_for_v3_and_preserved_for_v4() {
-    let legacy = decode_client_line(
+fn a_command_key_is_optional_and_preserved() {
+    let unkeyed = decode_client_line(
         r#"{"id":9,"payload":{"type":"command","content":{"type":"cycle_project_sort"}}}"#,
     )
     .unwrap();
-    assert_eq!(legacy.key, None);
-    assert_eq!(legacy.principal, None);
-    let scoped = decode_client_line(r#"{"id":9,"principal":{"type":"space","content":{"space_id":"s","space_name":"Shared","project_ids":["p"],"device_id":"d","device_name":"Phone"}},"payload":{"type":"command","content":{"type":"cycle_project_sort"}}}"#).unwrap();
-    assert_eq!(
-        scoped.principal,
-        Some(Principal::Space {
-            policy_revision: 0,
-            space_id: "s".into(),
-            space_name: "Shared".into(),
-            project_ids: vec!["p".into()],
-            device_id: "d".into(),
-            device_name: "Phone".into(),
-            policy: SpacePolicy::unrestricted(),
-        })
-    );
-    assert_eq!(
-        serde_json::to_value(&scoped).unwrap()["principal"],
-        json!({"type":"space","content":{"policy_revision":0,"space_id":"s","space_name":"Shared","project_ids":["p"],"device_id":"d","device_name":"Phone",
-            "policy":{"agents":{"type":"every"},"approval":"any","terminals":true,"git_remote":true,"preview":false,"computer_use":true,"editor":false}}})
-    );
+    assert_eq!(unkeyed.key, None);
+    assert_eq!(unkeyed.principal, None);
     let keyed = decode_client_line(r#"{"id":9,"key":"00000000-0000-4000-8000-000000000001","payload":{"type":"command","content":{"type":"cycle_project_sort"}}}"#).unwrap();
     assert_eq!(
         keyed.key.as_deref(),
         Some("00000000-0000-4000-8000-000000000001")
     );
-    assert_eq!(keyed.payload, legacy.payload);
+    assert_eq!(keyed.payload, unkeyed.payload);
 }
 
-/// The hosting reply is read by browsers and phones that may be older or
-/// newer than the machine: a machine from the six-digit-code era (its
-/// `code` field is ignored) or without device paths must still be
-/// understood, and a machine that has the link sends it whole so a scanner
-/// needs nothing else to reach it off the LAN. Each Traverse source's status
-/// is spelled out for the settings page that draws it.
+/// A machine that has the link sends it whole so a scanner needs nothing
+/// else to reach it off the LAN. Each Traverse source's status is spelled
+/// out for the settings page that draws it.
 #[test]
-fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
-    let older: HostingState = serde_json::from_value(json!({
-        "enabled": true,
-        "code": "123456",
-        "expires_in_secs": 280,
-        "host_id": "ab".repeat(32),
-        "host_name": "Studio",
-        "devices": [{"id": "cd".repeat(32), "name": "Phone", "created_unix": 1}]
-    }))
-    .unwrap();
-    assert_eq!(older.invite, None);
-    assert_eq!(older.created_space_id, None);
-    assert_eq!(older.devices[0].path, None);
-    assert_eq!(
-        serde_json::from_value::<HostingAction>(json!({"type": "new_code"})).unwrap(),
-        HostingAction::NewInvitation
-    );
+fn hosting_actions_and_state_carry_the_invite_link() {
     assert_eq!(
         serde_json::to_value(HostingAction::NewInvitation).unwrap(),
         json!({"type": "new_invitation"})
     );
-
-    assert!(older.spaces.is_empty());
-    assert!(older.traverse.is_empty());
-    assert_eq!(older.devices[0].access, DeviceAccess::Full);
     for (action, wire) in [
         (
             SpaceAction::Create {
@@ -1587,14 +1488,13 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
     );
 }
 
-/// A path is direct or relayed on every peer; whether a direct path stays
-/// on the LAN, and whether a relay is still waiting for one, are newer
-/// flags that a machine from before them never sends. Such a machine's
-/// direct path reads as punched, since that is what it could not tell.
+/// A path is direct or relayed; a direct path stays on the LAN or is
+/// punched, and a relay may still be waiting for a direct one. A flag that
+/// is off is left out.
 #[test]
-fn path_info_kinds_read_older_peers_and_spell_the_flags() {
-    let older: PathInfo = serde_json::from_value(json!({"direct": true})).unwrap();
-    assert_eq!(older.kind(), PathKind::Tunnel);
+fn path_info_kinds_follow_the_flags() {
+    let punched: PathInfo = serde_json::from_value(json!({"direct": true})).unwrap();
+    assert_eq!(punched.kind(), PathKind::Tunnel);
     let lan = PathInfo {
         direct: true,
         relay: None,
@@ -1695,8 +1595,7 @@ fn provider_login_commands_and_state_use_their_documented_wire_shapes() {
 }
 
 /// A client adds another account and opens its sign-in from the profile id
-/// the host answers with; a third-party profile from a client without
-/// `inherit_config` copies nothing.
+/// the host answers with.
 #[test]
 fn profile_creation_commands_use_their_documented_wire_shapes() {
     let command = Command::CreateAccountProfile {
@@ -1717,40 +1616,13 @@ fn profile_creation_commands_use_their_documented_wire_shapes() {
         serde_json::from_value::<CommandResponse>(wire).unwrap(),
         response
     );
-
-    assert_eq!(
-        serde_json::from_value::<Command>(json!({"type": "create_third_party_profile", "content": {
-            "provider": "claude_code", "name": "Kimi", "base_url": "https://api.kimi.com/coding/",
-            "model": null, "api_key": "sk"
-        }}))
-        .unwrap(),
-        Command::CreateThirdPartyProfile {
-            provider: agent::ProviderKind::ClaudeCode,
-            name: "Kimi".into(),
-            base_url: "https://api.kimi.com/coding/".into(),
-            model: None,
-            api_key: "sk".into(),
-            inherit_config: false,
-        }
-    );
 }
 
 /// A provider-plugin catalog and a plugin command are read by clients that
 /// render the actions the host computed, so their literal shapes are the
-/// contract; an older providers snapshot still decodes with no catalogs.
+/// contract.
 #[test]
 fn provider_plugin_catalog_and_commands_use_their_documented_wire_shapes() {
-    let older: ProvidersStatus = serde_json::from_value(json!({
-        "model_catalogs": {}, "models_loading": {}, "provider_versions": {},
-        "tcode_update": {"current": "1.0.0", "latest": null, "release_url": null,
-            "update_available": false, "checking": false},
-        "provider_snapshots": {}, "acp_marketplace_items": [], "acp_registry_loading": false,
-        "acp_registry_error": null, "acp_installing": [], "providers_checked_at": null,
-        "providers_checking": false, "secret_names": {}
-    }))
-    .unwrap();
-    assert!(older.plugins.is_empty());
-
     let catalog: ProviderPluginCatalog = serde_json::from_value(json!({
         "profile_id": "claude",
         "context_cwd": "/work/proj",

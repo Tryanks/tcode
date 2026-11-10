@@ -14,16 +14,6 @@ pub use tcode_core::settings::SettingsPatch;
 
 use crate::{ExternalThread, RuntimeOperationId};
 
-/// Fallback cell metrics matching the host emulator's own defaults, used when
-/// a client resizes without knowing its physical cell size.
-fn default_cell_width() -> u16 {
-    8
-}
-
-fn default_cell_height() -> u16 {
-    17
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSelection {
     pub line_start: usize,
@@ -60,9 +50,7 @@ pub enum Command {
         rows: u16,
         /// Physical cell size, which the host needs to answer a program's
         /// pixel-size queries (CSI 14 t).
-        #[serde(default = "default_cell_width")]
         cell_width: u16,
-        #[serde(default = "default_cell_height")]
         cell_height: u16,
     },
     /// Clear the host grid and its scrollback, keeping the current prompt line.
@@ -180,7 +168,6 @@ pub enum Command {
         base_url: String,
         model: Option<String>,
         api_key: String,
-        #[serde(default)]
         inherit_config: bool,
     },
     /// Add a profile for another account of `provider`, in its own config
@@ -256,21 +243,18 @@ pub enum Command {
     /// directory), or from outside any project when `cwd` is `None`.
     RefreshProviderPlugins {
         profile_id: String,
-        #[serde(default)]
         cwd: Option<PathBuf>,
     },
     InstallProviderPlugin {
         profile_id: String,
         entry_id: String,
         scope: PluginScope,
-        #[serde(default)]
         cwd: Option<PathBuf>,
     },
     UninstallProviderPlugin {
         profile_id: String,
         entry_id: String,
         scope: PluginScope,
-        #[serde(default)]
         cwd: Option<PathBuf>,
     },
     SetProviderPluginEnabled {
@@ -278,26 +262,22 @@ pub enum Command {
         entry_id: String,
         scope: PluginScope,
         enabled: bool,
-        #[serde(default)]
         cwd: Option<PathBuf>,
     },
     UpdateProviderPlugin {
         profile_id: String,
         entry_id: String,
         scope: PluginScope,
-        #[serde(default)]
         cwd: Option<PathBuf>,
     },
     AddProviderMarketplace {
         profile_id: String,
         source: String,
-        #[serde(default)]
         cwd: Option<PathBuf>,
     },
     RemoveProviderMarketplace {
         profile_id: String,
         name: String,
-        #[serde(default)]
         cwd: Option<PathBuf>,
     },
     ResolvePluginChallenge {
@@ -341,8 +321,7 @@ pub enum Command {
     CaptureTerminalSelection {
         session_id: String,
         terminal_id: u64,
-        /// Client-grid selection; absent retains the local-handle behavior.
-        #[serde(default)]
+        /// Client-grid selection; `None` retains the local-handle behavior.
         selection: Option<TerminalSelection>,
     },
     RemoveTerminalContext {

@@ -162,9 +162,7 @@ pub struct PullRequestComment {
     pub review_state: Option<PullRequestReviewState>,
     pub reactions: Vec<PullRequestReaction>,
     /// GitHub lets the signed-in account change its text: its own, or a maintainer's right.
-    #[serde(default)]
     pub viewer_can_update: bool,
-    #[serde(default)]
     pub viewer_can_react: bool,
 }
 
@@ -193,10 +191,8 @@ pub struct PullRequestReviewThread {
     pub total_comments: u64,
     /// Where [`PullRequestRead::ThreadReplies`] carries on, while replies remain unread.
     pub replies_after: Option<String>,
-    #[serde(default)]
     pub viewer_can_reply: bool,
     /// Whether the signed-in account may resolve it, or unresolve it once resolved.
-    #[serde(default)]
     pub viewer_can_resolve: bool,
 }
 
@@ -211,12 +207,9 @@ pub struct PullRequestConversation {
     /// Opaque, and different for each GitHub account the host reads as: a client keys the
     /// media this conversation shows by it, so no copy outlives an account change.
     pub account: String,
-    #[serde(default)]
     pub permissions: PullRequestPermissions,
-    #[serde(default)]
     pub labels: Vec<PullRequestLabel>,
     /// Requested reviewers first, then whoever reviewed without a request outstanding.
-    #[serde(default)]
     pub reviewers: Vec<PullRequestReviewerState>,
     pub capabilities: PullRequestCapabilities,
 }

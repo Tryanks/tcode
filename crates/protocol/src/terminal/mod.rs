@@ -144,25 +144,13 @@ bitflags::bitflags! {
 /// A resolved cell style. Index 0 of every style table is the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TerminalStyle {
-    #[serde(default = "TerminalColor::foreground")]
     pub fg: TerminalColor,
-    #[serde(default = "TerminalColor::background")]
     pub bg: TerminalColor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub underline_color: Option<TerminalColor>,
     /// Raw [`CellFlags`] bits.
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub flags: u16,
-}
-
-impl TerminalColor {
-    fn foreground() -> Self {
-        Self::Foreground
-    }
-
-    fn background() -> Self {
-        Self::Background
-    }
 }
 
 impl Default for TerminalStyle {
