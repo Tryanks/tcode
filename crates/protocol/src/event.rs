@@ -481,12 +481,7 @@ impl HarnessDescription {
             default_config_dir: text(facts.default_config_dir),
             endpoint: facts.endpoint.map(|endpoint| EndpointDescription {
                 base_url_env: endpoint.base_url_env.to_owned(),
-                key_env: endpoint
-                    .key_envs
-                    .first()
-                    .copied()
-                    .unwrap_or_default()
-                    .to_owned(),
+                key_env: endpoint.key_envs[0].to_owned(),
                 model_env: text(endpoint.model_env),
                 profiles: endpoint.profiles,
                 presets: endpoint
