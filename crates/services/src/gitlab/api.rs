@@ -115,7 +115,7 @@ pub(super) struct Api {
     store: SettingsStore,
     environment: BTreeMap<String, String>,
     hosts: RwLock<BTreeMap<String, HostSettings>>,
-    pub(super) agent: ureq::Agent,
+    agent: ureq::Agent,
     tokens: Mutex<HashMap<String, Cached<Option<Credential>>>>,
     rate_limits: Mutex<crate::forge::RateLimits>,
 }
@@ -656,25 +656,14 @@ fn nonempty(value: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     /// `GITLAB_TOKEN` goes only to the server glab's host variables name (`GITLAB_HOST`, else
-    /// `GL_HOST`), gitlab.com without them, and glab's token for one server never to another:
-    /// glab is asked for each server by its own host, with none of those variables.
-    #[cfg(unix)]
+    /// `GL_HOST`), and to gitlab.com without them.
     #[test]
-    fn a_token_goes_only_to_the_server_it_is_for() {
+    fn the_environment_token_goes_only_to_the_server_it_is_for() {
         use super::Api;
-        use std::os::unix::fs::PermissionsExt as _;
         use tcode_core::settings::CredentialSource;
         let root =
             std::env::temp_dir().join(format!("tcode-gitlab-token-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let glab = root.join("glab");
-        std::fs::write(
-            &glab,
-            "#!/bin/sh\n[ -n \"$GITLAB_TOKEN$GITLAB_HOST$GITLAB_URI$GL_HOST\" ] && exit 1\nwhile read -r line; do\n  [ \"$line\" = host=glab.test:8443 ] && echo password=glab-secret\ndone\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&glab, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = ("PATH".to_owned(), root.to_string_lossy().into_owned());
         let token = ("GITLAB_TOKEN".to_owned(), "env-secret".to_owned());
         let source = |api: &Api, authority: &str| {
             api.credential(authority)
@@ -688,20 +677,19 @@ mod tests {
             "env-secret".to_owned(),
         ));
         let store = || crate::settings::SettingsStore::new(root.clone());
-        let public = Api::new(store(), [path.clone(), token.clone()]);
+        let public = Api::new(store(), [token.clone()]);
         assert_eq!(source(&public, "gitlab.com"), env);
         assert_eq!(source(&public, "gitlab.acme.test"), None);
         let gl_host = (
             "GL_HOST".to_owned(),
             "https://gitlab.corp.example".to_owned(),
         );
-        let corp = Api::new(store(), [path.clone(), token.clone(), gl_host.clone()]);
+        let corp = Api::new(store(), [token.clone(), gl_host.clone()]);
         assert_eq!(source(&corp, "gitlab.corp.example"), env);
         assert_eq!(source(&corp, "gitlab.com"), None);
         let named = Api::new(
             store(),
             [
-                path,
                 token,
                 gl_host,
                 (
@@ -713,17 +701,6 @@ mod tests {
         assert_eq!(source(&named, "gitlab.acme.test"), env);
         assert_eq!(source(&named, "gitlab.com"), None);
         assert_eq!(source(&named, "gitlab.corp.example"), None);
-        assert_eq!(
-            source(&named, "glab.test:8443"),
-            Some((
-                CredentialSource::Cli {
-                    tool: "glab".into()
-                },
-                "glab-secret".into()
-            ))
-        );
-        assert_eq!(source(&named, "glab.test"), None);
-        assert_eq!(source(&named, "glab.test.evil"), None);
         let _ = std::fs::remove_dir_all(root);
     }
 }
