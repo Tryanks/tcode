@@ -236,9 +236,7 @@ impl TextSystemState {
         let family = self
             .memory_source
             .select_family_by_name(requested)
-            .or_else(|_| self.system_source.select_family_by_name(requested))
-            .or_else(|_| self.system_source.select_family_by_name("PingFang SC"))
-            .or_else(|_| self.system_source.select_family_by_name("Helvetica"))?;
+            .or_else(|_| self.system_source.select_family_by_name(requested))?;
 
         let mut result = SmallVec::new();
         for handle in family.fonts() {
