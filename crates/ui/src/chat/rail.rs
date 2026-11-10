@@ -9,6 +9,7 @@ mod plan;
 mod pull_requests;
 pub(super) mod screen;
 mod stack;
+mod thread;
 
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -360,10 +361,11 @@ pub(super) enum RailCard {
     Screen,
     Changes,
     PullRequests,
+    Thread,
 }
 
 impl RailCard {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Goal,
         Self::Plan,
         Self::Agents,
@@ -371,6 +373,7 @@ impl RailCard {
         Self::Screen,
         Self::Changes,
         Self::PullRequests,
+        Self::Thread,
     ];
 
     /// Its key among the rail's cards and in the view's expansion state.
@@ -383,6 +386,7 @@ impl RailCard {
             Self::Screen => "screen",
             Self::Changes => "changes",
             Self::PullRequests => "pull-requests",
+            Self::Thread => "thread",
         }
     }
 
@@ -395,6 +399,7 @@ impl RailCard {
             Self::Screen => crate::tr!("chat.rail_screen"),
             Self::Changes => crate::tr!("chat.rail_changes"),
             Self::PullRequests => crate::tr!("chat.rail_pull_requests"),
+            Self::Thread => crate::tr!("chat.rail_thread"),
         }
     }
 
@@ -407,6 +412,7 @@ impl RailCard {
             Self::Screen => IconName::Monitor,
             Self::Changes => IconName::Files,
             Self::PullRequests => IconName::GitPullRequest,
+            Self::Thread => IconName::Info,
         }
     }
 
@@ -414,7 +420,7 @@ impl RailCard {
     /// gives way to while it is open.
     fn tab(self) -> Option<RightTab> {
         match self {
-            Self::Goal | Self::Commands | Self::Screen => None,
+            Self::Goal | Self::Commands | Self::Screen | Self::Thread => None,
             Self::Plan => Some(RightTab::Plan),
             Self::Agents => Some(RightTab::Agents),
             Self::Changes => Some(RightTab::Diff),
@@ -431,6 +437,7 @@ impl RailCard {
             Self::Screen => screen::present(rail, cx),
             Self::Changes => changes::present(rail, cx),
             Self::PullRequests => pull_requests::present(rail, cx),
+            Self::Thread => thread::present(rail, cx),
         }
     }
 
@@ -443,7 +450,7 @@ impl RailCard {
             Self::Agents => agents::summary(rail, cx),
             Self::Commands => commands::summary(rail, cx),
             Self::Changes => changes::summary(rail, cx),
-            Self::Screen | Self::PullRequests => None,
+            Self::Screen | Self::PullRequests | Self::Thread => None,
         }
     }
 
@@ -472,7 +479,8 @@ impl RailCard {
             | Self::Agents
             | Self::Screen
             | Self::Changes
-            | Self::PullRequests => None,
+            | Self::PullRequests
+            | Self::Thread => None,
         }
     }
 
@@ -507,6 +515,7 @@ impl RailCard {
             Self::Screen => screen::body(rail, window, cx),
             Self::Changes => changes::body(rail, window, cx),
             Self::PullRequests => pull_requests::body(rail, window, cx),
+            Self::Thread => thread::body(rail, window, cx),
         }
     }
 }

@@ -95,6 +95,7 @@ chat:
   rail_goal: "目標"
   rail_commands: "コマンド"
   rail_pull_requests: "プルリクエスト"
+  rail_thread: "スレッド情報"
   copy: "コピー"
   copied: "コピーしました"
   copy_message: "メッセージをコピー"

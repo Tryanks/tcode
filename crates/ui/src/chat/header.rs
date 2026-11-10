@@ -261,12 +261,13 @@ impl ChatView {
         let links = self
             .active_pull_requests(cx)
             .filter(|links| shows(RailCard::PullRequests) && !links.is_empty());
+        let fork = shows(RailCard::Thread) && self.fork_source(cx).is_some();
         let agents = agents
             .filter(|_| shows(RailCard::Agents))
             .map(|agents| (agents.count(), agents.cue(cx)));
         let strip = self.motion.shown(
             "phone-strip",
-            (background.is_some() || agents.is_some() || links.is_some()).then_some(()),
+            (background.is_some() || agents.is_some() || links.is_some() || fork).then_some(()),
             SHOW,
             window,
             cx,
@@ -321,6 +322,17 @@ impl ChatView {
                     pill.fold_across_gap(gap, chip)
                 })
             });
+        let fork = self
+            .motion
+            .shown("phone-fork-pill-fold", fork.then_some(()), SHOW, window, cx)
+            .and_then(|pill| {
+                let chip = floating_backing(radius, cx).child(self.render_fork_pill(cx)?);
+                Some(if whole {
+                    chip.into_any_element()
+                } else {
+                    pill.fold_across_gap(gap, chip)
+                })
+            });
         let progress = strip.progress();
         Some((
             crate::material::bar("phone-strip", crate::material::Bar::Toolbar, true, cx)
@@ -339,7 +351,7 @@ impl ChatView {
                         // Each pill keeps the width its label needs; a strip
                         // too narrow for them all scrolls instead.
                         .children(
-                            [background, agents, pull_requests]
+                            [background, agents, pull_requests, fork]
                                 .into_iter()
                                 .flatten()
                                 .map(|pill| div().flex_none().child(pill)),
@@ -604,22 +616,19 @@ impl ChatView {
         )
     }
 
-    /// The thread this one was forked from, which it opens while it exists.
-    pub(super) fn fork_origin(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let store = self.workspace_store.read(cx);
-        let origin = store
-            .thread_meta(self.session_id.as_deref()?)?
-            .fork_origin
-            .as_ref()?;
-        let source = store.thread_meta(&origin.thread_id);
-        let title = source.map_or(origin.title.clone(), |source| source.title.clone());
-        let thread_id = source.map(|source| source.id.clone());
+    /// The thread this one was forked from, where the rail's Thread card does
+    /// not show it: a chip naming it, which opens it while it exists.
+    fn render_fork_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (title, thread_id) = self.fork_source(cx)?;
         let label = crate::tr!("fork.forked_from", title = title).into_owned();
         let link = Button::new("fork-origin")
             .motion(&self.motion)
             .debug_selector(|| "fork-origin".into())
             .ghost()
-            .xsmall()
+            .outline()
+            .chip()
+            .text_body(false, cx)
+            .max_w(px(240.))
             .icon(IconName::GitBranch)
             .disabled(thread_id.is_none())
             .child(
@@ -636,15 +645,13 @@ impl ChatView {
                     }
                 }
             });
-        Some(
-            h_flex()
-                .w_full()
-                .flex_none()
-                .justify_center()
-                .px_2()
-                .child(link)
-                .into_any_element(),
-        )
+        Some(link.into_any_element())
+    }
+
+    fn fork_source(&self, cx: &App) -> Option<(String, Option<String>)> {
+        self.workspace_store
+            .read(cx)
+            .fork_source(self.session_id.as_deref()?)
     }
 
     fn active_pull_requests(
