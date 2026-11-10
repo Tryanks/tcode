@@ -398,10 +398,7 @@ impl ManifestLoader {
     }
 
     pub(crate) fn state(&self) -> std::sync::MutexGuard<'_, ManifestState> {
-        self.inner
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner.state.lock().unwrap()
     }
 
     /// The manifest in effect; never waits on the network. A self-hosted
