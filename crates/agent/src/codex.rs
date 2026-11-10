@@ -34,9 +34,6 @@ pub use developer_instructions::PREVIEW_BROWSER_INSTRUCTIONS;
 /// The `additionalContext` key [`SessionOptions::instructions`] ride under.
 const INSTRUCTIONS_CONTEXT_KEY: &str = "tcode";
 
-/// Fallback model slug for `collaborationMode.settings.model` when the session
-/// has no resolved model yet.
-const DEFAULT_MODEL: &str = "gpt-5-codex";
 const ELICITATION_URL_ACK_LABEL: &str = "I've opened the link";
 const ELICITATION_URL_CANCEL_LABEL: &str = "Cancel";
 
@@ -308,28 +305,44 @@ async fn collect_models(
     windows: &HashMap<String, model_windows::ModelWindows>,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     initialize(stdin, lines).await?;
+    let entries = list_models_raw(stdin, lines, &mut 2, false).await?;
+    Ok(entries
+        .iter()
+        .filter_map(|model| {
+            let slug = model.get("model").and_then(Value::as_str);
+            map_model(model, slug.and_then(|slug| windows.get(slug)))
+        })
+        .collect())
+}
 
-    let mut models = Vec::new();
+/// Every `model/list` entry, page after page (initial `{}`, then `{cursor}`
+/// until `nextCursor` is empty); `include_hidden` adds the models hidden from
+/// the picker.
+async fn list_models_raw(
+    stdin: &mut BufWriter<ChildStdin>,
+    lines: &Receiver<ChildOutput>,
+    next_id: &mut i64,
+    include_hidden: bool,
+) -> Result<Vec<Value>, AgentError> {
+    let mut entries = Vec::new();
     let mut cursor: Option<String> = None;
-    let mut id = 2;
     loop {
-        let params = match &cursor {
+        let mut params = match &cursor {
             Some(cursor) => json!({ "cursor": cursor }),
             None => json!({}),
         };
+        if include_hidden {
+            params["includeHidden"] = json!(true);
+        }
+        let id = *next_id;
+        *next_id += 1;
         send_json(
             stdin,
             &json!({ "id": id, "method": "model/list", "params": params }),
         )?;
         let response = wait_for_response(lines, id).await?;
-        id += 1;
         if let Some(data) = response.get("data").and_then(Value::as_array) {
-            for model in data {
-                let slug = model.get("model").and_then(Value::as_str);
-                if let Some(spec) = map_model(model, slug.and_then(|slug| windows.get(slug))) {
-                    models.push(spec);
-                }
-            }
+            entries.extend(data.iter().cloned());
         }
         cursor = response
             .get("nextCursor")
@@ -337,10 +350,9 @@ async fn collect_models(
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
         if cursor.is_none() {
-            break;
+            return Ok(entries);
         }
     }
-    Ok(models)
 }
 
 /// Map one `model/list` entry to a [`ModelSpec`]; `None` for hidden models.
@@ -574,6 +586,64 @@ fn codex_effort(selections: &[OptionSelection]) -> Option<String> {
     selection_str(selections, "reasoningEffort")
 }
 
+/// What `model/list` says of each model's reasoning effort (`v2/Model.ts`).
+#[derive(Default)]
+struct ModelEfforts {
+    /// Slug → its supported efforts and its default one.
+    models: HashMap<String, (Vec<String>, String)>,
+    /// The slug the list marks `isDefault`.
+    default_model: Option<String>,
+}
+
+impl ModelEfforts {
+    fn from_list(entries: &[Value]) -> Self {
+        let mut efforts = Self::default();
+        for entry in entries {
+            let (Some(slug), Some(default)) = (
+                entry.get("model").and_then(Value::as_str),
+                entry.get("defaultReasoningEffort").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            let supported = entry
+                .get("supportedReasoningEfforts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|option| option.get("reasoningEffort").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect();
+            if entry.get("isDefault").and_then(Value::as_bool) == Some(true) {
+                efforts.default_model = Some(slug.to_owned());
+            }
+            efforts
+                .models
+                .insert(slug.to_owned(), (supported, default.to_owned()));
+        }
+        efforts
+    }
+
+    /// The effort a turn of `model` runs at, in ChatGPT.app's order: the one
+    /// chosen or configured when the model supports it, else the model's
+    /// default; for a model the list does not have, the chosen or configured
+    /// one, else the default model's default, and only then `medium`.
+    fn resolve(&self, model: &str, chosen: Option<&str>) -> String {
+        match self.models.get(model) {
+            Some((supported, default)) => chosen
+                .filter(|chosen| supported.iter().any(|effort| effort == chosen))
+                .unwrap_or(default)
+                .to_owned(),
+            None => chosen
+                .map(str::to_owned)
+                .or_else(|| {
+                    let default_model = self.default_model.as_ref()?;
+                    Some(self.models.get(default_model)?.1.clone())
+                })
+                .unwrap_or_else(|| "medium".to_owned()),
+        }
+    }
+}
+
 /// Selected service tier (option id `serviceTier`).
 fn codex_service_tier(selections: &[OptionSelection]) -> Option<String> {
     selection_str(selections, "serviceTier")
@@ -678,10 +748,16 @@ struct Actor {
     events: Sender<AgentEvent>,
     thread_id: String,
     cwd: PathBuf,
-    /// Resolved model slug; used for `collaborationMode.settings.model`.
-    model: Option<String>,
+    /// The model turns run on, for `collaborationMode.settings.model`.
+    model: String,
+    /// The model a session without a chosen one runs on.
+    default_model: String,
     /// Session reasoning effort (`reasoningEffort` selection), if any.
     effort: Option<String>,
+    /// The effort Codex's configuration sets, if any: the thread's
+    /// `reasoningEffort` as `thread/start`, `resume` or `fork` reported it.
+    config_effort: Option<String>,
+    model_efforts: ModelEfforts,
     /// Session service tier (`serviceTier` selection), if any.
     service_tier: Option<String>,
     /// What the thread started with that only a new thread changes.
@@ -770,6 +846,9 @@ async fn run_actor(
         thread_id,
         unrevertable,
         model,
+        default_model,
+        config_effort,
+        model_efforts,
         next_id,
         provider_commands,
         permission_descriptor,
@@ -797,7 +876,10 @@ async fn run_actor(
         thread_id: thread_id.clone(),
         cwd: opts.cwd.clone(),
         model: model.clone(),
+        default_model,
         effort: codex_effort(&opts.option_selections),
+        config_effort,
+        model_efforts,
         service_tier: codex_service_tier(&opts.option_selections),
         thread_config: thread_config(&opts.option_selections),
         requested_permission: requested_permission(&opts.option_selections),
@@ -832,7 +914,7 @@ async fn run_actor(
     let started = AgentEvent::SessionStarted {
         provider_session_id: thread_id.clone(),
         resume: ResumeCursor(json!({ "thread_id": thread_id })),
-        model,
+        model: Some(model),
     };
     if actor.events.send(started).await.is_err() {
         let _ = ready
@@ -1130,7 +1212,7 @@ impl SessionActor for Actor {
             } => {
                 let applied = thread_config(&option_selections) == self.thread_config;
                 if applied {
-                    self.model = model;
+                    self.model = model.unwrap_or_else(|| self.default_model.clone());
                     self.effort = codex_effort(&option_selections);
                     self.service_tier = codex_service_tier(&option_selections);
                 }
@@ -1424,7 +1506,10 @@ struct OpenedThread {
     /// Why `thread/revert` refuses this thread, when it does: only paginated
     /// threads that are written to disk can be reverted.
     unrevertable: Option<RewindFailureReason>,
-    model: Option<String>,
+    model: String,
+    default_model: String,
+    config_effort: Option<String>,
+    model_efforts: ModelEfforts,
     next_id: i64,
     provider_commands: Vec<ProviderCommand>,
     permission_descriptor: OptionDescriptor,
@@ -1483,8 +1568,12 @@ async fn initialize_and_open_thread(
     let model = result
         .get("model")
         .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| opts.model.clone());
+        .ok_or_else(|| AgentError::Protocol(format!("{method} response omitted model: {result}")))?
+        .to_owned();
+    let config_effort = result
+        .get("reasoningEffort")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let effective_permission = effective_permission(&result);
     let unrevertable = (result.pointer("/thread/ephemeral") == Some(&json!(true))
         || result.pointer("/thread/historyMode") != Some(&json!("paginated")))
@@ -1510,10 +1599,29 @@ async fn initialize_and_open_thread(
             Vec::new()
         });
     next_id += 1;
+    let model_efforts = list_models_raw(stdin, lines, &mut next_id, true)
+        .await
+        .map(|entries| ModelEfforts::from_list(&entries))
+        .unwrap_or_else(|err| {
+            warnings.push(format!("Codex model/list failed: {err}"));
+            ModelEfforts::default()
+        });
+    // Without a chosen model Codex ran the configured one or its default; a
+    // chosen one hides which, and the list's default stands in.
+    let default_model = match &opts.model {
+        None => model.clone(),
+        Some(_) => model_efforts
+            .default_model
+            .clone()
+            .unwrap_or_else(|| model.clone()),
+    };
     Ok(OpenedThread {
         thread_id,
         unrevertable,
         model,
+        default_model,
+        config_effort,
+        model_efforts,
         next_id,
         provider_commands,
         permission_descriptor,
@@ -2057,15 +2165,12 @@ impl Actor {
             });
         }
 
-        let model = self
-            .model
-            .clone()
-            .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+        let chosen = effort.as_deref().or(self.config_effort.as_deref());
         params["collaborationMode"] = json!({
             "mode": "default",
             "settings": {
-                "model": model,
-                "reasoning_effort": effort.clone().unwrap_or_else(|| "medium".to_owned()),
+                "model": self.model,
+                "reasoning_effort": self.model_efforts.resolve(&self.model, chosen),
                 "developer_instructions": null,
             }
         });
@@ -4903,8 +5008,11 @@ mod tests {
                 events: event_tx,
                 thread_id: "thread-1".into(),
                 cwd: std::env::temp_dir(),
-                model: Some("gpt-5-codex".into()),
+                model: "gpt-5-codex".into(),
+                default_model: "gpt-5-codex".into(),
                 effort: None,
+                config_effort: None,
+                model_efforts: ModelEfforts::default(),
                 service_tier: None,
                 thread_config: None,
                 requested_permission: "ask".into(),
@@ -7495,6 +7603,113 @@ mod tests {
         rx
     }
 
+    /// A turn's `collaborationMode` names the model and effort as ChatGPT.app
+    /// 26.1103 fills them: the chosen effort, else the configured one (the
+    /// thread's `reasoningEffort`), else the model's own default from
+    /// `model/list`; the model is the one the thread runs. The replies are
+    /// `v2/ThreadStartResponse.ts` and `v2/Model.ts` of 0.167.0.
+    #[test]
+    fn a_turn_runs_at_the_chosen_then_configured_then_the_models_effort() {
+        smol::block_on(async {
+            let efforts: Vec<Value> = ["low", "medium", "high"]
+                .map(|effort| json!({"reasoningEffort": effort, "description": ""}))
+                .into();
+            let model = |slug: &str, default: &str, is_default: bool| {
+                json!({"id": slug, "model": slug, "upgrade": null, "upgradeInfo": null,
+                    "availabilityNux": null, "displayName": slug, "description": "",
+                    "modelSpecialty": null, "hidden": false,
+                    "supportedReasoningEfforts": efforts,
+                    "defaultReasoningEffort": default, "inputModalities": ["text"],
+                    "supportsPersonality": false, "multiAgentVersion": null,
+                    "additionalSpeedTiers": [], "serviceTiers": [], "defaultServiceTier": null,
+                    "availableAccessPrograms": null, "isDefault": is_default})
+            };
+            for (configured, chosen, effort) in [
+                (None, None, "low"),
+                (Some("high"), None, "high"),
+                (Some("high"), Some("medium"), "medium"),
+            ] {
+                let (mut actor, _events) = test_actor();
+                let thread = json!({
+                    "id": "thread-1", "sessionId": "session-1", "forkedFromId": null,
+                    "parentThreadId": null, "preview": "", "ephemeral": false,
+                    "historyMode": "paginated", "modelProvider": "openai",
+                    "model": "gpt-6-sol", "reasoningEffort": configured, "createdAt": 1767225600,
+                    "updatedAt": 1767225600, "status": {"type": "idle"}, "path": null,
+                    "cwd": "/home/user/project", "cliVersion": "0.167.0",
+                    "source": "appServer", "projectId": null, "turns": []
+                });
+                let replies = replies([
+                    (
+                        1,
+                        json!({"userAgent": "codex_cli_rs/0.167.0", "codexHome": "/home/user/.codex",
+                            "platformFamily": "unix", "platformOs": "linux"}),
+                    ),
+                    (
+                        2,
+                        json!({"thread": thread, "model": "gpt-6-sol", "modelProvider": "openai",
+                            "serviceTier": null, "cwd": "/home/user/project",
+                            "approvalPolicy": "on-request", "approvalsReviewer": "user",
+                            "sandbox": {"type": "workspaceWrite", "writableRoots": [],
+                                "networkAccess": false, "excludeTmpdirEnvVar": false,
+                                "excludeSlashTmp": false},
+                            "activePermissionProfile": null, "reasoningEffort": configured}),
+                    ),
+                    (3, json!({"data": [], "nextCursor": null})),
+                    (4, json!({"data": []})),
+                    (
+                        5,
+                        json!({"data": [model("gpt-6-luna", "medium", false),
+                            model("gpt-6-sol", "low", true)], "nextCursor": null}),
+                    ),
+                ])
+                .await;
+                let options = SessionOptions {
+                    cwd: PathBuf::from("/home/user/project"),
+                    model: None,
+                    resume: None,
+                    fork: None,
+                    binary_path: None,
+                    option_selections: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    launch_env: LaunchEnv::default(),
+                    extra_args: Vec::new(),
+                    acp: None,
+                    instructions: None,
+                };
+                let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
+                    .await
+                    .unwrap();
+                assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
+                assert_eq!(
+                    written(&mut actor).await.last().unwrap(),
+                    &json!({"id": 5, "method": "model/list", "params": {"includeHidden": true}})
+                );
+                actor.model = opened.model;
+                actor.default_model = opened.default_model;
+                actor.config_effort = opened.config_effort;
+                actor.model_efforts = opened.model_efforts;
+                if let Some(chosen) = chosen {
+                    actor
+                        .handle_command(SessionCommand::SetOption {
+                            id: "reasoningEffort".into(),
+                            value: json!(chosen),
+                        })
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(
+                    actor.build_turn_params("go on", None, &[])["collaborationMode"]["settings"],
+                    json!({"model": "gpt-6-sol", "reasoning_effort": effort,
+                        "developer_instructions": null}),
+                    "{configured:?} {chosen:?}"
+                );
+                let _ = actor.child.kill();
+                let _ = actor.child.wait();
+            }
+        });
+    }
+
     /// Only a paginated thread written to disk can be reverted, so each
     /// session says whether its thread can, from the `thread/start` result
     /// (`v2/ThreadStartResponse.ts` and `v2/Thread.ts` of 0.167.0).
@@ -7534,6 +7749,7 @@ mod tests {
                     ),
                     (3, json!({"data": [], "nextCursor": null})),
                     (4, json!({"data": []})),
+                    (5, json!({"data": [], "nextCursor": null})),
                 ])
                 .await;
                 let options = SessionOptions {
