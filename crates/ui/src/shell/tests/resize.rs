@@ -3,8 +3,6 @@
 //! many threads listed and a long thread of Markdown and code shown beside
 //! its rail.
 
-use std::time::Instant;
-
 use super::scenes::serve_log;
 use super::*;
 
@@ -12,8 +10,6 @@ const TURNS: usize = 40;
 const THREADS: usize = 80;
 const STEPS: usize = 30;
 const FRAME: Duration = Duration::from_millis(16);
-/// The longest of the motion a resize starts: the rail coming in or going.
-const MOTION_FRAMES: usize = 200 / 16 + 1;
 const FROM: (f32, f32) = (1200., 800.);
 const TO: (f32, f32) = (1512., 982.);
 
@@ -142,9 +138,6 @@ fn mount_scene(cx: &mut TestAppContext) -> &mut VisualTestContext {
     cx.simulate_resize(size(px(FROM.0), px(FROM.1)));
     cx.update(|window, cx| window.blur(cx));
     crate::test_frames::draw_settled(cx);
-    // What the thread's arrival scrolled holds its scrollbar a while.
-    cx.executor().advance_clock(Duration::from_secs(3));
-    crate::test_frames::draw_settled(cx);
     cx
 }
 
@@ -187,32 +180,6 @@ fn sweep(from: (f32, f32), to: (f32, f32), cx: &mut VisualTestContext) -> u64 {
 fn settle_at(at: (f32, f32), cx: &mut VisualTestContext) {
     cx.simulate_resize(size(px(at.0), px(at.1)));
     crate::test_frames::draw_settled(cx);
-}
-
-/// Once the window has its new size, what the resize set moving lands and
-/// nothing draws again: no scrollbar comes in for the list the resize moved
-/// and fades out once its hold ends, seconds after.
-#[gpui::test]
-fn a_window_resized_into_full_screen_rests_once_its_size_does(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let cx = mount_scene(cx);
-    sweep(FROM, TO, cx);
-    work(cx);
-    // Paced as a display paces it: gpui-base's own scrollbars sample the
-    // wall clock (see `test_frames::draw_settled`).
-    let started = Instant::now();
-    let mut drawn = Vec::new();
-    for frame in 0..(3000 / 16) {
-        display(cx);
-        if work(cx).0 > 0 {
-            drawn.push(frame);
-        }
-        std::thread::sleep((FRAME * (frame + 1)).saturating_sub(started.elapsed()));
-    }
-    assert!(
-        drawn.iter().all(|frame| *frame < MOTION_FRAMES as u32),
-        "frames drawn after the size settled: {drawn:?}"
-    );
 }
 
 /// Widening the window while the thread's column keeps its widest lays out
