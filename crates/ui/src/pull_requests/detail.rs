@@ -994,32 +994,16 @@ impl PullRequestView {
                             }),
                     ),
                 )
-                .children(ago_rfc3339(&snapshot.updated_at).map(|ago| {
-                    synced.fade(
-                        crate::tr!(
-                            if self
-                                .store
-                                .read(cx)
-                                .settings()
-                                .source_control
-                                .kind(&key.host)
-                                == tcode_core::pull_request::HostKind::Azure
-                            {
-                                if snapshot.merged_at.is_some() {
-                                    "pull_requests.conversation.merged"
-                                } else if snapshot.closed_at.is_some() {
-                                    "pull_requests.conversation.closed"
-                                } else {
-                                    "pull_requests.detail.created"
-                                }
-                            } else {
-                                "pull_requests.detail.updated"
-                            },
-                            ago = ago
-                        )
-                        .into_owned(),
-                    )
-                }));
+                .children(
+                    [
+                        (&snapshot.updated_at, "pull_requests.detail.updated"),
+                        (&snapshot.merged_at, "pull_requests.conversation.merged"),
+                        (&snapshot.closed_at, "pull_requests.conversation.closed"),
+                    ]
+                    .into_iter()
+                    .find_map(|(at, key)| Some((ago_rfc3339(at.as_deref()?)?, key)))
+                    .map(|(ago, key)| synced.fade(crate::tr!(key, ago = ago).into_owned())),
+                );
         }
         let mut chips = h_flex()
             .gap(cx.theme().tokens.spacing.sm)
@@ -3173,7 +3157,7 @@ mod tests {
                 head_branch: "feature".into(),
                 base_branch: "main".into(),
                 is_draft: false,
-                updated_at: "2026-10-01T00:00:00Z".into(),
+                updated_at: Some("2026-10-01T00:00:00Z".into()),
                 synced_at: 1,
                 closed_at: None,
                 merged_at: None,

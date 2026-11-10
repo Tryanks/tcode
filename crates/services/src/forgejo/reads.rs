@@ -202,7 +202,7 @@ pub(super) fn snapshot(
         head_branch: head_branch(pr)?,
         base_branch: text(&pr["base"], "ref")?,
         is_draft: pr["draft"].as_bool().unwrap_or(false),
-        updated_at: text(pr, "updated_at")?,
+        updated_at: Some(text(pr, "updated_at")?),
         synced_at,
         closed_at: text(pr, "closed_at"),
         merged_at: text(pr, "merged_at"),

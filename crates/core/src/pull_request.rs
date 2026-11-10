@@ -622,7 +622,9 @@ pub struct PullRequestSnapshot {
     pub head_branch: String,
     pub base_branch: String,
     pub is_draft: bool,
-    pub updated_at: String,
+    /// When the host last changed the pull request; `None` where the host keeps no such time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
     pub synced_at: u64,
     pub closed_at: Option<String>,
     pub merged_at: Option<String>,
@@ -1373,7 +1375,8 @@ pub fn groups(links: &[ThreadPullRequestLink]) -> Vec<PullRequestGroup<'_>> {
                 .map(|link| {
                     link.snapshot
                         .as_ref()
-                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s.updated_at).ok())
+                        .and_then(|s| s.updated_at.as_deref())
+                        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
                         .map(|time| time.timestamp().max(0) as u64)
                         .unwrap_or_else(|| link.linked_at.unwrap_or(0))
                 })
@@ -1818,7 +1821,7 @@ mod tests {
                 head_branch: format!("layer-{number}"),
                 base_branch: "main".into(),
                 is_draft: draft,
-                updated_at: "2026-10-08T00:00:00Z".into(),
+                updated_at: Some("2026-10-08T00:00:00Z".into()),
                 synced_at: 1,
                 closed_at: None,
                 merged_at: None,

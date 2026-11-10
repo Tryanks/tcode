@@ -324,6 +324,7 @@ pub use wire::{
 // GitDiffScope and SourceTool have no unknown value. ExternalImportState's
 // finished carries failed, the ImportFailure {file, error} of each thread an
 // import could not bring in, which skipped no longer counts.
+// PullRequestSnapshot's updated_at may be absent (Azure DevOps keeps none).
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

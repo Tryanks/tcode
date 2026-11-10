@@ -1483,9 +1483,8 @@ impl PullRequestsPanel {
             None => (
                 None,
                 snapshot
-                    .and_then(|snapshot| {
-                        chrono::DateTime::parse_from_rfc3339(&snapshot.updated_at).ok()
-                    })
+                    .and_then(|snapshot| snapshot.updated_at.as_deref())
+                    .and_then(|updated| chrono::DateTime::parse_from_rfc3339(updated).ok())
                     .map(|updated| {
                         crate::time::humanize_ago(
                             tcode_core::project::now_secs()

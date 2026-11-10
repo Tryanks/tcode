@@ -419,7 +419,7 @@ fn review_decision(pr: &Value) -> Option<ReviewDecision> {
 }
 
 /// The pull request from one read; `checks` are its statuses and policies. Azure keeps no
-/// last-update time, so the closing time stands for it, else the creation.
+/// last-update time.
 pub(super) fn snapshot(
     pr: &Value,
     checks: &[PullRequestCheck],
@@ -427,7 +427,6 @@ pub(super) fn snapshot(
     synced_at: u64,
 ) -> Option<PullRequestSnapshot> {
     let state = state(pr)?;
-    let created = text(pr, "creationDate")?;
     let closed = text(pr, "closedDate").filter(|_| state != PullRequestState::Open);
     Some(PullRequestSnapshot {
         state,
@@ -435,7 +434,7 @@ pub(super) fn snapshot(
         head_branch: branch(pr["sourceRefName"].as_str()?),
         base_branch: branch(pr["targetRefName"].as_str()?),
         is_draft: pr["isDraft"].as_bool().unwrap_or(false),
-        updated_at: closed.clone().unwrap_or(created),
+        updated_at: None,
         synced_at,
         merged_at: closed.clone().filter(|_| state == PullRequestState::Merged),
         closed_at: closed,

@@ -93,7 +93,7 @@ type GroupRead = Result<(PullRequestWatchRead, Option<Option<Vec<PullRequestRema
 fn snapshot_fingerprint(link: &pull_request::ThreadPullRequestLink) -> String {
     link.snapshot.as_ref().map_or_else(String::new, |snapshot| {
         format!(
-            "{:?} {} {:?} {:?} {:?} {}",
+            "{:?} {:?} {:?} {:?} {:?} {}",
             snapshot.state,
             snapshot.updated_at,
             snapshot.checks_state,

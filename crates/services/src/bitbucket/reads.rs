@@ -233,7 +233,7 @@ pub(super) fn snapshot(
         head_branch: text(&pr["source"]["branch"], "name")?,
         base_branch: text(&pr["destination"]["branch"], "name")?,
         is_draft: pr["draft"].as_bool().unwrap_or(false),
-        updated_at,
+        updated_at: Some(updated_at),
         synced_at,
         closed_at: None,
         merged_at: None,

@@ -2120,7 +2120,6 @@ pull_requests:
     refresh_unloaded: "刷新"
     refreshing: "正在刷新%{pr}"
     updated: "%{ago}更新"
-    created: "创建于%{ago}"
     merging_into: "将 %{head} 合并到 %{base}"
     files: "文件"
     files_count: "文件 %{count}"

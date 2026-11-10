@@ -2127,7 +2127,6 @@ pull_requests:
     refresh_unloaded: "Refresh"
     refreshing: "Refreshing %{pr}"
     updated: "updated %{ago}"
-    created: "created %{ago}"
     merging_into: "Merging %{head} into %{base}"
     files: "Files"
     files_count: "Files %{count}"

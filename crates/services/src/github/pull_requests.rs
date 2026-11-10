@@ -217,7 +217,7 @@ fn decode_summary(raw: &Value) -> Option<Summary> {
             head_branch: string(raw, "headRefName")?,
             base_branch: string(raw, "baseRefName")?,
             is_draft: raw["isDraft"].as_bool().unwrap_or(false),
-            updated_at: string(raw, "updatedAt")?,
+            updated_at: Some(string(raw, "updatedAt")?),
             synced_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()

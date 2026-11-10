@@ -2127,7 +2127,6 @@ pull_requests:
     refresh_unloaded: "再読み込み"
     refreshing: "%{pr}を再読み込み中"
     updated: "更新：%{ago}"
-    created: "作成：%{ago}"
     merging_into: "%{head} を %{base} にマージ"
     files: "ファイル"
     files_count: "ファイル %{count}"

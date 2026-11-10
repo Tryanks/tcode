@@ -12781,7 +12781,7 @@ fn first_index_snapshot_includes_persisted_child_runs_and_human_resume_status() 
         head_branch: "sample-change".into(),
         base_branch: "main".into(),
         is_draft: false,
-        updated_at: merged_at.clone(),
+        updated_at: Some(merged_at.clone()),
         synced_at: merged / 1000,
         closed_at: Some(merged_at.clone()),
         merged_at: Some(merged_at),
