@@ -139,7 +139,7 @@ impl Forgejo {
         let base = text(&pr, "merge_base")
             .or_else(|| text(&pr["base"], "sha"))
             .unwrap_or_default();
-        let changed_files = pr["changed_files"].as_u64().unwrap_or(0);
+        let changed_files = pr["changed_files"].as_u64();
         if page.is_none()
             && let Some(diff) = self.diff(key)?
         {
@@ -169,8 +169,9 @@ impl Forgejo {
             .unwrap_or_default();
         let size = page.map_or(rows.len(), |(_, size)| size);
         let listed = (page_number as u64 - 1) * size as u64 + rows.len() as u64;
-        let next = (api::page_full(rows.len(), &size) && listed < changed_files)
-            .then_some((page_number + 1, size));
+        let next = (api::page_full(rows.len(), &size)
+            && changed_files.is_none_or(|count| listed < count))
+        .then_some((page_number + 1, size));
         Ok(PullRequestFiles {
             base,
             head,
@@ -188,14 +189,14 @@ impl Forgejo {
                             "renamed" => agent::FileChangeKind::Rename,
                             _ => agent::FileChangeKind::Modify,
                         },
-                        additions: row["additions"].as_u64().unwrap_or(0),
-                        deletions: row["deletions"].as_u64().unwrap_or(0),
+                        additions: row["additions"].as_u64()?,
+                        deletions: row["deletions"].as_u64()?,
                         patch: PullRequestPatch::Withheld,
                     })
                 })
                 .collect(),
             next_cursor: next.map(|(page, size)| format!("{page}:{size}")),
-            complete: next.is_none() && listed >= changed_files,
+            complete: next.is_none() && changed_files.is_none_or(|count| listed >= count),
             changed_files,
         })
     }

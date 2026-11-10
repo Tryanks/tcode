@@ -62,8 +62,9 @@ pub struct PullRequestFiles {
     pub next_cursor: Option<String>,
     /// Every changed file has been listed once the pages before this one were read too.
     pub complete: bool,
-    /// The host's count of changed files, which a listing may fall short of.
-    pub changed_files: u64,
+    /// The host's count of changed files, which a listing may fall short of; `None` where the
+    /// host gave none.
+    pub changed_files: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

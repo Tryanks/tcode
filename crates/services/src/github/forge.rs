@@ -156,7 +156,7 @@ impl Forge for GitHub {
                         files: files.files,
                         next_cursor: files.next_page.map(|page| page.to_string()),
                         complete: files.complete,
-                        changed_files: files.changed_files,
+                        changed_files: Some(files.changed_files),
                     })
                 })
             }

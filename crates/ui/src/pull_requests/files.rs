@@ -900,11 +900,17 @@ impl PullRequestView {
                 )
             }
             .into_owned();
-            let mut counter = crate::tr!(
-                "pull_requests.files.viewed_count",
-                viewed = viewed.to_string(),
-                total = total.to_string()
-            )
+            let mut counter = match total {
+                Some(total) => crate::tr!(
+                    "pull_requests.files.viewed_count",
+                    viewed = viewed.to_string(),
+                    total = total.to_string()
+                ),
+                None => crate::tr!(
+                    "pull_requests.files.viewed_count_unknown",
+                    viewed = viewed.to_string()
+                ),
+            }
             .into_owned();
             // The host keeps no marks Tcode can read, so the ones shown are Tcode's own.
             if host_marks == Some(false) {
@@ -1370,11 +1376,11 @@ impl PullRequestView {
             "pr-files-partial",
             (files.next_cursor.is_none() && !files.complete).then(|| {
                 let listed = files.files.len();
-                if files.changed_files > listed as u64 {
+                if let Some(total) = files.changed_files.filter(|total| *total > listed as u64) {
                     crate::tr!(
                         "pull_requests.files.partial",
                         shown = listed.to_string(),
-                        total = files.changed_files.to_string(),
+                        total = total.to_string(),
                         host_name = self.host_name(cx),
                         pr = self.noun(cx).pr
                     )

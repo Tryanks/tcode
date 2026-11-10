@@ -2148,6 +2148,7 @@ pull_requests:
     expand_file: "ファイルを展開"
     viewed: "確認済み"
     viewed_count: "%{viewed}/%{total} 確認済み"
+    viewed_count_unknown: "%{viewed} 確認済み"
     viewed_owner_anonymous: "GitHub 上の確認済みマーク"
     viewed_owner_tcode: "Tcode が保持する確認済みマーク"
     viewed_owner_tcode_tooltip: "%{host_name} には Tcode が読み取れる確認済みマークがないため、Tcode を実行しているホストが保持します。そのホストに接続しているすべてのデバイスで表示されますが、%{host_name} には表示されません。"

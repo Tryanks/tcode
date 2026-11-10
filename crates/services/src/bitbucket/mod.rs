@@ -214,7 +214,7 @@ impl Bitbucket {
             return Ok(PullRequestFiles {
                 base,
                 head,
-                changed_files: files.len() as u64,
+                changed_files: Some(files.len() as u64),
                 files,
                 next_cursor: None,
                 complete: true,
@@ -244,8 +244,8 @@ impl Bitbucket {
                             _ => agent::FileChangeKind::Modify,
                         },
                         previous_path: previous,
-                        additions: row["lines_added"].as_u64().unwrap_or(0),
-                        deletions: row["lines_removed"].as_u64().unwrap_or(0),
+                        additions: row["lines_added"].as_u64()?,
+                        deletions: row["lines_removed"].as_u64()?,
                         patch: PullRequestPatch::Withheld,
                         path,
                     })
@@ -253,7 +253,7 @@ impl Bitbucket {
                 .collect(),
             complete: next.is_none(),
             next_cursor: next,
-            changed_files: page["size"].as_u64().unwrap_or(0),
+            changed_files: page["size"].as_u64(),
         })
     }
 

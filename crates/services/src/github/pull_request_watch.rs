@@ -625,12 +625,15 @@ pub fn activity(
             .flatten()
             .filter_map(|raw| remark(raw, path))
             .collect();
-        let count = thread["comments"]["totalCount"].as_u64().unwrap_or(0);
         remarks.extend(first_page.iter().cloned());
         let Some(cursor) = next_cursor(&thread["comments"]) else {
             continue;
         };
         live.insert(id.to_owned());
+        let Some(count) = thread["comments"]["totalCount"].as_u64() else {
+            complete = false;
+            continue;
+        };
         let cached = tails.get(id).filter(|tail| tail.count == count);
         let tail = match cached {
             Some(tail) => tail.comments.clone(),

@@ -2148,6 +2148,7 @@ pull_requests:
     expand_file: "Expand file"
     viewed: "Viewed"
     viewed_count: "%{viewed} of %{total} viewed"
+    viewed_count_unknown: "%{viewed} viewed"
     viewed_owner_anonymous: "Your viewed marks on GitHub"
     viewed_owner_tcode: "Viewed marks kept by Tcode"
     viewed_owner_tcode_tooltip: "%{host_name} has no viewed marks Tcode can read, so the machine running Tcode keeps them. Every device connected to it sees them; %{host_name} doesn't."

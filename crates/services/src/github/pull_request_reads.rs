@@ -172,7 +172,9 @@ impl Reader<'_> {
         let revisions = Revisions {
             base: sha("base")?,
             head: sha("head")?,
-            changed_files: raw["changed_files"].as_u64().unwrap_or(0),
+            changed_files: raw["changed_files"]
+                .as_u64()
+                .ok_or(GitHubError::InvalidResponse)?,
             node_id: raw["node_id"]
                 .as_str()
                 .ok_or(GitHubError::InvalidResponse)?
@@ -1058,7 +1060,7 @@ fn thread_from(raw: &Value) -> Option<PullRequestReviewThread> {
             .into_iter()
             .filter_map(|raw| comment_from(raw, None))
             .collect(),
-        total_comments: raw["comments"]["totalCount"].as_u64().unwrap_or(0),
+        total_comments: raw["comments"]["totalCount"].as_u64()?,
         replies_after: next_cursor(&raw["comments"]),
         viewer_can_reply: raw["viewerCanReply"].as_bool() == Some(true),
         viewer_can_resolve: raw[if raw["isResolved"].as_bool() == Some(true) {
@@ -1120,8 +1122,8 @@ fn listed_file(row: &Value) -> Option<PullRequestFile> {
         "renamed" => FileChangeKind::Rename,
         _ => FileChangeKind::Modify,
     };
-    let additions = row["additions"].as_u64().unwrap_or(0);
-    let deletions = row["deletions"].as_u64().unwrap_or(0);
+    let additions = row["additions"].as_u64()?;
+    let deletions = row["deletions"].as_u64()?;
     // The files API gives no reason for a missing patch: changed lines without one were
     // withheld for size. A file with neither is empty, renamed alone, binary, or past GitHub's
     // diff limits, and only the first two can be told apart here.

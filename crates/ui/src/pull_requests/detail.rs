@@ -1944,7 +1944,7 @@ impl PullRequestView {
         let read = self
             .page()
             .and_then(|page| page.files.data.as_ref())
-            .map(|files| files.changed_files);
+            .and_then(|files| files.changed_files);
         let count = read.or_else(|| {
             self.link(cx)
                 .and_then(|link| link.snapshot.as_ref().and_then(|s| s.changed_files))
@@ -2481,7 +2481,7 @@ mod tests {
                 .collect(),
             next_cursor: next_cursor.map(str::to_owned),
             complete: next_cursor.is_none(),
-            changed_files: 150,
+            changed_files: Some(150),
         }
     }
 

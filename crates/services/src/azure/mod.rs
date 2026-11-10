@@ -290,7 +290,7 @@ impl Azure {
             files,
             next_cursor: more.then(|| format!("{}:{next}", iteration.id)),
             complete: !more && whole,
-            changed_files: all.len() as u64,
+            changed_files: Some(all.len() as u64),
         })
     }
 
@@ -309,7 +309,7 @@ impl Azure {
                 files: self.built(key, &iteration, &wanted)?,
                 next_cursor: None,
                 complete: changes.1,
-                changed_files: changes.0.len() as u64,
+                changed_files: Some(changes.0.len() as u64),
                 base: iteration.base,
                 head: iteration.head,
             },

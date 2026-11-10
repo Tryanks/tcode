@@ -2141,6 +2141,7 @@ pull_requests:
     expand_file: "展开文件"
     viewed: "已查看"
     viewed_count: "已查看 %{viewed}/%{total}"
+    viewed_count_unknown: "已查看 %{viewed}"
     viewed_owner_anonymous: "你在 GitHub 上的已查看标记"
     viewed_owner_tcode: "由 Tcode 保存的已查看标记"
     viewed_owner_tcode_tooltip: "%{host_name} 没有 Tcode 可读取的已查看标记，因此由运行 Tcode 的主机保存。连接到它的每台设备都能看到，%{host_name} 上看不到。"

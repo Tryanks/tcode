@@ -372,10 +372,11 @@ pub(super) fn checks_state(checks: &[PullRequestCheck]) -> Option<ChecksState> {
     })
 }
 
-/// "12", or "1000+" past GitLab's counting limit, whose number is the floor.
-pub(super) fn changed_files(mr: &Value) -> u64 {
-    let count = mr["changes_count"].as_str().unwrap_or_default();
-    count.trim_end_matches('+').parse().unwrap_or(0)
+/// "12", or "1000+" past GitLab's counting limit, whose number is the floor; `None` until
+/// GitLab has counted.
+pub(super) fn changed_files(mr: &Value) -> Option<u64> {
+    let count = mr["changes_count"].as_str()?;
+    count.trim_end_matches('+').parse().ok()
 }
 
 /// `stats` is lines added and removed, where GitLab counted them.
@@ -401,7 +402,7 @@ pub(super) fn snapshot(
         }),
         additions: stats.map(|(additions, _)| additions),
         deletions: stats.map(|(_, deletions)| deletions),
-        changed_files: Some(changed_files(mr)),
+        changed_files: changed_files(mr),
         review_decision: None,
         checks_state: checks_state(&checks(mr)),
         mergeability,
