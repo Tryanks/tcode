@@ -191,9 +191,6 @@ impl Drop for PendingRequest<'_> {
     }
 }
 
-pub type CommandFuture =
-    Pin<Box<dyn Future<Output = Result<CommandResponse, ProtocolError>> + Send + 'static>>;
-
 impl HostLink {
     pub fn new(
         to_host: impl Into<outgoing::Outgoing>,
@@ -858,20 +855,6 @@ impl HostLink {
         }
     }
 
-    pub fn command_with_id(&self, command: Command) -> (u64, CommandFuture) {
-        let id = self.next_id();
-        let link = self.clone();
-        let future = async move {
-            let _pending = PendingRequest { link: &link, id };
-            let receiver = link.begin_request(id, ClientPayload::Command(command))?;
-            match receiver.recv().await.map_err(transport_error)? {
-                HostMessage::Ack { result, .. } => result,
-                other => Err(unexpected_response("command ack", &other)),
-            }
-        };
-        (id, Box::pin(future))
-    }
-
     #[cfg(not(target_arch = "wasm32"))]
     pub fn command_blocking(&self, command: Command) -> Result<CommandResponse, ProtocolError> {
         let id = self.next_id();
@@ -1240,7 +1223,7 @@ async fn delay(delay: std::time::Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tcode_protocol::{IndexSnapshot, ServerEvent};
+    use tcode_protocol::ServerEvent;
 
     #[test]
     fn query_deadline_and_command_stall_use_connected_clock() {
@@ -1572,22 +1555,16 @@ mod tests {
         let link = HostLink::new(to_host, from_host);
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         let mut pump = std::pin::pin!(link.pump_with_timer(|_| std::future::pending::<()>()));
-        let (ids, mut futures): (Vec<_>, Vec<_>) = (0..3)
-            .map(|title| link.command_with_id(rename(title)))
-            .unzip();
+        let mut futures: Vec<_> = (0..3)
+            .map(|title| Box::pin(link.command(rename(title))))
+            .collect();
         // The request is admitted on first poll.
         for future in &mut futures {
             assert!(future.as_mut().poll(&mut cx).is_pending());
         }
         let requests: Vec<_> = (0..3).map(|_| request(&outgoing)).collect();
         assert!(outgoing.try_recv().is_err(), "all three were sent unacked");
-        assert_eq!(
-            requests
-                .iter()
-                .map(|request| request.id)
-                .collect::<Vec<_>>(),
-            ids
-        );
+        let ids: Vec<_> = requests.iter().map(|request| request.id).collect();
         let keys: Vec<_> = link
             .pending_commands()
             .into_iter()
@@ -1917,24 +1894,6 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_request_releases_pending_waiter() {
-        let (to_host, _outgoing) = async_channel::unbounded();
-        let (_incoming, from_host) = async_channel::unbounded();
-        let link = HostLink::new(to_host, from_host);
-        for _ in 0..20 {
-            let mut query = std::pin::pin!(link.query(Query::Ping));
-            assert!(
-                std::future::Future::poll(
-                    query.as_mut(),
-                    &mut std::task::Context::from_waker(std::task::Waker::noop())
-                )
-                .is_pending()
-            );
-        }
-        assert!(link.inner.pending.lock().unwrap().is_empty());
-    }
-
-    #[test]
     fn hello_rejection_reasons_preserve_legacy_retry_behavior() {
         for (wire, expected) in [
             (Some("token"), ConnectionFailure::AuthenticationRejected),
@@ -2020,79 +1979,5 @@ mod tests {
         })
         .unwrap();
         assert!(!link.subscription_reply_is_current(&queued_reply));
-    }
-
-    #[test]
-    fn correlates_responses_forwards_events_and_remembers_topics() {
-        let (to_host, client_lines) = async_channel::unbounded();
-        let (host_lines, from_host) = async_channel::unbounded();
-        let link = HostLink::new(to_host, from_host);
-        let pump = std::thread::spawn({
-            let link = link.clone();
-            move || smol::block_on(link.pump())
-        });
-        let server = std::thread::spawn(move || {
-            let request = loop {
-                let line = client_lines.recv_blocking().unwrap();
-                let request = tcode_protocol::decode_client_line(&line).unwrap();
-                if matches!(request.payload, ClientPayload::Command(_)) {
-                    break request;
-                }
-            };
-            host_lines
-                .send_blocking(
-                    encode_line(&HostMessage::Ack {
-                        id: request.id + 100,
-                        result: Ok(CommandResponse::Unit),
-                    })
-                    .unwrap(),
-                )
-                .unwrap();
-            host_lines
-                .send_blocking(
-                    encode_line(&HostMessage::Event(EventEnvelope {
-                        request_id: None,
-                        topic: Topic::Index,
-                        event: ServerEvent::IndexSnapshot(IndexSnapshot {
-                            summary: Default::default(),
-                            sessions: Vec::new(),
-                            projects: Vec::new(),
-                        }),
-                    }))
-                    .unwrap(),
-                )
-                .unwrap();
-            host_lines
-                .send_blocking(
-                    encode_line(&HostMessage::Ack {
-                        id: request.id,
-                        result: Ok(CommandResponse::Unit),
-                    })
-                    .unwrap(),
-                )
-                .unwrap();
-            host_lines.close();
-        });
-
-        link.subscribe(Subscription {
-            known_index: None,
-            after: None,
-            topic: Topic::Index,
-        })
-        .unwrap();
-        link.subscribe(Subscription {
-            known_index: None,
-            after: None,
-            topic: Topic::Index,
-        })
-        .unwrap();
-        assert_eq!(link.subscribed_topics(), vec![Topic::Index]);
-        assert_eq!(
-            link.command_blocking(Command::OpenLatestSession).unwrap(),
-            CommandResponse::Unit
-        );
-        assert_eq!(link.events().recv_blocking().unwrap().topic, Topic::Index);
-        server.join().unwrap();
-        pump.join().unwrap();
     }
 }

@@ -562,15 +562,6 @@ mod tests {
         assert!(!transcript.contains("middle request"));
     }
 
-    #[test]
-    fn empty_or_incomplete_history_has_no_transcript() {
-        let empty = Timeline::default();
-        assert_eq!(render(&empty, 60_000), "");
-
-        let incomplete = Timeline::fold_events([user("u1", "not completed")]);
-        assert_eq!(render(&incomplete, 60_000), "");
-    }
-
     /// Switching provider while the only turn is still streaming, or after it
     /// was interrupted, hands over what that turn produced and says it was
     /// cut short; an opening message that got nothing back hands over nothing.

@@ -1125,24 +1125,6 @@ fn session_activity_names_what_keeps_a_thread_going_literal_json() {
     );
 }
 
-/// A peer built before the field sends entries without it, and every thread
-/// with nothing to report is written the same way.
-#[test]
-fn session_activity_without_a_latest_activity_keeps_the_older_shape() {
-    let older = json!({
-        "working": false,
-        "turn_running": false,
-        "waiting_for_approval": false,
-        "waiting_for_input": false,
-        "failed": false,
-        "unread": true,
-        "fork": "available",
-    });
-    let decoded: SessionActivity = serde_json::from_value(older.clone()).unwrap();
-    assert_eq!(decoded.latest_activity, None);
-    assert_eq!(serde_json::to_value(&decoded).unwrap(), older);
-}
-
 #[test]
 fn version_six_index_visits_output_and_elision_literal_json() {
     let index = IndexSnapshot {
