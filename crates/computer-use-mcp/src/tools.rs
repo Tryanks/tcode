@@ -588,7 +588,11 @@ impl ComputerUseTools {
                        The call touches the live UI and returns a successor state_id; reuse that instead of the old state, then observe again after later UI changes. \
                        Oversized output returns a preview plus a continuation ref for read_text."
     )]
-    async fn wait_for(&self, Parameters(params): Parameters<WaitForParams>) -> CallToolResult {
+    async fn wait_for(
+        &self,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        Parameters(params): Parameters<WaitForParams>,
+    ) -> CallToolResult {
         let permissions = permissions();
         if let Some(result) = permission_gate(permissions, true, false) {
             return result;
@@ -607,35 +611,13 @@ impl ComputerUseTools {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
         };
-        let timeout = Duration::from_millis(
-            params
-                .condition
-                .timeout_ms
-                .unwrap_or(DEFAULT_TIMEOUT_MS)
-                .min(MAX_TIMEOUT_MS),
-        );
-        let deadline = Instant::now() + timeout;
-        let mut polls = 0_u64;
-        let (observed, matched) = loop {
-            polls += 1;
-            let mut observed = match crate::backend::observe(
-                &previous.root,
-                ObserveRequest {
-                    semantic: true,
-                    capture: CapturePolicy::Never,
-                },
-            ) {
-                Ok(observed) => observed,
-                Err(error) => return backend_error(error),
-            };
-            outline::assign_refs_from_previous(&previous.tree, &mut observed.tree);
-            if condition_satisfied(&observed.tree, &params.condition) {
-                break (observed, true);
-            }
-            if Instant::now() >= deadline {
-                break (observed, false);
-            }
-            tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
+        let waited = tokio::select! {
+            _ = context.ct.cancelled() => return tool_error("wait_for cancelled"),
+            waited = poll_condition(&previous, &params.condition) => waited,
+        };
+        let (observed, matched, polls) = match waited {
+            Ok(waited) => waited,
+            Err(error) => return backend_error(error),
         };
         let successor = crate::state::global()
             .lock()
@@ -1006,6 +988,39 @@ async fn poll_successor(
         };
         if let Some(status) = status {
             return Ok((observed, status));
+        }
+        tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
+    }
+}
+
+/// The last observation, whether it met the condition, and the polls taken.
+async fn poll_condition(
+    previous: &crate::state::Observation,
+    condition: &UiCondition,
+) -> Result<(RootObservation, bool, u64), crate::backend::BackendError> {
+    let timeout = Duration::from_millis(
+        condition
+            .timeout_ms
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .min(MAX_TIMEOUT_MS),
+    );
+    let deadline = Instant::now() + timeout;
+    let mut polls = 0_u64;
+    loop {
+        polls += 1;
+        let mut observed = crate::backend::observe(
+            &previous.root,
+            ObserveRequest {
+                semantic: true,
+                capture: CapturePolicy::Never,
+            },
+        )?;
+        outline::assign_refs_from_previous(&previous.tree, &mut observed.tree);
+        if condition_satisfied(&observed.tree, condition) {
+            return Ok((observed, true, polls));
+        }
+        if Instant::now() >= deadline {
+            return Ok((observed, false, polls));
         }
         tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
