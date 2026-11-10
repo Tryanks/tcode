@@ -23,7 +23,6 @@ const DISPLAY_LABEL_MAX_BYTES: usize = 200;
 pub struct Observation {
     pub state_id: String,
     pub root: RootInfo,
-    pub root_epoch: u64,
     pub tree: UiNode,
     pub harness_annotation: String,
 }
@@ -45,11 +44,6 @@ struct HarnessHistory {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateError {
     Evicted(String),
-    Stale {
-        state_id: String,
-        state_epoch: u64,
-        current_epoch: u64,
-    },
     UnknownElement(String),
     UnknownOutput(String),
     OutputOwnerMismatch {
@@ -66,14 +60,6 @@ impl fmt::Display for StateError {
             Self::Evicted(state_id) => write!(
                 formatter,
                 "state {state_id} was evicted from the observation cache; call observe_ui again"
-            ),
-            Self::Stale {
-                state_id,
-                state_epoch,
-                current_epoch,
-            } => write!(
-                formatter,
-                "state {state_id} is stale (root epoch {state_epoch}, current {current_epoch}); call observe_ui again"
             ),
             Self::UnknownElement(ref_id) => write!(
                 formatter,
@@ -126,7 +112,6 @@ pub struct StateStore {
     next_output: u64,
     observations: HashMap<String, Arc<Observation>>,
     observation_lru: VecDeque<String>,
-    root_epochs: HashMap<String, u64>,
     harness_histories: HashMap<String, HarnessHistory>,
     outputs: HashMap<String, OutputEntry>,
     output_lru: VecDeque<String>,
@@ -139,7 +124,6 @@ impl Default for StateStore {
             next_output: 1,
             observations: HashMap::new(),
             observation_lru: VecDeque::new(),
-            root_epochs: HashMap::new(),
             harness_histories: HashMap::new(),
             outputs: HashMap::new(),
             output_lru: VecDeque::new(),
@@ -165,14 +149,11 @@ impl StateStore {
 
         let harness_annotation = self.record_harness_observation(&root, &tree);
 
-        let epoch = self.root_epochs.entry(identity.clone()).or_default();
-        *epoch += 1;
         let state_id = format!("S{}", self.next_state);
         self.next_state += 1;
         let observation = Arc::new(Observation {
             state_id: state_id.clone(),
             root,
-            root_epoch: *epoch,
             tree,
             harness_annotation,
         });
@@ -241,23 +222,6 @@ impl StateStore {
             .cloned()
             .ok_or_else(|| StateError::Evicted(state_id.to_string()))?;
         touch(&mut self.observation_lru, state_id);
-        Ok(observation)
-    }
-
-    pub fn validate_for_action(&mut self, state_id: &str) -> Result<Arc<Observation>, StateError> {
-        let observation = self.get(state_id)?;
-        let current_epoch = self
-            .root_epochs
-            .get(&observation.root.identity())
-            .copied()
-            .unwrap_or_default();
-        if current_epoch != observation.root_epoch {
-            return Err(StateError::Stale {
-                state_id: state_id.to_string(),
-                state_epoch: observation.root_epoch,
-                current_epoch,
-            });
-        }
         Ok(observation)
     }
 
@@ -663,28 +627,6 @@ mod tests {
         assert!(store.harness_histories.contains_key(&root(1).identity()));
         assert!(!store.harness_histories.contains_key(&root(2).identity()));
         assert_eq!(store.harness_histories.len(), OBSERVATION_CAPACITY);
-    }
-
-    #[test]
-    fn newer_root_epoch_rejects_actions_from_old_state() {
-        let mut store = StateStore::default();
-        let first = store.insert_observation(root(1), tree("one"));
-        let second = store.insert_observation(root(1), tree("one changed"));
-        assert!(matches!(
-            store.validate_for_action(&first.state_id),
-            Err(StateError::Stale { .. })
-        ));
-        assert!(store.validate_for_action(&second.state_id).is_ok());
-        let other = store.insert_observation(root(2), tree("other"));
-        assert!(store.validate_for_action(&second.state_id).is_ok());
-        assert!(store.validate_for_action(&other.state_id).is_ok());
-        assert!(first.harness_annotation.contains("observation_sequence: 1"));
-        assert!(
-            second
-                .harness_annotation
-                .contains("observation_sequence: 2")
-        );
-        assert!(other.harness_annotation.contains("observation_sequence: 1"));
     }
 
     #[test]

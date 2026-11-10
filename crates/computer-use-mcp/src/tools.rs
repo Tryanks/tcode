@@ -234,7 +234,7 @@ impl ComputerUseTools {
     #[tool(
         description = "Observe a desktop root and return a folded outline, state_id, @e element refs, and a screenshot when requested by the observation mode. \
                        Use find_roots → observe_ui, query that cached state with search_ui/expand_ui/inspect_ui, then use act_ui/wait_for and observe again; those cached queries do not touch the live UI. \
-                       Every @e ref belongs to its producing state_id; observations are immutable and kept in a bounded LRU (default 8), so an evicted or stale state or a ref from another state requires a fresh observe_ui. \
+                       Every @e ref belongs to its producing state_id; observations are immutable and kept in a bounded LRU (default 8), so an evicted state or a ref from another state requires a fresh observe_ui. \
                        This server exposes desktop windows only, so use the tcode_preview tools for web pages. \
                        On macOS, grant Accessibility for all tools and Screen Recording for screenshots in Tcode Settings → Computer Use; Windows needs no permissions, and other platforms are unsupported."
     )]
@@ -361,7 +361,7 @@ impl ComputerUseTools {
                        Each step uses the element's accessibility action (AX on macOS, UI Automation on Windows) when one fits and otherwise delivers events to the target app's own process or windows, so it works on background windows, never moves the user's pointer, and sends keys to the target app rather than whichever app the user has focused; each step reports its delivery. \
                        When keys for type_text, keypress or set_text's keyboard replacement cannot be delivered to the target app, the step fails, its message says why, and its delivery is none. \
                        Hover that an app tracks from the real pointer may not respond to move_mouse. \
-                       Every @e ref must belong to the supplied state_id; an evicted or stale state or a ref from another state errors and requires a fresh observe_ui, while a successful call returns a successor state_id that must replace the old one. \
+                       Every @e ref must belong to the supplied state_id; an evicted state or a ref from another state errors and requires a fresh observe_ui. A step whose target's live role or title no longer matches the state fails and asks for a fresh observe_ui; a successful call returns a successor state_id to use from then on. \
                        Results report worked/didnt/unknown per step, stop at the first failure with stopped_at, and use expect as a postcondition rather than treating event delivery as success. \
                        Input is refused when observe-only mode is enabled (allow_input=false) in Settings → Computer Use, and oversized output returns a preview plus a continuation ref for read_text."
     )]
@@ -383,20 +383,12 @@ impl ComputerUseTools {
         if params.actions.is_empty() {
             return tool_error("act_ui requires at least one action");
         }
-        let pid = match crate::state::global().lock().unwrap().get(&params.state_id) {
-            Ok(observation) => observation.root.pid,
-            Err(error) => return tool_error(&error.to_string()),
-        };
-        let lane = observation_lane(pid);
-        let _transaction = lane.lock().await;
-        let previous = match crate::state::global()
-            .lock()
-            .unwrap()
-            .validate_for_action(&params.state_id)
-        {
+        let previous = match crate::state::global().lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
         };
+        let lane = observation_lane(previous.root.pid);
+        let _transaction = lane.lock().await;
         let mut step_results = Vec::new();
         let mut action_descriptions = Vec::new();
         let mut stopped_at = None;
@@ -568,7 +560,7 @@ impl ComputerUseTools {
 
     #[tool(
         description = "After observe_ui, wait against that state for a text, role, value, or referenced UI element to become present or absent. \
-                       Every @e ref must belong to the supplied state_id; an evicted or stale state or a ref from another state errors and requires a fresh observe_ui. \
+                       Every @e ref must belong to the supplied state_id; an evicted state or a ref from another state errors and requires a fresh observe_ui. \
                        The call touches the live UI and returns a successor state_id; reuse that instead of the old state, then observe again after later UI changes. \
                        Oversized output returns a preview plus a continuation ref for read_text."
     )]
@@ -581,20 +573,12 @@ impl ComputerUseTools {
         if let Some(result) = permission_gate(permissions, true, false) {
             return result;
         }
-        let pid = match crate::state::global().lock().unwrap().get(&params.state_id) {
-            Ok(observation) => observation.root.pid,
-            Err(error) => return tool_error(&error.to_string()),
-        };
-        let lane = observation_lane(pid);
-        let _transaction = lane.lock().await;
-        let previous = match crate::state::global()
-            .lock()
-            .unwrap()
-            .validate_for_action(&params.state_id)
-        {
+        let previous = match crate::state::global().lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
         };
+        let lane = observation_lane(previous.root.pid);
+        let _transaction = lane.lock().await;
         let waited = tokio::select! {
             _ = context.ct.cancelled() => return tool_error("wait_for cancelled"),
             waited = poll_condition(&previous, &params.condition) => waited,
