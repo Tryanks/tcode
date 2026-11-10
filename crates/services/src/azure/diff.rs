@@ -167,66 +167,90 @@ fn hunks(old: &str, new: &str) -> (PullRequestPatch, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    /// An iteration's entries read as files: a rename keeps the path it came from, a deleted
-    /// file has no blob at the head, and a folder is no file. Each file's hunks are the change
-    /// between its two texts with three lines of context; a binary or oversized side shows none.
+    /// The hunks, and the lines added and removed, that `git diff` writes between the texts.
+    fn git_diff(old: &str, new: &str) -> (String, u64, u64) {
+        let dir = std::env::temp_dir().join(format!("tcode-azure-diff-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("old"), old).unwrap();
+        std::fs::write(dir.join("new"), new).unwrap();
+        let output = crate::process::command("git")
+            .current_dir(&dir)
+            .args([
+                "diff",
+                "--no-index",
+                "--no-color",
+                "--no-ext-diff",
+                "--diff-algorithm=histogram",
+                "-U3",
+                "old",
+                "new",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = String::from_utf8(output.stdout).unwrap();
+        // Without the function context git writes after a hunk's header.
+        let hunks: String = text
+            .find("\n@@")
+            .map_or("", |at| &text[at + 1..])
+            .split_inclusive('\n')
+            .map(|line| match line.strip_prefix("@@ ") {
+                Some(rest) => format!("@@ {} @@\n", rest.split(" @@").next().unwrap()),
+                None => line.to_owned(),
+            })
+            .collect();
+        let count = |sign: char| {
+            hunks
+                .lines()
+                .filter(|line| line.starts_with(sign) && !line.starts_with("@@"))
+                .count() as u64
+        };
+        (hunks.clone(), count('+'), count('-'))
+    }
+
+    /// Azure serves no patch, so a file's hunks are built from its two texts; they are the ones
+    /// git writes, with three lines of context, near the top of a file as anywhere else.
     #[test]
-    fn changes_read_as_files_with_hunks_between_their_texts() {
-        let renamed = change(&json!({
-            "changeType": "rename, edit",
-            "changeTrackingId": 4,
-            "originalPath": "/src/old.rs",
-            "item": {"path": "/src/new.rs", "objectId": "AB12"},
-        }))
-        .unwrap();
-        assert_eq!(renamed.path, "src/new.rs");
-        assert_eq!(renamed.previous_path.as_deref(), Some("src/old.rs"));
-        assert_eq!(renamed.kind, agent::FileChangeKind::Rename);
-        assert_eq!(renamed.object.as_deref(), Some("ab12"));
-        assert_eq!(renamed.tracking, Some(4));
-        let deleted = change(&json!({
-            "changeType": "delete",
-            "item": {"path": "/gone.txt", "objectId": "CD34"},
-        }))
-        .unwrap();
-        assert_eq!(
-            (deleted.kind, deleted.object),
-            (agent::FileChangeKind::Delete, None)
-        );
-        assert!(
-            change(&json!({"changeType": "add", "item": {"path": "/dir", "isFolder": true}}))
-                .is_none()
-        );
-
-        let old: String = (1..=10).map(|line| format!("line {line}\n")).collect();
-        let new = old.replace("line 5\n", "line five\n");
-        let text = |text: &str| Some(PullRequestFileText::Text(text.to_owned()));
-        let read = file(&renamed, text(&old), text(&new));
-        assert_eq!(
-            read.patch,
-            PullRequestPatch::Hunks(
-                "@@ -2,7 +2,7 @@\n line 2\n line 3\n line 4\n-line 5\n+line five\n line 6\n line 7\n line 8\n"
-                    .into()
-            )
-        );
-        assert_eq!((read.additions, read.deletions), (1, 1));
-        let created = file(&renamed, None, text("a\nb"));
-        assert_eq!(
-            created.patch,
-            PullRequestPatch::Hunks(
-                "@@ -0,0 +1,2 @@\n+a\n+b\n\\ No newline at end of file\n".into()
-            )
-        );
-        assert_eq!((created.additions, created.deletions), (2, 0));
-        assert_eq!(
-            file(&renamed, text(&old), Some(PullRequestFileText::Binary)).patch,
-            PullRequestPatch::Binary
-        );
-        assert_eq!(
-            file(&renamed, Some(PullRequestFileText::Oversized), text(&new)).patch,
-            PullRequestPatch::Oversized
-        );
+    fn hunks_are_the_ones_git_writes() {
+        let lines = |count: usize| {
+            (1..=count)
+                .map(|line| format!("line {line}\n"))
+                .collect::<String>()
+        };
+        let ten = lines(10);
+        let twenty = lines(20);
+        for (old, new) in [
+            (ten.clone(), ten.replace("line 2\n", "line two\n")),
+            (ten.clone(), ten.replace("line 5\n", "line five\n")),
+            (
+                twenty.clone(),
+                twenty
+                    .replace("line 3\n", "line three\n")
+                    .replace("line 9\n", ""),
+            ),
+            (
+                twenty.clone(),
+                twenty
+                    .replace("line 3\n", "")
+                    .replace("line 15\n", "line 15\nextra\n"),
+            ),
+            (ten.clone(), ten.replace("line 10\n", "line ten")),
+            (String::new(), "a\nb".to_owned()),
+            (ten.clone(), String::new()),
+        ] {
+            let (patch, additions, deletions) = hunks(&old, &new);
+            let (expected, added, removed) = git_diff(&old, &new);
+            assert_eq!(
+                patch,
+                PullRequestPatch::Hunks(expected),
+                "{old:?} -> {new:?}"
+            );
+            assert_eq!(
+                (additions, deletions),
+                (added, removed),
+                "{old:?} -> {new:?}"
+            );
+        }
     }
 }
