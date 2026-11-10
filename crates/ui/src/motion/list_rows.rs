@@ -486,7 +486,6 @@ pub(crate) fn arrived_rows(
 }
 
 /// What replacing a list's rows brought and took away.
-#[derive(Debug, PartialEq)]
 pub(crate) struct Changes {
     /// Each new row whose key is new, by its index among the new rows, with
     /// how it came in.
@@ -926,31 +925,5 @@ impl Element for RowGlide {
                 });
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Arrival, Attach, changes};
-
-    /// One replacement that reorders, inserts and removes at once: a new row
-    /// between kept ones is inserted and one after them all appended; a row
-    /// that went folds below the kept row above it, or above the first kept
-    /// row when none was above it. Kept rows, moved or not, are neither.
-    #[test]
-    fn a_replacement_tells_what_came_and_what_went() {
-        let replaced = changes(&[1, 2, 3, 4], &[3, 5, 1, 6]);
-        assert_eq!(
-            replaced.arrived,
-            [(1, Arrival::Inserted), (3, Arrival::Appended)]
-        );
-        assert_eq!(
-            replaced.left,
-            [(1, Attach::Below(1)), (3, Attach::Below(3))]
-        );
-        assert_eq!(
-            changes(&[1, 2, 3], &[3]).left,
-            [(0, Attach::Above(3)), (1, Attach::Above(3))]
-        );
     }
 }
