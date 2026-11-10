@@ -186,13 +186,12 @@ mod imp {
         // lb-wry's iOS WKWebView binding declares no snapshot method, and
         // objc2-web-kit's configuration is macOS only.
         unsafe {
-            let configuration: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> = rect
-                .and_then(|rect| {
-                    let class = objc2::runtime::AnyClass::get(c"WKSnapshotConfiguration")?;
+            let configuration: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
+                rect.map(|rect| {
                     let configuration: objc2::rc::Retained<objc2::runtime::AnyObject> =
-                        objc2::msg_send![class, new];
+                        objc2::msg_send![objc2::class!(WKSnapshotConfiguration), new];
                     let () = objc2::msg_send![&*configuration, setRect: rect];
-                    Some(configuration)
+                    configuration
                 });
             let () = objc2::msg_send![
                 &*webview,

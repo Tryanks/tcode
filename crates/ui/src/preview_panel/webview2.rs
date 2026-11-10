@@ -160,17 +160,10 @@ pub(super) async fn create(
         },
     ));
     let started = (|| unsafe {
-        match environment.cast::<ICoreWebView2Environment10>() {
-            Ok(environment) => {
-                let options = environment.CreateCoreWebView2ControllerOptions()?;
-                options.SetIsInPrivateModeEnabled(private)?;
-                environment
-                    .CreateCoreWebView2CompositionControllerWithOptions(parent, &options, &handler)
-            }
-            Err(_) => environment
-                .cast::<ICoreWebView2Environment3>()?
-                .CreateCoreWebView2CompositionController(parent, &handler),
-        }
+        let environment = environment.cast::<ICoreWebView2Environment10>()?;
+        let options = environment.CreateCoreWebView2ControllerOptions()?;
+        options.SetIsInPrivateModeEnabled(private)?;
+        environment.CreateCoreWebView2CompositionControllerWithOptions(parent, &options, &handler)
     })();
     started.map_err(|error| error.to_string())?;
     rx.recv()
@@ -209,12 +202,12 @@ impl RawWebView {
             settings.SetAreDefaultContextMenusEnabled(true)?;
             settings.SetIsZoomControlEnabled(false)?;
             settings.SetAreDevToolsEnabled(true)?;
-            if let Ok(settings) = settings.cast::<ICoreWebView2Settings5>() {
-                settings.SetIsPinchZoomEnabled(false)?;
-            }
-            if let Ok(settings) = settings.cast::<ICoreWebView2Settings6>() {
-                settings.SetIsSwipeNavigationEnabled(false)?;
-            }
+            settings
+                .cast::<ICoreWebView2Settings5>()?
+                .SetIsPinchZoomEnabled(false)?;
+            settings
+                .cast::<ICoreWebView2Settings6>()?
+                .SetIsSwipeNavigationEnabled(false)?;
             controller.SetIsVisible(false)?;
         }
         Ok(Self {
