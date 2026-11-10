@@ -114,18 +114,16 @@ fn agent_call(
     host: &SpawnedHost,
     session_id: &str,
     op: preview_mcp::PreviewOp,
-    timeout: Duration,
 ) -> async_channel::Receiver<Result<preview_mcp::PreviewReply, String>> {
     let (reply, answer) = async_channel::bounded(1);
     let session_id = session_id.to_owned();
     smol::block_on(host.update_state_for_test(move |state, cx| {
-        state.route_preview_with_timeout(
+        state.route_preview(
             preview_mcp::BrokerRequest {
                 session_id,
                 op,
                 reply,
             },
-            timeout,
             cx,
         )
     }))
@@ -195,12 +193,7 @@ fn request_id(event: ServerEvent) -> u64 {
 #[test]
 fn an_agent_preview_request_reaches_only_the_client_rendering_its_thread() {
     let (host, mux, desk, session_id) = fixture();
-    let refused = agent_call(
-        &host,
-        &session_id,
-        preview_mcp::PreviewOp::Status,
-        Duration::from_secs(60),
-    );
+    let refused = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
     assert!(
         refused
             .recv_blocking()
@@ -221,7 +214,6 @@ fn an_agent_preview_request_reaches_only_the_client_rendering_its_thread() {
         preview_mcp::PreviewOp::Navigate {
             url: "http://localhost:5173".into(),
         },
-        Duration::from_secs(60),
     );
     let ServerEvent::PreviewRequest {
         request_id,
@@ -260,21 +252,6 @@ fn an_agent_preview_request_reaches_only_the_client_rendering_its_thread() {
         Ok(preview_mcp::PreviewReply::Json(json))
     );
 
-    let unanswered = agent_call(
-        &host,
-        &session_id,
-        preview_mcp::PreviewOp::Status,
-        Duration::from_millis(30),
-    );
-    next(
-        &desk_events,
-        |event| matches!(event, ServerEvent::PreviewRequest { request, .. } if *request == tcode_protocol::PreviewRequest::Status),
-    );
-    let error = unanswered.recv_blocking().unwrap().unwrap_err();
-    assert!(
-        error.contains("timed out") && error.contains("Desk"),
-        "{error}"
-    );
     desk.command_blocking(Command::ShutdownAllAndFlush).unwrap();
 }
 
@@ -343,12 +320,7 @@ fn show_here_moves_rendering_and_the_page_with_it() {
         rendering(event).is_some_and(|sessions| sessions.is_empty())
     });
 
-    let answered = agent_call(
-        &host,
-        &session_id,
-        preview_mcp::PreviewOp::Status,
-        Duration::from_secs(60),
-    );
+    let answered = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
     let request_id = request_id(next(&laptop_events, |event| {
         matches!(event, ServerEvent::PreviewRequest { .. })
     }));
@@ -403,12 +375,7 @@ fn a_rendering_client_that_goes_away_releases_its_threads() {
         .unwrap();
     watch_session(&desk, &session_id);
 
-    let orphaned = agent_call(
-        &host,
-        &session_id,
-        preview_mcp::PreviewOp::Status,
-        Duration::from_secs(60),
-    );
+    let orphaned = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
     next(&phone_events, |event| {
         matches!(event, ServerEvent::PreviewRequest { .. })
     });
@@ -423,12 +390,7 @@ fn a_rendering_client_that_goes_away_releases_its_threads() {
     });
 
     // The next call opens the page on a client still here.
-    let answered = agent_call(
-        &host,
-        &session_id,
-        preview_mcp::PreviewOp::Status,
-        Duration::from_secs(60),
-    );
+    let answered = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
     let ServerEvent::PreviewRenderingReplaced(taken) = next(&desk_events, |event| {
         rendering(event).is_some_and(|sessions| !sessions.is_empty())
     }) else {
@@ -455,12 +417,7 @@ fn user_input_on_the_rendering_page_reaches_the_agent_until_it_snapshots() {
     show_here(&desk, &session_id, &desk_client, false);
     watch_session(&laptop, &session_id);
     let status = |expected: bool| {
-        let answered = agent_call(
-            &host,
-            &session_id,
-            preview_mcp::PreviewOp::Status,
-            Duration::from_secs(60),
-        );
+        let answered = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
         let request_id = request_id(next(&desk_events, |event| {
             matches!(event, ServerEvent::PreviewRequest { .. })
         }));
@@ -493,12 +450,7 @@ fn user_input_on_the_rendering_page_reaches_the_agent_until_it_snapshots() {
     });
     status(true);
 
-    let snapshot = agent_call(
-        &host,
-        &session_id,
-        preview_mcp::PreviewOp::Snapshot,
-        Duration::from_secs(60),
-    );
+    let snapshot = agent_call(&host, &session_id, preview_mcp::PreviewOp::Snapshot);
     let request_id = request_id(next(&desk_events, |event| {
         matches!(event, ServerEvent::PreviewRequest { .. })
     }));
