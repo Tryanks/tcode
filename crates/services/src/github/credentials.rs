@@ -457,3 +457,53 @@ fn nonempty(value: String) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// gh's variables name the token for each host: `GH_TOKEN` (then `GITHUB_TOKEN`) for
+    /// github.com and its data-residency hosts, `GH_ENTERPRISE_TOKEN` (then
+    /// `GITHUB_ENTERPRISE_TOKEN`) for the Enterprise Server `GH_HOST` names. A token saved in
+    /// Tcode goes before them, and a host turned off gets none.
+    #[test]
+    fn each_host_gets_the_token_that_is_for_it() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-github-token-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SettingsStore::new(root.clone());
+        let credentials = Credentials::new(
+            store.clone(),
+            [
+                ("GH_TOKEN", "public-first"),
+                ("GITHUB_TOKEN", "public-second"),
+                ("GH_ENTERPRISE_TOKEN", "enterprise-first"),
+                ("GITHUB_ENTERPRISE_TOKEN", "enterprise-second"),
+                ("GH_HOST", " GIT.EXAMPLE.COM "),
+            ]
+            .map(|(key, value)| (key.to_owned(), value.to_owned())),
+        );
+        let token = |host: &str| credentials.get(host).map(|credential| credential.token);
+        assert_eq!(token(" GITHUB.COM ").as_deref(), Ok("public-first"));
+        assert_eq!(token("tenant.ghe.com").as_deref(), Ok("public-first"));
+        assert_eq!(token("git.example.com").as_deref(), Ok("enterprise-first"));
+        store
+            .set_token(HostKind::Github, "GITHUB.COM", Some("saved-first"))
+            .unwrap();
+        assert_eq!(token("github.com").as_deref(), Ok("saved-first"));
+        store
+            .set_token(HostKind::Github, "github.com", None)
+            .unwrap();
+        assert_eq!(token("github.com").as_deref(), Ok("public-first"));
+        credentials.configure(BTreeMap::from([(
+            "github.com".into(),
+            HostSettings {
+                kind: HostKind::Github,
+                enabled: false,
+                account: None,
+            },
+        )]));
+        assert_eq!(token("github.com").unwrap_err(), CredentialError::Disabled);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
