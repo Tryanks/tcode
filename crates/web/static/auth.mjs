@@ -35,8 +35,9 @@ export async function authorizeBrowser() {
     return response.json();
   };
   const state = await api('/auth/state');
-  let hosts = [];
-  try { hosts = JSON.parse(localStorage.getItem('tcode.hosts') || '[]'); } catch { /* damaged site data */ }
+  // Site data this page cannot read stops the start, reported as it is,
+  // rather than being replaced by the next login.
+  let hosts = JSON.parse(localStorage.getItem('tcode.hosts') ?? '[]');
   const last = localStorage.getItem('tcode.last_host');
   const saved = hosts.find(host => host.host_id === last && host.origin === location.origin);
   if (saved) return; // The normal hello verifies it; rejection returns to login.
