@@ -130,38 +130,10 @@ impl IosWindow {
             preferred_present_mode: Some(wgpu::PresentMode::Fifo),
         };
         let context = WgpuContext::new(instance, &bootstrap_surface, &surface_config, None)?;
-        let surface_capabilities = bootstrap_surface.get_capabilities(&context.adapter);
-        let surface_format = [
-            wgpu::TextureFormat::Bgra8Unorm,
-            wgpu::TextureFormat::Rgba8Unorm,
-        ]
-        .into_iter()
-        .find(|format| surface_capabilities.formats.contains(format))
-        .or_else(|| {
-            surface_capabilities
-                .formats
-                .iter()
-                .find(|format| !format.is_srgb())
-                .copied()
-        })
-        .or_else(|| surface_capabilities.formats.first().copied())
-        .ok_or_else(|| anyhow::anyhow!("iOS Metal surface reports no supported formats"))?;
-        let format_features = context.adapter.get_texture_format_features(surface_format);
-        let glass_usages = wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC
-            | wgpu::TextureUsages::COPY_DST;
-        let glass_enabled = format_features.allowed_usages.contains(glass_usages)
-            && format_features
-                .flags
-                .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE);
         drop(bootstrap_surface);
         let gpu_context = Rc::new(RefCell::new(Some(context)));
         let renderer = WgpuRenderer::new(gpu_context.clone(), &raw_handles, surface_config, None)?;
-        log::info!(
-            "GPUI iOS Metal surface format selected: {surface_format:?}; scale factor: \
-             {scale_factor:.2}; glass enabled: {glass_enabled}"
-        );
+        log::info!("GPUI iOS Metal surface created at scale factor {scale_factor:.2}");
 
         Ok(Self {
             view: Cell::new(view),
