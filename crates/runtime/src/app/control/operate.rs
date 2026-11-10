@@ -221,17 +221,32 @@ impl AppState {
                 let caller = caller.clone();
                 let host_cx = cx.clone();
                 let data_dir = self.store.root().clone();
-                Answer::Later(cx.spawn_background(async move {
+                // Carried through once begun, whether the caller waits or not: a
+                // worktree made is a thread installed, which a retry finds.
+                let (started, start) = smol::channel::bounded(1);
+                HostCx::spawn_detached(cx, async move {
                     let (path, child_id) = (meta.cwd.clone(), meta.id.clone());
-                    let (cwd, worktree) = host_cx
+                    let installed = match host_cx
                         .unblock(move || resolve_child_worktree(path, &child_id, &data_dir))
-                        .await?;
-                    meta.cwd = cwd;
-                    meta.worktree = Some(worktree);
-                    finish_on_host(host_cx, move |state, cx| {
-                        state.finish_start_thread(&caller, *meta, message, attachments, cx)
-                    })
-                    .await
+                        .await
+                    {
+                        Ok((cwd, worktree)) => {
+                            meta.cwd = cwd;
+                            meta.worktree = Some(worktree);
+                            finish_on_host(host_cx, move |state, cx| {
+                                state.finish_start_thread(&caller, *meta, message, attachments, cx)
+                            })
+                            .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    let _ = started.send(installed).await;
+                });
+                Answer::Later(cx.spawn_background(async move {
+                    start
+                        .recv()
+                        .await
+                        .unwrap_or_else(|_| Err("the host stopped before the call finished".into()))
                 }))
             }
         }

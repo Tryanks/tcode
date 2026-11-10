@@ -1928,6 +1928,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tcode-core",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
