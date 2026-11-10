@@ -1682,11 +1682,6 @@ fn parse_codex_skills(result: &Value) -> Vec<ProviderCommand> {
             let description = skill
                 .get("description")
                 .and_then(Value::as_str)
-                .or_else(|| {
-                    skill
-                        .pointer("/interface/shortDescription")
-                        .and_then(Value::as_str)
-                })
                 .map(str::to_owned)
                 .filter(|s| !s.is_empty());
             out.push(ProviderCommand {
