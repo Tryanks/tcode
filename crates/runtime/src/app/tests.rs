@@ -8940,32 +8940,6 @@ fn assert_drawer_closed_without_terminals(state: &TestEntity, status: &SessionSt
     });
 }
 
-/// Earlier builds reopened, with fresh shells, every drawer
-/// `terminal-ui.json` marked open once its conversation loaded. Its entries
-/// are ignored and the file is removed.
-#[test]
-fn a_conversation_loads_with_its_drawer_closed_despite_an_older_builds_terminal_file() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-legacy-terminal-ui");
-    let id = stored_terminal_thread(&test_store);
-    let legacy = test_store.root().join("terminal-ui.json");
-    std::fs::write(
-        &legacy,
-        format!(
-            r#"{{
-  "{id}": {{ "open": true, "height": 320.0, "count": 2 }},
-  "draft:project": {{ "open": false, "height": 240.0, "count": 0 }}
-}}"#
-        ),
-    )
-    .unwrap();
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    assert!(!legacy.exists(), "the older build's terminal file is kept");
-
-    let status = load_conversation(&state, cx, 1, &id);
-    assert_drawer_closed_without_terminals(&state, &status);
-}
-
 /// A conversation left with a terminal running comes back with its drawer as
 /// it was: open, at its height, with the same terminals. One whose shells
 /// have all exited comes back closed, without them.
@@ -9030,7 +9004,6 @@ fn only_a_running_terminal_reopens_the_drawer_when_its_conversation_loads() {
 
     let status = load_conversation(&state, cx, 21, &id);
     assert_drawer_closed_without_terminals(&state, &status);
-    assert!(!test_store.root().join("terminal-ui.json").exists());
 }
 
 /// Closing a conversation's last terminal forgets its drawer: it comes back
@@ -9067,7 +9040,6 @@ fn closing_the_last_terminal_forgets_the_drawer() {
     leave_conversation(&state, cx, 7, &id);
     let status = load_conversation(&state, cx, 8, &id);
     assert_drawer_closed_without_terminals(&state, &status);
-    assert!(!test_store.root().join("terminal-ui.json").exists());
 }
 
 #[test]

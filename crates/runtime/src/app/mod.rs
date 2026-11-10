@@ -550,10 +550,6 @@ impl AppState {
             tcode_services::relaunch::take(store.root()),
             computer_use_mcp::permissions::check(),
         );
-        // Older builds kept each conversation's terminal drawer here and
-        // reopened it with fresh shells on load; a drawer now lives only with
-        // its running terminals.
-        let _ = std::fs::remove_file(store.root().join("terminal-ui.json"));
         // Seed the model picker from the persisted cache so it is instant and
         // works offline; a background refresh (see `refresh_model_catalogs`)
         // updates it once the providers respond.
