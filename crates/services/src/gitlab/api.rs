@@ -703,4 +703,20 @@ mod tests {
         assert_eq!(source(&named, "gitlab.corp.example"), None);
         let _ = std::fs::remove_dir_all(root);
     }
+
+    /// A refusal carries GitLab's own words in the error shapes its REST API documents (shape:
+    /// GitLab REST API troubleshooting, "Data validation and error reporting": `message` as
+    /// text, or as a property to messages map; content invented).
+    #[test]
+    fn a_refusal_carries_gitlabs_words() {
+        use super::messages;
+        assert_eq!(
+            messages(br#"{"message":"400 (Bad request) \"title\" not given"}"#),
+            ["400 (Bad request) \"title\" not given"]
+        );
+        assert_eq!(
+            messages(br#"{"message":{"title":["is too long","is invalid"]}}"#),
+            ["title is too long", "title is invalid"]
+        );
+    }
 }
