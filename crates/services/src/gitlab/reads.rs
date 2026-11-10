@@ -373,7 +373,7 @@ pub(super) fn checks_state(checks: &[PullRequestCheck]) -> Option<ChecksState> {
 }
 
 /// "12", or "1000+" past GitLab's counting limit, whose number is the floor.
-fn changed_files(mr: &Value) -> u64 {
+pub(super) fn changed_files(mr: &Value) -> u64 {
     let count = mr["changes_count"].as_str().unwrap_or_default();
     count.trim_end_matches('+').parse().unwrap_or(0)
 }

@@ -124,12 +124,7 @@ impl GitLab {
         let mr = self.mr(key);
         let read = mr.mr()?;
         let refs = &read["diff_refs"];
-        let changed_files = read["changes_count"]
-            .as_str()
-            .unwrap_or_default()
-            .trim_end_matches('+')
-            .parse()
-            .unwrap_or(0);
+        let changed_files = reads::changed_files(&read);
         let mut next = Some(page.unwrap_or(1));
         let mut files = Vec::new();
         let pages = if page.is_some() { 1 } else { MAX_PAGES };
