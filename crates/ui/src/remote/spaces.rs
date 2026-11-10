@@ -1578,24 +1578,33 @@ mod section {
                                         .collect();
                                     (label, items)
                                 };
-                            Button::new(SharedString::from(format!(
-                                "space-models-{space_id}-{}",
-                                choice.profile_id
-                            )))
-                            .ghost()
-                            .xsmall()
-                            .label(label)
-                            .dropdown_menu(move |mut menu, _, _| {
-                                for (label, checked, action) in &items {
-                                    menu = menu.menu_with_check(
-                                        label.clone(),
-                                        *checked,
-                                        Box::new(action.clone()),
-                                    );
-                                }
-                                menu
-                            })
-                            .into_any_element()
+                            // The accessory takes the room the labels leave, so
+                            // the models button sits by the switch at the row's end.
+                            h_flex()
+                                .flex_1()
+                                .justify_end()
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "space-models-{space_id}-{}",
+                                        choice.profile_id
+                                    )))
+                                    .ghost()
+                                    .xsmall()
+                                    .label(label)
+                                    .dropdown_menu(
+                                        move |mut menu, _, _| {
+                                            for (label, checked, action) in &items {
+                                                menu = menu.menu_with_check(
+                                                    label.clone(),
+                                                    *checked,
+                                                    Box::new(action.clone()),
+                                                );
+                                            }
+                                            menu
+                                        },
+                                    ),
+                                )
+                                .into_any_element()
                         });
                         let (on, off) = (set(on), set(off));
                         agent_rows.push(
