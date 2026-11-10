@@ -1306,6 +1306,7 @@ impl TerminalDrawer {
             self.hovered_link = None;
             return;
         };
+        let now = cx.background_executor().now();
         let workspace_store = self.workspace_store.clone();
         workspace_store.read(cx).with_terminal_workspace_for(
             self.session_id.as_deref(),
@@ -1335,9 +1336,9 @@ impl TerminalDrawer {
                 if terminal_link_modifier(event.modifiers, cfg!(target_os = "macos")) {
                     if self
                         .last_link_hover
-                        .is_none_or(|last| last.elapsed() >= Duration::from_millis(16))
+                        .is_none_or(|last| now - last >= Duration::from_millis(16))
                     {
-                        self.last_link_hover = Some(Instant::now());
+                        self.last_link_hover = Some(now);
                         self.hovered_link = entry
                             .terminal
                             .hyperlink_at(point.0, point.1)

@@ -350,6 +350,7 @@ fn images(cx: &mut App) -> &mut Images {
 /// read again; the view is drawn again when the read lands.
 fn answer(source: &Source, window: &mut Window, cx: &mut App) -> Option<Answer> {
     let view = window.current_view();
+    let now = cx.background_executor().now();
     let state = images(cx);
     let after_frame = state.after_frame.clone();
     let entry = state
@@ -359,7 +360,9 @@ fn answer(source: &Source, window: &mut Window, cx: &mut App) -> Option<Answer> 
     let due = entry.stale
         || match &entry.answer {
             None => true,
-            Some(Answer::Unreached(failed)) => failed.elapsed() >= RETRY_UNREACHED,
+            Some(Answer::Unreached(failed)) => {
+                now.saturating_duration_since(*failed) >= RETRY_UNREACHED
+            }
             Some(_) => entry
                 .expiry
                 .as_ref()
@@ -410,6 +413,7 @@ fn reading(source: &Source, validator: Option<String>, cx: &mut App) -> Reading 
     match source.clone() {
         Source::Host(host, request) => {
             let host = HostImages::link(host, cx);
+            let executor = cx.background_executor().clone();
             Box::pin(async move {
                 let query = match request {
                     ImageRequest::Preview {
@@ -441,7 +445,7 @@ fn reading(source: &Source, validator: Option<String>, cx: &mut App) -> Reading 
                     },
                 };
                 let Some(host) = host else {
-                    return Read::Unreached(Instant::now());
+                    return Read::Unreached(executor.now());
                 };
                 match host.query(query).await {
                     Ok(QueryResponse::FileBytes(bytes)) => {
@@ -454,7 +458,7 @@ fn reading(source: &Source, validator: Option<String>, cx: &mut App) -> Reading 
                         }
                     }
                     Err(error) if UNREACHED.contains(&error.code.as_str()) => {
-                        Read::Unreached(Instant::now())
+                        Read::Unreached(executor.now())
                     }
                     Err(error) => Read::Unavailable(error.message.into()),
                     Ok(response) => Read::Unavailable(format!("unexpected {response:?}").into()),

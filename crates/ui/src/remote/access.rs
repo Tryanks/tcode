@@ -183,7 +183,7 @@ impl AccessSection {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let model = spaces.read(cx);
-        let invitation = model.invitation();
+        let invitation = model.invitation(cx);
         let group = model.group().map(|group| group.name.clone());
         let on_new: NewInvitation = Rc::new({
             let spaces = spaces.clone();
