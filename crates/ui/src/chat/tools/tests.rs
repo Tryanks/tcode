@@ -1,7 +1,8 @@
 //! Tool windows driven the way the app shows them: a thread's stored log,
 //! read back by a host, folded into the timeline and drawn by the chat.
-//! Each log is recorded tool items (`fixtures/*.jsonl`, rows of tcode.db,
-//! scrubbed) inside one turn.
+//! Each log is tool items inside one turn (`fixtures/*.jsonl`): rows in the
+//! shape tcode.db stores them, as recorded, with invented paths, ids and
+//! content.
 
 use std::sync::Arc;
 
@@ -124,7 +125,7 @@ impl StoredThread {
         Read::of(&activity(
             &entry,
             false,
-            std::path::Path::new("/Users/me/project"),
+            std::path::Path::new("/home/user/project"),
         ))
     }
 
@@ -247,14 +248,14 @@ fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppCo
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/generic.jsonl"), 1_024.);
-    let mcp = "toolu_01D3QR5wqdMAMUrcBoPhrb1u";
-    let connector = "exec-88fd27ec-2db0-4847-848a-ae9f453befeb";
+    let mcp = "toolu_010000000000000000000023";
+    let connector = "exec-00000018-0000-0000-0000-000000000018";
     for (id, expected) in [
         (
             mcp,
             read(
                 "Called",
-                Some("fl-studio · piano_roll_write_notes"),
+                Some("example-db · insert_rows"),
                 Some("append"),
                 None,
             ),
@@ -264,14 +265,14 @@ fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppCo
             read(
                 "Called",
                 Some("codex_apps · github.search_installed_repositories_v2"),
-                Some("SampleGame"),
+                Some("example-app"),
                 None,
             ),
         ),
     ] {
         assert_eq!(thread.header(id, cx), expected, "{id}");
     }
-    let other = "call_9e4cTBeI2xb0W4DZfy2oKPAB";
+    let other = "call_000000000000000000000025";
     let header = thread.header(other, cx);
     assert_eq!(
         (header.verb, header.subject, header.argument),
@@ -289,17 +290,17 @@ fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppCo
     assert!(shows(cx, &format!("tool-text-{connector}-output")));
     click(cx, &format!("activity-row-{connector}"));
 
-    // Open, the input reads as keys and values; the 13 notes stay folded
+    // Open, the input reads as keys and values; the 13 rows stay folded
     // until asked for, and the output is printed as indented JSON, too long
     // to show whole.
     click(cx, &format!("activity-row-{mcp}"));
-    for key in ["channel_index", "mode", "notes", "pattern_number"] {
+    for key in ["batch_number", "mode", "rows", "table_index"] {
         assert!(shows(cx, &format!("tool-input-{mcp}-{key}")), "{key}");
     }
-    let notes = format!("tool-text-{mcp}-nested-notes");
-    assert!(!shows(cx, &notes));
-    click(cx, &format!("tool-nested-{mcp}-notes"));
-    assert!(shows(cx, &notes));
+    let rows = format!("tool-text-{mcp}-nested-rows");
+    assert!(!shows(cx, &rows));
+    click(cx, &format!("tool-nested-{mcp}-rows"));
+    assert!(shows(cx, &rows));
     assert!(shows(cx, &format!("tool-text-{mcp}-output-more")));
 
     // An item canonicalization does not model has nothing more to open.
@@ -323,12 +324,12 @@ fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
         chips,
         ..read("Ran", None, Some(argument), error)
     };
-    let declined = "exec-1886810a-4a55-4708-8ae0-6005349e79e8";
-    let exec = "call_SwgyPy31gqrEcphvMeyBJsST";
-    let stdin = "call_HODo1V5SY8J2DrCNPTJqiTc7";
+    let declined = "exec-0000000c-0000-0000-0000-00000000000c";
+    let exec = "call_000000000000000000000013";
+    let stdin = "call_000000000000000000000014";
     for (id, expected) in [
         (
-            "toolu_01RQ9kdsaRsD7Vh9QGznNJwT",
+            "toolu_010000000000000000000009",
             ran(
                 "git status --short && git log --oneline -3 && ls",
                 vec![],
@@ -336,13 +337,13 @@ fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
             ),
         ),
         (
-            "toolu_01RNnVjDHfMoqLkL2otV6JiC",
-            ran("ls /Users/me/project/src", vec![Chip::Exit(1)], None),
+            "toolu_010000000000000000000010",
+            ran("ls /home/user/project/src", vec![Chip::Exit(1)], None),
         ),
         (
-            "exec-a4d9d295-690b-4905-9427-20acfcd6d992",
+            "exec-0000000b-0000-0000-0000-00000000000b",
             ran(
-                "/bin/zsh -lc \"sed -n '1,130p' .github/scripts/check-architecture.sh\"",
+                "/bin/zsh -lc \"sed -n '1,130p' .github/scripts/check-links.sh\"",
                 vec![Chip::Exit(1)],
                 None,
             ),
@@ -353,8 +354,8 @@ fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
                 "Run",
                 None,
                 Some(
-                    "/bin/zsh -c '/opt/homebrew/bin/adb -t 1 shell cmd appops set \
-                     org.koreader.launcher MANAGE_EXTERNAL_STORAGE allow'",
+                    "/bin/zsh -c '/usr/local/bin/docker compose -f deploy/compose.yml down \
+                     --volumes --remove-orphans'",
                 ),
                 None,
             ),
@@ -368,19 +369,19 @@ fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
             },
         ),
         (
-            "tool_mJeTs4Cc0I6gPcCx5W0BlgpT",
-            ran("ls -la /Users/me/project", vec![], None),
+            "tool_000000000000000000000015",
+            ran("ls -la /home/user/project", vec![], None),
         ),
     ] {
         assert_eq!(thread.header(id, cx), expected, "{id}");
     }
-    let child = "toolu_01GZcgPu9J81FC9d5KiL2geW:toolu_015f228ibAN81Gb9q9mdmffs";
+    let child = "toolu_010000000000000000000016:toolu_010000000000000000000017";
     let header = thread.header(child, cx);
     assert_eq!(header.verb.as_deref(), Some("Ran"));
     assert!(
         header
             .argument
-            .is_some_and(|argument| argument.starts_with("cd /Users/me/project/SampleGame/")),
+            .is_some_and(|argument| argument.starts_with("cd /home/user/project/vendor/")),
     );
 
     // Every one of them is a command to the run that holds them.
@@ -389,15 +390,15 @@ fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
     let counts = crate::chat::model::work_log_counts(&refs);
     assert_eq!((counts.commands, counts.tools), (8, 0));
 
-    thread.open_work_log("toolu_01RQ9kdsaRsD7Vh9QGznNJwT", cx);
+    thread.open_work_log("toolu_010000000000000000000009", cx);
     assert!(shows(cx, &format!("tool-status-chip-{declined}")));
-    let failed = "toolu_01RNnVjDHfMoqLkL2otV6JiC";
+    let failed = "toolu_010000000000000000000010";
     assert!(shows(cx, &format!("tool-chip-{failed}")));
     assert!(!shows(cx, &format!("tool-error-{failed}")));
     // A shell run as a tool opens on the same terminal window as a command:
     // its command line over what it printed, verbatim, its harness's report
     // included, all of it in the grid, with nothing more to open.
-    let pi = "tool_mJeTs4Cc0I6gPcCx5W0BlgpT";
+    let pi = "tool_000000000000000000000015";
     for shell in [exec, child, pi] {
         click(cx, &format!("activity-row-{shell}"));
         assert!(shows(cx, &format!("tool-shell-{shell}")), "{shell}");
@@ -420,7 +421,7 @@ impl StoredThread {
     /// read.
     pub(in crate::chat) fn files(&self, id: &str, cx: &mut VisualTestContext) -> Vec<FileRead> {
         let entry = self.entry(id, cx);
-        let cwd = std::path::PathBuf::from("/Users/me/project");
+        let cwd = std::path::PathBuf::from("/home/user/project");
         let edit = super::diff::edit(&entry, &cwd).expect("an edit");
         edit.files
             .iter()
@@ -450,32 +451,32 @@ fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
     let file = |verb: &str, path: &str, counts, numbered| {
         (verb.to_owned(), path.to_owned(), counts, numbered)
     };
-    let patch = "call_pRHtbnUjD1fys6vF0opYzxxb";
-    let codex = "exec-f7170e74-7da8-447e-8dd1-8f9e4171a278";
+    let patch = "call_000000000000000000000006";
+    let codex = "exec-00000004-0000-0000-0000-000000000004";
     for (id, expected) in [
         (
-            "toolu_011mXP4LmwByfxyE3aeyTZmG",
+            "toolu_010000000000000000000001",
             vec![file(
                 "Edited",
-                "crates/app/src/sessions.rs",
+                "crates/app/src/metrics.rs",
                 Some((4, 1)),
                 true,
             )],
         ),
         (
-            "toolu_017j2Ae9pT4MwYY5MGTQGrtR",
+            "toolu_010000000000000000000002",
             vec![file(
                 "Edited",
-                "crates/ui/src/store/mod.rs",
+                "crates/ui/src/state/mod.rs",
                 Some((1, 1)),
                 false,
             )],
         ),
         (
-            "toolu_01428REq3FY79RkJYwSanEU7",
+            "toolu_010000000000000000000003",
             vec![file(
                 "Created",
-                "/Users/me/Documents/Tcode/2026-10-29/tools/extract_subs.sh",
+                "/home/user/scratch/tools/make_thumbs.sh",
                 Some((17, 0)),
                 false,
             )],
@@ -485,12 +486,12 @@ fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
             vec![file("Edited", "docs/review.md", Some((5, 1)), true)],
         ),
         (
-            "exec-c85dea68-c4be-4c0f-a7f3-c0acb537833a",
+            "exec-00000005-0000-0000-0000-000000000005",
             vec![
-                file("Moved", "crates/services/src/version_check.rs", None, false),
+                file("Moved", "crates/services/src/update_check.rs", None, false),
                 file(
                     "Moved",
-                    "crates/services/src/version_check/app_releases.rs",
+                    "crates/services/src/update_check/releases.rs",
                     Some((1, 1)),
                     true,
                 ),
@@ -500,16 +501,16 @@ fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
             patch,
             vec![file(
                 "Edited",
-                "crates/sampleapp-core/src/helper_protocol/ops.rs",
+                "crates/example-core/src/storage/ops.rs",
                 Some((4, 0)),
                 false,
             )],
         ),
         (
-            "toolu_01CbYY9A8YxGCykHFEFqtNq5:toolu_01XFRP8Dbt8t1tPr3LaArd15",
+            "toolu_010000000000000000000007:toolu_010000000000000000000008",
             vec![file(
                 "Edited",
-                "/tmp/sampleapp-selectors/locales/pages/selectors.yml",
+                "/tmp/example-app-locales/locales/pages/settings.yml",
                 Some((0, 3)),
                 false,
             )],
@@ -518,12 +519,12 @@ fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
         assert_eq!(thread.files(id, cx), expected, "{id}");
     }
 
-    thread.open_work_log("toolu_011mXP4LmwByfxyE3aeyTZmG", cx);
-    assert!(shows(cx, "tool-chip-toolu_011mXP4LmwByfxyE3aeyTZmG-file-0"));
+    thread.open_work_log("toolu_010000000000000000000001", cx);
+    assert!(shows(cx, "tool-chip-toolu_010000000000000000000001-file-0"));
     // A rename that changed no lines has nothing to open.
     click(
         cx,
-        "activity-row-exec-c85dea68-c4be-4c0f-a7f3-c0acb537833a-file-0",
+        "activity-row-exec-00000005-0000-0000-0000-000000000005-file-0",
     );
     assert!(!shows(cx, "file-edit-diff"));
 
@@ -549,10 +550,10 @@ fn a_read_reads_as_its_file_and_lines(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/read.jsonl"), 1_024.);
-    let claude = "toolu_016biQ3Y87fKqgUWVGucqtNE";
-    let pi = "tool_WZrAwFwAbvGI2G5cZra64pTS";
-    let image = "toolu_01LaP7uGd5FPjA4TZEacYFKe";
-    let rollout = "call_COcZJppSUODpGmo9sQXLhw6m";
+    let claude = "toolu_010000000000000000000018";
+    let pi = "tool_000000000000000000000021";
+    let image = "toolu_010000000000000000000020";
+    let rollout = "call_000000000000000000000022";
     let with_detail = |read: Read, detail: Option<&str>| Read {
         detail: detail.map(str::to_owned),
         ..read
@@ -564,26 +565,26 @@ fn a_read_reads_as_its_file_and_lines(cx: &mut TestAppContext) {
                 super::tests::read(
                     "Read",
                     None,
-                    Some("/tmp/sepia-ref/sepia/skills/sepia/references/model-fingerprints.md"),
+                    Some("/tmp/example-docs/guides/references/style-guide.md"),
                     None,
                 ),
                 Some("L1–12"),
             ),
         ),
         (
-            "toolu_01CHit7GAx8MHvPX8YPiiQne",
+            "toolu_010000000000000000000019",
             super::tests::read(
                 "Read",
                 None,
-                Some("/tmp/vm-3.png"),
+                Some("/tmp/shot-3.png"),
                 Some(
-                    "File does not exist. Note: your current working directory is /Users/me/project",
+                    "File does not exist. Note: your current working directory is /home/user/project",
                 ),
             ),
         ),
         (
             image,
-            super::tests::read("Viewed", None, Some("/tmp/tcode-xtrace/ui1.png"), None),
+            super::tests::read("Viewed", None, Some("/tmp/example-shots/ui1.png"), None),
         ),
         (
             pi,
@@ -592,8 +593,8 @@ fn a_read_reads_as_its_file_and_lines(cx: &mut TestAppContext) {
                     "Read",
                     None,
                     Some(
-                        "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/\
-                         node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js",
+                        "/home/user/.local/lib/node_modules/example-cli/\
+                         node_modules/example-sdk/dist/api/chat-completions.js",
                     ),
                     None,
                 ),
@@ -605,7 +606,7 @@ fn a_read_reads_as_its_file_and_lines(cx: &mut TestAppContext) {
             super::tests::read(
                 "Viewed",
                 None,
-                Some("/tmp/smart-cabinet-recognition-debug/diff_otsu_binary.png"),
+                Some("/tmp/example-debug/diff_threshold.png"),
                 None,
             ),
         ),
@@ -639,7 +640,7 @@ fn a_search_reads_as_its_pattern_and_opens_on_what_it_found(cx: &mut TestAppCont
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/search.jsonl"), 1_024.);
-    let refused = "toolu_013SmuYY5FGMfM9pME2Nkb6n:toolu_01Cx6kFav4s5Rsv4vhYkPark";
+    let refused = "toolu_010000000000000000000027:toolu_010000000000000000000028";
     let found = |verb: &str, argument: &str, detail: Option<&str>, count: Option<&str>| Read {
         detail: detail.map(str::to_owned),
         chips: count
@@ -652,13 +653,13 @@ fn a_search_reads_as_its_pattern_and_opens_on_what_it_found(cx: &mut TestAppCont
             refused,
             Read {
                 detail: Some(
-                    ".claude/worktrees/agent-ab2974c16489ddc88/crates/app/src/pages/nodes/chains"
+                    ".claude/worktrees/agent-a0000000000000001/crates/app/src/pages/settings/profiles"
                         .to_owned(),
                 ),
                 ..read(
                     "Searched",
                     None,
-                    Some("CHAINS_TAB|DEFAULT_GROUP_ID|tab\\.set|Import|import_"),
+                    Some("PROFILES_TAB|DEFAULT_PROFILE_ID|tab\\.set|Import|import_"),
                     Some(
                         "<tool_use_error>Error: No such tool available: Grep. Grep is not \
                          available in this session — search file contents with `grep` via the \
@@ -717,15 +718,15 @@ fn a_web_call_reads_as_its_url_or_query(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/web.jsonl"), 1_024.);
-    let fetch = "toolu_01AjUWd82mqBqGyPmhUMzhTS:toolu_013j1D9CWuGU1W1v9VEQaWyt";
-    let search = "toolu_01ARRsmtUMKF9Jr8HaVd9DaE:toolu_01UnWqBEoDTfn52xSKRMa3yD";
+    let fetch = "toolu_010000000000000000000029:toolu_010000000000000000000030";
+    let search = "toolu_010000000000000000000031:toolu_010000000000000000000032";
     for (id, expected) in [
         (
             fetch,
             read(
                 "Fetched",
                 None,
-                Some("https://helpx.adobe.com/animate/kb/end-of-life.html"),
+                Some("https://docs.example.com/product/kb/end-of-life.html"),
                 None,
             ),
         ),
@@ -736,17 +737,17 @@ fn a_web_call_reads_as_its_url_or_query(cx: &mut TestAppContext) {
                 ..read(
                     "Searched the web",
                     None,
-                    Some("嘉立创 亚克力 激光切割 乳白 下单 CNC 钣金"),
+                    Some("示例库 中间件 跨域配置 预检 缓存 API 文档"),
                     None,
                 )
             },
         ),
         (
-            "exec-2f58edd8-f98d-4a06-ba20-0f55a5486be1",
+            "exec-00000021-0000-0000-0000-000000000021",
             read("Searched the web", None, Some("'font'"), None),
         ),
         (
-            "exec-24caa8e4-8398-460e-8cd0-d7bbda29ca96",
+            "exec-00000022-0000-0000-0000-000000000022",
             read("Searched the web", None, None, None),
         ),
     ] {
@@ -773,7 +774,7 @@ fn a_plan_written_as_a_call_reads_as_a_checklist(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/todo.jsonl"), 1_024.);
-    let plan = "call_ZBnIlWgl8BTGGZ6KIUCb3Pmo";
+    let plan = "call_000000000000000000000035";
     assert_eq!(
         thread.header(plan, cx),
         Read {
@@ -781,7 +782,7 @@ fn a_plan_written_as_a_call_reads_as_a_checklist(cx: &mut TestAppContext) {
             ..read(
                 "Updated the plan",
                 None,
-                Some("审视旧环境变量兼容残留与配置命名"),
+                Some("梳理旧配置文件格式与字段命名规则"),
                 None
             )
         }
@@ -802,15 +803,15 @@ fn a_subagent_reads_as_its_agent_and_task(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/subagent.jsonl"), 1_024.);
-    let claude = "toolu_01N5qbJptVEf5KH4yk3fYa9N";
-    let codex = "call_vmWu7cCLM2uUfy2hX4GQhU9Y";
-    let interrupted = "call_fCcc53Gl87IKZZRYJZKIisUT";
+    let claude = "toolu_010000000000000000000036";
+    let codex = "call_000000000000000000000037";
+    let interrupted = "call_000000000000000000000038";
     assert_eq!(
         thread.header(claude, cx),
         read(
             "Ran subagent",
             Some("Explore"),
-            Some("Classify chat/markdown tests"),
+            Some("Classify the parser tests"),
             None
         )
     );
@@ -820,8 +821,8 @@ fn a_subagent_reads_as_its_agent_and_task(cx: &mut TestAppContext) {
             chips: vec![Chip::Tag("gpt-6-astra · low".to_owned())],
             ..read(
                 "Ran subagent",
-                Some("t3_transport"),
-                Some("/root/t3_transport"),
+                Some("api_client"),
+                Some("/root/api_client"),
                 None
             )
         }
@@ -830,8 +831,8 @@ fn a_subagent_reads_as_its_agent_and_task(cx: &mut TestAppContext) {
         thread.header(interrupted, cx),
         read(
             "Ran subagent",
-            Some("clock_limits"),
-            Some("/root/sd_timing_finish/clock_limits"),
+            Some("cache_limits"),
+            Some("/root/perf_review/cache_limits"),
             None
         )
     );
@@ -859,15 +860,15 @@ fn a_subagent_reads_as_its_agent_and_task(cx: &mut TestAppContext) {
 fn a_subagent_window_tells_a_running_and_a_failed_agent(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
-    let running = "call_vmWu7cCLM2uUfy2hX4GQhU9Y";
+    let running = "call_000000000000000000000037";
     let failed = "spawn-failed";
     let log = [
         serde_json::json!({ "ts": 1_000, "event": { "type": "turn_started", "turn_id": "t" } }),
         serde_json::json!({ "ts": 1_001, "event": { "type": "item_completed", "id": "user",
             "content": { "kind": "user_message", "text": "Delegate it." } } }),
         serde_json::json!({ "ts": 1_788_812_926_728_u64, "event": { "type": "item_updated",
-            "id": running, "content": { "kind": "subagent", "agent_type": "t3_transport",
-                "description": "/root/t3_transport", "status": "in_progress", "summary": null,
+            "id": running, "content": { "kind": "subagent", "agent_type": "api_client",
+                "description": "/root/api_client", "status": "in_progress", "summary": null,
                 "model": "gpt-6-astra", "effort": "low" } } }),
         serde_json::json!({ "ts": 1_788_812_926_800_u64, "event": { "type": "item_completed",
             "id": failed, "content": { "kind": "subagent", "agent_type": "general",
@@ -1290,23 +1291,23 @@ fn a_computer_use_script_reads_as_its_title_and_shows_what_it_got_back(cx: &mut 
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/script.jsonl"), 1_024.);
-    let first = "call_WdPy4laY4Ov28Z0wb0rwTLr6";
-    let shot = "call_eCkCDGIgrTwMGt9JIPQK7WVO";
-    let failed = "call_laYExxOR0UWZ9HfL3wHwdMRP";
-    let imported = "call_mLYh6qpMr3E3n0GTeZcMWu80";
+    let first = "call_000000000000000000000054";
+    let shot = "call_000000000000000000000053";
+    let failed = "call_000000000000000000000057";
+    let imported = "call_000000000000000000000059";
     for (id, expected) in [
-        (first, titled("Open the seeded tcode desktop app", None)),
-        (shot, titled("核对引脚表当前内容", None)),
+        (first, titled("Open the seeded example desktop app", None)),
+        (shot, titled("核对设置页当前内容", None)),
         (
             failed,
             titled(
-                "点击图纸放置 RP2040",
+                "点击画布放置 Button",
                 Some("Computer Use server error -10005: noWindowsAvailable"),
             ),
         ),
-        (imported, titled("Refilter cases by initial node", None)),
+        (imported, titled("Refilter orders by status", None)),
         (
-            "call_QR1C3qJxdBRhhcHJ71eoq7VO",
+            "call_000000000000000000000062",
             read("Reset the script kernel", None, None, None),
         ),
     ] {
@@ -1343,10 +1344,10 @@ fn a_desktop_call_reads_as_the_window_it_saw_and_the_steps_it_took(cx: &mut Test
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/desktop.jsonl"), 1_024.);
-    let roots = "toolu_01NQJSSZLJPJ8sqjTfgSsDRB";
-    let observe = "toolu_017Q2ubQL1y3N7Q6G6nrmsJa:toolu_01C9td26NuYvzsayZDbUJedP";
-    let codex_observe = "exec-68ab8f51-9ce2-4b33-9bf9-0ecaa88f99c1";
-    let act = "exec-e7482230-19ea-45c9-8fcb-97c6bd764327";
+    let roots = "toolu_010000000000000000000039";
+    let observe = "toolu_010000000000000000000041:toolu_010000000000000000000042";
+    let codex_observe = "exec-00000028-0000-0000-0000-000000000028";
+    let act = "exec-00000030-0000-0000-0000-000000000030";
     let with = |read: Read, detail: Option<&str>, chips: Vec<Chip>| Read {
         detail: detail.map(str::to_owned),
         chips,
@@ -1365,21 +1366,21 @@ fn a_desktop_call_reads_as_the_window_it_saw_and_the_steps_it_took(cx: &mut Test
         (
             observe,
             with(
-                read("Observed", None, Some("tcode"), None),
-                Some("Tcode"),
+                read("Observed", None, Some("example-app"), None),
+                Some("Example App"),
                 count("6 elements"),
             ),
         ),
         (
             codex_observe,
             with(
-                read("Observed", None, Some("tcode"), None),
+                read("Observed", None, Some("example-app"), None),
                 None,
                 count("6 elements"),
             ),
         ),
         (
-            "toolu_01Ns9tGxLtoMYTQxqB7WLyGB",
+            "toolu_010000000000000000000044",
             with(
                 read("Searched", None, Some("终端"), None),
                 None,
@@ -1387,12 +1388,12 @@ fn a_desktop_call_reads_as_the_window_it_saw_and_the_steps_it_took(cx: &mut Test
             ),
         ),
         (
-            "toolu_01YamGZ6qjcLmnYdocyvENVR",
+            "toolu_010000000000000000000047",
             read("Moved the pointer", None, Some("(220, 250)"), None),
         ),
         (act, read("Clicked", None, Some("(625, 432)"), None)),
         (
-            "toolu_01HecLyWpPRByj9kFuaqBPW5",
+            "toolu_010000000000000000000049",
             with(
                 read("Waited for", None, Some("\"Threads\""), None),
                 None,
@@ -1400,7 +1401,7 @@ fn a_desktop_call_reads_as_the_window_it_saw_and_the_steps_it_took(cx: &mut Test
             ),
         ),
         (
-            "toolu_01GHuvDnmLGCzz3TPBdmxyYf",
+            "toolu_010000000000000000000051",
             read(
                 "Observed",
                 None,
@@ -1409,7 +1410,7 @@ fn a_desktop_call_reads_as_the_window_it_saw_and_the_steps_it_took(cx: &mut Test
             ),
         ),
         (
-            "toolu_01XWGXfmuiByFbAif8Kpgim3",
+            "toolu_010000000000000000000052",
             read(
                 "Read",
                 None,
@@ -1464,17 +1465,17 @@ fn a_preview_call_reads_as_what_it_did_to_the_page(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/preview.jsonl"), 1_024.);
-    let status = "toolu_01KS7AVK8D5rAHPgk3WkGAAW:toolu_013GGKGccaHprbMwkZFNsR8J";
-    let snapshot = "exec-8919949d-a629-45b8-9377-f4ce815c25fe";
-    let evaluate = "toolu_01KS7AVK8D5rAHPgk3WkGAAW:toolu_01ECxEjKA1AXdoNAeHhDygDe";
-    let screenshot = "toolu_01F6CrbmXUvasJ6vjNrR5wQe";
+    let status = "toolu_010000000000000000000063:toolu_010000000000000000000064";
+    let snapshot = "exec-00000043-0000-0000-0000-000000000043";
+    let evaluate = "toolu_010000000000000000000063:toolu_010000000000000000000075";
+    let screenshot = "toolu_010000000000000000000076";
     for (id, expected) in [
         (
             status,
             read("Checked the page", None, Some("about:blank"), None),
         ),
         (
-            "toolu_01P2BLtgGU73xSPBupeRsT5T",
+            "toolu_010000000000000000000065",
             read("Opened", None, Some("http://localhost:3110/"), None),
         ),
         (
@@ -1484,33 +1485,33 @@ fn a_preview_call_reads_as_what_it_did_to_the_page(cx: &mut TestAppContext) {
                 ..read(
                     "Read the page",
                     None,
-                    Some("登录 - DigVPS - 专注服务器测评，总有一款服务器适合您！"),
+                    Some("登录 - Example - 示例应用演示站点，仅用于测试登录流程！"),
                     None,
                 )
             },
         ),
         (
-            "toolu_014bi2P56XPcvHKchawYF8Lg",
+            "toolu_010000000000000000000068",
             read("Clicked", None, Some("header button"), None),
         ),
         (
-            "toolu_01WeNMNrE8DcifVjUj9yPWeT",
+            "toolu_010000000000000000000069",
             Read {
                 detail: Some("#auth input".to_owned()),
                 ..read("Typed", None, Some("\"testpass123\""), None)
             },
         ),
         (
-            "toolu_012K8JSPa5Xfh1DvDJd8muwD",
+            "toolu_010000000000000000000070",
             read("Pressed keys", None, Some("Escape"), None),
         ),
         (
-            "toolu_01WJGxramGWcxon7DAAbGqcq",
+            "toolu_010000000000000000000071",
             read("Scrolled", None, Some("y+1500"), None),
         ),
         (screenshot, read("Took a screenshot", None, None, None)),
         (
-            "exec-d4bae9da-f150-466c-a7e0-3a3fc1bd167c",
+            "exec-0000004e-0000-0000-0000-00000000004e",
             read(
                 "Took a screenshot",
                 None,
@@ -1552,9 +1553,9 @@ fn consecutive_computer_calls_share_one_window_with_the_latest_screenshot(cx: &m
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/run.jsonl"), 1_024.);
-    let observe = "toolu_017Q2ubQL1y3N7Q6G6nrmsJa:toolu_01C9td26NuYvzsayZDbUJedP";
-    let act = "toolu_01YamGZ6qjcLmnYdocyvENVR";
-    let script = "call_eCkCDGIgrTwMGt9JIPQK7WVO";
+    let observe = "toolu_010000000000000000000041:toolu_010000000000000000000042";
+    let act = "toolu_010000000000000000000047";
+    let script = "call_000000000000000000000053";
 
     let entries = thread.entries(cx);
     let refs: Vec<&TimelineEntry> = entries.iter().map(Arc::as_ref).collect();
@@ -1587,8 +1588,8 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/threads.jsonl"), 1_024.);
-    let outline = "toolu_012QMT71dp98e55BupiJURf6:toolu_01PVcJdSBA51bmNhQcD7vCPN";
-    let notify = "toolu_01XWjf1cgHqAZxrE9sURd7Gb";
+    let outline = "toolu_010000000000000000000079:toolu_010000000000000000000080";
+    let notify = "toolu_010000000000000000000100";
     let with = |read: Read, detail: Option<&str>, chips: Vec<Chip>| Read {
         detail: detail.map(str::to_owned),
         chips,
@@ -1597,22 +1598,22 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
     for (id, expected) in [
         (
             outline,
-            read("Outlined", None, Some("打包 Go 与 Rust UDF 分发包"), None),
+            read("Outlined", None, Some("打包 Go 与 Rust SDK 发布包"), None),
         ),
         (
-            "toolu_014TLy6G9bmwfudQJRXy3KaV",
-            read("Read", None, Some("0f0027c4 #1855–#1903"), None),
+            "toolu_010000000000000000000082",
+            read("Read", None, Some("00000053 #1855–#1903"), None),
         ),
         (
-            "toolu_01SZQhAHqfTmKVScua8iLLGi",
+            "toolu_010000000000000000000084",
             with(
                 read("Searched", None, Some("抽象"), None),
-                Some("1c4a9ef6"),
+                Some("00000055"),
                 vec![Chip::Count("0 hits".to_owned())],
             ),
         ),
         (
-            "toolu_01FQ8S6KvXR7rVJXYYVMHhp3",
+            "toolu_010000000000000000000086",
             read(
                 "Searched",
                 None,
@@ -1621,15 +1622,15 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
             ),
         ),
         (
-            "toolu_01GprWTPcsBNkJ7DmcEjBVDb",
+            "toolu_010000000000000000000087",
             with(
                 read("Searched", None, Some("git_commit"), None),
-                Some("92ba1a19 #33670"),
+                Some("00000058 #33670"),
                 Vec::new(),
             ),
         ),
         (
-            "toolu_017ZJVGuFzkcNidvsaj1RoB8",
+            "toolu_010000000000000000000092",
             with(
                 read("Listed threads", None, Some("多窗格"), None),
                 None,
@@ -1637,12 +1638,12 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
             ),
         ),
         (
-            "toolu_01AoVkVQP25t5xSZqB1ru1Hd",
+            "toolu_010000000000000000000095",
             with(
                 read(
                     "Started a thread",
                     None,
-                    Some("工作包 8：预检台与大屏"),
+                    Some("工作包 8：设置页与导出"),
                     None,
                 ),
                 Some("claude · claude-fable-5-1"),
@@ -1650,20 +1651,20 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
             ),
         ),
         (
-            "toolu_01RyxSsh7j4FTxBcFtnm4rWW",
-            read("Updated threads", None, Some("interrupt f7419215"), None),
+            "toolu_010000000000000000000098",
+            read("Updated threads", None, Some("interrupt 00000063"), None),
         ),
         (
             notify,
-            read("Set a watch on", None, Some("0f0027c4, bb008ad2"), None),
+            read("Set a watch on", None, Some("00000053, 00000065"), None),
         ),
         (
-            "toolu_01XtnFUpXBHJRqTz5kxibApB",
+            "toolu_010000000000000000000102",
             with(
                 read(
                     "Dispatched",
                     None,
-                    Some("Investigate plan-mode persistence/replay lifecycle"),
+                    Some("Investigate cache persistence/replay lifecycle"),
                     None,
                 ),
                 Some("codex · gpt-5.6-sol"),
@@ -1671,11 +1672,11 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
             ),
         ),
         (
-            "toolu_01CpV5xZDbdN8sHK2rddZX8G",
+            "toolu_010000000000000000000104",
             read(
                 "Read the result of",
                 None,
-                Some("4a00e630"),
+                Some("00000067"),
                 Some("thread is still running"),
             ),
         ),
@@ -1703,13 +1704,13 @@ fn a_harness_call_reads_as_what_it_did_to_the_session(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/harness.jsonl"), 1_024.);
-    let review = "6edd6799-9365-40eb-bb46-1b81349825ce";
-    let ask = "toolu_01ATcf9PyE343ETE6mET6bu9";
-    let codex_ask = "call_xOISWlfXvmW4R9A8oaZnC3uD";
-    let viewed = "exec-5bd102db-8280-4811-a3c3-6146bd58a20c";
-    let generated = "exec-89f575db-4c35-4d77-a024-611fdd5d1d50";
-    let rationale = "该脚本通过 DOM 查询定位控件，违反用户明确禁止用页面脚本替代正常交互、\
-                     读取隐藏页面状态的限制；应改用可见控件快照定位或停止。";
+    let review = "0000006b-0000-0000-0000-00000000006b";
+    let ask = "toolu_010000000000000000000112";
+    let codex_ask = "call_000000000000000000000113";
+    let viewed = "exec-00000073-0000-0000-0000-000000000073";
+    let generated = "exec-00000074-0000-0000-0000-000000000074";
+    let rationale = "该脚本通过页面脚本直接改写表单状态，违反用户明确要求只用可见控件完成操作、\
+                     不得绕过页面校验的限制；应改用点击和输入重新操作。";
     for (id, expected) in [
         (
             review,
@@ -1724,18 +1725,18 @@ fn a_harness_call_reads_as_what_it_did_to_the_session(cx: &mut TestAppContext) {
             },
         ),
         (
-            "toolu_01GYbQaLznEUcjv91J9ZFWNn",
+            "toolu_010000000000000000000109",
             Read {
                 chips: vec![Chip::Count("1 tool".to_owned())],
                 ..read("Loaded tools", None, Some("select:Monitor"), None)
             },
         ),
         (
-            "toolu_01GpvHKPqmxfntp6jA11WR8e",
+            "toolu_010000000000000000000110",
             read("Launched skill", None, Some("pr"), None),
         ),
         (
-            "toolu_01VyJhZhVpFpWy43VaLQUsCR",
+            "toolu_010000000000000000000111",
             read(
                 "Proposed a plan",
                 None,
@@ -1753,7 +1754,7 @@ fn a_harness_call_reads_as_what_it_did_to_the_session(cx: &mut TestAppContext) {
             ),
         ),
         (
-            "call_wmvrnLAr0GTnBoYQog6Gvjq0",
+            "call_000000000000000000000114",
             read("Waited", None, Some("20.0s"), None),
         ),
         (
@@ -1776,8 +1777,8 @@ fn a_harness_call_reads_as_what_it_did_to_the_session(cx: &mut TestAppContext) {
 
     thread.open_work_log(review, cx);
     assert!(shows(cx, &format!("tool-error-{review}")));
-    click(cx, "activity-row-toolu_01GYbQaLznEUcjv91J9ZFWNn");
-    assert!(shows(cx, "tool-loaded-toolu_01GYbQaLznEUcjv91J9ZFWNn-0"));
+    click(cx, "activity-row-toolu_010000000000000000000109");
+    assert!(shows(cx, "tool-loaded-toolu_010000000000000000000109-0"));
     for id in [ask, codex_ask] {
         click(cx, &format!("activity-row-{id}"));
         assert!(shows(cx, &format!("tool-question-{id}-0")), "{id}");
