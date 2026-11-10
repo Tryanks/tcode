@@ -3369,7 +3369,7 @@ mod tests {
             status.provider_snapshots.insert(
                 id.into(),
                 ready(
-                    (id == "claude").then_some("tryanks@example.com"),
+                    (id == "claude").then_some("user@example.com"),
                     (id == "claude").then_some("Claude Max Subscription"),
                 ),
             );
@@ -3390,7 +3390,7 @@ mod tests {
         assert_eq!(
             host.store
                 .read_with(cx, |store, _| store.provider_profile_display_name("claude")),
-            "Claude Code (tryanks)",
+            "Claude Code (user)",
             "beside a second account, the default one is named for who it is"
         );
         let shown = |cx: &mut VisualTestContext, selector: &'static str| {
@@ -3683,7 +3683,7 @@ mod tests {
         assert_eq!(
             body,
             "Also deletes the config directory Tcode created for it, with its sessions and \
-             sign-in. The 2 threads still using it switch to Claude Code (tryanks)."
+             sign-in. The 2 threads still using it switch to Claude Code (user)."
         );
     }
 }
