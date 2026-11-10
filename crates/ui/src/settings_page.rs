@@ -2753,14 +2753,20 @@ impl SettingsPage {
         compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let archived_at = meta.archived_at.unwrap_or(meta.created_at);
-        let archived_when = humanize_ago(now.saturating_sub(archived_at));
-        let created_when = humanize_ago(now.saturating_sub(meta.created_at));
-        let desc = format!(
-            "{} · {}",
-            crate::tr!("settings.archived_at", when = archived_when),
-            crate::tr!("settings.archived_created", when = created_when),
+        let created = crate::tr!(
+            "settings.archived_created",
+            when = humanize_ago(now.saturating_sub(meta.created_at))
         );
+        let desc = match meta.archived_at {
+            Some(archived_at) => format!(
+                "{} · {created}",
+                crate::tr!(
+                    "settings.archived_at",
+                    when = humanize_ago(now.saturating_sub(archived_at))
+                ),
+            ),
+            None => created.into_owned(),
+        };
         let id_unarchive = meta.id.clone();
         let id_delete = meta.id.clone();
         let title = meta.title.clone();
