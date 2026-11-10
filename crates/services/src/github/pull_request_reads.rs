@@ -411,9 +411,8 @@ impl Reader<'_> {
     fn viewed_files(&self) -> Result<PullRequestViewedFiles, GitHubError> {
         let query = "query PullRequestViewedFiles($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { files(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { path viewerViewedState } } } } }";
         let read = graphql::pages(
-            None,
-            Some(VIEWED_PAGES),
-            |after, _| {
+            VIEWED_PAGES,
+            |after| {
                 self.query(
                     "PullRequestViewedFiles",
                     query.to_owned(),
@@ -421,7 +420,6 @@ impl Reader<'_> {
                 )
             },
             |page| next_cursor(&page["data"]["repository"]["pullRequest"]["files"]),
-            |_| false,
         )?;
         if read
             .pages

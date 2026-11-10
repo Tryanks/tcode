@@ -220,7 +220,6 @@ pub fn detail(api: &GitHubApi, key: &PullRequestKey) -> Result<PullRequestWatchR
     let mut variables = repository_variables(key)?;
     let mut contexts = Vec::new();
     let mut first: Option<Value> = None;
-    let mut seen = HashSet::new();
     let mut complete = false;
     for _ in 0..MAX_PAGES {
         let response = query(api, key, &options, document.clone(), variables.clone())?;
@@ -236,16 +235,11 @@ pub fn detail(api: &GitHubApi, key: &PullRequestKey) -> Result<PullRequestWatchR
         }
         let page = &pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"];
         contexts.extend(page["nodes"].as_array().into_iter().flatten().cloned());
-        let next = page["pageInfo"]["endCursor"]
-            .as_str()
-            .filter(|_| page["pageInfo"]["hasNextPage"].as_bool() == Some(true))
-            .map(str::to_owned);
         first.get_or_insert_with(|| response["data"].clone());
-        match next {
-            Some(cursor) if seen.insert(cursor.clone()) => {
+        match next_cursor(page) {
+            Some(cursor) => {
                 variables.insert("checksAfter".into(), json!(cursor));
             }
-            Some(_) => break,
             None => {
                 complete = true;
                 break;
@@ -664,8 +658,7 @@ pub fn activity(
     Ok(complete.then_some(remarks))
 }
 
-/// A thread's replies after its first page, deduplicated by id; `None` when they could not all
-/// be read.
+/// A thread's replies after its first page; `None` when they could not all be read.
 fn read_tail(
     api: &GitHubApi,
     key: &PullRequestKey,
@@ -675,11 +668,11 @@ fn read_tail(
     path: Option<&str>,
 ) -> Option<Vec<PullRequestRemark>> {
     let mut comments: Vec<PullRequestRemark> = Vec::new();
-    let mut ids = HashSet::new();
-    let mut cursors = HashSet::new();
     let mut cursor = Some(cursor);
+    let mut pages = 0;
     while let Some(after) = cursor.take() {
-        if !cursors.insert(after.clone()) || cursors.len() > MAX_PAGES {
+        pages += 1;
+        if pages > MAX_PAGES {
             return None;
         }
         let response = query(
@@ -702,13 +695,13 @@ fn read_tail(
             }
         };
         let page = &response["data"]["node"]["comments"];
-        for comment in page["nodes"].as_array().into_iter().flatten() {
-            if let Some(comment) = remark(comment, path)
-                && ids.insert(comment.id.clone())
-            {
-                comments.push(comment);
-            }
-        }
+        comments.extend(
+            page["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|comment| remark(comment, path)),
+        );
         cursor = next_cursor(page);
     }
     Some(comments)
