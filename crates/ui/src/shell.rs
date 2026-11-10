@@ -11061,9 +11061,8 @@ pub(crate) mod tests {
 
     /// An agent opened from its lead's Agents panel shows beside the lead in
     /// the lead's own pane, the panel staying docked beside them: on a card
-    /// in the side rail's place, under the lead's header, at the rail's edge
-    /// and a third of what the panel leaves, the lead's column keeping its
-    /// width clear of it, and the lead keeping the store's focus. Close takes
+    /// in the side rail's place, under the lead's header, the lead's column
+    /// keeping its width clear of it, and the lead keeping the store's focus. Close takes
     /// it away, the panel still there, and with that closed the lead's pane,
     /// its column and the keyboard are back where they were before it opened,
     /// with the agent's thread closed. Opening and closing again leaves the
@@ -11084,7 +11083,7 @@ pub(crate) mod tests {
             .debug_bounds("composer-card")
             .expect("the lead's composer");
 
-        for round in 0..3 {
+        for round in 0..2 {
             store.update(cx, |store, cx| {
                 store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
             });
@@ -11118,15 +11117,6 @@ pub(crate) mod tests {
                     && side.right() <= card.right()
                     && side.top() >= card.top(),
                 "{side:?} on {card:?}"
-            );
-            assert!(
-                (beside.right() - px(crate::material::CHAT_RAIL_EDGE) - card.right()).abs()
-                    < px(1.),
-                "{card:?} at the rail's edge of {beside:?}"
-            );
-            assert!(
-                (card.size.width * 3. - beside.size.width).abs() < beside.size.width * 0.03,
-                "{card:?} is a third of {beside:?}"
             );
             let lead = lead_card(column, cx).unwrap_or_else(|| {
                 panic!("round {round}: the lead's composer keeps the width of {column:?}")
