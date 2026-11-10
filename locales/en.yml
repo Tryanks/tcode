@@ -1656,6 +1656,15 @@ hosts:
     retry: "Try again"
     failed: "Could not add the machine: %{reason}"
 
+device:
+  scan_hint: "Place the QR code inside the frame"
+  failure:
+    unsupported: "This device can't do that"
+    no_camera: "This device has no camera"
+    camera_denied: "Tcode may not use the camera. Paste the invitation instead."
+    busy: "Another scan or picker is still open"
+    cannot_open: "The scanner or picker could not be shown"
+    unreadable: "A chosen item could not be read"
 mobile:
   cancel: "Cancel"
   threads: "Threads"

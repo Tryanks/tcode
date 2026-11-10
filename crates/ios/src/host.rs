@@ -12,15 +12,15 @@ use std::{
     },
 };
 
-use tcode_client::host::{HostFuture, PickedFile};
+use tcode_client::host::{DeviceFailure, HostFuture, PickedFile};
 use tcode_traverse::{NativeClientHost, lan::SystemBrowser};
 
-type ScanDone = Box<dyn FnOnce(Result<String, String>)>;
+type ScanDone = Box<dyn FnOnce(Result<Option<String>, DeviceFailure>)>;
 
 /// A picker request in flight: what arrived so far and who awaits it.
 struct PickRequest {
     images: Vec<PickedFile>,
-    done: async_channel::Sender<Result<Vec<PickedFile>, String>>,
+    done: async_channel::Sender<Result<Vec<PickedFile>, DeviceFailure>>,
 }
 
 thread_local! {
@@ -40,7 +40,13 @@ unsafe extern "C" {
     fn tcode_ios_host_device_name(destination: *mut u8, capacity: usize) -> usize;
     fn tcode_ios_host_device_platform(destination: *mut u8, capacity: usize) -> usize;
     fn tcode_ios_host_system_locale(destination: *mut u8, capacity: usize) -> usize;
-    fn tcode_ios_host_start_camera_scan(request_id: u64);
+    fn tcode_ios_host_start_camera_scan(
+        request_id: u64,
+        cancel_bytes: *const u8,
+        cancel_length: usize,
+        hint_bytes: *const u8,
+        hint_length: usize,
+    );
     fn tcode_ios_host_pick_images(request_id: u64, limit: usize);
     fn tcode_ios_host_pick_files(request_id: u64);
     fn tcode_ios_host_browse_start(request: u64);
@@ -96,28 +102,42 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (Rc<NativeClientHost>, Option<S
         .with_speech_recognizer(crate::speech::IosRecognizer)
         .with_platform(platform)
         .with_system_browser(system_browser())
-        .with_qr_scanner(|| -> HostFuture<'static, Result<String, String>> {
-            let (sender, receiver) = async_channel::bounded(1);
-            let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-            CAMERA_CALLBACKS.with(|callbacks| {
-                callbacks.borrow_mut().insert(
-                    request_id,
-                    Box::new(move |result| {
-                        let _ = sender.try_send(result);
-                    }),
-                );
-            });
-            // SAFETY: UIKit retains the id and completes the request exactly once.
-            unsafe { tcode_ios_host_start_camera_scan(request_id) };
-            Box::pin(async move {
-                receiver
-                    .recv()
-                    .await
-                    .unwrap_or_else(|error| Err(error.to_string()))
-            })
-        })
+        .with_qr_scanner(
+            || -> HostFuture<'static, Result<Option<String>, DeviceFailure>> {
+                let (sender, receiver) = async_channel::bounded(1);
+                let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+                CAMERA_CALLBACKS.with(|callbacks| {
+                    callbacks.borrow_mut().insert(
+                        request_id,
+                        Box::new(move |result| {
+                            let _ = sender.try_send(result);
+                        }),
+                    );
+                });
+                // The scanner's button and instruction, in the app's language.
+                let cancel = tcode_ui::tr!("mobile.cancel");
+                let hint = tcode_ui::tr!("device.scan_hint");
+                // SAFETY: UIKit retains the id and completes the request exactly
+                // once; Swift copies both strings before returning.
+                unsafe {
+                    tcode_ios_host_start_camera_scan(
+                        request_id,
+                        cancel.as_ptr(),
+                        cancel.len(),
+                        hint.as_ptr(),
+                        hint.len(),
+                    )
+                };
+                Box::pin(async move {
+                    receiver
+                        .recv()
+                        .await
+                        .unwrap_or_else(|error| Err(DeviceFailure::Platform(error.to_string())))
+                })
+            },
+        )
         .with_image_picker(
-            |limit| -> HostFuture<'static, Result<Vec<PickedFile>, String>> {
+            |limit| -> HostFuture<'static, Result<Vec<PickedFile>, DeviceFailure>> {
                 let (done, receiver) = async_channel::bounded(1);
                 let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
                 PICK_REQUESTS.with(|requests| {
@@ -135,31 +155,33 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (Rc<NativeClientHost>, Option<S
                     receiver
                         .recv()
                         .await
-                        .unwrap_or_else(|error| Err(error.to_string()))
+                        .unwrap_or_else(|error| Err(DeviceFailure::Platform(error.to_string())))
                 })
             },
         )
-        .with_file_picker(|| -> HostFuture<'static, Result<Vec<PickedFile>, String>> {
-            let (done, receiver) = async_channel::bounded(1);
-            let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-            PICK_REQUESTS.with(|requests| {
-                requests.borrow_mut().insert(
-                    request_id,
-                    PickRequest {
-                        images: Vec::new(),
-                        done,
-                    },
-                );
-            });
-            // SAFETY: UIKit retains the id and finishes the request exactly once.
-            unsafe { tcode_ios_host_pick_files(request_id) };
-            Box::pin(async move {
-                receiver
-                    .recv()
-                    .await
-                    .unwrap_or_else(|error| Err(error.to_string()))
-            })
-        });
+        .with_file_picker(
+            || -> HostFuture<'static, Result<Vec<PickedFile>, DeviceFailure>> {
+                let (done, receiver) = async_channel::bounded(1);
+                let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+                PICK_REQUESTS.with(|requests| {
+                    requests.borrow_mut().insert(
+                        request_id,
+                        PickRequest {
+                            images: Vec::new(),
+                            done,
+                        },
+                    );
+                });
+                // SAFETY: UIKit retains the id and finishes the request exactly once.
+                unsafe { tcode_ios_host_pick_files(request_id) };
+                Box::pin(async move {
+                    receiver
+                        .recv()
+                        .await
+                        .unwrap_or_else(|error| Err(DeviceFailure::Platform(error.to_string())))
+                })
+            },
+        );
     let host = Rc::new(host);
     HOST.with(|slot| *slot.borrow_mut() = Rc::downgrade(&host));
     (host, system_locale)
@@ -224,9 +246,12 @@ pub extern "C" fn tcode_ios_camera_scan_completed(
     let value = unsafe { ffi_string(value_bytes, value_length) };
     // SAFETY: same as above.
     let error = unsafe { ffi_string(error_bytes, error_length) };
-    let result = value
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| error.unwrap_or_else(|| "此设备没有可用的相机".to_string()));
+    // Neither a value nor an error: the scanner was closed.
+    let result = match (value.filter(|value| !value.is_empty()), error) {
+        (Some(value), _) => Ok(Some(value)),
+        (None, Some(error)) => Err(DeviceFailure::from_native(error)),
+        (None, None) => Ok(None),
+    };
     callback(result);
 }
 
@@ -278,7 +303,7 @@ pub extern "C" fn tcode_ios_image_pick_finished(
     // SAFETY: Swift keeps the temporary buffer alive through this call.
     let error = unsafe { ffi_string(error_bytes, error_length) };
     let _ = request.done.try_send(match error {
-        Some(error) => Err(error),
+        Some(error) => Err(DeviceFailure::from_native(error)),
         None => Ok(request.images),
     });
 }

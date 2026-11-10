@@ -3,14 +3,22 @@ import PhotosUI
 import UIKit
 import UniformTypeIdentifiers
 
+/// A failure Rust names by its code (`no_camera`, `camera_denied`,
+/// `cannot_open`, `unreadable`) and shows in the app's language.
 private struct MobileHostServiceError: LocalizedError {
-    let message: String
+    let code: String
 
-    init(_ message: String) {
-        self.message = message
+    init(_ code: String) {
+        self.code = code
     }
 
-    var errorDescription: String? { message }
+    var errorDescription: String? { code }
+}
+
+/// A string Rust lent for the duration of a call.
+private func borrowedString(_ bytes: UnsafePointer<UInt8>?, _ length: Int) -> String {
+    guard let bytes, length > 0 else { return "" }
+    return String(decoding: UnsafeBufferPointer(start: bytes, count: length), as: UTF8.self)
 }
 
 @discardableResult
@@ -68,8 +76,18 @@ public func tcodeIosHostSystemLocale(
     return copyUTF8(locale, to: destination, capacity: capacity)
 }
 
+/// Scan one QR code. `cancel` and `hint` are the scanner's button and
+/// instruction in the app's language.
 @_cdecl("tcode_ios_host_start_camera_scan")
-public func tcodeIosHostStartCameraScan(_ requestId: UInt64) {
+public func tcodeIosHostStartCameraScan(
+    _ requestId: UInt64,
+    _ cancelBytes: UnsafePointer<UInt8>?,
+    _ cancelLength: Int,
+    _ hintBytes: UnsafePointer<UInt8>?,
+    _ hintLength: Int
+) {
+    let cancel = borrowedString(cancelBytes, cancelLength)
+    let hint = borrowedString(hintBytes, hintLength)
     func begin() {
         guard let device = AVCaptureDevice.default(
             .builtInWideAngleCamera,
@@ -78,18 +96,22 @@ public func tcodeIosHostStartCameraScan(_ requestId: UInt64) {
         ) ?? AVCaptureDevice.default(for: .video) else {
             completeCamera(
                 requestId,
-                result: .failure(MobileHostServiceError("此设备没有可用的相机"))
+                result: .failure(MobileHostServiceError("no_camera"))
             )
             return
         }
         guard let presenter = topPresenter() else {
             completeCamera(
                 requestId,
-                result: .failure(MobileHostServiceError("无法显示相机扫描界面"))
+                result: .failure(MobileHostServiceError("cannot_open"))
             )
             return
         }
-        let scanner = QRScannerViewController(device: device) { result in
+        let scanner = QRScannerViewController(
+            device: device,
+            cancel: cancel,
+            hint: hint
+        ) { result in
             completeCamera(requestId, result: result)
         }
         scanner.modalPresentationStyle = .fullScreen
@@ -107,7 +129,7 @@ public func tcodeIosHostStartCameraScan(_ requestId: UInt64) {
                 } else {
                     completeCamera(
                         requestId,
-                        result: .failure(MobileHostServiceError("相机权限被拒绝"))
+                        result: .failure(MobileHostServiceError("camera_denied"))
                     )
                 }
             }
@@ -115,7 +137,7 @@ public func tcodeIosHostStartCameraScan(_ requestId: UInt64) {
     default:
         completeCamera(
             requestId,
-            result: .failure(MobileHostServiceError("相机权限被拒绝"))
+            result: .failure(MobileHostServiceError("camera_denied"))
         )
     }
 }
@@ -127,7 +149,7 @@ private var imagePickers: [UInt64: ImagePickerDelegate] = [:]
 @_cdecl("tcode_ios_host_pick_images")
 public func tcodeIosHostPickImages(_ requestId: UInt64, _ limit: Int) {
     guard let presenter = topPresenter() else {
-        finishImagePick(requestId, error: "无法显示相册")
+        finishImagePick(requestId, error: "cannot_open")
         return
     }
     var configuration = PHPickerConfiguration(photoLibrary: .shared())
@@ -149,7 +171,7 @@ private var filePickers: [UInt64: FilePickerDelegate] = [:]
 @_cdecl("tcode_ios_host_pick_files")
 public func tcodeIosHostPickFiles(_ requestId: UInt64) {
     guard let presenter = topPresenter() else {
-        finishImagePick(requestId, error: "无法显示文件选择器")
+        finishImagePick(requestId, error: "cannot_open")
         return
     }
     let delegate = FilePickerDelegate(requestId: requestId)
@@ -284,7 +306,7 @@ private final class ImagePickerDelegate: NSObject, PHPickerViewControllerDelegat
         }
         return loadObject(provider).flatMap { image in
             guard let data = image.jpegData(compressionQuality: 0.9) else {
-                return .failure(MobileHostServiceError("无法编码所选图片"))
+                return .failure(MobileHostServiceError("unreadable"))
             }
             return .success(("image/jpeg", "jpg", data))
         }
@@ -292,7 +314,7 @@ private final class ImagePickerDelegate: NSObject, PHPickerViewControllerDelegat
 
     private static func loadData(_ provider: NSItemProvider, type: UTType) -> Result<Data, Error> {
         let done = DispatchSemaphore(value: 0)
-        var result: Result<Data, Error> = .failure(MobileHostServiceError("无法读取所选图片"))
+        var result: Result<Data, Error> = .failure(MobileHostServiceError("unreadable"))
         provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, error in
             if let data {
                 result = .success(data)
@@ -307,7 +329,7 @@ private final class ImagePickerDelegate: NSObject, PHPickerViewControllerDelegat
 
     private static func loadObject(_ provider: NSItemProvider) -> Result<UIImage, Error> {
         let done = DispatchSemaphore(value: 0)
-        var result: Result<UIImage, Error> = .failure(MobileHostServiceError("无法读取所选图片"))
+        var result: Result<UIImage, Error> = .failure(MobileHostServiceError("unreadable"))
         provider.loadObject(ofClass: UIImage.self) { object, error in
             if let image = object as? UIImage {
                 result = .success(image)
@@ -321,9 +343,12 @@ private final class ImagePickerDelegate: NSObject, PHPickerViewControllerDelegat
     }
 }
 
-private func completeCamera(_ requestId: UInt64, result: Result<String, Error>) {
+/// `nil` is the scanner closed without a code.
+private func completeCamera(_ requestId: UInt64, result: Result<String?, Error>) {
     switch result {
-    case .success(let value):
+    case .success(nil):
+        tcode_ios_camera_scan_completed(requestId, nil, 0, nil, 0)
+    case .success(let value?):
         withUTF8(value) { valueBytes, valueLength in
             tcode_ios_camera_scan_completed(
                 requestId,
@@ -350,16 +375,22 @@ private final class QRScannerViewController: UIViewController,
     AVCaptureMetadataOutputObjectsDelegate
 {
     private let device: AVCaptureDevice
-    private let completion: (Result<String, Error>) -> Void
+    private let cancelTitle: String
+    private let hint: String
+    private let completion: (Result<String?, Error>) -> Void
     private let session = AVCaptureSession()
     private let previewLayer = AVCaptureVideoPreviewLayer()
     private var finished = false
 
     init(
         device: AVCaptureDevice,
-        completion: @escaping (Result<String, Error>) -> Void
+        cancel: String,
+        hint: String,
+        completion: @escaping (Result<String?, Error>) -> Void
     ) {
         self.device = device
+        self.cancelTitle = cancel
+        self.hint = hint
         self.completion = completion
         super.init(nibName: nil, bundle: nil)
     }
@@ -385,7 +416,7 @@ private final class QRScannerViewController: UIViewController,
         view.addSubview(frame)
 
         let cancel = UIButton(type: .system)
-        cancel.setTitle("取消", for: .normal)
+        cancel.setTitle(cancelTitle, for: .normal)
         cancel.setTitleColor(.white, for: .normal)
         cancel.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
         cancel.backgroundColor = UIColor.black.withAlphaComponent(0.45)
@@ -395,7 +426,7 @@ private final class QRScannerViewController: UIViewController,
         view.addSubview(cancel)
 
         let label = UILabel()
-        label.text = "将二维码置于取景框内"
+        label.text = hint
         label.textColor = .white
         label.font = .systemFont(ofSize: 17, weight: .semibold)
         label.textAlignment = .center
@@ -439,7 +470,7 @@ private final class QRScannerViewController: UIViewController,
             session.beginConfiguration()
             guard session.canAddInput(input), session.canAddOutput(output) else {
                 session.commitConfiguration()
-                finish(.failure(MobileHostServiceError("无法启动二维码扫描")))
+                finish(.failure(MobileHostServiceError("cannot_open")))
                 return
             }
             session.addInput(input)
@@ -456,7 +487,7 @@ private final class QRScannerViewController: UIViewController,
     }
 
     @objc private func cancelScan() {
-        finish(.failure(MobileHostServiceError("已取消扫描")))
+        finish(.success(nil))
     }
 
     func metadataOutput(
@@ -470,7 +501,7 @@ private final class QRScannerViewController: UIViewController,
         finish(.success(value))
     }
 
-    private func finish(_ result: Result<String, Error>) {
+    private func finish(_ result: Result<String?, Error>) {
         guard !finished else { return }
         finished = true
         dismiss(animated: true) { [completion] in completion(result) }

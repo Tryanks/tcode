@@ -204,6 +204,22 @@ pub(crate) fn join_list<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> St
     list
 }
 
+/// Why the platform's camera scan or picker gave nothing back, as the current
+/// language says it; the platform's own words as they are.
+pub(crate) fn device_failure(failure: &tcode_client::host::DeviceFailure) -> String {
+    use tcode_client::host::DeviceFailure;
+    match failure {
+        DeviceFailure::Unsupported => crate::tr!("device.failure.unsupported"),
+        DeviceFailure::NoCamera => crate::tr!("device.failure.no_camera"),
+        DeviceFailure::CameraDenied => crate::tr!("device.failure.camera_denied"),
+        DeviceFailure::Busy => crate::tr!("device.failure.busy"),
+        DeviceFailure::CannotOpen => crate::tr!("device.failure.cannot_open"),
+        DeviceFailure::Unreadable => crate::tr!("device.failure.unreadable"),
+        DeviceFailure::Platform(text) => return text.clone(),
+    }
+    .into_owned()
+}
+
 /// Set the process-global translation locale.
 pub fn set_locale(locale: &str) {
     rust_i18n::set_locale(locale);

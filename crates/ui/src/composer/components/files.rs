@@ -452,7 +452,11 @@ impl Composer {
                 }
                 Err(error) => window.push_notification(
                     Notification::error(
-                        crate::tr!("attach.pick_failed", error = error).into_owned(),
+                        crate::tr!(
+                            "attach.pick_failed",
+                            error = crate::i18n::device_failure(&error)
+                        )
+                        .into_owned(),
                     ),
                     cx,
                 ),

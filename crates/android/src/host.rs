@@ -19,7 +19,7 @@ use jni::{
     objects::{JIntArray, JObject, JString, JValue},
     refs::Global,
 };
-use tcode_client::host::{HostFuture, PickedFile};
+use tcode_client::host::{DeviceFailure, HostFuture, PickedFile};
 use tcode_traverse::NativeClientHost;
 
 const RESULT_OK: i32 = 0;
@@ -52,7 +52,7 @@ enum BridgeEvent {
 /// A picker request in flight: what arrived so far and who awaits it.
 struct PickRequest {
     images: Vec<PickedFile>,
-    done: async_channel::Sender<Result<Vec<PickedFile>, String>>,
+    done: async_channel::Sender<Result<Vec<PickedFile>, DeviceFailure>>,
 }
 
 #[derive(Clone)]
@@ -211,15 +211,24 @@ impl JavaBridge {
         }));
     }
 
+    /// Open the scanner, its button and instruction in the app's language.
     fn start_camera(&self, request_id: u64) {
         let object = self.object.clone();
+        let cancel = tcode_ui::tr!("mobile.cancel").into_owned();
+        let hint = tcode_ui::tr!("device.scan_hint").into_owned();
         self.app.run_on_java_main_thread(Box::new(move || {
             if let Err(error) = object.with_env(|env, activity| {
+                let cancel = env.new_string(&cancel)?;
+                let hint = env.new_string(&hint)?;
                 env.call_method(
                     activity,
                     jni_str!("gpuiStartCameraScan"),
-                    jni_sig!("(J)V"),
-                    &[JValue::Long(request_id as i64)],
+                    jni_sig!("(JLjava/lang/String;Ljava/lang/String;)V"),
+                    &[
+                        JValue::Long(request_id as i64),
+                        JValue::Object(&cancel),
+                        JValue::Object(&hint),
+                    ],
                 )?;
                 Ok(())
             }) {
@@ -264,7 +273,7 @@ pub(crate) fn native_host(
 
     let callbacks = Rc::new(RefCell::new(HashMap::<
         u64,
-        async_channel::Sender<Result<String, String>>,
+        async_channel::Sender<Result<Option<String>, DeviceFailure>>,
     >::new()));
     let pending = callbacks.clone();
     let picks = Rc::new(RefCell::new(HashMap::<u64, PickRequest>::new()));
@@ -290,20 +299,22 @@ pub(crate) fn native_host(
                 log::warn!("Android multicast lock unavailable: {error}");
             }
         })
-        .with_qr_scanner(move || -> HostFuture<'static, Result<String, String>> {
-            let (sender, receiver) = async_channel::bounded(1);
-            let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-            callbacks.borrow_mut().insert(request_id, sender);
-            camera.start_camera(request_id);
-            Box::pin(async move {
-                receiver
-                    .recv()
-                    .await
-                    .unwrap_or_else(|error| Err(error.to_string()))
-            })
-        })
+        .with_qr_scanner(
+            move || -> HostFuture<'static, Result<Option<String>, DeviceFailure>> {
+                let (sender, receiver) = async_channel::bounded(1);
+                let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+                callbacks.borrow_mut().insert(request_id, sender);
+                camera.start_camera(request_id);
+                Box::pin(async move {
+                    receiver
+                        .recv()
+                        .await
+                        .unwrap_or_else(|error| Err(DeviceFailure::Platform(error.to_string())))
+                })
+            },
+        )
         .with_image_picker(
-            move |limit| -> HostFuture<'static, Result<Vec<PickedFile>, String>> {
+            move |limit| -> HostFuture<'static, Result<Vec<PickedFile>, DeviceFailure>> {
                 let (done, receiver) = async_channel::bounded(1);
                 let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
                 picks.borrow_mut().insert(
@@ -318,12 +329,12 @@ pub(crate) fn native_host(
                     receiver
                         .recv()
                         .await
-                        .unwrap_or_else(|error| Err(error.to_string()))
+                        .unwrap_or_else(|error| Err(DeviceFailure::Platform(error.to_string())))
                 })
             },
         )
         .with_file_picker(
-            move || -> HostFuture<'static, Result<Vec<PickedFile>, String>> {
+            move || -> HostFuture<'static, Result<Vec<PickedFile>, DeviceFailure>> {
                 let (done, receiver) = async_channel::bounded(1);
                 let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
                 file_picks.borrow_mut().insert(
@@ -338,7 +349,7 @@ pub(crate) fn native_host(
                     receiver
                         .recv()
                         .await
-                        .unwrap_or_else(|error| Err(error.to_string()))
+                        .unwrap_or_else(|error| Err(DeviceFailure::Platform(error.to_string())))
                 })
             },
         );
@@ -373,7 +384,7 @@ pub(crate) fn native_host(
                     };
                     let result = match status {
                         RESULT_OK | RESULT_CANCELLED => Ok(request.images),
-                        _ => Err(error.unwrap_or_else(|| "Android image picker failed".into())),
+                        _ => Err(DeviceFailure::from_native(error.unwrap_or_default())),
                     };
                     let _ = request.done.try_send(result);
                 }
@@ -390,11 +401,9 @@ pub(crate) fn native_host(
                         return;
                     };
                     let result = match (status, value) {
-                        (RESULT_OK, Some(value)) if !value.is_empty() => Ok(value),
-                        (RESULT_CANCELLED, value) => {
-                            Err(value.unwrap_or_else(|| "已取消扫描".into()))
-                        }
-                        (_, value) => Err(value.unwrap_or_else(|| "Android 相机扫描失败".into())),
+                        (RESULT_OK, Some(value)) if !value.is_empty() => Ok(Some(value)),
+                        (RESULT_CANCELLED, _) => Ok(None),
+                        (_, value) => Err(DeviceFailure::from_native(value.unwrap_or_default())),
                     };
                     let _ = sender.try_send(result);
                 }

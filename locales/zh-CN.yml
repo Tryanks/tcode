@@ -1649,6 +1649,15 @@ hosts:
     retry: "重试"
     failed: "添加失败：%{reason}"
 
+device:
+  scan_hint: "将二维码置于取景框内"
+  failure:
+    unsupported: "此设备无法这样做"
+    no_camera: "此设备没有可用的相机"
+    camera_denied: "相机权限被拒绝，请改用粘贴邀请"
+    busy: "另一个扫描或选择仍在进行"
+    cannot_open: "无法显示扫描或选择界面"
+    unreadable: "无法读取所选内容"
 mobile:
   cancel: "取消"
   threads: "线程"

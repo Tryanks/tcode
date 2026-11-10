@@ -730,7 +730,7 @@ impl RemotePanel {
             let scanned = host.scan_qr().await;
             let _ = this.update_in(cx, |panel, window, cx| {
                 match scanned {
-                    Ok(value) => {
+                    Ok(Some(value)) => {
                         if panel.form.fill_invite(&value, window, cx) {
                             panel.submit(window, cx);
                         } else {
@@ -738,7 +738,8 @@ impl RemotePanel {
                                 Some(crate::tr!("hosts.pair.bad_invite").into_owned());
                         }
                     }
-                    Err(error) => panel.form.error = Some(error),
+                    Ok(None) => {}
+                    Err(error) => panel.form.error = Some(crate::i18n::device_failure(&error)),
                 }
                 cx.notify();
             });

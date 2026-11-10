@@ -552,14 +552,23 @@ public final class GpuiActivity extends NativeActivity {
         return locale.toLanguageTag();
     }
 
-    public void gpuiStartCameraScan(long requestId) {
+    /**
+     * Scan one QR code. {@code cancel} and {@code hint} are the scanner's
+     * button and instruction in the app's language. A failure the scanner
+     * names is reported as its code ({@code busy}, {@code no_camera},
+     * {@code camera_denied}); any other as the platform's text.
+     */
+    public void gpuiStartCameraScan(long requestId, String cancel, String hint) {
         if (cameraRequest != 0) {
-            nativeQrScanCompleted(requestId, HOST_ERROR, "相机扫描正在进行");
+            nativeQrScanCompleted(requestId, HOST_ERROR, "busy");
             return;
         }
         cameraRequest = requestId;
         try {
-            startActivityForResult(new Intent(this, QrScannerActivity.class), REQUEST_CAMERA);
+            Intent intent = new Intent(this, QrScannerActivity.class);
+            intent.putExtra(QrScannerActivity.EXTRA_CANCEL, cancel);
+            intent.putExtra(QrScannerActivity.EXTRA_HINT, hint);
+            startActivityForResult(intent, REQUEST_CAMERA);
         } catch (RuntimeException error) {
             cameraRequest = 0;
             nativeQrScanCompleted(requestId, HOST_ERROR, errorMessage(error));
@@ -574,7 +583,7 @@ public final class GpuiActivity extends NativeActivity {
      */
     public void gpuiPickImages(long requestId, int limit) {
         if (imageRequest != 0) {
-            nativeImagePickFinished(requestId, HOST_ERROR, "图片选择正在进行");
+            nativeImagePickFinished(requestId, HOST_ERROR, "busy");
             return;
         }
         imageRequest = requestId;
@@ -606,7 +615,7 @@ public final class GpuiActivity extends NativeActivity {
      */
     public void gpuiPickFiles(long requestId) {
         if (imageRequest != 0) {
-            nativeImagePickFinished(requestId, HOST_ERROR, "文件选择正在进行");
+            nativeImagePickFinished(requestId, HOST_ERROR, "busy");
             return;
         }
         imageRequest = requestId;
@@ -701,7 +710,7 @@ public final class GpuiActivity extends NativeActivity {
         } else if (error != null) {
             nativeQrScanCompleted(request, HOST_ERROR, error);
         } else {
-            nativeQrScanCompleted(request, HOST_CANCELLED, "已取消扫描");
+            nativeQrScanCompleted(request, HOST_CANCELLED, null);
         }
     }
 

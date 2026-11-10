@@ -1656,6 +1656,15 @@ hosts:
     retry: "再試行"
     failed: "ホストを追加できませんでした：%{reason}"
 
+device:
+  scan_hint: "QR コードを枠内に収めてください"
+  failure:
+    unsupported: "このデバイスではできません"
+    no_camera: "このデバイスにはカメラがありません"
+    camera_denied: "カメラの使用が許可されていません。招待を貼り付けてください。"
+    busy: "別のスキャンまたは選択がまだ開いています"
+    cannot_open: "スキャナーまたは選択画面を表示できませんでした"
+    unreadable: "選んだ項目を読み込めませんでした"
 mobile:
   cancel: "キャンセル"
   threads: "スレッド"

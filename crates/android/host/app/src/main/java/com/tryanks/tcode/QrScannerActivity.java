@@ -38,6 +38,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class QrScannerActivity extends FragmentActivity {
     public static final String EXTRA_VALUE = "value";
     public static final String EXTRA_ERROR = "error";
+    /** The cancel button's label, in the app's language. */
+    public static final String EXTRA_CANCEL = "cancel";
+    /** The instruction over the preview, in the app's language. */
+    public static final String EXTRA_HINT = "hint";
 
     private static final int CAMERA_PERMISSION = 6201;
 
@@ -52,7 +56,7 @@ public final class QrScannerActivity extends FragmentActivity {
         super.onCreate(savedInstanceState);
         buildOverlay();
         if (!getPackageManager().hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) {
-            finishError("此设备没有可用的相机");
+            finishError("no_camera");
             return;
         }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
@@ -72,7 +76,7 @@ public final class QrScannerActivity extends FragmentActivity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         TextView hint = new TextView(this);
-        hint.setText("将二维码置于取景框内");
+        hint.setText(getIntent().getStringExtra(EXTRA_HINT));
         hint.setTextColor(Color.WHITE);
         hint.setTextSize(18);
         hint.setGravity(Gravity.CENTER);
@@ -86,7 +90,7 @@ public final class QrScannerActivity extends FragmentActivity {
         root.addView(hint, hintLayout);
 
         Button cancel = new Button(this);
-        cancel.setText("取消");
+        cancel.setText(getIntent().getStringExtra(EXTRA_CANCEL));
         cancel.setOnClickListener(view -> {
             setResult(Activity.RESULT_CANCELED);
             finish();
@@ -108,7 +112,7 @@ public final class QrScannerActivity extends FragmentActivity {
             try {
                 cameraProvider = future.get();
                 if (!cameraProvider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)) {
-                    finishError("此设备没有可用的相机");
+                    finishError("no_camera");
                     return;
                 }
                 Preview preview = new Preview.Builder().build();
@@ -121,7 +125,7 @@ public final class QrScannerActivity extends FragmentActivity {
                 cameraProvider.bindToLifecycle(
                         this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis);
             } catch (Exception error) {
-                finishError("相机启动失败：" + errorMessage(error));
+                finishError(errorMessage(error));
             }
         }, ContextCompat.getMainExecutor(this));
     }
@@ -160,10 +164,11 @@ public final class QrScannerActivity extends FragmentActivity {
         if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             startCamera();
         } else {
-            finishError("相机权限被拒绝，请改用手动输入");
+            finishError("camera_denied");
         }
     }
 
+    /** Ends the scan with a failure: its code where it has one, else the platform's text. */
     private void finishError(String message) {
         if (!delivered.compareAndSet(false, true)) {
             return;
