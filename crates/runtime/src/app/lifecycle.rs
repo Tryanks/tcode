@@ -90,6 +90,11 @@ impl AppState {
             None
         };
         let control_registration = self.control_registration_for(&meta);
+        let tasks_registration = if self.task_tools_offered(meta.provider) {
+            self.tasks_registration_for(&meta)
+        } else {
+            None
+        };
         let provider_launcher = self.provider_launcher.clone();
         let session_id = meta.id.clone();
         if let Some(cursor) = &meta.resume_cursor {
@@ -139,6 +144,7 @@ impl AppState {
                     },
                 );
                 opts.mcp_servers.extend(pull_request_registration);
+                opts.mcp_servers.extend(tasks_registration);
                 opts.instructions = instructions;
                 if transfer_failed.is_some() {
                     opts.resume = None;
@@ -633,11 +639,13 @@ impl AppState {
             self.revoke_preview_registration(&child_id);
             self.revoke_pull_request_registration(&child_id);
             self.revoke_control_registration(&child_id);
+            self.revoke_tasks_registration(&child_id);
         }
         self.revoke_preview_registration(parent_id);
         self.revoke_pull_request_registration(parent_id);
         self.revoke_computer_use_registration(parent_id);
         self.revoke_control_registration(parent_id);
+        self.revoke_tasks_registration(parent_id);
     }
 
     pub(super) fn revoke_preview_registration(&mut self, session_id: &str) {

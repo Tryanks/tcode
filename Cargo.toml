@@ -16,6 +16,7 @@ members = [
     "crates/pull-request-mcp",
     "crates/control-mcp",
     "crates/computer-use-mcp",
+    "crates/tasks-mcp",
     "crates/ui",
     "crates/app",
     "crates/ios",

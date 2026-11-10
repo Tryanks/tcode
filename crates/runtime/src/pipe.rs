@@ -39,6 +39,7 @@ pub struct HostServices {
     /// Why the MCP servers could not start; the host tells the user when the first thread
     /// starts without them.
     pub mcp_unavailable: Option<String>,
+    pub tasks: Option<tasks_mcp::TasksMcpServer>,
 }
 
 impl HostServices {
@@ -52,15 +53,17 @@ impl HostServices {
             let preview = preview_mcp::start(&mut host);
             let pull_requests = pull_request_mcp::start(&mut host);
             let control = control_mcp::start(&mut host);
+            let tasks = tasks_mcp::start(&mut host);
             let computer_use = computer_use.then(|| computer_use_mcp::start(&mut host));
             host.start()?;
-            std::io::Result::Ok((preview, pull_requests, control, computer_use))
+            std::io::Result::Ok((preview, pull_requests, control, tasks, computer_use))
         })();
         match started {
-            Ok((preview, pull_requests, control, computer_use)) => {
+            Ok((preview, pull_requests, control, tasks, computer_use)) => {
                 self.preview = Some(preview);
                 self.pull_requests = Some(pull_requests);
                 self.control = Some(control);
+                self.tasks = Some(tasks);
                 self.computer_use = computer_use;
             }
             Err(error) => self.mcp_unavailable = Some(error.to_string()),
@@ -154,6 +157,7 @@ impl SpawnedHost {
         impl Drop for Unfinished {
             fn drop(&mut self) {
                 agent::stop_every_tree();
+                tasks_mcp::stop_every_task();
             }
         }
         // Made outside the future, so a future dropped before its first
@@ -222,6 +226,7 @@ impl Drop for RunningHost {
     fn drop(&mut self) {
         if RUNNING_HOSTS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
             agent::stop_every_tree();
+            tasks_mcp::stop_every_task();
         }
     }
 }
@@ -281,6 +286,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             state.pump_pull_request_requests(services.pull_requests.take(), &mut cx);
             state.start_pull_request_workers(&mut cx);
             state.pump_control_requests(&mut cx);
+            state.attach_tasks_mcp(services.tasks.take(), &mut cx);
             state.pump_preview_requests(preview_requests, &mut cx);
             state.resume_undelivered_reports(&mut cx);
             if services.background_startup_probes {

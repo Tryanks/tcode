@@ -53,11 +53,7 @@ impl Background {
         }
         Some(Self {
             harness: store.harness_name_for(Some(session_id), cx),
-            stop: status
-                .provider
-                .caps()
-                .background
-                .map_or(BackgroundStop::None, |control| control.stop),
+            stop: status.provider.caps().background_stop(),
             rows: status.background_tasks.clone(),
         })
     }

@@ -263,7 +263,8 @@ impl AppState {
                     || session.delivery_in_flight.is_some()
                     || session.timeline.turn_running
             }),
-            background_work: resident.is_some_and(|session| session.background_task_count > 0),
+            background_work: resident.is_some_and(|session| session.background_task_count > 0)
+                || self.host_tasks_running(&meta.id),
             unsettled_children: projection.children_hold(&meta.id),
             pull_request_watches: !meta.pull_request_watches_paused
                 && tcode_core::pull_request::watched(&meta.pull_requests)

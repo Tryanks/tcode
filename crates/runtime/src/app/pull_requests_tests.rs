@@ -290,7 +290,14 @@ fn the_agent_tools_are_disclosed_before_the_first_turn() {
     services.start_mcp_servers(false);
     assert_eq!(services.mcp_unavailable, None);
     let host = crate::pipe::spawn_host((*store).clone(), services).unwrap();
-    for (provider, disclosed) in [(ProviderKind::ClaudeCode, true), (ProviderKind::Pi, false)] {
+    // pi takes only the task tools; Claude Code has background commands of its own.
+    for (provider, servers) in [
+        (
+            ProviderKind::ClaudeCode,
+            &["tcode_preview", "tcode_pull_requests", "tcode_control"][..],
+        ),
+        (ProviderKind::Pi, &["tcode_tasks"][..]),
+    ] {
         let tools = smol::block_on(host.update_state_for_test(move |state, _| {
             let meta = SessionMeta::new(provider, PathBuf::from("/tmp/synthetic-checkout"), None);
             let id = meta.id.clone();
@@ -302,15 +309,24 @@ fn the_agent_tools_are_disclosed_before_the_first_turn() {
             state.session_status_snapshot(&id).unwrap().injected_tools
         }))
         .unwrap();
+        let tools = tools.unwrap();
+        let mut shown: Vec<_> = tools
+            .servers
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect();
+        shown.sort();
+        let mut expected = servers.to_vec();
+        expected.sort();
         assert_eq!(
-            tools.is_some(),
-            disclosed,
+            shown, expected,
             "{provider:?}: shown exactly when its provider would receive the tools"
         );
-        if let Some(tools) = tools {
-            let description = preview_mcp::tool_descriptions().into_iter().next().unwrap();
-            assert!(tools.tools.contains(&description));
-        }
+        let preview = preview_mcp::tool_descriptions().into_iter().next().unwrap();
+        assert_eq!(
+            tools.tools.contains(&preview),
+            servers.contains(&"tcode_preview")
+        );
     }
     host.shutdown_blocking().unwrap();
 }

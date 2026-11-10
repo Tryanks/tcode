@@ -573,6 +573,12 @@ impl AppState {
         // After the turn's bookkeeping, so the child's flight state and queue
         // describe what comes next, not the turn that just ended.
         if let AgentEvent::TurnCompleted { status, .. } = &event {
+            // A call still waiting when its turn ends was cut off with it.
+            if *status == TurnStatus::Completed {
+                self.drop_task_approvals(session_id);
+            } else {
+                self.stop_foreground_tasks(session_id);
+            }
             self.settle_child_expectation(session_id, *status, cx);
             let woken_by_control = self
                 .resident_mut(session_id)

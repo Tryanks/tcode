@@ -47,20 +47,35 @@ impl BackgroundWork {
     }
 
     /// The work as clients see it: what the harness lists, in its order,
-    /// then the calls of `timeline` going on in the background that none of
-    /// that claims.
-    pub(super) fn statuses(&self, timeline: &Timeline) -> Vec<BackgroundTaskStatus> {
+    /// then the commands Tcode's task tools run for the thread in the
+    /// background (`host`), then the calls of `timeline` going on in the
+    /// background that none of that claims.
+    pub(super) fn statuses(
+        &self,
+        timeline: &Timeline,
+        host: &[BackgroundTask],
+    ) -> Vec<BackgroundTaskStatus> {
         let claimed: HashSet<&str> = self
             .tasks
             .iter()
+            .chain(host)
             .filter_map(|task| task.item_id.as_deref())
             .collect();
-        let listed = self.tasks.iter().map(|task| BackgroundTaskStatus {
-            task: task.clone(),
-            listed: true,
-            stopping_since: self.stops.get(&task.id).copied(),
-            ended: false,
-        });
+        let listed = self
+            .tasks
+            .iter()
+            .map(|task| BackgroundTaskStatus {
+                task: task.clone(),
+                listed: true,
+                stopping_since: self.stops.get(&task.id).copied(),
+                ended: false,
+            })
+            .chain(host.iter().map(|task| BackgroundTaskStatus {
+                task: task.clone(),
+                listed: true,
+                stopping_since: None,
+                ended: false,
+            }));
         let unlisted = timeline
             .running_background_items()
             .filter(|(entry, _)| !claimed.contains(entry.id.as_str()))

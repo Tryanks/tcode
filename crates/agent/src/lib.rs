@@ -133,6 +133,26 @@ impl BackgroundStop {
     }
 }
 
+impl Caps {
+    /// What a client may stop of the background work it lists: the
+    /// harness's own, or for a harness without background commands, the
+    /// commands Tcode's task tools run for it, one at a time.
+    pub fn background_stop(&self) -> BackgroundStop {
+        match self.background {
+            Some(control) => control.stop,
+            None if !self.native_background => BackgroundStop::Each,
+            None => BackgroundStop::None,
+        }
+    }
+}
+
+/// Whether the call `name` is a `task_run` of Tcode's task tools, the call a
+/// harness without background commands moves to the background.
+pub fn is_task_run(name: &str) -> bool {
+    let name = ToolName::parse(name);
+    name.server == Some(McpRegistration::SERVER_NAME_TASKS) && name.tool == "task_run"
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Caps {
     pub supports_steering: bool,
@@ -156,6 +176,10 @@ pub struct Caps {
     /// The harness lists its background work ([`AgentEvent::BackgroundTaskList`]),
     /// and what it lets a client do with it.
     pub background: Option<BackgroundControl>,
+    /// The harness runs commands in the background itself and, when one
+    /// ends, starts a turn that reports it. Tcode's own task tools
+    /// (`tcode_tasks`) are attached only to the sessions of a harness without.
+    pub native_background: bool,
     /// The running process can be asked to take a new model and options
     /// ([`SessionCommand::ApplySettings`]) rather than restart for them.
     pub live_settings: bool,
@@ -363,6 +387,7 @@ impl ProviderKind {
                     move_running: true,
                 }),
                 // `set_model` and `apply_flag_settings` (2.1.318).
+                native_background: true,
                 live_settings: true,
                 mcp_servers: true,
                 native_computer_use: false,
@@ -418,6 +443,7 @@ impl ProviderKind {
                     stop: BackgroundStop::EachAndAll,
                     move_running: false,
                 }),
+                native_background: true,
                 live_settings: true,
                 mcp_servers: true,
                 // `codex features list` reports `computer_use stable` (0.159.3).
@@ -456,6 +482,7 @@ impl ProviderKind {
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
                 background: None,
+                native_background: false,
                 live_settings: false,
                 // ACP support is negotiated per agent; capable agents receive
                 // every tcode HTTP MCP registration in session/new or load.
@@ -494,6 +521,7 @@ impl ProviderKind {
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
                 background: None,
+                native_background: false,
                 live_settings: true,
                 mcp_servers: false,
                 native_computer_use: false,
@@ -540,6 +568,7 @@ impl ProviderKind {
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::Only(&["agent"]),
                 background: None,
+                native_background: false,
                 live_settings: true,
                 mcp_servers: true,
                 native_computer_use: false,
@@ -575,6 +604,7 @@ impl ProviderKind {
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
                 background: None,
+                native_background: false,
                 live_settings: false,
                 mcp_servers: true,
                 native_computer_use: false,
@@ -623,6 +653,9 @@ impl ProviderKind {
                     stop: BackgroundStop::None,
                     move_running: false,
                 }),
+                // Grok runs a prompt of its own reporting a background task that
+                // finished (see `grok::Activity`).
+                native_background: true,
                 live_settings: false,
                 mcp_servers: true,
                 native_computer_use: false,
@@ -1285,6 +1318,7 @@ impl McpRegistration {
     pub const SERVER_NAME_COMPUTER_USE: &'static str = "tcode_computer_use";
     pub const SERVER_NAME_PULL_REQUESTS: &'static str = "tcode_pull_requests";
     pub const SERVER_NAME_CONTROL: &'static str = "tcode_control";
+    pub const SERVER_NAME_TASKS: &'static str = "tcode_tasks";
 
     /// Codex `-c` override value: an inline TOML table for a streamable-HTTP MCP
     /// server. Codex rejects a literal `bearer_token` for HTTP, so the token

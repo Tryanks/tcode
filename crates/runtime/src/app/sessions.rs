@@ -1565,6 +1565,7 @@ impl AppState {
             self.revoke_preview_registration(id);
             self.revoke_pull_request_registration(id);
             self.revoke_control_registration(id);
+            self.stop_thread_tasks(id);
         }
         for id in &ids {
             self.close_orchestrator_children(id, cx);
@@ -1658,6 +1659,7 @@ impl AppState {
             self.terminal_workspaces
                 .remove(&ConversationDestination::Thread(id.clone()));
             self.close_orchestrator_children(id, cx);
+            self.forget_thread_tasks(id);
             self.settings.last_visited.remove(id);
         }
         if metas

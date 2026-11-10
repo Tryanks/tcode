@@ -1637,17 +1637,20 @@ impl TimelineView {
                 .any(|task| task.task.item_id.as_deref() == Some(entry.id.as_str()))
         });
         // A running command or agent the harness can move into the
-        // background, as its own Ctrl+B does.
+        // background, as its own Ctrl+B does; for a harness without
+        // background commands, a `task_run` of Tcode's task tools.
         let movable = thread.is_some_and(|status| {
-            status
-                .provider
-                .caps()
-                .background
-                .is_some_and(|control| control.move_running)
-        }) && matches!(
-            &entry.content,
-            EntryContent::Item(ItemContent::CommandExecution { .. } | ItemContent::Subagent { .. })
-        );
+            let caps = status.provider.caps();
+            match &entry.content {
+                EntryContent::Item(
+                    ItemContent::CommandExecution { .. } | ItemContent::Subagent { .. },
+                ) => caps.background.is_some_and(|control| control.move_running),
+                EntryContent::Item(ItemContent::ToolCall { name, .. }) => {
+                    !caps.native_background && agent::is_task_run(name)
+                }
+                _ => false,
+            }
+        });
         if entry.background && listed {
             status = agent::ItemStatus::InProgress;
             header.background = true;
