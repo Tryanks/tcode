@@ -566,3 +566,27 @@ pub(super) fn remarks(activity: &[Value]) -> Vec<PullRequestRemark> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The conflicts page is Bitbucket's one word on mergeability, taken at the first read
+    /// (#729): a path in it is a conflict, an empty page is clean.
+    ///
+    /// Shape: `paginated_file_conflicts`, the answer `/pullrequests/{id}/conflicts` redirects to
+    /// (Bitbucket Cloud OpenAPI, GET /repositories/{workspace}/{repo_slug}/file-conflicts/{spec},
+    /// whose documented example this follows). Content is invented.
+    #[test]
+    fn a_conflicts_page_with_a_path_is_a_conflict() {
+        let conflicting = json!({
+            "pagelen": 500, "page": 1, "size": 1,
+            "values": [{"path": "src/lib.rs", "scenario": "content",
+                        "message": "File modified in both source and destination"}],
+        });
+        let clean = json!({"pagelen": 500, "page": 1, "size": 0, "values": []});
+        assert_eq!(conflicts(&conflicting), Mergeability::Conflicting);
+        assert_eq!(conflicts(&clean), Mergeability::Clean);
+    }
+}
