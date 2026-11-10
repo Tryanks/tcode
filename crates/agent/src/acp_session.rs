@@ -73,12 +73,9 @@ pub(crate) fn config_selection<'a>(
     category: Option<&acp::SessionConfigOptionCategory>,
 ) -> Option<&'a str> {
     let id = config_option_id(config_id, category);
-    // Selections saved while every config option was `acp:cfg:<id>` still
-    // name a thought-level option that way.
-    let legacy = format!("{CONFIG_OPTION_PREFIX}{config_id}");
-    let find = |id: &str| selections.iter().find(|selection| selection.id == id);
-    find(&id)
-        .or_else(|| find(&legacy))
+    selections
+        .iter()
+        .find(|selection| selection.id == id)
         .and_then(|selection| selection.value.as_str())
 }
 
@@ -3496,29 +3493,6 @@ mod tests {
             }
             other => panic!("expected ProviderOptions, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn a_thought_level_selection_saved_under_its_config_id_still_restores() {
-        let thought = Some(&acp::SessionConfigOptionCategory::ThoughtLevel);
-        let saved = |id: &str| {
-            vec![OptionSelection {
-                id: id.into(),
-                value: json!("low"),
-            }]
-        };
-        assert_eq!(
-            config_selection(&saved("reasoningEffort"), "reasoning_effort", thought),
-            Some("low")
-        );
-        assert_eq!(
-            config_selection(
-                &saved("acp:cfg:reasoning_effort"),
-                "reasoning_effort",
-                thought
-            ),
-            Some("low")
-        );
     }
 
     #[test]
