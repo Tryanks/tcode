@@ -18,19 +18,24 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let state = self.composer_state(cx);
-        let since = state.stopping_since.filter(|_| state.stopping);
-        let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
-        let waited = since.map(|since| now.saturating_sub(since));
-        let due = waited.filter(|waited| *waited >= UNANSWERED.as_millis() as u64);
-        if let (Some(since), Some(waited), None) = (since, waited, due) {
-            if self.stop_wait.as_ref().is_none_or(|(at, _)| *at != since) {
-                let left = UNANSWERED.saturating_sub(std::time::Duration::from_millis(waited));
+        let seen = self
+            .workspace_store
+            .read(cx)
+            .stop_seen(self.session_id.as_deref(), None, cx);
+        let waited = seen.map(|seen| {
+            cx.background_executor()
+                .now()
+                .saturating_duration_since(seen)
+        });
+        let due = waited.filter(|waited| *waited >= UNANSWERED);
+        if let (Some(seen), Some(waited), None) = (seen, waited, due) {
+            if self.stop_wait.as_ref().is_none_or(|(at, _)| *at != seen) {
+                let left = UNANSWERED.saturating_sub(waited);
                 let task = cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(left).await;
                     let _ = this.update(cx, |_, cx| cx.notify());
                 });
-                self.stop_wait = Some((since, task));
+                self.stop_wait = Some((seen, task));
             }
         } else {
             self.stop_wait = None;

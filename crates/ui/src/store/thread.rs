@@ -1,10 +1,15 @@
 //! What the client holds of one thread, whether or not a surface shows it.
 
 use std::collections::HashMap;
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
 
 use gpui::{App, AppContext as _, Entity, Task};
 use tcode_core::{session::Timeline, ui::ConversationDestination};
 use tcode_protocol::{GitStatusStatus, SessionPlan, SessionStatus};
+
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 use super::{command_output::CommandOutputReplica, history::HeldHistory};
 
@@ -96,6 +101,11 @@ pub(super) struct ThreadReplica {
     /// Total turns at the last complete window, absent during catch-up.
     pub(super) total_turns: Option<usize>,
     pub(super) status: Option<SessionStatus>,
+    /// When this client first saw each stop `status` has out, by the
+    /// executor's clock: the turn's under `None`, a background piece's
+    /// under its task id. The host's `stopping_since` names a stop; it is
+    /// the host's clock, not this one, so a wait is counted from here.
+    pub(super) stops_seen: HashMap<Option<String>, (u64, Instant)>,
     pub(super) plan: Option<SessionPlan>,
     pub(super) git: Option<GitStatusStatus>,
     /// The held records folded, settled against `status`.
@@ -134,6 +144,7 @@ impl ThreadReplica {
             history: None,
             total_turns: None,
             status: None,
+            stops_seen: HashMap::new(),
             plan: None,
             git: None,
             timeline: None,
@@ -149,6 +160,27 @@ impl ThreadReplica {
             read_acknowledged: None,
             destination: None,
         }
+    }
+
+    /// Takes `status` as the thread's, noting `now` as when this client
+    /// first saw each stop it has out that was not out before.
+    pub(super) fn set_status(&mut self, status: SessionStatus, now: Instant) {
+        let turn = status
+            .stopping
+            .then_some(status.stopping_since)
+            .flatten()
+            .map(|since| (None, since));
+        let pieces = status
+            .background_tasks
+            .iter()
+            .filter_map(|row| Some((Some(row.task.id.clone()), row.stopping_since?)));
+        let out: HashMap<Option<String>, u64> = turn.into_iter().chain(pieces).collect();
+        self.stops_seen
+            .retain(|key, (since, _)| out.get(key) == Some(since));
+        for (key, since) in out {
+            self.stops_seen.entry(key).or_insert((since, now));
+        }
+        self.status = Some(status);
     }
 
     /// The part's revision, read as a view depending on it.

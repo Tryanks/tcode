@@ -354,10 +354,10 @@ fn row(
 ) -> AnyElement {
     let theme = cx.theme();
     let (muted, danger, warning) = (theme.muted_foreground, theme.danger, theme.warning);
-    let standing = line
-        .background
-        .as_ref()
-        .map(|row| Standing::of(row, crate::time::now_millis(cx)));
+    let standing = line.background.as_ref().map(|row| {
+        let waited = background.and_then(|(background, _)| background.waited(row, cx));
+        Standing::of(row, waited)
+    });
     let ended = standing == Some(Standing::Ended);
     let mark = mark(key, line.mark, ended, window, cx);
     let trailing = match line.mark {

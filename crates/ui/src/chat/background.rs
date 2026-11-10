@@ -5,8 +5,11 @@
 //! the rail a pill opens them all as one list over the timeline, or in a
 //! sheet on a phone.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
 
 use agent::{BackgroundKind, BackgroundStop};
 use gpui::{
@@ -16,6 +19,8 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_protocol::BackgroundTaskStatus;
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 use super::ChatView;
 use crate::icon::{Icon, IconName};
@@ -42,6 +47,9 @@ pub(in crate::chat) struct Background {
     /// What of it the harness stops.
     stop: BackgroundStop,
     pub(in crate::chat) rows: Vec<BackgroundTaskStatus>,
+    /// When this client first saw the stop out for each piece, by its task
+    /// id and the executor's clock.
+    stops_seen: HashMap<String, Instant>,
 }
 
 impl Background {
@@ -59,7 +67,26 @@ impl Background {
                 .background
                 .map_or(BackgroundStop::None, |control| control.stop),
             rows: status.background_tasks.clone(),
+            stops_seen: status
+                .background_tasks
+                .iter()
+                .filter_map(|row| {
+                    let seen = store.stop_seen(Some(session_id), Some(&row.task.id), cx)?;
+                    Some((row.task.id.clone(), seen))
+                })
+                .collect(),
         })
+    }
+
+    /// How long the stop out for `row` has gone unanswered, counted from
+    /// when this client first saw it.
+    pub(in crate::chat) fn waited(&self, row: &BackgroundTaskStatus, cx: &App) -> Option<Duration> {
+        let seen = self.stops_seen.get(&row.task.id)?;
+        Some(
+            cx.background_executor()
+                .now()
+                .saturating_duration_since(*seen),
+        )
     }
 
     /// How many pieces still run: listed, not ended.
@@ -266,11 +293,14 @@ pub(in crate::chat) enum Standing {
 }
 
 impl Standing {
-    pub(in crate::chat) fn of(row: &BackgroundTaskStatus, now: u64) -> Self {
-        let unanswered = crate::composer::UNANSWERED.as_millis() as u64;
+    /// How `row` stands, its stop having `waited` unanswered by this
+    /// client's clock.
+    pub(in crate::chat) fn of(row: &BackgroundTaskStatus, waited: Option<Duration>) -> Self {
         match row.stopping_since {
             _ if row.ended => Self::Ended,
-            Some(since) if now.saturating_sub(since) >= unanswered => Self::Unanswered,
+            Some(_) if waited.is_some_and(|waited| waited >= crate::composer::UNANSWERED) => {
+                Self::Unanswered
+            }
             Some(_) => Self::Stopping,
             None => Self::Running,
         }
@@ -282,25 +312,22 @@ impl Standing {
 fn wake_when_unanswered(
     row: &BackgroundTaskStatus,
     place: &Place,
-    now: u64,
+    waited: Option<Duration>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(since) = row.stopping_since else {
+    let (Some(since), Some(waited)) = (row.stopping_since, waited) else {
         return;
     };
-    let unanswered = crate::composer::UNANSWERED.as_millis() as u64;
-    let left = (since + unanswered).saturating_sub(now);
-    if left == 0 {
+    let left = crate::composer::UNANSWERED.saturating_sub(waited);
+    if left.is_zero() {
         return;
     }
     let redraw = place.redraw.clone();
     let id = SharedString::from(format!("{}-bg-wake-{}-{since}", place.key, row.task.id));
     window.use_keyed_state(id, cx, move |window, cx| {
         cx.spawn_in(window, async move |_, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(left))
-                .await;
+            cx.background_executor().timer(left).await;
             let _ = cx.update(|_, cx| redraw(cx));
         })
     });
@@ -338,9 +365,9 @@ pub(in crate::chat) fn controls(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let now = crate::time::now_millis(cx);
-    let standing = Standing::of(row, now);
-    wake_when_unanswered(row, place, now, window, cx);
+    let waited = background.waited(row, cx);
+    let standing = Standing::of(row, waited);
+    wake_when_unanswered(row, place, waited, window, cx);
     let task = &row.task;
     let id = task.id.clone();
     let elapsed = (elapsed && standing != Standing::Ended).then(|| {
@@ -467,7 +494,7 @@ fn row(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let standing = Standing::of(row, crate::time::now_millis(cx));
+    let standing = Standing::of(row, background.waited(row, cx));
     let task = &row.task;
     let id = task.id.clone();
     let key = format!("{}-bg-{}", place.key, id);
@@ -906,6 +933,28 @@ mod tests {
         );
         click(cx, "background-stop-98413");
         assert_eq!(stops(&thread), [Some("98413".to_owned())]);
+    }
+
+    /// A stop the harness leaves unanswered offers to end its processes once
+    /// it has waited long enough by this client's clock, counted from when
+    /// the client first saw it: the host's stamp names the stop, and the
+    /// host's clock is not this one.
+    #[gpui::test]
+    fn an_unanswered_background_stop_is_counted_from_when_it_was_seen(cx: &mut TestAppContext) {
+        let mut stopping = task("98412", Some("call_1"), "npm run dev");
+        // Stamped by a host whose clock is far behind this one.
+        stopping.stopping_since = Some(1);
+        let (_thread, _chat, cx) = backgrounded(cx, vec![stopping], 1_400.);
+        assert!(
+            cx.debug_bounds("background-force-terminate").is_none(),
+            "a stop just seen is not offered"
+        );
+        cx.executor().advance_clock(crate::composer::UNANSWERED);
+        draw_settled(cx);
+        assert!(
+            cx.debug_bounds("background-force-terminate").is_some(),
+            "offered after the wait"
+        );
     }
 
     /// The stop for all of the background work stands while a single piece

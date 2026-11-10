@@ -20,6 +20,10 @@ use model::*;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::rc::Rc;
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 use std::path::PathBuf;
 
@@ -244,8 +248,8 @@ pub struct Composer {
     queued_refill: Option<(String, u64, String)>,
     queue_drag: Option<components::queue_strip::QueueDrag>,
     /// Redraws the composer when an unanswered stop has waited long enough to
-    /// offer the force terminate, keyed by when that stop went out.
-    stop_wait: Option<(u64, gpui::Task<()>)>,
+    /// offer the force terminate, keyed by when this client first saw it.
+    stop_wait: Option<(Instant, gpui::Task<()>)>,
     queue_scroll: gpui::ScrollHandle,
     /// A touch on the compact Queue button that has not lifted yet.
     steer_gesture: Option<SteerGesture>,
@@ -3584,21 +3588,23 @@ mod replica_tests {
     }
 
     /// A stop the harness has not answered for a while offers to kill its
-    /// process; a fresh one does not, and the offer itself only asks.
+    /// process, counted by this client's clock from when it first saw the
+    /// stop: the host's stamp names the stop, and the host's clock is not
+    /// this one. The offer itself only asks.
     #[gpui::test]
     fn an_unanswered_stop_offers_force_terminate_behind_a_confirmation(cx: &mut TestAppContext) {
         let (store, incoming, outgoing, mut status) = attach(cx);
         let session_id = Some(status.session_id.clone());
-        let topic = Topic::SessionStatus {
-            session_id: status.session_id.clone(),
-        };
         status.activity.turn_running = true;
         status.stopping = true;
-        status.stopping_since = Some(chrono::Utc::now().timestamp_millis() as u64);
+        // Stamped by a host whose clock is far behind this one.
+        status.stopping_since = Some(1);
         replace(
             &incoming,
-            topic.clone(),
-            ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+            Topic::SessionStatus {
+                session_id: status.session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
         cx.run_until_parked();
         cx.run_until_parked();
@@ -3610,15 +3616,12 @@ mod replica_tests {
         cx.simulate_resize(gpui::size(px(1024.), px(768.)));
         cx.update(|_, cx| cx.set_reduce_motion(true));
         cx.update(|window, cx| _ = window.draw(cx));
-        assert!(cx.debug_bounds("force-terminate").is_none());
-
-        status.stopping_since = Some(1);
-        replace(
-            &incoming,
-            topic,
-            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        assert!(
+            cx.debug_bounds("force-terminate").is_none(),
+            "a stop just seen is not offered"
         );
-        cx.run_until_parked();
+
+        cx.executor().advance_clock(crate::composer::UNANSWERED);
         cx.run_until_parked();
         cx.update(|window, cx| _ = window.draw(cx));
         while outgoing.try_recv().is_ok() {}

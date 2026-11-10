@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
 
 use gpui::{App, Context, Entity, EventEmitter, Subscription as GpuiSubscription, Task};
 use tcode_client::{
@@ -26,6 +28,8 @@ use tcode_protocol::{
     QueryResponse, Scope, ScopedProviderChoice, ServerEvent, SessionContentHits, SessionPlan,
     SessionStatus, StorageMigration, Subscription, Topic,
 };
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 pub(crate) mod terminal;
 pub(crate) use terminal::ClientTerminal;
 use terminal::TerminalWorkspace;
@@ -1698,7 +1702,7 @@ impl WorkspaceStore {
                     if let Some(thread) = self.threads.get_mut(session_id) {
                         let status = status.as_ref().clone();
                         let drawer = (status.terminal_open, status.terminal_height);
-                        thread.status = Some(status);
+                        thread.set_status(status, cx.background_executor().now());
                         if thread.open {
                             thread.resettle();
                             let destination = thread.destination.clone();
@@ -4320,6 +4324,20 @@ impl WorkspaceStore {
 
     pub fn session_status_for(&self, session_id: Option<&str>, cx: &App) -> Option<&SessionStatus> {
         self.thread_status(session_id, cx)
+    }
+
+    /// When this client first saw the stop the thread's status has out, by
+    /// the executor's clock: its turn's (`task: None`) or a background
+    /// piece's.
+    pub(crate) fn stop_seen(
+        &self,
+        session_id: Option<&str>,
+        task: Option<&str>,
+        cx: &App,
+    ) -> Option<Instant> {
+        let thread = self.watched(session_id, Part::Status, cx)?;
+        let (_, seen) = thread.stops_seen.get(&task.map(str::to_owned))?;
+        Some(*seen)
     }
 
     /// How many threads deleting `session_id` removes (the host deletes every
