@@ -879,11 +879,6 @@ impl MarkdownState {
     fn update_layout(&mut self, bounds: Bounds<Pixels>) {
         self.bounds = bounds;
     }
-
-    #[cfg(test)]
-    pub(super) fn has_measured_item(&self, index: usize) -> bool {
-        self.list_state.bounds_for_item(index).is_some()
-    }
 }
 
 fn with_trailing_newline(mut text: String) -> String {

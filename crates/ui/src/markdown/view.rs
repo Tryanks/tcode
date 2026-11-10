@@ -1006,14 +1006,17 @@ mod tests {
                 let _ = window.draw(cx);
             });
 
+            let measured = |markdown: &MarkdownState, item| {
+                markdown.list_state.bounds_for_item(item).is_some()
+            };
             assert!(view.read_with(cx, |root, cx| {
-                root.markdown.read(cx).has_measured_item(settled + 1)
+                measured(root.markdown.read(cx), settled + 1)
             }));
             view.update(cx, |root, cx| {
                 root.markdown.update(cx, |markdown, cx| {
                     markdown.push_str(append, cx);
-                    assert!(markdown.has_measured_item(settled));
-                    assert!(!markdown.has_measured_item(settled + 1));
+                    assert!(measured(markdown, settled));
+                    assert!(!measured(markdown, settled + 1));
                 });
             });
         }

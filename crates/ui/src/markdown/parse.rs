@@ -18,11 +18,6 @@ pub(crate) struct ParsedDocument {
     pub(crate) defines_links: bool,
 }
 
-#[cfg(test)]
-pub(crate) fn parse(source: &str) -> BlockNode {
-    parse_document(source).root
-}
-
 pub(crate) fn parse_document(source: &str) -> ParsedDocument {
     let parser = rushdown::parser::Parser::with_extensions(
         rushdown::parser::Options::default(),
@@ -557,6 +552,10 @@ fn utf8_len(first: u8) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(source: &str) -> BlockNode {
+        parse_document(source).root
+    }
 
     fn root_children(source: &str) -> Vec<BlockNode> {
         let BlockNode::Root { children, .. } = parse(source) else {
