@@ -280,9 +280,6 @@ pub(super) fn rest_id(global: &str) -> Option<String> {
 }
 
 pub(super) fn state(mr: &Value) -> Option<PullRequestState> {
-    if mr["merged_at"].as_str().is_some_and(|at| !at.is_empty()) {
-        return Some(PullRequestState::Merged);
-    }
     match mr["state"].as_str()? {
         "merged" => Some(PullRequestState::Merged),
         "closed" => Some(PullRequestState::Closed),
