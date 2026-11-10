@@ -145,7 +145,8 @@ impl ZedRemote {
         self.listen()?;
         let exe = process::current_exe()
             .ok_or_else(|| "Tcode could not find its own executable".to_owned())?;
-        let hosts = tcode_traverse::hosts::load_hosts(&inner.data_dir).unwrap_or_default();
+        let hosts = tcode_traverse::hosts::load_hosts(&inner.data_dir)
+            .map_err(|error| format!("hosts.json: {error}"))?;
         let mut machines: Vec<(String, String)> = hosts
             .iter()
             .map(|host| (host.host_id.clone(), host.name.clone()))
