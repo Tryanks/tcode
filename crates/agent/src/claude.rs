@@ -258,14 +258,13 @@ pub(crate) fn copy_resolved(
     to: &Path,
     ancestors: &mut HashSet<PathBuf>,
 ) -> std::io::Result<()> {
-    const MAX_DEPTH: usize = 32;
     let metadata = match std::fs::metadata(from) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         metadata => metadata?,
     };
     if metadata.is_dir() {
         let canonical = std::fs::canonicalize(from)?;
-        if ancestors.len() == MAX_DEPTH || !ancestors.insert(canonical.clone()) {
+        if !ancestors.insert(canonical.clone()) {
             return Ok(());
         }
         std::fs::create_dir_all(to)?;
