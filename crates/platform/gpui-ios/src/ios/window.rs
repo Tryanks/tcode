@@ -30,8 +30,6 @@ type InputCallback = Box<dyn FnMut(PlatformInput) -> DispatchEventResult>;
 type BoolCallback = Box<dyn FnMut(bool)>;
 type ResizeCallback = Box<dyn FnMut(Size<Pixels>, f32)>;
 type UnitCallback = Box<dyn FnMut()>;
-type ShouldCloseCallback = Box<dyn FnMut() -> bool>;
-type HitTestCallback = Box<dyn FnMut() -> Option<WindowControlArea>>;
 type InsetsCallback = Box<dyn FnMut(WindowInsets)>;
 type VisibilityCallback = Box<dyn FnMut(WindowVisibility)>;
 
@@ -58,11 +56,7 @@ pub(crate) struct IosWindow {
     request_frame_callback: RefCell<Option<RequestFrameCallback>>,
     input_callback: RefCell<Option<InputCallback>>,
     active_callback: RefCell<Option<BoolCallback>>,
-    hover_callback: RefCell<Option<BoolCallback>>,
     resize_callback: RefCell<Option<ResizeCallback>>,
-    moved_callback: RefCell<Option<UnitCallback>>,
-    should_close_callback: RefCell<Option<ShouldCloseCallback>>,
-    hit_test_callback: RefCell<Option<HitTestCallback>>,
     close_callback: RefCell<Option<Box<dyn FnOnce()>>>,
     appearance_callback: RefCell<Option<UnitCallback>>,
     insets_callback: RefCell<Option<InsetsCallback>>,
@@ -156,11 +150,7 @@ impl IosWindow {
             request_frame_callback: RefCell::new(None),
             input_callback: RefCell::new(None),
             active_callback: RefCell::new(None),
-            hover_callback: RefCell::new(None),
             resize_callback: RefCell::new(None),
-            moved_callback: RefCell::new(None),
-            should_close_callback: RefCell::new(None),
-            hit_test_callback: RefCell::new(None),
             close_callback: RefCell::new(None),
             appearance_callback: RefCell::new(None),
             insets_callback: RefCell::new(None),
@@ -683,9 +673,7 @@ impl PlatformWindow for IosWindow {
         *self.visibility_callback.borrow_mut() = Some(callback);
     }
 
-    fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>) {
-        *self.hover_callback.borrow_mut() = Some(callback);
-    }
+    fn on_hover_status_change(&self, _callback: Box<dyn FnMut(bool)>) {}
 
     fn on_resize(&self, callback: Box<dyn FnMut(Size<Pixels>, f32)>) {
         *self.resize_callback.borrow_mut() = Some(callback);
@@ -695,16 +683,11 @@ impl PlatformWindow for IosWindow {
         *self.display_callback.borrow_mut() = Some(callback);
     }
 
-    fn on_moved(&self, callback: Box<dyn FnMut()>) {
-        *self.moved_callback.borrow_mut() = Some(callback);
-    }
+    fn on_moved(&self, _callback: Box<dyn FnMut()>) {}
 
-    fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>) {
-        *self.should_close_callback.borrow_mut() = Some(callback);
-    }
+    fn on_should_close(&self, _callback: Box<dyn FnMut() -> bool>) {}
 
-    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
-        *self.hit_test_callback.borrow_mut() = Some(callback);
+    fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
     }
 
     fn on_close(&self, callback: Box<dyn FnOnce()>) {

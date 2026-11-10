@@ -33,10 +33,7 @@ struct IosPlatformState {
     native_paste: Option<ClipboardItem>,
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
     on_quit: Option<Box<dyn FnMut() -> bool>>,
-    on_reopen: Option<Box<dyn FnMut()>>,
     on_displays_changed: Option<Box<dyn FnMut()>>,
-    on_system_sleep: Option<Box<dyn FnMut()>>,
-    on_system_wake: Option<Box<dyn FnMut()>>,
     on_lifecycle: Option<Box<dyn FnMut(AppLifecyclePhase)>>,
     on_memory_warning: Option<Box<dyn FnMut()>>,
     on_thermal_state_change: Option<Box<dyn FnMut()>>,
@@ -267,19 +264,13 @@ impl Platform for IosPlatform {
         self.state.borrow_mut().on_quit = Some(callback);
     }
 
-    fn on_reopen(&self, callback: Box<dyn FnMut()>) {
-        self.state.borrow_mut().on_reopen = Some(callback);
-    }
+    fn on_reopen(&self, _callback: Box<dyn FnMut()>) {}
 
     // UIKit exposes no system sleep notifications; `on_app_lifecycle` is the
-    // closest signal, so these callbacks are kept but never fired.
-    fn on_system_sleep(&self, callback: Box<dyn FnMut()>) {
-        self.state.borrow_mut().on_system_sleep = Some(callback);
-    }
+    // closest signal.
+    fn on_system_sleep(&self, _callback: Box<dyn FnMut()>) {}
 
-    fn on_system_wake(&self, callback: Box<dyn FnMut()>) {
-        self.state.borrow_mut().on_system_wake = Some(callback);
-    }
+    fn on_system_wake(&self, _callback: Box<dyn FnMut()>) {}
 
     fn on_app_lifecycle(&self, callback: Box<dyn FnMut(AppLifecyclePhase)>) {
         self.state.borrow_mut().on_lifecycle = Some(callback);

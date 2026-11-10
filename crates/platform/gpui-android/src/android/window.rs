@@ -69,12 +69,9 @@ struct Callbacks {
     request_frame: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     input: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
     active: Option<Box<dyn FnMut(bool)>>,
-    hover: Option<Box<dyn FnMut(bool)>>,
     resize: Option<ResizeCallback>,
-    moved: Option<Box<dyn FnMut()>>,
     display: Option<Box<dyn FnMut()>>,
     should_close: Option<Box<dyn FnMut() -> bool>>,
-    hit_test: Option<Box<dyn FnMut() -> Option<gpui::WindowControlArea>>>,
     close: Option<Box<dyn FnOnce()>>,
     appearance: Option<Box<dyn FnMut()>>,
     insets: Option<Box<dyn FnMut(WindowInsets)>>,
@@ -96,7 +93,6 @@ struct WindowState {
     mouse_position: Point<Pixels>,
     input_handler: Option<PlatformInputHandler>,
     input_configuration: TextInputConfiguration,
-    title: String,
     insets: WindowInsets,
     back_enabled: bool,
 }
@@ -161,7 +157,6 @@ impl AndroidWindow {
                 mouse_position: point(px(0.0), px(0.0)),
                 input_handler: None,
                 input_configuration: TextInputConfiguration::default(),
-                title: String::new(),
                 insets: WindowInsets::default(),
                 back_enabled: false,
             }),
@@ -994,9 +989,7 @@ impl PlatformWindow for AndroidWindow {
         self.0.state.borrow().background
     }
 
-    fn set_title(&mut self, title: &str) {
-        self.0.state.borrow_mut().title = title.to_owned();
-    }
+    fn set_title(&mut self, _title: &str) {}
 
     fn set_background_appearance(&self, background: WindowBackgroundAppearance) {
         self.0.state.borrow_mut().background = background;
@@ -1036,9 +1029,7 @@ impl PlatformWindow for AndroidWindow {
         self.0.callbacks.borrow_mut().visibility = Some(callback);
     }
 
-    fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>) {
-        self.0.callbacks.borrow_mut().hover = Some(callback);
-    }
+    fn on_hover_status_change(&self, _callback: Box<dyn FnMut(bool)>) {}
 
     fn on_resize(&self, callback: Box<dyn FnMut(Size<Pixels>, f32)>) {
         self.0.callbacks.borrow_mut().resize = Some(callback);
@@ -1048,9 +1039,7 @@ impl PlatformWindow for AndroidWindow {
         self.0.callbacks.borrow_mut().display = Some(callback);
     }
 
-    fn on_moved(&self, callback: Box<dyn FnMut()>) {
-        self.0.callbacks.borrow_mut().moved = Some(callback);
-    }
+    fn on_moved(&self, _callback: Box<dyn FnMut()>) {}
 
     fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>) {
         self.0.callbacks.borrow_mut().should_close = Some(callback);
@@ -1058,9 +1047,8 @@ impl PlatformWindow for AndroidWindow {
 
     fn on_hit_test_window_control(
         &self,
-        callback: Box<dyn FnMut() -> Option<gpui::WindowControlArea>>,
+        _callback: Box<dyn FnMut() -> Option<gpui::WindowControlArea>>,
     ) {
-        self.0.callbacks.borrow_mut().hit_test = Some(callback);
     }
 
     fn on_close(&self, callback: Box<dyn FnOnce()>) {
