@@ -783,6 +783,7 @@ async fn run_actor(
         provider_commands,
         permission_descriptor,
         effective_permission,
+        warnings,
     } = match startup {
         Ok(value) => value,
         Err(err) => {
@@ -866,6 +867,9 @@ async fn run_actor(
             commands: provider_commands,
         })
         .await;
+    for message in warnings {
+        actor.events.emit(AgentEvent::Warning { message }).await;
+    }
     let thread = json!({ "threadId": actor.thread_id });
     if let Err(err) = actor.request("thread/goal/get", thread, PendingRequest::GoalSnapshot) {
         log::debug!("Codex thread/goal/get not sent: {err}");
@@ -1442,6 +1446,7 @@ struct OpenedThread {
     provider_commands: Vec<ProviderCommand>,
     permission_descriptor: OptionDescriptor,
     effective_permission: String,
+    warnings: Vec<String>,
 }
 
 /// Ids of the startup's `thread/turns/list` pages, clear of the ones
@@ -1521,26 +1526,25 @@ async fn initialize_and_open_thread(
         || result.pointer("/thread/historyMode") != Some(&json!("paginated")))
     .then_some(RewindFailureReason::Unsupported);
 
-    // Discover the session's skills for the composer's `$` menu. Supported since
-    // codex 0.144.1 (verified live); a failure is non-fatal so older builds
-    // still start. The app-server expands a `$name` mention in plain turn text
-    // itself; it has no request to list or run `~/.codex/prompts` files, so
-    // those are not offered.
+    // The thread is open either way: a failed listing is reported once the
+    // session has started. The app-server expands a `$name` mention in plain
+    // turn text itself; it has no request to list or run `~/.codex/prompts`
+    // files, so those are not offered.
+    let mut warnings = Vec::new();
     let mut next_id = 3;
     let profiles = request_permission_profiles(&opts.cwd, stdin, lines, &mut next_id)
         .await
         .unwrap_or_else(|err| {
-            log::debug!("Codex permissionProfile/list unavailable: {err}");
+            warnings.push(format!("Codex permissionProfile/list failed: {err}"));
             Vec::new()
         });
     let permission_descriptor = permission_descriptor(&profiles, &effective_permission, &result);
-    let provider_commands = match request_codex_skills(&opts.cwd, stdin, lines, next_id).await {
-        Ok(commands) => commands,
-        Err(err) => {
-            log::debug!("codex skills/list unavailable: {err}");
+    let provider_commands = request_codex_skills(&opts.cwd, stdin, lines, next_id)
+        .await
+        .unwrap_or_else(|err| {
+            warnings.push(format!("Codex skills/list failed: {err}"));
             Vec::new()
-        }
-    };
+        });
     next_id += 1;
     Ok(OpenedThread {
         thread_id,
@@ -1550,6 +1554,7 @@ async fn initialize_and_open_thread(
         provider_commands,
         permission_descriptor,
         effective_permission,
+        warnings,
     })
 }
 
@@ -8097,5 +8102,71 @@ done
             });
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    /// A thread opens even when Codex refuses to list its permission profiles
+    /// or skills, and the session says what Codex answered.
+    #[cfg(unix)]
+    #[test]
+    fn a_thread_opens_and_reports_the_listings_codex_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("agent-codex-listing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("codex");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\).*/\1/p')
+  [ -z "$id" ] && continue
+  case "$line" in
+    *'"thread/start"'*) echo "{\"id\":$id,\"result\":{\"thread\":{\"id\":\"t\"}}}" ;;
+    *'"initialize"'*) echo "{\"id\":$id,\"result\":{}}" ;;
+    *'"permissionProfile/list"'*) echo "{\"id\":$id,\"error\":{\"code\":-32603,\"message\":\"bad profile\"}}" ;;
+    *'"skills/list"'*) echo "{\"id\":$id,\"error\":{\"code\":-32603,\"message\":\"bad skill\"}}" ;;
+    *) echo "{\"id\":$id,\"error\":{\"code\":-32601,\"message\":\"no\"}}" ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        smol::block_on(async {
+            let handle = start(SessionOptions {
+                cwd: dir.clone(),
+                model: None,
+                resume: None,
+                fork: None,
+                binary_path: Some(bin.clone()),
+                option_selections: Vec::new(),
+                mcp_servers: Vec::new(),
+                launch_env: LaunchEnv::default(),
+                extra_args: Vec::new(),
+                acp: None,
+                instructions: None,
+            })
+            .await
+            .unwrap();
+            // The session is ready only after its startup events went out.
+            let warnings: Vec<String> = std::iter::from_fn(|| handle.events.try_recv().ok())
+                .filter_map(|event| match event {
+                    AgentEvent::Warning { message } => Some(message),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(warnings.len(), 2, "{warnings:?}");
+            assert!(
+                warnings[0].contains("permissionProfile/list")
+                    && warnings[0].contains("bad profile"),
+                "{warnings:?}"
+            );
+            assert!(
+                warnings[1].contains("skills/list") && warnings[1].contains("bad skill"),
+                "{warnings:?}"
+            );
+            let _ = handle.commands.send(SessionCommand::Shutdown).await;
+        });
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
