@@ -9538,6 +9538,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tcode-core",
+ "tokio-util",
 ]
 
 [[package]]
