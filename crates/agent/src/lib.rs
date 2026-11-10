@@ -3169,8 +3169,8 @@ pub enum ApprovalKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
     },
-    /// A read-only file/search operation (Claude's `file_read_approval` family:
-    /// Read/View/Grep/Glob/…/WebSearch). `detail` is the pre-rendered summary.
+    /// A read-only file or search operation. `detail` is the pre-rendered
+    /// summary.
     FileRead {
         detail: String,
     },
