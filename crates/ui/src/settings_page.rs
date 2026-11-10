@@ -892,14 +892,17 @@ impl SettingsPage {
                     }
                 }
             }));
-        page._subscriptions.push(cx.subscribe(
+        page._subscriptions.push(cx.subscribe_in(
             &remote_attachment_limit_input,
-            |this, input, event, cx| {
+            window,
+            |this, input, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
-                    let value = input.read(cx).value().to_string();
-                    if this.remote_attachment_limit_input.is_user_edit(&value) {
-                        this.commit_remote_attachment_limit(cx);
-                    }
+                    this.remote_attachment_limit_input
+                        .is_user_edit(input.read(cx).value().as_ref());
+                } else if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. })
+                    && this.remote_attachment_limit_input.dirty
+                {
+                    this.commit_remote_attachment_limit(window, cx);
                 }
             },
         ));
@@ -1023,19 +1026,24 @@ impl SettingsPage {
         DevicePreferences::set_device_name(name, cx);
     }
 
-    fn commit_remote_attachment_limit(&self, cx: &mut Context<Self>) {
-        let Some(limit) = self
+    /// Take what the field holds once the user leaves it, which the field
+    /// has brought within its range. What is not a number of MiB is not
+    /// taken, and the field shows the limit in effect again.
+    fn commit_remote_attachment_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self
             .remote_attachment_limit_input
             .state
             .read(cx)
             .value()
             .trim()
             .parse::<u32>()
-            .ok()
-        else {
-            return;
-        };
-        DevicePreferences::set_remote_attachment_limit_mib(Some(limit), cx);
+            .ok();
+        if let Some(limit) = typed {
+            DevicePreferences::set_remote_attachment_limit_mib(Some(limit), cx);
+        }
+        self.remote_attachment_limit_input.dirty = false;
+        let limit = remote_attachment_limit_value(cx);
+        self.remote_attachment_limit_input.push(limit, window, cx);
     }
 
     /// Open a harness's settings: a dialog on a wide window, a page of the
@@ -3678,6 +3686,7 @@ mod tests {
         send(None, None);
         assert!(!shown(cx), "the card leaves once the move is done");
 
+        cx.update(|window, _| window.activate_window());
         page.update(cx, |page, cx| page.select_section(Section::General, cx));
         cx.run_until_parked();
         assert!(
@@ -4335,6 +4344,73 @@ mod tests {
                 )
             )]
         );
+    }
+
+    /// The attachment limit is taken when the user leaves the field. A value
+    /// it cannot take is not saved, and the field shows the limit in effect
+    /// rather than what was typed.
+    #[gpui::test]
+    fn an_attachment_limit_the_field_cannot_take_shows_the_one_in_effect(cx: &mut TestAppContext) {
+        use tcode_client::host::ClientHost as _;
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::theme::init);
+        let root = crate::store::tests::scratch_root("attachment-limit-field");
+        std::fs::create_dir_all(&root).unwrap();
+        let device = std::rc::Rc::new(tcode_traverse::NativeClientHost::new(root.clone(), "phone"));
+        cx.update(|cx| DevicePreferences::install(device.clone(), cx));
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, cx)
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        let window_state = cx.new(|_| WindowState::default());
+        let mut page = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
+            page = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let page = page.unwrap();
+        cx.update(|window, _| window.activate_window());
+        page.update(cx, |page, cx| page.select_section(Section::General, cx));
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            cx.debug_bounds("settings-remote-attachment-limit-row")
+                .is_some()
+        );
+        let in_effect = cx.update(|_, cx| remote_attachment_limit_value(cx));
+        let field = page.read_with(cx, |page, _| {
+            page.remote_attachment_limit_input.state.clone()
+        });
+        // What the user types after clearing the field, then leaving it.
+        let type_and_leave = |typed: &str, cx: &mut gpui::VisualTestContext| {
+            let row = cx
+                .debug_bounds("settings-remote-attachment-limit-row")
+                .expect("the limit's row is drawn");
+            cx.simulate_click(
+                gpui::point(row.right() - gpui::px(40.), row.center().y),
+                gpui::Modifiers::default(),
+            );
+            crate::test_frames::draw(cx);
+            cx.simulate_keystrokes("end backspace backspace backspace");
+            cx.simulate_input(typed);
+            crate::test_frames::draw(cx);
+            cx.update(|window, cx| window.blur(cx));
+            crate::test_frames::draw_settled(cx);
+            (
+                device
+                    .load_preferences()
+                    .unwrap()
+                    .remote_attachment_limit_mib,
+                cx.update(|_, cx| field.read(cx).value().to_string()),
+            )
+        };
+        assert_eq!(type_and_leave("", cx), (None, in_effect));
+        assert_eq!(type_and_leave("12", cx), (Some(12), "12".to_owned()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[gpui::test]
