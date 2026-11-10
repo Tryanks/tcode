@@ -10,4 +10,4 @@
 {"type":"stream_event","event":{"type":"content_block_stop","index":2},"parent_tool_use_id":null}
 {"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":8}},"parent_tool_use_id":null}
 {"type":"stream_event","event":{"type":"message_stop"},"parent_tool_use_id":null}
-{"stop_reason":"end_turn","session_id":"13802227-75a6-432a-a554-ce7363f47104","is_error":false,"subtype":"success","result":"After switch.","type":"result"}
+{"stop_reason":"end_turn","session_id":"00000000-0000-4000-8000-000000000003","is_error":false,"subtype":"success","result":"After switch.","type":"result"}

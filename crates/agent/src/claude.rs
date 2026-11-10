@@ -5090,7 +5090,7 @@ mod tests {
         );
         feed(
             &mut mapper,
-            r#"{"type":"control_request","request_id":"hook-1","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-create","input":{"session_id":"native","transcript_path":"/home/me/.claude/projects/-work-repo/native.jsonl","cwd":"/work/repo","prompt_id":"prompt-1","hook_event_name":"WorktreeCreate","name":"feat"},"tool_use_id":"446fc413-fa9e-45ab-b701-854b8177c9a9"}}"#,
+            r#"{"type":"control_request","request_id":"hook-1","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-create","input":{"session_id":"native","transcript_path":"/home/me/.claude/projects/-work-repo/native.jsonl","cwd":"/work/repo","prompt_id":"prompt-1","hook_event_name":"WorktreeCreate","name":"feat"},"tool_use_id":"00000000-0000-4000-8000-000000000062"}}"#,
         );
         let answer = WorktreeAnswer::Ready {
             path: PathBuf::from("/data/worktrees/repo-1a2b3c4d/feat"),
@@ -5128,7 +5128,7 @@ mod tests {
         );
         let events = feed(
             &mut mapper,
-            r#"{"type":"control_request","request_id":"hook-1","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-create","input":{"session_id":"native","transcript_path":"/home/me/.claude/projects/-work-repo/native.jsonl","cwd":"/work/repo","prompt_id":"prompt-1","hook_event_name":"WorktreeCreate","name":"agent-a955ec08a6e37c75e"},"tool_use_id":"745e37e8-5bb4-421f-935d-909749721cb4"}}"#,
+            r#"{"type":"control_request","request_id":"hook-1","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-create","input":{"session_id":"native","transcript_path":"/home/me/.claude/projects/-work-repo/native.jsonl","cwd":"/work/repo","prompt_id":"prompt-1","hook_event_name":"WorktreeCreate","name":"agent-a0000000000000010"},"tool_use_id":"00000000-0000-4000-8000-000000000063"}}"#,
         );
         assert_eq!(
             events,
@@ -5136,11 +5136,11 @@ mod tests {
                 request_id: "hook-1".into(),
                 request: WorktreeRequest::Create {
                     cwd: PathBuf::from("/work/repo"),
-                    name: "agent-a955ec08a6e37c75e".into(),
+                    name: "agent-a0000000000000010".into(),
                 },
             }]
         );
-        let worktree = PathBuf::from("/data/worktrees/repo-1a2b3c4d/agent-a955ec08a6e37c75e");
+        let worktree = PathBuf::from("/data/worktrees/repo-1a2b3c4d/agent-a0000000000000010");
         mapper
             .worktree_response(
                 "hook-1",
@@ -5152,7 +5152,7 @@ mod tests {
             .unwrap();
         let events = feed(
             &mut mapper,
-            r#"{"type":"system","subtype":"task_started","task_id":"a955ec08a6e37c75e","tool_use_id":"toolu_agent","description":"Print working directory","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","prompt":"Run pwd","session_id":"native"}"#,
+            r#"{"type":"system","subtype":"task_started","task_id":"a0000000000000010","tool_use_id":"toolu_agent","description":"Print working directory","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","prompt":"Run pwd","session_id":"native"}"#,
         );
         assert!(
             events.contains(&AgentEvent::SessionMoved {
@@ -5166,7 +5166,7 @@ mod tests {
 
         feed(
             &mut mapper,
-            r#"{"type":"control_request","request_id":"hook-2","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-remove","input":{"session_id":"native","cwd":"/work/repo","hook_event_name":"WorktreeRemove","worktree_path":"/data/worktrees/repo-1a2b3c4d/agent-a955ec08a6e37c75e"}}}"#,
+            r#"{"type":"control_request","request_id":"hook-2","request":{"subtype":"hook_callback","callback_id":"tcode-worktree-remove","input":{"session_id":"native","cwd":"/work/repo","hook_event_name":"WorktreeRemove","worktree_path":"/data/worktrees/repo-1a2b3c4d/agent-a0000000000000010"}}}"#,
         );
         let (removed, _) = mapper
             .worktree_response("hook-2", &WorktreeAnswer::Removed)
@@ -5567,7 +5567,7 @@ mod tests {
         mapper.start_turn();
         let events = feed(
             &mut mapper,
-            r#"{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","direction":"retry","scope":"session","original_model":"claude-fable-5","fallback_model":"claude-opus-4-8","request_id":"req_123","api_refusal_category":"cyber","api_refusal_explanation":null,"refused_user_message_uuid":"cf7703ac-420b-4038-9f32-582077b27352","content":"Safeguards flagged this message. Switched models.","session_id":"session-1","uuid":"system-1"}"#,
+            r#"{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","direction":"retry","scope":"session","original_model":"claude-fable-5","fallback_model":"claude-opus-4-8","request_id":"req_123","api_refusal_category":"cyber","api_refusal_explanation":null,"refused_user_message_uuid":"00000000-0000-4000-8000-000000000064","content":"Safeguards flagged this message. Switched models.","session_id":"session-1","uuid":"system-1"}"#,
         );
 
         assert_eq!(
@@ -6344,9 +6344,10 @@ mod tests {
         }
     }
 
-    /// Recorded from Claude Code 2.1.316 (`claude -p --output-format
+    /// The shape Claude Code 2.1.316 prints (`claude -p --output-format
     /// stream-json --verbose --model haiku` in a scratch directory holding an
-    /// 8x8 blue PNG and `a.txt`): a Read of the image, then a subagent that
+    /// 8x8 blue PNG and `a.txt`), its ids and paths invented: a Read of the
+    /// image, then a subagent that
     /// runs Bash, reads and edits `a.txt`. The image is the result's only
     /// content and reaches `image_reads` alone; the subagent's Bash and Edit
     /// map as they do at the top level.
@@ -6368,7 +6369,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{id} never completed: {completed:#?}"))
         };
         assert_eq!(
-            item("toolu_01HG34Q57eKf3Vmy7mipKtqD").content,
+            item("toolu_010000000000000000000014").content,
             ItemContent::ToolCall {
                 image_reads: vec![Attachment {
                     media_type: "image/png".into(),
@@ -6382,15 +6383,15 @@ mod tests {
             }
         );
         let child = |id: &str| {
-            let item = item(&format!("toolu_01DEp56X845RWkeSRLr9oGhE:{id}"));
+            let item = item(&format!("toolu_010000000000000000000015:{id}"));
             assert_eq!(
                 item.parent_item_id.as_deref(),
-                Some("toolu_01DEp56X845RWkeSRLr9oGhE")
+                Some("toolu_010000000000000000000015")
             );
             &item.content
         };
         assert_eq!(
-            child("toolu_014AnXC7pBrAgEgqpWymetDS"),
+            child("toolu_010000000000000000000016"),
             &ItemContent::CommandExecution {
                 command: "echo hi".into(),
                 output: "hi".into(),
@@ -6399,10 +6400,10 @@ mod tests {
             }
         );
         assert_eq!(
-            child("toolu_01QkfKor1fX5xFDBvWR1ZUEX"),
+            child("toolu_010000000000000000000018"),
             &ItemContent::FileChange {
                 changes: vec![FileChange {
-                    path: "/private/tmp/b2rec/claude/a.txt".into(),
+                    path: "/home/user/project/a.txt".into(),
                     kind: FileChangeKind::Modify,
                     diff: Some("-hello\n+bye".into()),
                 }],
@@ -6410,7 +6411,7 @@ mod tests {
             }
         );
         assert!(matches!(
-            child("toolu_01KLtmHwybFdAVQGeGUZEfvP"),
+            child("toolu_010000000000000000000017"),
             ItemContent::ToolCall { name, output: Some(output), .. }
                 if name == "Read" && output == "1\thello\n2\tworld\n3\t"
         ));
@@ -6420,7 +6421,7 @@ mod tests {
     /// outlive the previous process: Claude Code first reports the command
     /// stopped and closes that notification with a `result` of its own
     /// (`num_turns: 0`, origin `task-notification`), then runs the message
-    /// (2.1.321, recorded).
+    /// (2.1.321's shape, its ids invented).
     #[test]
     fn a_resumed_sessions_stopped_task_result_leaves_the_message_turn_open() {
         let mut m = Mapper::new();
@@ -6785,14 +6786,14 @@ mod tests {
         let mut m = Mapper::new();
         let first = tasks(&feed(
             &mut m,
-            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a3138d90bec23d1c7","run_id":"0mw6umb2h-0212cc6f","task_type":"local_agent","subagent_type":"general-purpose","description":"wait helper"}]}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a0000000000000011","run_id":"000000002-00000000","task_type":"local_agent","subagent_type":"general-purpose","description":"wait helper"}]}"#,
         ));
-        assert_eq!(first[0].id, "a3138d90bec23d1c7");
+        assert_eq!(first[0].id, "a0000000000000011");
         assert_eq!(first[0].name, "wait helper");
         assert_eq!(first[0].kind, crate::BackgroundKind::Agent);
         let second = tasks(&feed(
             &mut m,
-            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a3138d90bec23d1c7","run_id":"0mw6umb2h-0212cc6f","task_type":"local_agent","subagent_type":"general-purpose","description":"wait helper"},{"task_id":"bxg56veie","run_id":"0mw6umbct-82b1a926","task_type":"local_bash","description":"wait","parent_task_id":"a3138d90bec23d1c7"}]}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a0000000000000011","run_id":"000000002-00000000","task_type":"local_agent","subagent_type":"general-purpose","description":"wait helper"},{"task_id":"b00000003","run_id":"000000003-00000000","task_type":"local_bash","description":"wait","parent_task_id":"a0000000000000011"}]}"#,
         ));
         assert_eq!(second.len(), 2);
         assert_eq!(second[0], first[0]);
@@ -6805,8 +6806,8 @@ mod tests {
         assert_eq!(
             requests,
             [
-                json!({"subtype": "stop_task", "task_id": "a3138d90bec23d1c7"}),
-                json!({"subtype": "stop_task", "task_id": "bxg56veie"}),
+                json!({"subtype": "stop_task", "task_id": "a0000000000000011"}),
+                json!({"subtype": "stop_task", "task_id": "b00000003"}),
             ]
         );
 
@@ -6853,11 +6854,11 @@ mod tests {
         let mut m = Mapper::new();
         feed_count(
             &mut m,
-            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b735c9qiy","run_id":"0mw6umbcx-cb2e7539","task_type":"local_bash","description":"wait"}]}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b00000002","run_id":"000000004-00000000","task_type":"local_bash","description":"wait"}]}"#,
         );
         for line in [
-            r#"{"type":"system","subtype":"task_updated","task_id":"b735c9qiy","run_id":"0mw6umbcx-cb2e7539","patch":{"status":"killed","end_time":1794082805458}}"#,
-            r#"{"type":"system","subtype":"task_notification","task_id":"b735c9qiy","run_id":"0mw6umbcx-cb2e7539","tool_use_id":"toolu_0025","status":"stopped","summary":"wait"}"#,
+            r#"{"type":"system","subtype":"task_updated","task_id":"b00000002","run_id":"000000004-00000000","patch":{"status":"killed","end_time":1794082805458}}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"b00000002","run_id":"000000004-00000000","tool_use_id":"toolu_0025","status":"stopped","summary":"wait"}"#,
             r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
         ] {
             assert!(feed_count(&mut m, line).is_empty());
@@ -6895,7 +6896,7 @@ mod tests {
         );
         let counted = feed_count(
             &mut m,
-            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"ae5779035aeb8a94d","run_id":"0mvctgbkr-7639c0ca","task_type":"local_agent","subagent_type":"general-purpose","description":"Run sleep and echo command"}]}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a0000000000000012","run_id":"000000005-00000000","task_type":"local_agent","subagent_type":"general-purpose","description":"Run sleep and echo command"}]}"#,
         );
         assert!(matches!(
             counted.as_slice(),
@@ -6903,11 +6904,11 @@ mod tests {
         ));
         feed(
             &mut m,
-            r#"{"type":"system","subtype":"task_started","task_id":"ae5779035aeb8a94d","tool_use_id":"toolu_agent","description":"Run sleep and echo command","subagent_type":"general-purpose","is_backgrounded":true,"task_type":"local_agent"}"#,
+            r#"{"type":"system","subtype":"task_started","task_id":"a0000000000000012","tool_use_id":"toolu_agent","description":"Run sleep and echo command","subagent_type":"general-purpose","is_backgrounded":true,"task_type":"local_agent"}"#,
         );
         feed(
             &mut m,
-            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_agent","type":"tool_result","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"ae5779035aeb8a94d"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_agent","type":"tool_result","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a0000000000000012"}}"#,
         );
         let launched = feed(
             &mut m,
@@ -6918,7 +6919,7 @@ mod tests {
         // Between turns, the background subagent asks for permission.
         let asked = feed(
             &mut m,
-            r#"{"type":"control_request","request_id":"ctrl-bg","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"cp a b"},"tool_use_id":"toolu_cp","agent_id":"ae5779035aeb8a94d"}}"#,
+            r#"{"type":"control_request","request_id":"ctrl-bg","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"cp a b"},"tool_use_id":"toolu_cp","agent_id":"a0000000000000012"}}"#,
         );
         let [AgentEvent::ApprovalRequested(request)] = asked.as_slice() else {
             panic!("expected one approval request, got {asked:?}");
@@ -6927,7 +6928,7 @@ mod tests {
 
         let notification = feed(
             &mut m,
-            r#"{"type":"system","subtype":"task_notification","task_id":"ae5779035aeb8a94d","tool_use_id":"toolu_agent","status":"completed","output_file":"/tmp/ae5779035aeb8a94d.output","summary":"SUB_DONE"}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"a0000000000000012","tool_use_id":"toolu_agent","status":"completed","output_file":"/tmp/a0000000000000012.output","summary":"SUB_DONE"}"#,
         );
         assert!(
             !notification
@@ -6945,7 +6946,7 @@ mod tests {
         m.start_turn();
         let done = feed(
             &mut m,
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"DONE","origin":{"kind":"task-notification","producer":"session-task","runId":"0mvctgbkr-7639c0ca"}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"DONE","origin":{"kind":"task-notification","producer":"session-task","runId":"000000005-00000000"}}"#,
         );
         turn_completed_after_count(&done, 0);
     }
@@ -7356,14 +7357,14 @@ mod tests {
                 }
                 if let AgentEvent::ApprovalRequested(request) = &event {
                     approvals += 1;
-                    assert_eq!(request.id, "221a98ab-3314-470d-89e0-0528a9e8d75f");
+                    assert_eq!(request.id, "00000000-0000-4000-8000-000000000047");
                     assert!(turn_id.is_some());
                     assert_eq!(request.turn_id, turn_id);
                     let ApprovalKind::FileChange { changes } = &request.kind else {
                         panic!("expected Write approval, got {request:?}");
                     };
                     assert_eq!(changes.len(), 1);
-                    assert_eq!(changes[0].path, "/private/tmp/probe-claude-py/hello.txt");
+                    assert_eq!(changes[0].path, "/home/user/project/hello.txt");
                     assert_eq!(
                         request.reason, None,
                         "the frame says what the tool does, not why it asks"
@@ -7380,11 +7381,11 @@ mod tests {
                             "type": "control_response",
                             "response": {
                                 "subtype": "success",
-                                "request_id": "221a98ab-3314-470d-89e0-0528a9e8d75f",
+                                "request_id": "00000000-0000-4000-8000-000000000047",
                                 "response": {
                                     "behavior": "allow",
                                     "updatedInput": {
-                                        "file_path": "/private/tmp/probe-claude-py/hello.txt",
+                                        "file_path": "/home/user/project/hello.txt",
                                         "content": "hi\n",
                                     },
                                 },
@@ -7425,7 +7426,7 @@ mod tests {
             })
             .collect();
         let expected = [FileChange {
-            path: "/private/tmp/probe-claude-py/hello.txt".into(),
+            path: "/home/user/project/hello.txt".into(),
             kind: FileChangeKind::Create,
             diff: Some("+hi".into()),
         }];
@@ -7434,13 +7435,13 @@ mod tests {
             vec![
                 (
                     "started",
-                    "toolu_01E6rT4J5qJva9HnEfBx5top",
+                    "toolu_010000000000000000000019",
                     ItemStatus::InProgress,
                     expected.as_slice()
                 ),
                 (
                     "completed",
-                    "toolu_01E6rT4J5qJva9HnEfBx5top",
+                    "toolu_010000000000000000000019",
                     ItemStatus::Completed,
                     expected.as_slice()
                 ),
@@ -7481,7 +7482,7 @@ mod tests {
     /// the transcript tail's last flush.
     #[test]
     fn subagent_fixture_maps_lifecycle_and_parented_activity() {
-        const SPAWN: &str = "toolu_018ti8UQiJ6xqBmKf5gTsp1d";
+        const SPAWN: &str = "toolu_010000000000000000000007";
         let trace = include_str!("../tests/fixtures/claude/subagent_handback_trace.jsonl");
         let mut mapper = Mapper::new();
         let mut events = Vec::new();
@@ -7551,7 +7552,7 @@ mod tests {
     /// reopen it.
     #[test]
     fn background_subagent_terminal_waits_for_tail_flush_and_dedupes_feeds() {
-        const SPAWN: &str = "toolu_01BXJLqzyGgqst9idkvgU4Mw";
+        const SPAWN: &str = "toolu_010000000000000000000002";
         let trace =
             include_str!("../tests/fixtures/claude/subagent_handback_background_trace.jsonl");
         let mut mapper = Mapper::new();
@@ -7576,7 +7577,7 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::ToolCall { status: ItemStatus::Completed, .. }, .. })
-                if *id == format!("{SPAWN}:toolu_01T4uuAGaM12YCPm6kBnYvH5")
+                if *id == format!("{SPAWN}:toolu_010000000000000000000003")
         )));
 
         // The tail maps the same child records a second time.
@@ -7870,7 +7871,7 @@ mod tests {
         let trace = include_str!("../tests/fixtures/claude/subagent_handback_trace.jsonl");
         let events = replay_subagent_trace(trace.lines());
         assert_eq!(
-            settled_summary(&events, "toolu_018ti8UQiJ6xqBmKf5gTsp1d").as_deref(),
+            settled_summary(&events, "toolu_010000000000000000000007").as_deref(),
             Some("PONG-FG-REPORT\nsecond-line")
         );
         assert_no_handback_note(&events);
@@ -7882,7 +7883,7 @@ mod tests {
             include_str!("../tests/fixtures/claude/subagent_handback_background_trace.jsonl");
         let events = replay_subagent_trace(trace.lines());
         assert_eq!(
-            settled_summary(&events, "toolu_01BXJLqzyGgqst9idkvgU4Mw").as_deref(),
+            settled_summary(&events, "toolu_010000000000000000000002").as_deref(),
             Some("PONG-BG-REPORT")
         );
         assert_no_handback_note(&events);
@@ -7895,11 +7896,11 @@ mod tests {
         let trace = include_str!("../tests/fixtures/claude/subagent_handback_nested_trace.jsonl");
         let events = replay_subagent_trace(trace.lines());
         assert_eq!(
-            settled_summary(&events, "toolu_016TdmuRUJr9k29RQGwWCy15").as_deref(),
+            settled_summary(&events, "toolu_010000000000000000000005").as_deref(),
             Some("PONG-INNER-REPORT")
         );
         assert_eq!(
-            settled_summary(&events, "toolu_013VQTQyj7vJ4uRuHAC4KupS").as_deref(),
+            settled_summary(&events, "toolu_010000000000000000000004").as_deref(),
             Some("PONG-OUTER-REPORT")
         );
         assert_no_handback_note(&events);
@@ -7910,7 +7911,7 @@ mod tests {
         let trace = include_str!("../tests/fixtures/claude/subagent_withheld_trace.jsonl");
         let events = replay_subagent_trace(trace.lines());
         assert_eq!(
-            settled_summary(&events, "toolu_01EV4e7BpxB6KFymEFQVWcYf"),
+            settled_summary(&events, "toolu_010000000000000000000013"),
             None
         );
         assert_no_handback_note(&events);
@@ -7921,11 +7922,11 @@ mod tests {
         let trace = include_str!("../tests/fixtures/claude/subagent_withheld_nested_trace.jsonl");
         let events = replay_subagent_trace(trace.lines());
         assert_eq!(
-            settled_summary(&events, "toolu_015Cfy34pCnu1nyFgoJWpV6c"),
+            settled_summary(&events, "toolu_010000000000000000000011"),
             None
         );
         assert_eq!(
-            settled_summary(&events, "toolu_019EPWayHRRkcGs1fKMrydKv").as_deref(),
+            settled_summary(&events, "toolu_010000000000000000000010").as_deref(),
             Some("OUTER-REPORT")
         );
         assert_no_handback_note(&events);
@@ -7938,7 +7939,7 @@ mod tests {
         let trace = include_str!("../tests/fixtures/claude/subagent_text_end_trace.jsonl");
         let events = replay_subagent_trace(trace.lines());
         assert_eq!(
-            settled_summary(&events, "toolu_01Y1QieQFWmLquSD4EMDRfdg").as_deref(),
+            settled_summary(&events, "toolu_010000000000000000000009").as_deref(),
             Some("PONG-FG-REPORT")
         );
     }
@@ -7955,7 +7956,7 @@ mod tests {
             );
         let events = replay_subagent_trace(trace.lines());
         assert_eq!(
-            settled_summary(&events, "toolu_018ti8UQiJ6xqBmKf5gTsp1d").as_deref(),
+            settled_summary(&events, "toolu_010000000000000000000007").as_deref(),
             Some("SECURITY WARNING\n\nPONG-FG-REPORT\nsecond-line")
         );
     }
