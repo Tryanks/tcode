@@ -65,7 +65,6 @@ const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 /// How long a part drawn here takes to cross-fade to another of its states.
 const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
-const RECENT_LIMIT: usize = 15;
 const ROW_HEIGHT: f32 = 32.;
 /// The list keeps one height while it is filtered, so the dialog does not jump.
 const LIST_HEIGHT: f32 = 340.;
@@ -382,14 +381,7 @@ impl AddProjectDialog {
             && !recent.dirs.is_empty()
         {
             recents_from = Some(rows.len());
-            rows.extend(
-                recent
-                    .dirs
-                    .iter()
-                    .take(RECENT_LIMIT)
-                    .cloned()
-                    .map(Row::Recent),
-            );
+            rows.extend(recent.dirs.iter().cloned().map(Row::Recent));
         }
         let folders_from = rows.len();
         let answer = self.folders.answer_for(&directory);
