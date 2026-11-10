@@ -229,9 +229,7 @@ impl AppState {
                 message,
                 attachments,
                 isolate: false,
-            }) => {
-                Answer::Now(self.finish_start_thread(caller, *meta, message, attachments, None, cx))
-            }
+            }) => Answer::Now(self.finish_start_thread(caller, *meta, message, attachments, cx)),
             Ok(StartPlan::Install {
                 mut meta,
                 message,
@@ -243,13 +241,13 @@ impl AppState {
                 let data_dir = self.store.root().clone();
                 Answer::Later(cx.spawn_background(async move {
                     let (path, child_id) = (meta.cwd.clone(), meta.id.clone());
-                    let (cwd, worktree, warning) = host_cx
+                    let (cwd, worktree) = host_cx
                         .unblock(move || resolve_child_worktree(path, &child_id, &data_dir))
-                        .await;
+                        .await?;
                     meta.cwd = cwd;
-                    meta.worktree = worktree;
+                    meta.worktree = Some(worktree);
                     finish_on_host(host_cx, move |state, cx| {
-                        state.finish_start_thread(&caller, *meta, message, attachments, warning, cx)
+                        state.finish_start_thread(&caller, *meta, message, attachments, cx)
                     })
                     .await
                 }))
@@ -418,7 +416,6 @@ impl AppState {
         meta: SessionMeta,
         message: String,
         attachments: Vec<Attachment>,
-        warning: Option<String>,
         cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
         // A worktree is made off the host thread: a retry or the caller's archive may have
@@ -444,7 +441,7 @@ impl AppState {
                 .worktree
                 .as_ref()
                 .map(|worktree| worktree.branch.clone()),
-            warning,
+            warning: None,
         };
         let id = if meta.is_dispatched() {
             self.install_subagent(meta, message, attachments, cx)
