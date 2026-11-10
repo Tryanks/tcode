@@ -514,14 +514,16 @@ impl SessionActor for PiActor {
                 request_id,
                 answers,
             } => {
-                let Some(response) = take_extension_dialog_response(
+                let answered = answer_dialog(
+                    &mut self.stdin,
                     &mut self.pending_dialogs,
-                    &request_id,
-                    &answers,
-                ) else {
-                    return Ok(());
-                };
-                send_json(&mut self.stdin, &response).map_err(|err| err.to_string())?;
+                    request_id,
+                    answers,
+                )
+                .map_err(|err| err.to_string())?;
+                if let Some(event) = answered {
+                    self.events.emit(event).await;
+                }
                 Ok(())
             }
             SessionCommand::Rewind {
@@ -1746,18 +1748,26 @@ fn extension_dialog_question(message: &Value) -> Option<(String, UserInputQuesti
     ))
 }
 
-fn take_extension_dialog_response(
+/// Answer an open extension dialog with the user's value, or dismiss it when
+/// the answer holds none; `None` when `request_id` is not an open dialog.
+fn answer_dialog(
+    writer: &mut impl Write,
     pending_dialogs: &mut HashSet<String>,
-    request_id: &str,
-    answers: &serde_json::Map<String, Value>,
-) -> Option<Value> {
-    if !pending_dialogs.remove(request_id) {
-        return None;
+    request_id: String,
+    answers: serde_json::Map<String, Value>,
+) -> Result<Option<AgentEvent>, AgentError> {
+    if !pending_dialogs.remove(&request_id) {
+        return Ok(None);
     }
-    Some(match answers.get(request_id).and_then(Value::as_str) {
+    let response = match answers.get(&request_id).and_then(Value::as_str) {
         Some(value) => json!({"type":"extension_ui_response","id":request_id,"value":value}),
         None => json!({"type":"extension_ui_response","id":request_id,"cancelled":true}),
-    })
+    };
+    send_json(writer, &response)?;
+    Ok(Some(AgentEvent::UserInputResolved {
+        request_id,
+        answers,
+    }))
 }
 
 fn cancel_pending_dialogs(
@@ -1936,33 +1946,46 @@ mod tests {
             })
         );
 
-        let mut pending = HashSet::from(["dialog".to_owned()]);
-        let answers = serde_json::Map::from_iter([("dialog".into(), json!("custom answer"))]);
-        assert_eq!(
-            take_extension_dialog_response(&mut pending, "dialog", &answers),
-            Some(json!({
-                "type":"extension_ui_response",
-                "id":"dialog",
-                "value":"custom answer"
-            }))
-        );
-        assert!(pending.is_empty());
-
-        for answers in [
-            serde_json::Map::new(),
-            serde_json::Map::from_iter([("dialog".into(), json!(["not", "a string"]))]),
+        for (answer, response) in [
+            (
+                Some(json!("custom answer")),
+                json!({"type":"extension_ui_response","id":"dialog","value":"custom answer"}),
+            ),
+            (
+                None,
+                json!({"type":"extension_ui_response","id":"dialog","cancelled":true}),
+            ),
+            (
+                Some(json!(["not", "a string"])),
+                json!({"type":"extension_ui_response","id":"dialog","cancelled":true}),
+            ),
         ] {
-            pending.insert("dialog".into());
-            assert_eq!(
-                take_extension_dialog_response(&mut pending, "dialog", &answers),
-                Some(json!({
-                    "type":"extension_ui_response",
-                    "id":"dialog",
-                    "cancelled":true
-                }))
+            let mut pending = HashSet::from(["dialog".to_owned()]);
+            let answers =
+                serde_json::Map::from_iter(answer.map(|answer| ("dialog".into(), answer)));
+            let mut output = Vec::new();
+            let resolved =
+                answer_dialog(&mut output, &mut pending, "dialog".into(), answers.clone()).unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&output).unwrap(), response);
+            assert!(
+                matches!(resolved, Some(AgentEvent::UserInputResolved { ref request_id, answers: ref resolved })
+                    if request_id == "dialog" && *resolved == answers),
+                "{resolved:?}"
             );
             assert!(pending.is_empty());
         }
+        let mut output = Vec::new();
+        assert!(
+            answer_dialog(
+                &mut output,
+                &mut HashSet::new(),
+                "dialog".into(),
+                serde_json::Map::new()
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(output.is_empty());
     }
 
     /// The `notify` request of pi 1.5.1's `docs/rpc-extension-ui.md`, whose
