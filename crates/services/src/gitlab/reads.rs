@@ -810,8 +810,7 @@ pub(super) fn remarks(discussions: &[Value]) -> Vec<PullRequestRemark> {
 /// and none at all for a file too large to show or one it collapsed.
 pub(super) fn file(row: &Value) -> Option<PullRequestFile> {
     let path = text(row, "new_path")?;
-    let diff = row["diff"].as_str().unwrap_or_default();
-    let hunks = diff.find("@@").map_or("", |at| &diff[at..]);
+    let hunks = row["diff"].as_str().unwrap_or_default();
     let count = |sign: char| hunks.lines().filter(|line| line.starts_with(sign)).count() as u64;
     let flag = |field: &str| row[field].as_bool() == Some(true);
     Some(PullRequestFile {
@@ -827,7 +826,7 @@ pub(super) fn file(row: &Value) -> Option<PullRequestFile> {
         },
         additions: count('+'),
         deletions: count('-'),
-        patch: if diff.starts_with("Binary files ") {
+        patch: if hunks.starts_with("Binary files ") {
             PullRequestPatch::Binary
         } else if hunks.is_empty() && flag("too_large") {
             PullRequestPatch::Oversized
