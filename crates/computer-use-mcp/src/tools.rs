@@ -321,7 +321,7 @@ impl ComputerUseTools {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
         };
-        let depth = params.depth.unwrap_or(3).min(12) as usize;
+        let depth = params.depth.unwrap_or(3) as usize;
         let expanded = match outline::render_expanded(&observation.tree, &params.r#ref, depth) {
             Ok(expanded) => expanded,
             Err(error) => return tool_error(&error),
