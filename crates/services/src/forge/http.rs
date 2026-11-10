@@ -187,7 +187,7 @@ pub(crate) fn run_cli(
         .kill_on_drop(true);
     let mut child = command.spawn().ok()?;
     let stdin = child.stdin.take();
-    let stdout = child.stdout.take()?;
+    let mut stdout = child.stdout.take()?;
     futures_lite::future::block_on(smol::future::race(
         async {
             if let (Some(mut stdin), Some(input)) = (stdin, input) {
@@ -195,11 +195,7 @@ pub(crate) fn run_cli(
                 drop(stdin);
             }
             let mut bytes = Vec::new();
-            stdout
-                .take(1024 * 1024)
-                .read_to_end(&mut bytes)
-                .await
-                .ok()?;
+            stdout.read_to_end(&mut bytes).await.ok()?;
             let status = child.status().await.ok()?;
             (status.success() || !success).then_some(())?;
             String::from_utf8(bytes).ok()

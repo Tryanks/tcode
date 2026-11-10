@@ -272,18 +272,14 @@ impl Credentials {
                 CredentialError::CliFailed
             }
         })?;
-        let stdout = child.stdout.take().ok_or(CredentialError::CliFailed)?;
+        let mut stdout = child.stdout.take().ok_or(CredentialError::CliFailed)?;
         futures_lite::future::block_on(smol::future::race(
             async {
                 let mut bytes = Vec::new();
                 stdout
-                    .take(1024 * 1024 + 1)
                     .read_to_end(&mut bytes)
                     .await
                     .map_err(|_| CredentialError::CliFailed)?;
-                if bytes.len() > 1024 * 1024 {
-                    return Err(CredentialError::CliFailed);
-                }
                 if !child
                     .status()
                     .await
