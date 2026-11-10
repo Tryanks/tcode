@@ -17,9 +17,6 @@ const QUIET_REREAD: Duration = Duration::from_secs(10 * 60);
 /// With a host fingerprint, how long until the activity is read again anyway: the fingerprint
 /// does not see edits to comments inside review threads.
 const FINGERPRINT_REREAD: Duration = Duration::from_secs(30 * 60);
-/// How long mergeability the host is still working out keeps a pull request read every pass;
-/// past it the host's answer is not coming soon, and the usual cadence resumes.
-const PENDING_MERGEABILITY: Duration = Duration::from_secs(10 * 60);
 const GROUP_CONCURRENCY: usize = 4;
 
 /// Watch progress and pagination caches remain independent per project and pull request.
@@ -32,24 +29,11 @@ pub(super) struct LastRead {
     snapshot: String,
     /// A check was still running, so the detail can move unannounced.
     checks_running: bool,
-    /// The head whose mergeability the host was still working out, and since when.
-    pending: Option<(Option<String>, Instant)>,
     remarks_complete: bool,
     /// The watch generations this read evaluated; one started since takes a full first look.
     watches: HashSet<(String, String)>,
     status: Option<String>,
     remarks: Option<String>,
-}
-
-impl LastRead {
-    /// Whether the detail can move unannounced: a check is running, or the host has not yet
-    /// worked out mergeability for long. A host that cannot work it out at all moves nothing.
-    fn in_flight(&self, now: Instant) -> bool {
-        self.checks_running
-            || self.pending.as_ref().is_some_and(|(_, since)| {
-                now.saturating_duration_since(*since) < PENDING_MERGEABILITY
-            })
-    }
 }
 
 pub(super) struct WatchRuntime {
@@ -129,7 +113,7 @@ fn rate_limited(error: &ForgeError) -> bool {
 
 /// Which reads a pass makes for one pull request. With a host fingerprint the detail is read
 /// when anything moved or a check is still running, the activity only when the remarks moved;
-/// without one, both whenever the sync snapshot moved or something is in flight.
+/// without one, both whenever the sync snapshot moved or a check is still running.
 fn plan(
     group: &Group,
     last: Option<&LastRead>,
@@ -151,7 +135,7 @@ fn plan(
     };
     let elapsed = now.saturating_duration_since(last.at);
     let Some(fingerprint) = fingerprint else {
-        let read = last.in_flight(now)
+        let read = last.checks_running
             || !last.remarks_complete
             || last.snapshot != group.snapshot
             || elapsed >= QUIET_REREAD;
@@ -168,7 +152,7 @@ fn plan(
     Plan {
         detail: activity
             || last.status.as_ref() != Some(&fingerprint.status)
-            || last.in_flight(now),
+            || last.checks_running,
         activity,
         reread_tails,
     }
@@ -561,13 +545,6 @@ impl AppState {
                 .checks
                 .iter()
                 .any(|check| check.status == watch::CheckStatus::Pending),
-            pending: (detail.mergeability == pull_request::Mergeability::Pending).then(|| {
-                let since = previous
-                    .and_then(|last| last.pending.as_ref())
-                    .filter(|(head, _)| *head == detail.head_sha)
-                    .map_or(now, |(_, since)| *since);
-                (detail.head_sha.clone(), since)
-            }),
             remarks_complete: if plan.activity {
                 remarks.is_some()
             } else {
