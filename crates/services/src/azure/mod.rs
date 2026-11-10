@@ -249,12 +249,9 @@ impl Azure {
                 reads
                     .into_iter()
                     .map(|handle| {
-                        handle.join().unwrap_or_else(|_| {
-                            Err(error(
-                                ForgeErrorKind::Uncertain,
-                                "Azure DevOps diff unbuilt",
-                            ))
-                        })
+                        handle
+                            .join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
                     })
                     .collect()
             });
