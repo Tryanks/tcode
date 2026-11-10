@@ -20,8 +20,6 @@ pub(super) const HOST_DEADLINE: Duration = Duration::from_secs(30);
 
 /// A log line the test process emitted.
 pub(super) struct LogLine {
-    pub(super) level: log::Level,
-    pub(super) target: String,
     pub(super) text: String,
 }
 
@@ -40,8 +38,6 @@ pub(super) fn captured_log() -> std::sync::MutexGuard<'static, Vec<LogLine>> {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(LogLine {
-                        level: record.level(),
-                        target: record.target().to_owned(),
                         text: record.args().to_string(),
                     });
             }
