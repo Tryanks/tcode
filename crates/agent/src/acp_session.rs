@@ -150,6 +150,7 @@ pub(crate) trait Dialect: Send + Sync + 'static {
     async fn steer(
         &self,
         session: &Session,
+        session_id: &acp::SessionId,
         request_id: String,
         text: String,
         attachments: Vec<Attachment>,
@@ -188,6 +189,7 @@ pub(crate) trait Dialect: Send + Sync + 'static {
     fn rewind(
         self: Arc<Self>,
         _session: Session,
+        _session_id: acp::SessionId,
         command: SessionCommand,
     ) -> impl Future<Output = Option<AgentEvent>> + Send {
         async move {
@@ -330,11 +332,6 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    /// The established session's id.
-    pub(crate) fn id(&self) -> Option<acp::SessionId> {
-        self.with_state(|state| state.session_id.clone())
-    }
-
     pub(crate) async fn emit(&self, event: AgentEvent) {
         let _ = self.events.send(event).await;
     }
@@ -905,7 +902,6 @@ async fn connected_actor<D: Dialect>(
     let session_id = established.session_id;
     let model = {
         let mut state = state.lock_recover();
-        state.session_id = Some(session_id.clone());
         if let Some(mut descriptor) = crate::permission_control(provider) {
             let id = descriptor_id(&descriptor).to_owned();
             let mut value = opts
@@ -1133,7 +1129,11 @@ async fn handle_command<D: Dialect>(
             request_id,
             text,
             attachments,
-        } => dialect.steer(session, request_id, text, attachments).await,
+        } => {
+            dialect
+                .steer(session, session_id, request_id, text, attachments)
+                .await
+        }
         SessionCommand::SendTurn {
             delivery_id,
             text,
@@ -1244,7 +1244,9 @@ async fn handle_command<D: Dialect>(
         command @ (SessionCommand::Rewind { .. }
         | SessionCommand::PreviewRewind { .. }
         | SessionCommand::UndoRewind { .. }) => {
-            let rewind = dialect.clone().rewind(session.clone(), command);
+            let rewind = dialect
+                .clone()
+                .rewind(session.clone(), session_id.clone(), command);
             let events = events.clone();
             executor
                 .spawn(async move {
@@ -1810,7 +1812,6 @@ struct TextStream {
 /// option state, the agent's terminals and the requests waiting on the user.
 pub(crate) struct State {
     cwd: PathBuf,
-    session_id: Option<acp::SessionId>,
     turn: Option<String>,
     /// True while `session/load` answers, which may replay history first.
     loading: bool,
@@ -1838,7 +1839,6 @@ impl State {
     pub(crate) fn new(cwd: PathBuf) -> Self {
         Self {
             cwd,
-            session_id: None,
             turn: None,
             loading: false,
             tools: HashMap::new(),

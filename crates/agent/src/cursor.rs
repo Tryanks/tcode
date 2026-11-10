@@ -345,6 +345,7 @@ impl Dialect for Cursor {
     async fn steer(
         &self,
         _session: &Session,
+        _session_id: &acp::SessionId,
         _request_id: String,
         _text: String,
         _attachments: Vec<Attachment>,

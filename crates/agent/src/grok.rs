@@ -242,23 +242,21 @@ impl Grok {
         };
         let exit_code = task.get("exit_code").and_then(Value::as_i64);
         let status = if exit_code == Some(0) {
-            "completed"
+            acp::ToolCallStatus::Completed
         } else {
-            "failed"
+            acp::ToolCallStatus::Failed
         };
         let output = task
             .get("output")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let Ok(acp::SessionUpdate::ToolCallUpdate(mut update)) = serde_json::from_value(json!({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": call,
-            "status": status,
-            "content": [{"type": "content", "content": {"type": "text", "text": output}}],
-            "rawOutput": {"type": "Bash", "exit_code": exit_code},
-        })) else {
-            return Vec::new();
-        };
+        let mut update = acp::ToolCallUpdate::new(
+            call,
+            acp::ToolCallUpdateFields::new()
+                .status(status)
+                .content(vec![acp::ToolCallContent::from(output)])
+                .raw_output(json!({"type": "Bash", "exit_code": exit_code})),
+        );
         let shell = prepare_tool_update(&mut update);
         let mut events = state.apply_update(acp::SessionUpdate::ToolCallUpdate(update));
         if let Some(shell) = shell {
@@ -919,13 +917,11 @@ impl Dialect for Grok {
     async fn steer(
         &self,
         session: &Session,
+        session_id: &acp::SessionId,
         request_id: String,
         text: String,
         _attachments: Vec<Attachment>,
     ) {
-        let Some(session_id) = session.id() else {
-            return;
-        };
         self.steers().push_back((text.clone(), request_id.clone()));
         let sent = session
             .connection
@@ -965,12 +961,9 @@ impl Dialect for Grok {
     async fn rewind(
         self: Arc<Self>,
         session: Session,
+        session_id: acp::SessionId,
         command: SessionCommand,
     ) -> Option<AgentEvent> {
-        let Some(session_id) = session.id() else {
-            return command
-                .rewind_refusal(RewindFailure::new(RewindFailureReason::ProcessGone, None));
-        };
         match command {
             SessionCommand::PreviewRewind {
                 checkpoint_id,
