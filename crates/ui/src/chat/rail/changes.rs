@@ -40,12 +40,23 @@ pub(super) fn present(rail: &RailView, cx: &App) -> bool {
     latest(rail, cx).is_some()
 }
 
-/// A turn's changes as the card last copied them, with what they were
-/// copied from.
-type HeldChanges = Rc<RefCell<Option<((usize, usize, usize), Rc<[FileChange]>)>>>;
+/// A turn's changes as the card last copied them, with the turn. The rail
+/// forgets it whenever the thread's entries change ([`forget`]).
+type HeldChanges = Rc<RefCell<Option<(usize, Rc<[FileChange]>)>>>;
 
-/// A turn's changed-line totals, with what they were counted from.
-type Totals = Rc<RefCell<Option<((usize, usize, usize), (u32, u32))>>>;
+/// A turn's changed-line totals, with the turn; forgotten as
+/// [`HeldChanges`] is.
+type Totals = Rc<RefCell<Option<(usize, (u32, u32))>>>;
+
+const HELD: &str = "rail-changes-held";
+const TOTALS: &str = "rail-changes-totals";
+
+/// Drop what the card copied and counted from the thread's entries, which
+/// have changed or are another thread's.
+pub(super) fn forget(rail: &RailView) {
+    rail.motion.forget(HELD);
+    rail.motion.forget(TOTALS);
+}
 
 /// The line the card's header shows beside its title: which turn it is and
 /// how long ago it finished, how many files it changed, whether that is all
@@ -54,7 +65,7 @@ pub(super) fn summary(rail: &RailView, cx: &App) -> Option<SharedString> {
     let turn = latest(rail, cx)?;
     // Counting lines reads every diff, so it is done once per turn and set
     // of diffs rather than every frame the header is drawn.
-    let totals = rail.motion.keep::<Totals>("rail-changes-totals");
+    let totals = rail.motion.keep::<Totals>(TOTALS);
     let store = rail.workspace_store.read(cx);
     let session = rail.session_id.as_deref();
     let (files, partial, ended, (added, deleted)) = store
@@ -63,18 +74,9 @@ pub(super) fn summary(rail: &RailView, cx: &App) -> Option<SharedString> {
             |timeline| {
                 let at = timeline.turns.get(turn)?;
                 let changes = at.changes.as_ref()?;
-                let counted = (
-                    turn,
-                    changes.changes.len(),
-                    changes
-                        .changes
-                        .iter()
-                        .map(|change| change.diff.as_deref().map_or(0, str::len))
-                        .sum(),
-                );
                 let mut totals = totals.borrow_mut();
                 let sums = match *totals {
-                    Some((at, sums)) if at == counted => sums,
+                    Some((at, sums)) if at == turn => sums,
                     _ => {
                         let sums =
                             changes
@@ -84,7 +86,7 @@ pub(super) fn summary(rail: &RailView, cx: &App) -> Option<SharedString> {
                                     let (a, d) = diff_stats(change.diff.as_deref());
                                     (added + a, deleted + d)
                                 });
-                        *totals = Some((counted, sums));
+                        *totals = Some((turn, sums));
                         sums
                     }
                 };
@@ -147,26 +149,18 @@ pub(super) fn body(
                     let session = rail.session_id.as_deref();
                     // The card is drawn every frame, so the turn's changes,
                     // diffs and all, are copied out only when they change.
-                    let held = rail.motion.keep::<HeldChanges>("rail-changes-held");
+                    let held = rail.motion.keep::<HeldChanges>(HELD);
                     let changes = store
                         .with_entries_for(
                             session,
                             |timeline| {
                                 let changes = &timeline.turns.get(turn)?.changes.as_ref()?.changes;
-                                let key = (
-                                    turn,
-                                    changes.len(),
-                                    changes
-                                        .iter()
-                                        .map(|change| change.diff.as_deref().map_or(0, str::len))
-                                        .sum::<usize>(),
-                                );
                                 let mut held = held.borrow_mut();
                                 match &*held {
-                                    Some((at, kept)) if *at == key => Some(kept.clone()),
+                                    Some((at, kept)) if *at == turn => Some(kept.clone()),
                                     _ => {
                                         let kept: Rc<[FileChange]> = changes.clone().into();
-                                        *held = Some((key, kept.clone()));
+                                        *held = Some((turn, kept.clone()));
                                         Some(kept)
                                     }
                                 }
