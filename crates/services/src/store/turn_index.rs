@@ -34,7 +34,6 @@ pub struct TurnIndex {
 struct State {
     boundaries: TurnBoundaries,
     snapshots: TurnSnapshots<u64>,
-    #[serde(default)]
     starts: TurnStarts,
     undecodable: bool,
 }
