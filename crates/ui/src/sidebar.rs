@@ -1794,13 +1794,9 @@ impl SessionsSidebar {
 
     /// Prompt for a directory, then create a project rooted there on `host`.
     fn add_project(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(store) = self.store_of(host) else {
-            return;
-        };
-        if !store.read(cx).scope().is_full() {
-            return;
+        if let Some(store) = self.store_of(host) {
+            crate::add_project_dialog::open(store, window, cx);
         }
-        crate::add_project_dialog::open(store, window, cx);
     }
 
     fn toggle_project(&mut self, project: &ProjectKey, cx: &mut Context<Self>) {
@@ -2600,12 +2596,6 @@ impl SessionsSidebar {
     }
 
     fn on_delete(&mut self, action: &ThreadDelete, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(store) = self.store_of(&action.0.host) else {
-            return;
-        };
-        if !store.read(cx).scope().is_full() {
-            return;
-        }
         let title = self.thread_title(&action.0, cx).unwrap_or_default();
         self.delete_thread(&action.0, &title, window, cx);
     }
@@ -2671,20 +2661,13 @@ impl SessionsSidebar {
         });
     }
 
-    /// The store of a project's host, where this client may change its
-    /// projects.
-    fn full_store_of(&self, project: &ProjectKey, cx: &App) -> Option<Entity<WorkspaceStore>> {
-        self.store_of(&project.host)
-            .filter(|store| store.read(cx).scope().is_full())
-    }
-
     fn on_change_project_icon(
         &mut self,
         action: &ChangeProjectIcon,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(store) = self.full_store_of(&action.0, cx) else {
+        let Some(store) = self.store_of(&action.0.host) else {
             return;
         };
         let project = store.read(cx).project(&action.0.project_id).cloned();
@@ -2699,7 +2682,7 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(store) = self.full_store_of(&action.0, cx) {
+        if let Some(store) = self.store_of(&action.0.host) {
             confirm_remove_project(store, action.0.project_id.clone(), window, cx);
         }
     }
@@ -2792,7 +2775,7 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(store) = self.full_store_of(&action.0, cx) {
+        if let Some(store) = self.store_of(&action.0.host) {
             crate::change_project_root_dialog::open(store, action.0.project_id.clone(), window, cx);
         }
     }
