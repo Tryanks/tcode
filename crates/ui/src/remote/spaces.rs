@@ -2699,7 +2699,8 @@ mod tests {
         let set_pairing = |enabled, cx: &mut TestAppContext| {
             cx.update(|cx| {
                 cx.global::<crate::remote::RemoteController>()
-                    .set_pairing_enabled(enabled)
+                    .hosting(HostingAction::SetEnabled(enabled))
+                    .unwrap();
             })
         };
         set_pairing(false, cx);

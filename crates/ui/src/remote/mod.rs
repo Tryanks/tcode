@@ -2540,7 +2540,9 @@ mod tests {
 
         cx.update(|_, cx| {
             cx.update_global::<RemoteController, _>(|controller, _| {
-                controller.set_pairing_enabled(false)
+                controller
+                    .hosting(tcode_protocol::HostingAction::SetEnabled(false))
+                    .unwrap();
             });
         });
         for width in [1024., 393.] {

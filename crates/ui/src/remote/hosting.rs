@@ -190,17 +190,6 @@ impl RemoteController {
             .is_some_and(TraverseHost::pairing_enabled)
     }
 
-    /// Turning pairing on mints an invitation at once; turning it off drops
-    /// the active one, and paired devices keep working.
-    pub fn set_pairing_enabled(&self, enabled: bool) {
-        if let Some(host) = self.host.as_ref() {
-            host.set_pairing_enabled(enabled);
-            if enabled {
-                host.new_invitation();
-            }
-        }
-    }
-
     /// The active invitation with its remaining lifetime in seconds, or
     /// `None` once it has expired. It carries where this machine is
     /// reachable *now*: an invitation is minted the moment hosting starts,
