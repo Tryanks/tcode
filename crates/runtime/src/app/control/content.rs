@@ -20,8 +20,6 @@ const MAX_HITS: usize = 50;
 /// A matched line longer than this is cut: minified output would otherwise spend the
 /// budget on one hit.
 const HIT_LINE_BYTES: usize = 1024;
-/// After this much read from one thread, reads suggest narrowing instead of paging on.
-const NARROW_HINT_BYTES: usize = 256 * 1024;
 
 fn anchor(thread_id: &str, position: u64) -> String {
     format!("{thread_id}#{position}")
@@ -100,8 +98,6 @@ struct ReadAnswer {
     redacted: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     omitted: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hint: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -500,7 +496,7 @@ impl AppState {
 
     pub(super) fn op_read(
         &mut self,
-        caller: &Caller,
+        _caller: &Caller,
         params: ReadParams,
         cx: &mut HostCx,
     ) -> Answer {
@@ -523,64 +519,9 @@ impl AppState {
             .iter()
             .map(|selection| selection.thread_id.as_str())
             .collect();
-        match self.indexed_logs(&thread_ids, cx) {
-            Logs::Ready(logs) => {
-                let answer = read_answer(&selections, &logs, max_bytes);
-                Answer::Now(self.count_read(&caller.thread_id, &selections, answer))
-            }
-            Logs::Reading(task) => {
-                let caller = caller.thread_id.clone();
-                let host_cx = cx.clone();
-                Answer::Later(cx.spawn_background(async move {
-                    let logs = task.await?;
-                    let answer = read_answer(&selections, &logs, max_bytes);
-                    finish_on_host(host_cx, move |state, _| {
-                        state.count_read(&caller, &selections, answer)
-                    })
-                    .await
-                }))
-            }
-        }
-    }
-
-    /// Add what `answer` shows to what `caller` has read of each thread, and suggest
-    /// narrowing once a thread has been read heavily.
-    fn count_read(
-        &mut self,
-        caller: &str,
-        selections: &[ThreadSelection],
-        mut answer: ReadAnswer,
-    ) -> Result<serde_json::Value, String> {
-        let mut heavy: Vec<&str> = Vec::new();
-        for selection in selections {
-            let read: usize = answer
-                .entries
-                .iter()
-                .filter(|entry| {
-                    parse_anchor(&entry.anchor)
-                        .is_some_and(|(thread_id, _)| thread_id == selection.thread_id)
-                })
-                .map(|entry| entry.text.len())
-                .sum();
-            let total = self
-                .control
-                .content_read
-                .entry((caller.to_owned(), selection.thread_id.clone()))
-                .or_default();
-            *total += read;
-            if *total >= NARROW_HINT_BYTES {
-                heavy.push(&selection.thread_id);
-            }
-        }
-        if !heavy.is_empty() {
-            answer.hint = Some(format!(
-                "You have read over {} KiB of {}; narrow with search or search_in_item \
-                 instead of re-reading history, which refills your context.",
-                NARROW_HINT_BYTES / 1024,
-                heavy.join(", ")
-            ));
-        }
-        to_json(&answer)
+        self.indexed_logs(&thread_ids, cx).answer(cx, move |logs| {
+            to_json(&read_answer(&selections, logs, max_bytes))
+        })
     }
 
     pub(super) fn op_search_in_item(
@@ -635,7 +576,6 @@ fn read_answer(
             entries: Vec::new(),
             redacted: 0,
             omitted: None,
-            hint: None,
         };
         let mut notes = Vec::new();
         let mut remaining = budget;

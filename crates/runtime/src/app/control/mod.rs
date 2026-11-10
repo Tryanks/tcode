@@ -31,9 +31,6 @@ pub(super) struct ControlState {
     review_records: Vec<tcode_core::control::ReviewRecord>,
     /// Answers to recent calls that carried a `request_id`, so a retry does not act twice.
     answered: VecDeque<(String, serde_json::Value)>,
-    /// Bytes each caller has read from each thread since the host started, for the hint to
-    /// narrow the query.
-    content_read: HashMap<(String, String), usize>,
 }
 
 impl ControlState {
@@ -46,7 +43,6 @@ impl ControlState {
             activity: activity.into(),
             review_records,
             answered: VecDeque::new(),
-            content_read: HashMap::new(),
         }
     }
 }
