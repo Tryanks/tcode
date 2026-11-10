@@ -2390,14 +2390,12 @@ impl Actor {
         }
 
         let kind = match method {
-            "item/commandExecution/requestApproval" | "execCommandApproval" => {
-                ApprovalKind::ExecCommand {
-                    command: shell_script(&string_field(params, "command")),
-                    cwd: params.get("cwd").and_then(Value::as_str).map(str::to_owned),
-                    description: None,
-                }
-            }
-            "item/fileChange/requestApproval" | "applyPatchApproval" => ApprovalKind::FileChange {
+            "item/commandExecution/requestApproval" => ApprovalKind::ExecCommand {
+                command: shell_script(&string_field(params, "command")),
+                cwd: params.get("cwd").and_then(Value::as_str).map(str::to_owned),
+                description: None,
+            },
+            "item/fileChange/requestApproval" => ApprovalKind::FileChange {
                 changes: self
                     .items
                     .get(item_id)
@@ -3272,12 +3270,7 @@ fn approval_choices(
         }
         return (choices, replies, json!({"permissions":{}, "scope":"turn"}));
     }
-    let legacy = matches!(method, "execCommandApproval" | "applyPatchApproval");
-    let defaults = if legacy {
-        json!(["approved", "approved_for_session", "denied", "abort"])
-    } else {
-        json!(["accept", "acceptForSession", "decline", "cancel"])
-    };
+    let defaults = json!(["accept", "acceptForSession", "decline", "cancel"]);
     let decisions = params
         .get("availableDecisions")
         .and_then(Value::as_array)
@@ -3286,22 +3279,22 @@ fn approval_choices(
     let mut replies = HashMap::new();
     for (index, decision) in decisions.iter().enumerate() {
         let (id, label, kind) = match decision.as_str() {
-            Some("accept" | "approved") => (
-                decision.as_str().unwrap().to_owned(),
+            Some("accept") => (
+                "accept".to_owned(),
                 "Allow once",
                 ApprovalOptionKind::AllowOnce,
             ),
-            Some("acceptForSession" | "approved_for_session") => (
-                decision.as_str().unwrap().to_owned(),
+            Some("acceptForSession") => (
+                "acceptForSession".to_owned(),
                 "Allow for this session",
                 ApprovalOptionKind::AllowAlways,
             ),
-            Some("decline" | "denied") => (
-                decision.as_str().unwrap().to_owned(),
+            Some("decline") => (
+                "decline".to_owned(),
                 "Decline",
                 ApprovalOptionKind::RejectOnce,
             ),
-            Some("cancel" | "abort") => continue,
+            Some("cancel") => continue,
             _ if decision.get("acceptWithExecpolicyAmendment").is_some() => (
                 format!("decision:{index}"),
                 "Allow and remember this command",
@@ -3335,11 +3328,7 @@ fn approval_choices(
         });
         replies.insert(id, json!({"decision":decision}));
     }
-    (
-        options,
-        replies,
-        json!({"decision":if legacy { "abort" } else { "cancel" }}),
-    )
+    (options, replies, json!({"decision": "cancel"}))
 }
 
 fn auto_review_action_summary(action: &Value) -> String {
