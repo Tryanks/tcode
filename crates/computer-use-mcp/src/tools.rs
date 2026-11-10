@@ -278,10 +278,6 @@ impl ComputerUseTools {
                        Oversized results return a preview and continuation ref for read_text."
     )]
     async fn search_ui(&self, Parameters(params): Parameters<SearchUiParams>) -> CallToolResult {
-        let permissions = permissions();
-        if let Some(result) = permission_gate(permissions, true, false) {
-            return result;
-        }
         let observation = match crate::state::global().lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
@@ -313,10 +309,6 @@ impl ComputerUseTools {
                        Oversized results return a preview and continuation ref for read_text."
     )]
     async fn expand_ui(&self, Parameters(params): Parameters<ExpandUiParams>) -> CallToolResult {
-        let permissions = permissions();
-        if let Some(result) = permission_gate(permissions, true, false) {
-            return result;
-        }
         let observation = match crate::state::global().lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
@@ -339,10 +331,6 @@ impl ComputerUseTools {
                        Oversized results return a preview and continuation ref for read_text."
     )]
     async fn inspect_ui(&self, Parameters(params): Parameters<InspectUiParams>) -> CallToolResult {
-        let permissions = permissions();
-        if let Some(result) = permission_gate(permissions, true, false) {
-            return result;
-        }
         let observation = match crate::state::global().lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
@@ -526,10 +514,6 @@ impl ComputerUseTools {
                        Continue with the returned ref and next offset until eof."
     )]
     async fn read_text(&self, Parameters(params): Parameters<ReadTextParams>) -> CallToolResult {
-        let permissions = permissions();
-        if let Some(result) = permission_gate(permissions, true, false) {
-            return result;
-        }
         let offset = match params.offset.map(usize::try_from).transpose() {
             Ok(offset) => offset,
             Err(_) => return tool_error("offset is too large for this platform"),
