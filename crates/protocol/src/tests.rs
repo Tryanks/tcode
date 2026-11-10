@@ -85,7 +85,7 @@ fn event_envelopes_keep_stored_record_shape_and_optional_request_id() {
         topic: Topic::SessionEvents {
             session_id: "session-1".into(),
         },
-        event: ServerEvent::SessionEvent(SessionEventRecord {
+        event: ServerEvent::SessionEvent(tcode_core::session::StoredEvent {
             origin: None,
             author: None,
             ts: Some(123),

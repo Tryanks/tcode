@@ -16,8 +16,7 @@ use tcode_core::{
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 
-/// Backward-compatible name for the core event record now used directly on
-/// the protocol wire.
+/// Another name for [`StoredEvent`], left while `crates/ui` still uses it.
 pub type SessionEventRecord = StoredEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -34,7 +34,8 @@ use tcode_core::relay::{
     render_relay_transcript,
 };
 use tcode_core::session::{
-    Author, EntryContent, MessageOrigin, ReviewComment, Timeline, append_review_comments_to_prompt,
+    Author, EntryContent, MessageOrigin, ReviewComment, StoredEvent, Timeline,
+    append_review_comments_to_prompt,
 };
 use tcode_core::settings::{
     ChildApprovalMode, EnvVar, FavoriteModel, ProfileSettingsPatch, ProviderProfile,
@@ -50,7 +51,7 @@ use tcode_protocol::{
     ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueryResponse,
     QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
     RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast, ServerEvent,
-    SessionActivity, SessionContentHits, SessionEventRecord, SessionPlan, SessionStatus,
+    SessionActivity, SessionContentHits, SessionPlan, SessionStatus,
     TcodeUpdateStatus, TerminalStatus, ThreadExportFormat, Topic,
 };
 use tcode_services::acp_registry::{

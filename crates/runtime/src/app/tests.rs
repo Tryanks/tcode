@@ -1882,7 +1882,7 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
             message,
             HostMessage::Event(EventEnvelope { request_id: None,
                 topic: Topic::SessionEvents { .. },
-                event: ServerEvent::SessionEvent(SessionEventRecord {
+                event: ServerEvent::SessionEvent(StoredEvent {
                     event: AgentEvent::TurnStarted { turn_id },
                     ..
                 }),
@@ -10349,7 +10349,7 @@ fn a_cursor_is_answered_in_one_reply_that_reaches_the_end_of_the_log() {
     let records = messages
         .iter()
         .enumerate()
-        .map(|(ts, message)| SessionEventRecord {
+        .map(|(ts, message)| StoredEvent {
             origin: None,
             author: None,
             ts: Some(ts as u64),
@@ -10418,8 +10418,8 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
     let store = TestStore::new("history-pages");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(cx, |state, _| {
-        let records: Vec<SessionEventRecord> = (0..2000)
-            .map(|index| SessionEventRecord {
+        let records: Vec<StoredEvent> = (0..2000)
+            .map(|index| StoredEvent {
                 origin: None,
                 author: None,
                 ts: Some(index),
@@ -10510,7 +10510,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
         let mut turn_starts = Vec::new();
         for turn in 0..5u64 {
             turn_starts.push(records.len());
-            records.push(SessionEventRecord {
+            records.push(StoredEvent {
                 origin: None,
                 author: None,
                 ts: Some(turn * 1000),
@@ -10525,7 +10525,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                 }),
                 elided: None,
             });
-            records.push(SessionEventRecord {
+            records.push(StoredEvent {
                 origin: None,
                 author: None,
                 ts: Some(turn * 1000 + 1),
@@ -10535,7 +10535,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                 elided: None,
             });
             for delta in 0..300u64 {
-                records.push(SessionEventRecord {
+                records.push(StoredEvent {
                     origin: None,
                     author: None,
                     ts: Some(turn * 1000 + 2 + delta),
@@ -10547,7 +10547,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                     elided: None,
                 });
             }
-            records.push(SessionEventRecord {
+            records.push(StoredEvent {
                 origin: None,
                 author: None,
                 ts: Some(turn * 1000 + 400),
@@ -10614,7 +10614,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
 
 /// Persist `turns` streamed turns for `id` and return the records as the
 /// store replays them.
-fn persist_streamed_turns(store: &SessionStore, id: &str, turns: u64) -> Vec<SessionEventRecord> {
+fn persist_streamed_turns(store: &SessionStore, id: &str, turns: u64) -> Vec<StoredEvent> {
     for turn in 0..turns {
         let mut events = vec![
             AgentEvent::ItemCompleted(ThreadItem {
@@ -11115,8 +11115,8 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
     );
 }
 
-fn tool_call(id: &str, output: String) -> SessionEventRecord {
-    SessionEventRecord {
+fn tool_call(id: &str, output: String) -> StoredEvent {
+    StoredEvent {
         origin: None,
         author: None,
         ts: Some(1),
@@ -11160,7 +11160,7 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
     }
     let records = vec![
         tool_call("tool", tool_output.clone()),
-        SessionEventRecord {
+        StoredEvent {
             origin: None,
             author: None,
             ts: Some(2),
@@ -11370,7 +11370,7 @@ fn superseded_turn_changes_cross_without_diffs() {
         ))
         .unwrap()
     };
-    let update = |diff: &str| SessionEventRecord {
+    let update = |diff: &str| StoredEvent {
         origin: None,
         author: None,
         ts: Some(1),
@@ -11382,7 +11382,7 @@ fn superseded_turn_changes_cross_without_diffs() {
         elided: None,
     };
     let records = vec![
-        SessionEventRecord {
+        StoredEvent {
             origin: None,
             author: None,
             ts: Some(0),
@@ -11472,7 +11472,7 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
         let window = state.update(cx, |state, cx| {
             for (ts, diff) in [(3, "-a\n+c\n"), (4, "-a\n+d\n")] {
                 state.record_event_for_replica_test("thread", ts, &snapshot(diff), cx);
-                conversation.push(SessionEventRecord {
+                conversation.push(StoredEvent {
                     origin: None,
                     author: None,
                     ts: Some(ts),
@@ -11829,8 +11829,8 @@ fn history_windows_are_byte_budgeted() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("history-window-bytes");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let records: Vec<SessionEventRecord> = (0..200)
-        .map(|index| SessionEventRecord {
+    let records: Vec<StoredEvent> = (0..200)
+        .map(|index| StoredEvent {
             origin: None,
             author: None,
             ts: Some(index),
@@ -11957,7 +11957,7 @@ fn store_writer_commits_a_waiting_delta_on_its_own_and_at_shutdown() {
 }
 
 /// A log as a read of densely numbered rows would load it.
-fn session_log(records: impl IntoIterator<Item = SessionEventRecord>) -> SessionLog {
+fn session_log(records: impl IntoIterator<Item = StoredEvent>) -> SessionLog {
     let records: Vec<_> = records.into_iter().collect();
     let rows = (0..records.len() as u64).collect();
     SessionLog::new(tcode_services::store::EventLog {
@@ -12047,7 +12047,7 @@ fn history_page(session_id: &str, before: u64) -> tcode_protocol::ClientPayload 
 struct Window {
     from: u64,
     end: u64,
-    records: Vec<SessionEventRecord>,
+    records: Vec<StoredEvent>,
     total: u64,
     total_turns: u64,
 }
@@ -12579,9 +12579,8 @@ fn message_origins_survive_queue_acknowledgement_and_callback_steering() {
             .collect::<Vec<_>>(),
         [Some(MessageOrigin::Human), Some(MessageOrigin::Agent), None]
     );
-    let fold = |record: &SessionEventRecord| {
-        tcode_core::settlement::ThreadActivity::fold_stored([record], false)
-    };
+    let fold =
+        |record: &StoredEvent| tcode_core::settlement::ThreadActivity::fold_stored([record], false);
     assert_eq!(fold(messages[1]).last_human_message_at, None);
     assert_eq!(
         fold(messages[2]).last_human_message_at,

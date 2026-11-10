@@ -80,11 +80,11 @@ const HISTORY_PREVIEW_CACHE_BYTES: usize = 16 * 1024;
 /// A record as clients receive it: tool and command output beyond
 /// [`OUTPUT_PREVIEW_BYTES`] stays on the host, read back with
 /// `Query::ReadItemOutput`.
-pub(super) fn wire_record(record: &SessionEventRecord) -> Cow<'_, SessionEventRecord> {
+pub(super) fn wire_record(record: &StoredEvent) -> Cow<'_, StoredEvent> {
     let Some((event, elided)) = wire_event(&record.event) else {
         return Cow::Borrowed(record);
     };
-    Cow::Owned(SessionEventRecord {
+    Cow::Owned(StoredEvent {
         origin: record.origin,
         author: record.author.clone(),
         ts: record.ts,
@@ -219,7 +219,7 @@ pub(super) fn append_projection(
     if bytes < HISTORY_PREVIEW_CACHE_BYTES || !oversized_output(event) {
         return None;
     }
-    let record = SessionEventRecord {
+    let record = StoredEvent {
         origin,
         author: author.cloned(),
         ts: Some(ts),
@@ -252,7 +252,7 @@ fn wire_image(image: &agent::Attachment) -> agent::Attachment {
 /// The records that stand for the log cursors in `range`.
 struct Window {
     range: Range<usize>,
-    records: Vec<SessionEventRecord>,
+    records: Vec<StoredEvent>,
 }
 
 /// Choose the contiguous cursors a reply covers and the records it sends for
@@ -264,7 +264,7 @@ struct Window {
 /// Consecutive deltas of one item are merged into one, which folds the same
 /// because nothing between them moves the turn.
 fn wire_window(
-    records: &[SessionEventRecord],
+    records: &[StoredEvent],
     requested: Range<usize>,
     backwards: bool,
     overhead: usize,
@@ -305,7 +305,7 @@ fn wire_window(
     } else {
         requested.start..requested.start + count
     };
-    let mut merged: Vec<SessionEventRecord> = Vec::with_capacity(range.len());
+    let mut merged: Vec<StoredEvent> = Vec::with_capacity(range.len());
     for index in range.clone() {
         let record = &records[index];
         if let AgentEvent::Delta {
@@ -355,7 +355,7 @@ fn wire_window(
 /// Cursors are row positions. A blank or undecodable row holds no record, so
 /// a range of cursors can hold fewer records than it spans.
 struct LogView<'a> {
-    records: &'a [SessionEventRecord],
+    records: &'a [StoredEvent],
     /// Lower cursor covered by this read, including blank or undecodable rows.
     from: u64,
     /// The row each record is in, ascending.
@@ -526,7 +526,7 @@ const BASELINE_RECORDS: u64 = 400;
 /// diffs, as the store keeps it, so no window sends them.
 #[derive(Clone)]
 pub(super) struct SessionLog {
-    records: Vec<SessionEventRecord>,
+    records: Vec<StoredEvent>,
     retained_bytes: usize,
     /// The stored row each record is in, ascending.
     rows: Vec<u64>,
@@ -568,13 +568,13 @@ impl SessionLog {
     /// Append the record the store is about to append, returning the rows of
     /// the streamed deltas it supersedes. The log keeps them: its fold is the
     /// same either way.
-    pub(super) fn push(&mut self, record: SessionEventRecord) -> Option<SupersededStream<u64>> {
+    pub(super) fn push(&mut self, record: StoredEvent) -> Option<SupersededStream<u64>> {
         let row = self.next_row;
         self.next_row += 1;
         self.push_at(record, row)
     }
 
-    fn push_at(&mut self, record: SessionEventRecord, row: u64) -> Option<SupersededStream<u64>> {
+    fn push_at(&mut self, record: StoredEvent, row: u64) -> Option<SupersededStream<u64>> {
         let index = self.records.len();
         let (change, superseded) =
             self.snapshots
@@ -598,12 +598,12 @@ impl SessionLog {
         self.retained_bytes
     }
 
-    pub(super) fn records(&self) -> &[SessionEventRecord] {
+    pub(super) fn records(&self) -> &[StoredEvent] {
         &self.records
     }
 
     /// The records in rows from `position` on.
-    pub(super) fn records_from(&self, position: u64) -> &[SessionEventRecord] {
+    pub(super) fn records_from(&self, position: u64) -> &[StoredEvent] {
         &self.records[self.rows.partition_point(|row| *row < position)..]
     }
 
@@ -773,7 +773,7 @@ fn whole_output_reply(
 /// the turn index of the whole log so the window is the one the whole log
 /// would give.
 pub(super) struct Tail {
-    records: Vec<SessionEventRecord>,
+    records: Vec<StoredEvent>,
     rows: Vec<u64>,
     from: u64,
     end: u64,
@@ -860,7 +860,7 @@ impl Tail {
 /// rows after that end.
 pub(super) struct Hydration {
     live: bool,
-    pending: Vec<SessionEventRecord>,
+    pending: Vec<StoredEvent>,
     /// Subscription replies, each with the longest line its connection
     /// carries; one without a request id answers no request.
     replies: Vec<(Option<u64>, Subscription, Option<usize>)>,
@@ -1240,12 +1240,7 @@ impl AppState {
     /// Accept a record for a session whose log is not resident. It is held
     /// while the log is read, since its row comes after whatever the read
     /// holds, and sent at once when the log is already live.
-    pub(super) fn hold_record(
-        &mut self,
-        session_id: &str,
-        record: SessionEventRecord,
-        cx: &mut HostCx,
-    ) {
+    pub(super) fn hold_record(&mut self, session_id: &str, record: StoredEvent, cx: &mut HostCx) {
         let hydration = self.hydrate_log(session_id, None, cx);
         let live = hydration.live;
         let wire = live.then(|| wire_record(&record).into_owned());

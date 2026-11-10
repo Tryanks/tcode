@@ -239,7 +239,7 @@ pub enum QueryResponse {
     /// Records standing for the log cursors `from..end`, with the same
     /// merging as [`crate::ServerEvent::SessionSnapshot`].
     SessionHistoryPage {
-        records: Vec<crate::SessionEventRecord>,
+        records: Vec<tcode_core::session::StoredEvent>,
         from: u64,
         end: u64,
         truncated: bool,
