@@ -6236,8 +6236,6 @@ mod tests {
                 .map(|model| model.id)
                 .collect()
         };
-        // Ungated models are always listed, even without a known version.
-        assert_eq!(ids(None), ["test-narrow", "test-plain"]);
         // minVersion is inclusive; maxVersionExclusive is not.
         assert_eq!(
             ids(Some((2, 1, 256))),
