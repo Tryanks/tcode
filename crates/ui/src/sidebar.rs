@@ -9999,7 +9999,8 @@ mod tests {
         });
         cx.update(|_, cx| cx.set_reduce_motion(false));
         cx.simulate_resize(size(px(393.), px(700.)));
-        // Wheels down until the list stops moving: its foot.
+        // Wheels down, a frame drawn after each turn, until the list stops
+        // moving: its foot.
         let scroll_down = |list: &ListState, cx: &mut VisualTestContext| {
             let position = gpui::point(px(196.), px(400.));
             cx.simulate_mouse_move(position, None, gpui::Modifiers::default());
@@ -10010,7 +10011,7 @@ mod tests {
                     delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-2000.))),
                     ..Default::default()
                 });
-                crate::test_frames::draw_settled(cx);
+                crate::test_frames::draw(cx);
                 if list.logical_scroll_top() == top {
                     return;
                 }
