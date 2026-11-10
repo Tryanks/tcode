@@ -698,7 +698,7 @@ fn status_detail(
         manifest_value.push(
             crate::tr!(
                 "remote.traverse.status.fetched",
-                time = crate::time::humanize_ago(crate::time::now_secs().saturating_sub(fetched))
+                time = crate::time::humanize_ago(crate::time::now_secs(cx).saturating_sub(fetched))
             )
             .into_owned(),
         );

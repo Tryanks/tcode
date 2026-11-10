@@ -2313,7 +2313,7 @@ impl AppShell {
             // transaction so it cannot restore a pre-migration address.
             client
                 .host()
-                .stamp_connected(&host.host_id, crate::time::now_secs());
+                .stamp_connected(&host.host_id, crate::time::now_secs(cx));
         }
     }
 
@@ -10201,7 +10201,7 @@ pub(crate) mod tests {
         status.activity.turn_running = true;
         status.running_turn = Some(tcode_core::session::RunningTurn {
             turn: 1,
-            started_at: Some(crate::time::now_millis()),
+            started_at: Some(cx.update(|_, cx| crate::time::now_millis(cx))),
         });
         send_events(
             &host,

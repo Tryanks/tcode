@@ -338,7 +338,7 @@ pub(in crate::chat) fn controls(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let now = crate::time::now_millis();
+    let now = crate::time::now_millis(cx);
     let standing = Standing::of(row, now);
     wake_when_unanswered(row, place, now, window, cx);
     let task = &row.task;
@@ -467,7 +467,7 @@ fn row(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let standing = Standing::of(row, crate::time::now_millis());
+    let standing = Standing::of(row, crate::time::now_millis(cx));
     let task = &row.task;
     let id = task.id.clone();
     let key = format!("{}-bg-{}", place.key, id);

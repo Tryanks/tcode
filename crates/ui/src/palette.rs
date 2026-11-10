@@ -1153,7 +1153,7 @@ impl CommandPalette {
                                 .items_center()
                                 .text_secondary(compact, cx)
                                 .when_some(item.updated_at, |this, at| {
-                                    let ago = now_secs().saturating_sub(at);
+                                    let ago = now_secs(cx).saturating_sub(at);
                                     this.child(div().child(humanize_ago(ago)))
                                 })
                                 .child(profile_glyph(
@@ -1278,7 +1278,7 @@ impl CommandPalette {
                         div()
                             .flex_none()
                             .text_secondary(compact, cx)
-                            .child(humanize_ago(now_secs().saturating_sub(at))),
+                            .child(humanize_ago(now_secs(cx).saturating_sub(at))),
                     )
                 })
                 .child(div().flex_none().w(px(16.)).when(item.current, |mark| {

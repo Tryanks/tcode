@@ -237,7 +237,7 @@ impl PullRequestView {
                 .reviewer_candidates()
                 .map(|reviewers| (reviewers.complete, reviewer_rows(reviewers))),
         };
-        self.read(read, answer, cx, move |page, result| {
+        self.read(read, answer, cx, move |page, result, _| {
             let Some(picker) = page
                 .writes
                 .picker

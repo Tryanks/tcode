@@ -236,18 +236,14 @@ pub struct PullRequestView {
 /// The busy mark of a lifecycle write in flight.
 const LIFECYCLE: &str = "lifecycle";
 
-pub(super) fn now() -> u64 {
-    tcode_core::project::now_secs()
+pub(super) fn ago(seconds: u64, cx: &App) -> String {
+    crate::time::humanize_ago(crate::time::now_secs(cx).saturating_sub(seconds))
 }
 
-pub(super) fn ago(seconds: u64) -> String {
-    crate::time::humanize_ago(now().saturating_sub(seconds))
-}
-
-pub(super) fn ago_rfc3339(stamp: &str) -> Option<String> {
+pub(super) fn ago_rfc3339(stamp: &str, cx: &App) -> Option<String> {
     chrono::DateTime::parse_from_rfc3339(stamp)
         .ok()
-        .map(|time| ago(time.timestamp().max(0) as u64))
+        .map(|time| ago(time.timestamp().max(0) as u64, cx))
 }
 
 /// The host's reason, as it gave it.
@@ -419,7 +415,7 @@ impl PullRequestView {
         read: PullRequestRead,
         answer: impl FnOnce(PullRequestReadResponse) -> Option<T> + 'static,
         cx: &mut Context<Self>,
-        land: impl FnOnce(&mut PullRequestPage, Result<(T, u64), ProtocolError>) + 'static,
+        land: impl FnOnce(&mut PullRequestPage, Result<(T, u64), ProtocolError>, u64) + 'static,
     ) {
         if let Some(current) = self.current.clone() {
             self.read_of(current, read, answer, cx, land);
@@ -432,7 +428,7 @@ impl PullRequestView {
         read: PullRequestRead,
         answer: impl FnOnce(PullRequestReadResponse) -> Option<T> + 'static,
         cx: &mut Context<Self>,
-        land: impl FnOnce(&mut PullRequestPage, Result<(T, u64), ProtocolError>) + 'static,
+        land: impl FnOnce(&mut PullRequestPage, Result<(T, u64), ProtocolError>, u64) + 'static,
     ) {
         let task = self.store.update(cx, |store, cx| {
             store.read_pull_request(session.clone(), key.clone(), read, answer, cx)
@@ -440,8 +436,9 @@ impl PullRequestView {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
+                let at = crate::time::now_secs(cx);
                 if let Some(page) = this.pages.get_mut(&(session, key)) {
-                    land(page, result);
+                    land(page, result, at);
                 }
                 cx.notify();
             });
@@ -456,14 +453,14 @@ impl PullRequestView {
             PullRequestRead::Files { cursor: None },
             PullRequestReadResponse::files,
             cx,
-            |page, result| {
+            |page, result, at| {
                 page.files.loading = false;
                 page.refreshing = false;
                 match result {
                     Ok((files, expires_at)) => {
                         page.files.expires_at = expires_at;
                         page.files.error = None;
-                        page.files.loaded_at = now();
+                        page.files.loaded_at = at;
                         // A re-read answers page 1 only: the pages read after it, the scroll and the
                         // completeness stay while the revisions and page 1 are what they were.
                         let restart = std::mem::take(&mut page.restart_files);
@@ -503,7 +500,7 @@ impl PullRequestView {
             PullRequestRead::Files { cursor: Some(next) },
             PullRequestReadResponse::files,
             cx,
-            move |page, result| {
+            move |page, result, _| {
                 page.files_view.page_loading = false;
                 match result {
                     Ok((more, _)) => {
@@ -532,14 +529,14 @@ impl PullRequestView {
             PullRequestRead::Conversation,
             PullRequestReadResponse::conversation,
             cx,
-            |page, result| {
+            |page, result, at| {
                 page.conversation.loading = false;
                 page.refreshing = false;
                 match result {
                     Ok((conversation, expires_at)) => {
                         page.conversation.expires_at = expires_at;
                         page.conversation.error = None;
-                        page.conversation.loaded_at = now();
+                        page.conversation.loaded_at = at;
                         let account_changed = page
                             .conversation
                             .data
@@ -573,13 +570,13 @@ impl PullRequestView {
             PullRequestRead::ViewedFiles,
             PullRequestReadResponse::viewed_files,
             cx,
-            |page, result| {
+            |page, result, at| {
                 page.viewed.loading = false;
                 match result {
                     Ok((viewed, expires_at)) => {
                         page.viewed.expires_at = expires_at;
                         page.viewed.error = None;
-                        page.viewed.loaded_at = now();
+                        page.viewed.loaded_at = at;
                         page.viewed.data = Some(viewed);
                         // The host's answer now carries every mark already sent.
                         page.viewed_marks
@@ -608,13 +605,13 @@ impl PullRequestView {
             PullRequestRead::ActionState,
             PullRequestReadResponse::action_state,
             cx,
-            |page, result| {
+            |page, result, at| {
                 page.action_state.loading = false;
                 match result {
                     Ok((state, expires_at)) => {
                         page.action_state.expires_at = expires_at;
                         page.action_state.error = None;
-                        page.action_state.loaded_at = now();
+                        page.action_state.loaded_at = at;
                         page.action_state.data = Some(state);
                         // GitHub's state as it now is answers a write that went unanswered.
                         page.writes.waiting = false;
@@ -735,7 +732,7 @@ impl PullRequestView {
             .and_then(|link| link.snapshot)
             .is_some_and(|snapshot| snapshot.state == PullRequestState::Open);
         let Some(page) = self.page_mut() else { return };
-        let now = now();
+        let now = crate::time::now_secs(cx);
         let action_due = open && page.action_state.due(now);
         let action_expires = page.action_state.expires_at;
         let (files_due, conversation_due, viewed_due) = (
@@ -843,8 +840,11 @@ impl PullRequestView {
                     }
                     window.push_notification(
                         Notification::warning(
-                            crate::tr!("pull_requests.detail.refresh_failed", ago = ago(now()))
-                                .into_owned()
+                            crate::tr!(
+                                "pull_requests.detail.refresh_failed",
+                                ago = ago(crate::time::now_secs(cx), cx)
+                            )
+                            .into_owned()
                                 + " "
                                 + &reason(&error),
                         ),
@@ -932,7 +932,7 @@ impl PullRequestView {
                     .font_family(cx.theme().mono_font_family.clone())
                     .child(format!("#{}", key.number))
                     .with_tooltip({
-                        let label = super::number_tooltip(link.as_ref());
+                        let label = super::number_tooltip(link.as_ref(), cx);
                         move |_, _| Tooltip::new(label.clone())
                     }),
             )
@@ -992,7 +992,7 @@ impl PullRequestView {
                         (&snapshot.closed_at, "pull_requests.conversation.closed"),
                     ]
                     .into_iter()
-                    .find_map(|(at, key)| Some((ago_rfc3339(at.as_deref()?)?, key)))
+                    .find_map(|(at, key)| Some((ago_rfc3339(at.as_deref()?, cx)?, key)))
                     .map(|(ago, key)| synced.fade(crate::tr!(key, ago = ago).into_owned())),
                 );
         }
@@ -1844,7 +1844,7 @@ impl PullRequestView {
                 crate::tr!("pull_requests.detail.refreshing", pr = self.noun(cx).pr).into_owned()
             }
             (false, Some(loaded)) => {
-                crate::tr!("pull_requests.detail.refresh", ago = ago(loaded)).into_owned()
+                crate::tr!("pull_requests.detail.refresh", ago = ago(loaded, cx)).into_owned()
             }
             (false, None) => crate::tr!("pull_requests.detail.refresh_unloaded").into_owned(),
         };
@@ -2165,7 +2165,7 @@ impl PullRequestView {
                         .and_then(|link| match link.sync_error {
                             Some(tcode_core::pull_request::PullRequestSyncError::RateLimited {
                                 retry_at,
-                            }) => Some(super::resumes(retry_at)),
+                            }) => Some(super::resumes(retry_at, cx)),
                             _ => None,
                         })
                         .unwrap_or_else(|| crate::tr!("pull_requests.notice_soon").into_owned())
@@ -2233,7 +2233,11 @@ impl PullRequestView {
                 .filter(|(code, _)| code != "pull_request_rate_limited")
         });
         let stale = stale.map(|(_, loaded_at)| {
-            crate::tr!("pull_requests.detail.refresh_failed", ago = ago(loaded_at)).into_owned()
+            crate::tr!(
+                "pull_requests.detail.refresh_failed",
+                ago = ago(loaded_at, cx)
+            )
+            .into_owned()
         });
         if let Some(stale) = kept("stale", stale, window, cx) {
             notices.push(notice(
@@ -2543,6 +2547,11 @@ mod tests {
         });
     }
 
+    /// Now by the test's clock, in unix seconds.
+    fn now(cx: &mut VisualTestContext) -> u64 {
+        cx.update(|_, cx| crate::time::now_secs(cx))
+    }
+
     struct Mounted<'a> {
         view: Entity<PullRequestView>,
         requests: async_channel::Receiver<String>,
@@ -2751,7 +2760,7 @@ mod tests {
             _pump,
             cx,
         } = mount(cx);
-        let later = now() + 3600;
+        let later = now(cx) + 3600;
         let mut reread = None;
         for (id, read) in reads(&requests) {
             match read {
@@ -2760,7 +2769,7 @@ mod tests {
                     &incoming,
                     id,
                     PullRequestReadResponse::Files(files(0..100, Some("2"))),
-                    now(),
+                    now(cx),
                 ),
                 read => answer_other(&incoming, id, read, later),
             }
@@ -2897,11 +2906,11 @@ mod tests {
                 .collect();
             PullRequestReadResponse::Conversation(Box::new(conversation))
         };
-        let later = now() + 3600;
+        let later = now(cx) + 3600;
         for (id, read) in reads(&requests) {
             match read {
                 // Lands as its expiry passes, so the view reads it again at once.
-                PullRequestRead::Conversation => answer(&incoming, id, with_comments(40), now()),
+                PullRequestRead::Conversation => answer(&incoming, id, with_comments(40), now(cx)),
                 PullRequestRead::Files { cursor: None } => answer(
                     &incoming,
                     id,
@@ -2974,10 +2983,10 @@ mod tests {
                 .collect();
             PullRequestReadResponse::Conversation(Box::new(conversation))
         };
-        let later = now() + 3600;
+        let later = now(cx) + 3600;
         for (id, read) in reads(&requests) {
             match read {
-                PullRequestRead::Conversation => answer(&incoming, id, with_comments(2), now()),
+                PullRequestRead::Conversation => answer(&incoming, id, with_comments(2), now(cx)),
                 PullRequestRead::Files { cursor: None } => answer(
                     &incoming,
                     id,
@@ -3037,7 +3046,7 @@ mod tests {
 
         let before = composer(cx);
         // Lands as its expiry passes, so the view reads it again at once.
-        answer(&incoming, reread(), with_comments(3), now());
+        answer(&incoming, reread(), with_comments(3), now(cx));
         let grown = gradual(&follow(cx), before);
         assert!(grown > before, "the comment took its room");
 
@@ -3063,7 +3072,7 @@ mod tests {
                 _pump,
                 cx,
             } = mount(cx);
-            let later = now() + 3600;
+            let later = now(cx) + 3600;
             for (id, read) in reads(&requests) {
                 let response = match read {
                     PullRequestRead::Conversation => {
@@ -3183,7 +3192,7 @@ mod tests {
             |cx: &mut VisualTestContext| view.read_with(cx, |view, cx| view.files_label(cx));
         assert_eq!(label(cx), "Files");
 
-        let later = now() + 3600;
+        let later = now(cx) + 3600;
         let (id, _) = reads(&requests)
             .into_iter()
             .find(|(_, read)| *read == PullRequestRead::Files { cursor: None })
@@ -3213,7 +3222,7 @@ mod tests {
             _pump,
             cx,
         } = mount(cx);
-        let later = now() + 3600;
+        let later = now(cx) + 3600;
         for (id, read) in reads(&requests) {
             match read {
                 PullRequestRead::Files { cursor: None } => answer(
@@ -3365,11 +3374,11 @@ mod tests {
                 ..conversation()
             }))
         };
-        let later = now() + 3600;
+        let later = now(cx) + 3600;
         for (id, read) in reads(&requests) {
             match read {
                 // Lands as its expiry passes, so the view reads it again at once.
-                PullRequestRead::Conversation => answer(&incoming, id, labelled(&["bug"]), now()),
+                PullRequestRead::Conversation => answer(&incoming, id, labelled(&["bug"]), now(cx)),
                 PullRequestRead::Files { cursor: None } => answer(
                     &incoming,
                     id,
@@ -3416,7 +3425,7 @@ mod tests {
             _pump,
             cx,
         } = mount(cx);
-        let later = now() + 3600;
+        let later = now(cx) + 3600;
         for (id, read) in reads(&requests) {
             match read {
                 PullRequestRead::Files { cursor: None } => answer(

@@ -268,7 +268,7 @@ impl SettingsPage {
         let mut context: Vec<String> = own_project.map(str::to_owned).into_iter().collect();
         context.push(self.store.read(cx).harness_name_of(meta));
         context.push(humanize_ago(
-            now_secs().saturating_sub(request.requested_at),
+            now_secs(cx).saturating_sub(request.requested_at),
         ));
         let respond = |approve: bool| {
             let (session_id, request_id) = (meta.id.clone(), request.id.clone());
@@ -1183,7 +1183,7 @@ impl SettingsPage {
             .into_iter()
             .map(|meta| meta.id)
             .collect();
-        let now_secs = now_secs();
+        let now_secs = now_secs(cx);
         let mut groups = Vec::new();
         for (day, entries) in days {
             // A refresh keeps the entries it found before where they were and

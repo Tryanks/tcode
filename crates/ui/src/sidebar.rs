@@ -4676,7 +4676,7 @@ impl SessionsSidebar {
         let action_id = state.thread.clone();
         let row_key = state.row_key.as_str();
         let settled = meta.is_settled();
-        let ago = humanize_ago(now_secs().saturating_sub(timestamp));
+        let ago = humanize_ago(now_secs(cx).saturating_sub(timestamp));
         let action_on_hover = settled || offers_settle;
         let label = if settled {
             crate::tr!("sidebar.unsettle_tooltip")
@@ -5149,7 +5149,7 @@ impl SessionsSidebar {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) -> Rc<CompactListModel> {
-        let now = now_secs();
+        let now = now_secs(cx);
         let locale = rust_i18n::locale();
         if self.compact_model_dirty
             || self
@@ -8578,12 +8578,13 @@ mod tests {
         )
         .unwrap();
         let project = Project::from_root(root.join("project"));
+        let now = cx.update(|cx| crate::time::now_secs(cx));
         smol::block_on(host.update_state_for_test(move |state, _| {
             state.sessions = (0..60)
                 .map(|index| {
                     let mut meta = session(&format!("scrollbar-{index}"), None);
                     meta.project_id = Some(project.id.clone());
-                    meta.updated_at = now_secs().saturating_sub(index);
+                    meta.updated_at = now.saturating_sub(index);
                     meta
                 })
                 .collect::<Vec<_>>()

@@ -302,7 +302,7 @@ impl TimelineView {
                             match limit_resume_action(
                                 resets_at,
                                 queued_id,
-                                now_secs(),
+                                now_secs(cx),
                                 ends_thread,
                                 queue_empty,
                             ) {

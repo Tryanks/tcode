@@ -351,6 +351,7 @@ fn images(cx: &mut App) -> &mut Images {
 fn answer(source: &Source, window: &mut Window, cx: &mut App) -> Option<Answer> {
     let view = window.current_view();
     let now = cx.background_executor().now();
+    let now_secs = crate::time::now_secs(cx);
     let state = images(cx);
     let after_frame = state.after_frame.clone();
     let entry = state
@@ -366,7 +367,7 @@ fn answer(source: &Source, window: &mut Window, cx: &mut App) -> Option<Answer> 
             Some(_) => entry
                 .expiry
                 .as_ref()
-                .is_some_and(|expiry| expiry.at <= tcode_core::project::now_secs()),
+                .is_some_and(|expiry| expiry.at <= now_secs),
         };
     let read = due && entry.read.is_none();
     if entry.answer.is_none() || read {

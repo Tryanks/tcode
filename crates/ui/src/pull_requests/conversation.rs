@@ -743,7 +743,7 @@ impl PullRequestView {
                 div()
                     .id(SharedString::from(format!("pr-ago-{}", comment.id)))
                     .text_color(muted)
-                    .children(ago_rfc3339(&comment.created_at))
+                    .children(ago_rfc3339(&comment.created_at, cx))
                     .with_tooltip(move |_, _| {
                         let local = chrono::DateTime::parse_from_rfc3339(&created)
                             .map(|time| {
@@ -1241,7 +1241,7 @@ impl PullRequestView {
             },
             PullRequestReadResponse::thread_replies,
             cx,
-            move |page, result| {
+            move |page, result, _| {
                 let replies = page.conversation_view.replies.entry(key).or_default();
                 replies.loading = false;
                 match result {
@@ -1898,7 +1898,7 @@ impl PullRequestView {
                 None => div().into_any_element(),
             },
             Item::Event(state, at) => {
-                let ago = ago_rfc3339(&at).unwrap_or_default();
+                let ago = ago_rfc3339(&at, cx).unwrap_or_default();
                 let (icon, label) = match state {
                     PullRequestState::Merged => (
                         IconName::GitMerge,

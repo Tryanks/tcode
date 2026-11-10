@@ -274,7 +274,7 @@ impl PullRequestView {
             read,
             PullRequestReadResponse::file_text,
             cx,
-            move |page, result| {
+            move |page, result, _| {
                 let state = match result {
                     Ok((PullRequestFileText::Text(text), _)) => {
                         if created {

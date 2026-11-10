@@ -541,7 +541,7 @@ pub(super) fn chip_words(
     operation: &PullRequestStackOperation,
     cx: &App,
 ) -> (IconName, Hsla, String, String) {
-    let ago = super::detail::ago(operation.started_at);
+    let ago = super::detail::ago(operation.started_at, cx);
     match &operation.kind {
         StackOperationKind::Merging {
             layers, adopted, ..
@@ -2194,7 +2194,7 @@ impl Render for MergeStackDialog {
                             theme.warning,
                             tr_with(
                                 "previous_unconfirmed",
-                                &[("ago", super::detail::ago(*started_at))],
+                                &[("ago", super::detail::ago(*started_at, cx))],
                             ),
                         ),
                     ));
@@ -2899,7 +2899,10 @@ fn progress_view(
     if let Some(started) = started_at {
         body = body.child(div().text_secondary(false, cx).child(tr_with(
             "progress_started",
-            &[("ago", super::detail::ago(started)), ("machine", machine)],
+            &[
+                ("ago", super::detail::ago(started, cx)),
+                ("machine", machine),
+            ],
         )));
     }
     let stopped = last.iter().find_map(|layer| match &layer.step {

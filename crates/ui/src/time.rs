@@ -1,13 +1,20 @@
-#[cfg(not(target_family = "wasm"))]
-use std::time::{SystemTime, UNIX_EPOCH};
-#[cfg(target_family = "wasm")]
-use web_time::{SystemTime, UNIX_EPOCH};
+use gpui::{App, BackgroundExecutor};
 
-pub(crate) fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+/// Now, in unix milliseconds, by the clock the executor's timers run on:
+/// the system's in the app, the one a test advances in a test.
+pub(crate) fn executor_millis(executor: &BackgroundExecutor) -> u64 {
+    let now = executor.scheduler_executor().scheduler().clock().utc_now();
+    u64::try_from(now.timestamp_millis()).unwrap_or(0)
+}
+
+/// Now, in unix milliseconds, by the executor's clock.
+pub(crate) fn now_millis(cx: &App) -> u64 {
+    executor_millis(cx.background_executor())
+}
+
+/// Now, in unix seconds, by the executor's clock.
+pub(crate) fn now_secs(cx: &App) -> u64 {
+    now_millis(cx) / 1000
 }
 
 /// Compact countdown: hours retain an hour column, shorter waits use minutes
@@ -60,13 +67,6 @@ pub fn humanize_in(secs: u64) -> String {
     } else {
         crate::tr!("time.in_days", count = secs.div_ceil(86_400)).into_owned()
     }
-}
-
-pub(crate) fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

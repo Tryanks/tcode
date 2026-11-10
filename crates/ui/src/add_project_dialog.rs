@@ -772,7 +772,8 @@ impl AddProjectDialog {
                         .file_name()
                         .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or_else(|| recent.path.display().to_string());
-                    let ago = humanize_ago(now_secs().saturating_sub(recent.last_active_ms / 1000));
+                    let ago =
+                        humanize_ago(now_secs(cx).saturating_sub(recent.last_active_ms / 1000));
                     let count = recent.threads.len();
                     let tag = if count == 1 {
                         crate::tr!("sidebar.recent_import_count_one").into_owned()

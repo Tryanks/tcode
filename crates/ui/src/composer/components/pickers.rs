@@ -2221,7 +2221,7 @@ fn render_context_meter_pane(
             .map(crate::usage::plan_label)
             .unwrap_or_else(|| {
                 let ago = crate::time::humanize_ago(
-                    crate::time::now_secs().saturating_sub(account.fetched_at),
+                    crate::time::now_secs(cx).saturating_sub(account.fetched_at),
                 );
                 crate::tr!("usage.updated", when = ago).into_owned()
             });
@@ -2252,7 +2252,7 @@ fn render_context_meter_pane(
                 ),
             );
         }
-        let now = crate::time::now_secs();
+        let now = crate::time::now_secs(cx);
         for (index, limit) in account.windows.iter().enumerate() {
             let limit_id = |part: &str| glide(&format!("limit-{index}-{part}"));
             let fill = gpui_base::motion::transition(

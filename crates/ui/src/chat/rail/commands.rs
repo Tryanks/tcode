@@ -357,7 +357,7 @@ fn row(
     let standing = line
         .background
         .as_ref()
-        .map(|row| Standing::of(row, crate::time::now_millis()));
+        .map(|row| Standing::of(row, crate::time::now_millis(cx)));
     let ended = standing == Some(Standing::Ended);
     let mark = mark(key, line.mark, ended, window, cx);
     let trailing = match line.mark {
