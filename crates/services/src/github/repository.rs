@@ -71,7 +71,6 @@ pub fn pull_request_url(value: &str) -> Option<(PullRequestKey, String)> {
 }
 
 fn remote(value: &str) -> Option<Repository> {
-    let ssh = value.starts_with("ssh://") || value.starts_with("git@");
     let value = value
         .strip_prefix("ssh://")
         .or_else(|| value.strip_prefix("https://"))
@@ -87,11 +86,6 @@ fn remote(value: &str) -> Option<Repository> {
         value.replacen(':', "/", 1)
     };
     let (host, path) = value.split_once('/')?;
-    let host = if ssh && !host.contains('.') && host.to_ascii_lowercase().contains("github") {
-        "github.com"
-    } else {
-        host
-    };
     if !host
         .to_ascii_lowercase()
         .split('.')
