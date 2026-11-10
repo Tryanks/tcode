@@ -114,7 +114,7 @@ impl Planner {
         }
         match decode_row(bare) {
             Ok(Some(record)) => {
-                let stored = record.into_stored(None);
+                let stored = record;
                 self.drop_diffs.extend(
                     self.snapshots
                         .apply_at(&mut self.fold, stored.ts, &stored.event, position)
@@ -175,7 +175,7 @@ pub(super) fn rewrite(
     let Ok(Some(record)) = decode_row(line) else {
         return Ok(None);
     };
-    let mut stored = record.into_stored(None);
+    let mut stored = record;
     if !change(&mut stored.event) {
         return Ok(None);
     }
@@ -245,7 +245,7 @@ pub(super) fn remove_superseded(
         }
         let line = decoder.bare(&stored)?;
         match decode_row(&line) {
-            Ok(Some(record)) if matches!(&record.stored.event, AgentEvent::Delta { item_id, .. } if item_id == item) =>
+            Ok(Some(record)) if matches!(&record.event, AgentEvent::Delta { item_id, .. } if item_id == item) =>
                 {}
             _ => return Ok(false),
         }

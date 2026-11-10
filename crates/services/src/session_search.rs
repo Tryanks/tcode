@@ -19,7 +19,7 @@ use crate::thread_index::IndexedLog;
 /// The rules entries are extracted by. A change to them, or to what the fold
 /// settles an entry to show, must change this so every thread is extracted
 /// again.
-const EXTRACTION_VERSION: u32 = 2;
+const EXTRACTION_VERSION: u32 = 3;
 
 /// The kind of entry a search hit comes from, as a filter names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -515,25 +515,12 @@ mod tests {
     }
 
     /// A query matches an entry as the entry's text lowercased the Unicode
-    /// way with its whitespace collapsed, whatever is stored to answer it;
-    /// a Codex image generation recorded before it was read as a tool call
-    /// is searched as that call, never as its image.
+    /// way with its whitespace collapsed, whatever is stored to answer it.
     #[test]
     fn a_query_matches_what_the_entry_shows_lowercased() {
         let root = std::env::temp_dir().join(format!("tcode-search-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
         let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
-        let picture = "iVBORw0KGgo".repeat(600);
-        let generation = format!(
-            "{{\"ts\":1,\"event\":{{\"type\":\"item_completed\",\"id\":\"gen\",\"content\":{{\"kind\":\"other\",\"provider_kind\":\"imageGeneration\",\"summary\":{}}}}}}}\n",
-            serde_json::to_string(&json!({"type":"imageGeneration","id":"gen","status":"completed","revisedPrompt":"a red fox","result":picture}).to_string()).unwrap()
-        );
-        store
-            .apply(&[Mutation::replace_event_log(
-                &meta.id,
-                generation.into_bytes(),
-            )])
-            .unwrap();
         for (id, text) in [
             ("ascii", "Fix   the\nLOGIN flow"),
             ("umlaut", "ÄRGER über die Straße"),
@@ -574,8 +561,6 @@ mod tests {
         assert_eq!(hits("STRAßE").len(), 1);
         assert_eq!(hits("İSTANBUL").len(), 1);
         assert_eq!(hits("äbc").len(), 1);
-        assert_eq!(hits("image_generation").len(), 1);
-        assert!(hits(&picture[..40]).is_empty());
         store.close().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }

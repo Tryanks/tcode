@@ -61,7 +61,7 @@ pub fn render_thread(
     match format {
         ThreadExportFormat::Jsonl => render_jsonl(meta, &event_log),
         ThreadExportFormat::Markdown => {
-            let events = parse_event_log(&event_log, meta.provider).map_err(invalid_data)?;
+            let events = parse_event_log(&event_log).map_err(invalid_data)?;
             Ok(render_markdown(meta, &Timeline::fold_events(events)).into_bytes())
         }
     }
@@ -138,8 +138,7 @@ pub(crate) fn read_tcode_export(path: &Path) -> Result<TcodeThreadExport, ReadEx
             header.version
         )));
     }
-    let events =
-        parse_event_log(&event_log, header.meta.provider).map_err(ReadExportError::Invalid)?;
+    let events = parse_event_log(&event_log).map_err(ReadExportError::Invalid)?;
     Ok(TcodeThreadExport {
         meta: header.meta,
         event_log,
@@ -147,20 +146,12 @@ pub(crate) fn read_tcode_export(path: &Path) -> Result<TcodeThreadExport, ReadEx
     })
 }
 
-fn parse_event_log(
-    bytes: &[u8],
-    current_provider: agent::ProviderKind,
-) -> Result<Vec<StoredEvent>, String> {
+fn parse_event_log(bytes: &[u8]) -> Result<Vec<StoredEvent>, String> {
     let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
-    let mut provider = current_provider;
-    let mut events = Vec::new();
-    for line in text.lines().filter(|line| !line.trim().is_empty()).rev() {
-        let record = parse_stored_line(line).map_err(|error| error.to_string())?;
-        provider = record.previous_provider().unwrap_or(provider);
-        events.push(record.into_stored(Some(provider)));
-    }
-    events.reverse();
-    Ok(events)
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| parse_stored_line(line).map_err(|error| error.to_string()))
+        .collect()
 }
 
 /// Render a complete folded timeline without the relay renderer's handoff size

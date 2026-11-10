@@ -124,32 +124,6 @@ impl Source {
         })
     }
 
-    /// The first row in `positions` containing `tag`.
-    pub(super) fn find(
-        &self,
-        id: &str,
-        positions: Range<u64>,
-        tag: &[u8],
-    ) -> io::Result<Option<(u64, Vec<u8>)>> {
-        if positions.is_empty() {
-            return Ok(None);
-        }
-        self.db().read(|db, connection| {
-            let mut found = None;
-            db.query(
-                connection,
-                "SELECT position, line FROM events WHERE session_id = ?1 AND position >= ?2 \
-                 AND position < ?3 AND instr(line, ?4) > 0 ORDER BY position LIMIT 1",
-                (id, positions.start as i64, positions.end as i64, tag),
-                |row| {
-                    found = Some((integer(row, 0)? as u64, blob(row, 1)?));
-                    Ok(())
-                },
-            )?;
-            Ok(found)
-        })
-    }
-
     /// The thread after `after` in id order, found through the primary key
     /// without scanning rows.
     pub(super) fn next_thread(&self, after: Option<&str>) -> io::Result<Option<String>> {

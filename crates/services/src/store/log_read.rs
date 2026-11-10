@@ -134,7 +134,7 @@ impl LogRead {
                         let line = st.decode(&mut decoder, &row, Mode::Full)?.bytes;
                         if let Ok(Some(record)) = decode_row(&line) {
                             log.rows.push(position);
-                            log.records.push(record.into_stored(None));
+                            log.records.push(record);
                         }
                     }
                     Ok(true)
@@ -198,10 +198,6 @@ impl LogRead {
                     Ok(Some(record)) => record,
                     _ => return Ok(true),
                 };
-                if record.legacy_file_diff {
-                    return Err(io::Error::other("legacy diff needs full hydration"));
-                }
-                let record = record.into_stored(None);
                 let record = match project(&record) {
                     Cow::Borrowed(_) => record,
                     Cow::Owned(preview) => {

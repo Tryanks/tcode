@@ -183,7 +183,7 @@ pub(super) fn candidate(
         |position, row| {
             match decode_row(&st.decode(&mut decoder, &row, Mode::Bare)?.bytes) {
                 Ok(Some(record)) => {
-                    pending.apply(position, &record.stored);
+                    pending.apply(position, &record);
                 }
                 Ok(None) => {}
                 Err(_) => pending.state.undecodable = true,

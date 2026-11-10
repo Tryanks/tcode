@@ -4170,40 +4170,6 @@ pub fn image_generation(item: &Value) -> ItemContent {
     }
 }
 
-/// An item the adapter recorded as `Other` before it mapped its kind, as it
-/// maps it now. Its summary is the item as the app-server sent it (the
-/// importer wrote an image generation in the same shape); `completed` when
-/// it was recorded as completed.
-pub fn normalize_legacy_item(item: &mut ThreadItem, completed: bool) {
-    let ItemContent::Other {
-        provider_kind,
-        summary,
-    } = &item.content
-    else {
-        return;
-    };
-    if !matches!(
-        provider_kind.as_str(),
-        "sleep" | "imageView" | "imageGeneration"
-    ) {
-        return;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(summary) else {
-        return;
-    };
-    if value.get("type").and_then(Value::as_str) != Some(provider_kind.as_str()) {
-        return;
-    }
-    let method = if completed {
-        "item/completed"
-    } else {
-        "item/updated"
-    };
-    if let Some(mapped) = lifecycle_item(method, &value) {
-        item.content = mapped.content;
-    }
-}
-
 fn collab_tool_input(item: &Value) -> Value {
     let mut input = serde_json::Map::new();
     for key in [
@@ -4392,31 +4358,6 @@ fn map_file_change(change: &Value) -> Option<FileChange> {
     };
     normalize_file_change_diff(&mut change);
     Some(change)
-}
-
-/// Decode file contents stored by the Codex adapter before it normalized add/delete diffs.
-/// Only call this for unversioned Codex records; turn-wide snapshots already contain patches.
-pub fn normalize_legacy_file_change_event(event: &mut AgentEvent) {
-    let changes = match event {
-        AgentEvent::ItemStarted(item)
-        | AgentEvent::ItemUpdated(item)
-        | AgentEvent::ItemCompleted(item) => {
-            let ItemContent::FileChange { changes, .. } = &mut item.content else {
-                return;
-            };
-            changes
-        }
-        AgentEvent::ApprovalRequested(request) => {
-            let ApprovalKind::FileChange { changes, .. } = &mut request.kind else {
-                return;
-            };
-            changes
-        }
-        _ => return,
-    };
-    for change in changes {
-        normalize_file_change_diff(change);
-    }
 }
 
 fn normalize_file_change_diff(change: &mut FileChange) {
