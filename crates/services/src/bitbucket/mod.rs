@@ -147,20 +147,7 @@ impl Bitbucket {
         if reads::state(pr) != Some(tcode_core::pull_request::PullRequestState::Open) {
             return Ok(Mergeability::Unknown);
         }
-        // `/conflicts` is not in Bitbucket's published API (it is what its own page reads), so
-        // an answer it stops giving leaves mergeability unknown rather than failing the read; a
-        // rate limit, a refused credential or a host turned off still say so.
-        match self.pr(key).conflicts() {
-            Ok(read) => Ok(read),
-            Err(ForgeError {
-                kind:
-                    ForgeErrorKind::NotFound
-                    | ForgeErrorKind::Refused { .. }
-                    | ForgeErrorKind::Uncertain,
-                ..
-            }) => Ok(Mergeability::Unknown),
-            Err(failure) => Err(failure),
-        }
+        self.pr(key).conflicts()
     }
 
     /// The whole diff at the pull request's head, `None` past the read limit.
