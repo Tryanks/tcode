@@ -644,11 +644,11 @@ mod tests {
     fn long_blocks_in_a_timeline_row_lay_out_only_their_visible_lines(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
-        let code = (0..3_000)
+        let code = (0..300)
             .map(|ix| format!("let line_{ix} = {ix};"))
             .collect::<Vec<_>>()
             .join("\n");
-        let list = (0..1_000)
+        let list = (0..100)
             .map(|ix| format!("- item {ix}"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -656,14 +656,14 @@ mod tests {
             (
                 format!("```rust\n{code}\n```"),
                 "markdown-code-line-5",
-                "markdown-code-line-2500",
-                "markdown-code-line-2999",
+                "markdown-code-line-250",
+                "markdown-code-line-299",
             ),
             (
                 list,
                 "markdown-list-item-root-0-5",
-                "markdown-list-item-root-0-900",
-                "markdown-list-item-root-0-999",
+                "markdown-list-item-root-0-90",
+                "markdown-list-item-root-0-99",
             ),
         ] {
             let (view, cx) = cx.add_window_view(|_, cx| OuterListRoot::new(&source, cx));

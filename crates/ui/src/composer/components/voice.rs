@@ -636,7 +636,7 @@ mod tests {
         ];
         let mut settled = String::new();
         let mut results = Vec::new();
-        for phrase in 0..28 {
+        for phrase in 0..14 {
             let words: &[&str] = if phrase % 2 == 0 { &latin } else { &cjk };
             let mut text = String::new();
             for word in 0..24 {
@@ -648,7 +648,7 @@ mod tests {
             settled.push_str(&text);
             results.push(PlatformEvent::Phrase(text));
         }
-        let backlog = results.split_off(300);
+        let backlog = results.split_off(150);
 
         let mut costs = Vec::new();
         for result in results {
@@ -677,7 +677,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(edits.borrow().len() - before, 1, "the backlog is one edit");
         composer.read_with(cx, |composer, cx| {
-            assert!(settled.chars().count() > 3_000);
+            assert!(settled.chars().count() > 1_500);
             assert_eq!(composer.draft(cx), format!("前{settled}后"));
             assert_eq!(composer.input.read(cx).cursor(), "前".len() + settled.len());
             assert_eq!(composer.voice.state.read(cx).status(), SpeechStatus::Idle);

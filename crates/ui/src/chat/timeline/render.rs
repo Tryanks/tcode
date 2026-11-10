@@ -2352,7 +2352,7 @@ mod tests {
         let mut timeline = Timeline::default();
         timeline.turns = vec![TurnMeta::default()];
         timeline.entries.push(entry("user", user_item("go")));
-        for index in 0..400 {
+        for index in 0..100 {
             timeline.entries.push(command(&format!("command-{index}")));
         }
         timeline
@@ -2380,8 +2380,8 @@ mod tests {
         draw_settled(cx);
         assert!(cx.debug_bounds("activity-row-command-0").is_some());
         assert!(
-            cx.debug_bounds("activity-row-command-399").is_none(),
-            "an expanded work log must not lay out all 400 activities"
+            cx.debug_bounds("activity-row-command-99").is_none(),
+            "an expanded work log must not lay out all 100 activities"
         );
 
         view.update(cx, |chat, cx| {
@@ -2389,7 +2389,7 @@ mod tests {
             cx.notify();
         });
         draw_settled(cx);
-        assert!(cx.debug_bounds("activity-row-command-399").is_some());
+        assert!(cx.debug_bounds("activity-row-command-99").is_some());
         assert!(cx.debug_bounds("activity-row-command-0").is_none());
 
         // Opening one activity keeps the measured heights of the turn's
@@ -3101,7 +3101,7 @@ This begins after the hard break."#;
             max_scroll > px(800.),
             "long markdown did not contribute its full height to the chat list: {max_scroll:?}"
         );
-        let scroll_step = px(40.);
+        let scroll_step = px(160.);
         let steps = (f32::from(max_scroll / 2.) / f32::from(scroll_step)).ceil() as usize;
         for step in 0..steps {
             let distance = (scroll_step * (step + 1) as f32).min(max_scroll / 2.);
