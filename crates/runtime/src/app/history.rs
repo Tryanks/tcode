@@ -352,11 +352,11 @@ fn wire_window(
 /// What a window is cut from: the records of the rows before `end` of a log,
 /// all of them or only its last ones, with the turns of the whole log.
 ///
-/// Cursors are row positions. A blank or undecodable row holds no record, so
-/// a range of cursors can hold fewer records than it spans.
+/// Cursors are row positions. A blank row holds no record, so a range of
+/// cursors can hold fewer records than it spans.
 struct LogView<'a> {
     records: &'a [StoredEvent],
-    /// Lower cursor covered by this read, including blank or undecodable rows.
+    /// Lower cursor covered by this read, including blank rows.
     from: u64,
     /// The row each record is in, ascending.
     rows: &'a [u64],
@@ -618,7 +618,6 @@ impl SessionLog {
             records: self.records.clone(),
             rows: self.rows.clone(),
             next_row: self.next_row,
-            undecodable: 0,
         }
     }
 

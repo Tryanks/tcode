@@ -2649,6 +2649,12 @@ pub enum AgentEvent {
     /// Another thread's model acted on this thread through `tcode_control`. This is
     /// never emitted by an adapter; the runtime records it in the target thread.
     ControlAction(ControlAction),
+    /// A row of a thread's log that this build cannot read, as it is stored:
+    /// a record of a type or shape Tcode no longer has. Never emitted by an
+    /// adapter nor written; the store reads it in the row's place.
+    UnreadableRecord {
+        line: String,
+    },
     /// Structured plan / task list for the sidebar (Codex `turn/plan/updated`,
     /// Claude `TodoWrite`). Replaces the current turn's plan wholesale.
     PlanUpdated {

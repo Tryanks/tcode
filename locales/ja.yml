@@ -46,6 +46,8 @@ chat:
   control_action: "%{actor}：%{action}"
   context_window_changed: "コンテキストウィンドウを %{window} に設定しました"
   settings_kept: "このメッセージは以前の設定のままです。バックグラウンドタスクの終了後に新しい設定へ切り替わります"
+  unreadable_record_one: "この版の Tcode が読めなくなった記録 1 件"
+  unreadable_records: "この版の Tcode が読めなくなった記録 %{count} 件"
   working: "作業中"
   turn_ai: "モデルの思考と応答 %{duration}"
   turn_tools: "ツール呼び出し %{duration}"

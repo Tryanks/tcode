@@ -9,7 +9,7 @@ use turso::Connection;
 use super::codec::{Encoder, Mode};
 use super::db::{Db, blob, integer};
 use super::rows::{self, Storage, Thread};
-use super::{SessionStore, decode_row, invalid_data};
+use super::{SessionStore, decode_row, invalid_data, read_row};
 
 pub(super) fn create_tables(db: &Db, connection: &Connection) -> io::Result<()> {
     db.execute(
@@ -180,12 +180,12 @@ pub(super) fn candidate(
         0..u64::MAX,
         false,
         |position, row| {
-            match decode_row(&st.decode(&mut decoder, &row, Mode::Bare)?.bytes) {
-                Ok(Some(record)) => {
-                    pending.apply(position, &record);
-                }
-                Ok(None) => {}
-                Err(_) => pending.state.undecodable = true,
+            let line = st.decode(&mut decoder, &row, Mode::Bare)?.bytes;
+            if decode_row(&line).is_err() {
+                pending.state.undecodable = true;
+            }
+            if let Some(record) = read_row(&line) {
+                pending.apply(position, &record);
             }
             Ok(true)
         },

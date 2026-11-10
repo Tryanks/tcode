@@ -52,7 +52,8 @@ fn is_provider_work(content: &EntryContent) -> bool {
         | EntryContent::ControlAction(_)
         | EntryContent::Rewound(_)
         | EntryContent::RewindFailed { .. }
-        | EntryContent::ModelChanged { .. } => false,
+        | EntryContent::ModelChanged { .. }
+        | EntryContent::Unreadable { .. } => false,
     }
 }
 
@@ -330,7 +331,8 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
             EntryContent::ModelChanged { .. }
             | EntryContent::SettingsKept
             | EntryContent::Rewound(_)
-            | EntryContent::RewindFailed { .. } => {}
+            | EntryContent::RewindFailed { .. }
+            | EntryContent::Unreadable { .. } => {}
             EntryContent::ControlAction(action) => activity(
                 &mut body,
                 "control",

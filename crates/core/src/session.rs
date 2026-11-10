@@ -26,7 +26,7 @@ pub use streams::{ItemStreams, SupersededStream};
 pub use superseded::{TurnSnapshots, drop_turn_diffs};
 
 /// Bump when the persisted turn-boundary policy changes.
-pub const TURN_INDEX_FOLD_VERSION: u32 = 7;
+pub const TURN_INDEX_FOLD_VERSION: u32 = 8;
 
 fn synthetic_entry_id(
     prefix: &str,
@@ -586,6 +586,11 @@ pub enum EntryContent {
     RewindFailed {
         mode: Option<agent::RewindMode>,
         failure: agent::RewindFailure,
+    },
+    /// A row of the log this build cannot read, as it is stored
+    /// ([`AgentEvent::UnreadableRecord`]).
+    Unreadable {
+        line: String,
     },
 }
 
@@ -1710,6 +1715,18 @@ impl Timeline {
                         request: request.clone(),
                         answer: answer.clone(),
                     },
+                    ts,
+                    finished_ts: None,
+                    background: false,
+                    turn,
+                }));
+            }
+            AgentEvent::UnreadableRecord { line } => {
+                let turn = self.ensure_turn();
+                let id = self.synthetic_id("unreadable", ts);
+                self.entries.push(Arc::new(TimelineEntry {
+                    id,
+                    content: EntryContent::Unreadable { line: line.clone() },
                     ts,
                     finished_ts: None,
                     background: false,

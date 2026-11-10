@@ -2405,20 +2405,26 @@ mod tests {
             unreachable!("filtered to snapshots")
         };
         assert_eq!(end, total, "the window reaches the end of the log");
+        // The unparseable row is read as it is stored, in its place.
+        let mut logged: Vec<_> = legacy_events().into();
+        logged.insert(
+            2,
+            (
+                None,
+                agent::AgentEvent::UnreadableRecord {
+                    line: "{torn".into(),
+                },
+            ),
+        );
         assert_eq!(
-            format!("{:?}", Timeline::fold_events(records)),
-            format!(
-                "{:?}",
-                Timeline::fold_events(legacy_events().into_iter().map(|(ts, event)| {
-                    StoredEvent {
-                        origin: None,
-                        author: None,
-                        ts,
-                        event,
-                        elided: None,
-                    }
-                }))
-            )
+            Timeline::fold_events(records),
+            Timeline::fold_events(logged.into_iter().map(|(ts, event)| StoredEvent {
+                origin: None,
+                author: None,
+                ts,
+                event,
+                elided: None,
+            }))
         );
         host.shutdown_blocking().unwrap();
         let start = if migrating { "migrating" } else { "restarted" };

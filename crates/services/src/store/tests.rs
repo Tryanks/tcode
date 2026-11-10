@@ -106,6 +106,7 @@ fn turn_ids(events: &[StoredEvent]) -> Vec<(Option<u64>, String)> {
                     status: TurnStatus::Completed,
                     ..
                 } => format!("completed {turn_id}"),
+                AgentEvent::UnreadableRecord { line } => format!("unreadable {line}"),
                 other => format!("{other:?}"),
             };
             (stored.ts, id)
@@ -139,14 +140,52 @@ fn assert_fixture_migrated(store: &SessionStore, root: &Path) {
     assert_eq!(store.read_event_log("mixed").unwrap(), MIXED_LOG);
     assert_eq!(store.read_event_log("orphan").unwrap(), ORPHAN_LOG);
     assert!(store.read_event_log("empty").unwrap().is_empty());
+    // A row this build cannot read is read as it is stored, in its place.
+    let mixed = store.read_events("mixed").unwrap();
     assert_eq!(
-        turn_ids(&store.read_events("mixed").unwrap()),
+        turn_ids(&mixed),
         [
             (None, "started legacy".to_owned()),
             (Some(2000), "completed legacy".to_owned()),
+            (None, "unreadable {not valid json}".to_owned()),
+            (
+                None,
+                "unreadable \u{FFFD}\u{FFFD}{\"type\":\"turn_started\",\"turn_id\":\"not-utf8\"}"
+                    .to_owned()
+            ),
             (Some(2500), "started second".to_owned()),
+            (None, "unreadable {\"type\":\"turn_started".to_owned()),
         ]
     );
+    let timeline = tcode_core::session::Timeline::fold_events(mixed);
+    let shown: Vec<(usize, &str)> = timeline
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.content {
+            tcode_core::session::EntryContent::Unreadable { line } => {
+                Some((entry.turn, line.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (0, "{not valid json}"),
+            (
+                0,
+                "\u{FFFD}\u{FFFD}{\"type\":\"turn_started\",\"turn_id\":\"not-utf8\"}"
+            ),
+            (1, "{\"type\":\"turn_started"),
+        ]
+    );
+    let markdown = crate::export::render_thread(
+        store,
+        &file.sessions[0],
+        tcode_protocol::ThreadExportFormat::Markdown,
+    )
+    .unwrap();
+    assert!(String::from_utf8(markdown).unwrap().contains("Mixed"));
     assert_eq!(
         turn_ids(&store.read_events("orphan").unwrap()),
         [(Some(1), "started orphan".to_owned())]
@@ -1337,7 +1376,6 @@ fn item_rows_recorded_before_canonical_items_are_read() {
         .collect();
 
     let log = store.read_log("legacy").unwrap();
-    assert_eq!(log.undecodable, 0);
     let read: Vec<&str> = log
         .records
         .iter()

@@ -18,10 +18,10 @@ use agent::{ItemContent, PlanStepStatus};
 use serde::Serialize;
 use tcode_core::project::SessionMeta;
 use tcode_core::relay::render_relay_transcript;
-use tcode_core::session::{EntryContent, StoredEvent, Timeline};
+use tcode_core::session::{EntryContent, Timeline};
 use tcode_protocol::ThreadExportFormat;
 
-use crate::store::{SessionStore, parse_stored_line};
+use crate::store::SessionStore;
 
 const EXPORT_VERSION: u32 = 1;
 
@@ -42,11 +42,10 @@ pub fn render_thread(
     meta: &SessionMeta,
     format: ThreadExportFormat,
 ) -> io::Result<Vec<u8>> {
-    let event_log = store.read_event_log(&meta.id)?;
     match format {
-        ThreadExportFormat::Jsonl => render_jsonl(meta, &event_log),
+        ThreadExportFormat::Jsonl => render_jsonl(meta, &store.read_event_log(&meta.id)?),
         ThreadExportFormat::Markdown => {
-            let events = parse_event_log(&event_log).map_err(invalid_data)?;
+            let events = store.read_events(&meta.id)?;
             Ok(render_markdown(meta, &Timeline::fold_events(events)).into_bytes())
         }
     }
@@ -100,14 +99,6 @@ fn render_jsonl(meta: &SessionMeta, event_log: &[u8]) -> io::Result<Vec<u8>> {
         output.push(b'\n');
     }
     Ok(output)
-}
-
-fn parse_event_log(bytes: &[u8]) -> Result<Vec<StoredEvent>, String> {
-    let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| parse_stored_line(line).map_err(|error| error.to_string()))
-        .collect()
 }
 
 /// Render a complete folded timeline without the relay renderer's handoff size

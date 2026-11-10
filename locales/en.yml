@@ -46,6 +46,8 @@ chat:
   control_action: "%{actor}: %{action}"
   context_window_changed: "Context window set to %{window}"
   settings_kept: "This message still uses the old settings; the new ones apply once background tasks finish"
+  unreadable_record_one: "1 record this version of Tcode no longer reads"
+  unreadable_records: "%{count} records this version of Tcode no longer reads"
   working: "Working"
   turn_ai: "Model thinking & response %{duration}"
   turn_tools: "Tool calls %{duration}"

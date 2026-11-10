@@ -269,6 +269,28 @@ impl TimelineView {
                 Segment::Plan(entry) => {
                     column = column.child(self.compose_plan(entry, cwd, cx));
                 }
+                Segment::Unreadable(rows) => {
+                    let label = if rows.len() == 1 {
+                        crate::tr!("chat.unreadable_record_one")
+                    } else {
+                        crate::tr!("chat.unreadable_records", count = rows.len())
+                    };
+                    let lines = rows
+                        .iter()
+                        .filter_map(|entry| match &entry.content {
+                            EntryContent::Unreadable { line } => Some(line.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    column = column.child(self.compose_disclosure(
+                        index,
+                        format!("unreadable-{}", rows[0].id),
+                        label.into_owned().into(),
+                        &lines,
+                        cx,
+                    ));
+                }
                 Segment::Error(entry) => {
                     let harness = self
                         .workspace_store

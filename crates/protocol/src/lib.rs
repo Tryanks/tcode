@@ -338,6 +338,8 @@ pub use wire::{
 // ServerEvent gains preview_request_cancelled.
 // Command gains cancel_plugin_operation, RuntimeToast plugin_operation_cancelled.
 // ProvidersStatus gains secrets_unreadable.
+// The agent event stream gains unreadable_record {line}: a row of a thread's
+// log the host cannot read is sent as it is stored instead of left out.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

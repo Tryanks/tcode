@@ -12099,7 +12099,6 @@ fn session_log(records: impl IntoIterator<Item = StoredEvent>) -> SessionLog {
         next_row: records.len() as u64,
         records,
         rows,
-        undecodable: 0,
     })
 }
 

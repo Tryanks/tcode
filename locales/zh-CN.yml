@@ -46,6 +46,8 @@ chat:
   control_action: "%{actor}：%{action}"
   context_window_changed: "上下文窗口已改为 %{window}"
   settings_kept: "这一条仍用旧设置，后台任务结束后换用新设置"
+  unreadable_record_one: "1 条此版本 Tcode 不再认识的记录"
+  unreadable_records: "%{count} 条此版本 Tcode 不再认识的记录"
   working: "工作中"
   turn_ai: "模型思考与回答 %{duration}"
   turn_tools: "工具调用 %{duration}"

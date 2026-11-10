@@ -25,7 +25,8 @@
 //! Model and command caches stay as JSON files beside it.
 //!
 //! Replay accepts timestamped records and legacy bare [`AgentEvent`] lines,
-//! then folds [`StoredEvent`]s into a [`tcode_core::session::Timeline`].
+//! reads any other row as it is stored ([`read_row`]), then folds
+//! [`StoredEvent`]s into a [`tcode_core::session::Timeline`].
 
 mod activity;
 mod blobs;
@@ -970,12 +971,7 @@ impl SessionStore {
         self.apply(&[Mutation::append_event(id, ts, event)?])
     }
 
-    /// Read and parse every persisted event for a session, skipping lines that
-    /// do not parse.
-    ///
-    /// Each line is tolerantly parsed as either a timestamped envelope
-    /// (`{"ts":…,"event":…}`) or a legacy bare event (`{"type":…}`), so logs
-    /// written before the envelope format still replay (with `ts == None`).
+    /// Read every persisted record of a session ([`read_row`]).
     pub fn read_events(&self, id: &str) -> io::Result<Vec<StoredEvent>> {
         self.read_log(id).map(|log| log.records)
     }
@@ -1013,16 +1009,9 @@ impl SessionStore {
                     |position, row| {
                         log.next_row = position + 1;
                         let line = canonical(st, &mut decoder, &row, id, position)?;
-                        match decode_row(&line) {
-                            Ok(Some(record)) => {
-                                log.records.push(record);
-                                log.rows.push(position);
-                            }
-                            Ok(None) => {}
-                            Err(reason) => {
-                                log.undecodable += 1;
-                                log::warn!("skipping event {position} of {id}: {reason}");
-                            }
+                        if let Some(record) = read_row(&line) {
+                            log.records.push(record);
+                            log.rows.push(position);
                         }
                         Ok(true)
                     },
@@ -1217,8 +1206,33 @@ pub struct EventLog {
     pub rows: Vec<u64>,
     /// The position after the last row read.
     pub next_row: u64,
-    /// Rows that hold no record this build reads and are not blank.
-    pub undecodable: usize,
+}
+
+/// The record a row holds for every reader that folds it: what it decodes
+/// to, or else the row as it is stored ([`AgentEvent::UnreadableRecord`]),
+/// timed by its envelope's `ts` when it has one. `None` for a blank row.
+pub(crate) fn read_row(line: &[u8]) -> Option<StoredEvent> {
+    match decode_row(line) {
+        Ok(record) => record,
+        Err(_) => Some(unreadable_row(line)),
+    }
+}
+
+fn unreadable_row(line: &[u8]) -> StoredEvent {
+    let line = String::from_utf8_lossy(line);
+    let line = line.trim_end_matches(['\n', '\r']);
+    let ts = serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|row| row.get("ts")?.as_u64());
+    StoredEvent {
+        origin: None,
+        author: None,
+        ts,
+        event: AgentEvent::UnreadableRecord {
+            line: line.to_owned(),
+        },
+        elided: None,
+    }
 }
 
 fn decode_row(line: &[u8]) -> Result<Option<StoredEvent>, String> {

@@ -344,7 +344,8 @@ impl TurnBoundaries {
             | AgentEvent::SettingsKept
             | AgentEvent::SessionMoved { .. }
             | AgentEvent::WorktreeResolved { .. }
-            | AgentEvent::ControlAction(_) => self.is_empty(),
+            | AgentEvent::ControlAction(_)
+            | AgentEvent::UnreadableRecord { .. } => self.is_empty(),
             AgentEvent::ContextCompacted(compaction) => {
                 !(compaction.in_progress && self.compacting) && self.is_empty()
             }

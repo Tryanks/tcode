@@ -486,6 +486,7 @@ impl AppState {
             | AgentEvent::ControlAction(_)
             | AgentEvent::ProposedPlanDelta { .. }
             | AgentEvent::ProposedPlan { .. }
+            | AgentEvent::UnreadableRecord { .. }
             | AgentEvent::ProviderStartFailed { .. } => {}
         }
 
