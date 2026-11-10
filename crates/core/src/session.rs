@@ -299,14 +299,8 @@ pub struct TurnTiming {
 }
 
 impl TurnTiming {
-    /// Build a breakdown. Tool time is already intersected with the turn's
-    /// bounds by [`ToolClock`]; the clamp here is only a last-resort guard that
-    /// keeps `tool_ms <= total_ms` true for hand-built values.
     pub fn new(total_ms: u64, tool_ms: u64) -> Self {
-        Self {
-            total_ms,
-            tool_ms: tool_ms.min(total_ms),
-        }
+        Self { total_ms, tool_ms }
     }
 }
 
