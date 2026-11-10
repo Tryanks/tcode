@@ -482,6 +482,10 @@ fn candidate_target_lines(root: &UiNode) -> Vec<String> {
 
     let mut lines = Vec::new();
     visit(root, &mut lines);
+    let total = crate::outline::interactive_count(root);
+    if total > lines.len() {
+        lines.push(format!("- ... {} more", total - lines.len()));
+    }
     lines
 }
 
