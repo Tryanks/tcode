@@ -162,7 +162,7 @@ impl Composer {
                 this.ui_expanded = !this.ui_expanded;
                 cx.notify();
             }));
-        let title = if blocking && !question.header.trim().is_empty() {
+        let title = if !question.header.trim().is_empty() {
             question.header.clone()
         } else {
             crate::tr!("userinput.async_header").into_owned()
