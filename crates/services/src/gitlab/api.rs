@@ -608,21 +608,30 @@ impl Api {
 }
 
 /// GitLab's words for a refusal: `message` as text, as a field → messages map, or `error`.
+/// In the map, `error` is no field: `render_api_error!` is handed `{ error: … }` for a refusal
+/// that names none (`lib/api/merge_requests.rb`, a cancelled query), and its words stand alone.
 pub(super) fn messages(body: &[u8]) -> Vec<String> {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return Vec::new();
+    };
+    let said = |field: &str, item: &str| {
+        if field == "error" {
+            item.to_owned()
+        } else {
+            format!("{field} {item}")
+        }
     };
     match &value["message"] {
         Value::String(message) => vec![message.clone()],
         Value::Object(fields) => fields
             .iter()
-            .flat_map(|(field, said)| match said {
+            .flat_map(|(field, items)| match items {
                 Value::Array(items) => items
                     .iter()
                     .filter_map(|item| item.as_str())
-                    .map(|item| format!("{field} {item}"))
+                    .map(|item| said(field, item))
                     .collect(),
-                Value::String(item) => vec![format!("{field} {item}")],
+                Value::String(item) => vec![said(field, item)],
                 _ => Vec::new(),
             })
             .collect(),
@@ -711,7 +720,8 @@ mod tests {
 
     /// A refusal carries GitLab's own words in the error shapes its REST API documents (shape:
     /// GitLab REST API troubleshooting, "Data validation and error reporting": `message` as
-    /// text, or as a property to messages map; content invented).
+    /// text, or as a property to messages map; GitLab's `lib/api/merge_requests.rb`, a map
+    /// whose only key is `error`; content invented).
     #[test]
     fn a_refusal_carries_gitlabs_words() {
         use super::messages;
@@ -722,6 +732,10 @@ mod tests {
         assert_eq!(
             messages(br#"{"message":{"title":["is too long","is invalid"]}}"#),
             ["title is too long", "title is invalid"]
+        );
+        assert_eq!(
+            messages(br#"{"message":{"error":"The request took too long"}}"#),
+            ["The request took too long"]
         );
     }
 
