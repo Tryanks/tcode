@@ -51,8 +51,8 @@ use tcode_protocol::{
     ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueryResponse,
     QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
     RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast, ServerEvent,
-    SessionActivity, SessionContentHits, SessionPlan, SessionStatus,
-    TcodeUpdateStatus, TerminalStatus, ThreadExportFormat, Topic,
+    SessionActivity, SessionContentHits, SessionPlan, SessionStatus, TcodeUpdateStatus,
+    TerminalStatus, ThreadExportFormat, Topic,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
