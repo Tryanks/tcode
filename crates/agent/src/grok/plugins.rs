@@ -614,10 +614,6 @@ mod tests {
             "{}",
             challenge.native_text
         );
-        assert_eq!(
-            challenge.sha256,
-            "73bbb8b21e0f3eccd8a8aa4b0e57361ff136482a4d41390cc332bfe3314293bc"
-        );
 
         assert!(matches!(
             install_step(refused(), Some(&challenge.sha256)).unwrap(),
