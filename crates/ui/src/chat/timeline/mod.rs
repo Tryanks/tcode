@@ -1824,7 +1824,7 @@ mod tests {
 
         // A phone and a tablet: the shell's layout rule, applied by hand since
         // no shell is mounted here.
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         for (width, height) in [(393., 852.), (1024., 768.)] {
             let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
             cx.update(|cx| cx.set_reduce_motion(true));

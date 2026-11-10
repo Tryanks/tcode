@@ -549,7 +549,7 @@ mod tests {
         );
 
         cx.update(|window, cx| {
-            crate::window_seam::override_mobile_for_test(cx, true);
+            crate::window_seam::force_mobile_layout(cx);
             window.blur(cx);
         });
         composer.update_in(cx, |composer, _, cx| {

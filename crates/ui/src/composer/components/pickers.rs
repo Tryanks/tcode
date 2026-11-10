@@ -2441,7 +2441,7 @@ mod sheet_tests {
     #[gpui::test]
     fn picker_sheets_span_window_and_preserve_wide_width(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(crate::store::tests::scratch_root(
                 "sheet-test",

@@ -7897,7 +7897,9 @@ mod tests {
 
     fn cancel_inline_rename(cx: &mut TestAppContext, compact: bool) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, compact));
+        if compact {
+            cx.update(crate::window_seam::force_mobile_layout);
+        }
         let root = crate::store::tests::scratch_root("sidebar-rename-test");
         let session_store = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(root.clone());

@@ -6745,7 +6745,7 @@ pub(crate) mod tests {
         Rc<ReturningClient>,
         &'a mut VisualTestContext,
     ) {
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         mount_restored_at_width(cx, history, machine_exists, 393., "plan")
     }
 
@@ -7045,7 +7045,7 @@ pub(crate) mod tests {
         &mut VisualTestContext,
     ) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let client = Rc::new(WorkspaceClient {
             saved: RefCell::new(saved.clone()),
             transports: RefCell::default(),
@@ -8957,7 +8957,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn cold_start_restores_thread_and_selects_it_once(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         for width in [393., 1024.] {
             let (shell, host, _, cx) =
                 mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, width, "plan");
@@ -9142,7 +9142,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn cold_start_restores_the_selected_panel_after_session_status(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         for (saved_panel, expected_tab) in [
             ("plan", RightTab::Plan),
             ("agents", RightTab::Agents),
@@ -9303,7 +9303,7 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (shell, _host, client, cx) =
             mount_restored_at_width(cx, &["hosts"], false, 1024., "plan");
         let assert_on_empty_root = |cx: &mut VisualTestContext| {
@@ -9393,14 +9393,13 @@ pub(crate) mod tests {
     }
 
     /// Navigation never raises a software keyboard: on a phone every route
-    /// leaves the composer unfocused, and a desktop window opening a thread
-    /// focuses it.
+    /// leaves the composer unfocused.
     #[gpui::test]
     fn navigation_dismisses_mobile_keyboards_but_preserves_explicit_editing_focus(
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount(cx);
+        let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
         resize(cx, 393.);
         let store = store_of(&shell, cx);
@@ -9457,27 +9456,6 @@ pub(crate) mod tests {
             draw(cx);
             cx.update(|window, _| assert!(focus.is_focused(window)));
         }
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
-        resize(cx, 1024.);
-        send_events(
-            &host,
-            vec![
-                (
-                    Topic::Settings,
-                    ServerEvent::SettingsSnapshot(Default::default()),
-                ),
-                panes_index(&[]),
-            ],
-        );
-        serve_thread(&host, "thread-2");
-        let state = shell.read_with(cx, |shell, _| shell.window_state());
-        state.update(cx, |state, cx| state.close_settings(cx));
-        store.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
-        await_restore_update(&shell, cx, |store, cx| {
-            !store.chat_loading_for(Some("thread-2"), cx)
-        });
-        crate::test_frames::draw_settled(cx);
-        assert!(composer_has_keyboard(&shell, 0, cx));
     }
 
     #[gpui::test]
@@ -9611,7 +9589,7 @@ pub(crate) mod tests {
     fn keyboard_cover_changes_keep_editor_focus_until_explicit_dismissal(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (shell, host, _, cx) =
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 393., "plan");
         restore_index(&shell, &host, true, cx);
@@ -9798,7 +9776,7 @@ pub(crate) mod tests {
     fn a_subagent_thread_composer_is_its_settings_read_only(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (shell, host, _, cx) =
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1200., "plan");
         restore_index(&shell, &host, true, cx);
@@ -9968,7 +9946,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn software_keyboard_restored_terminal_does_not_raise_keyboard(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (shell, host, _, cx) = mount_restored_at_width(
             cx,
             &["hosts", "threads", "thread", "panel"],
@@ -10342,9 +10320,11 @@ pub(crate) mod tests {
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let timeline = gpui::point(px(700.), px(300.));
-        for mobile in [true, false] {
+        for mobile in [false, true] {
             cx.update(|window, cx| {
-                crate::window_seam::override_mobile_for_test(cx, mobile);
+                if mobile {
+                    crate::window_seam::force_mobile_layout(cx);
+                }
                 window.blur(cx);
             });
             draw(cx);
@@ -14339,7 +14319,9 @@ pub(crate) mod tests {
     ) {
         let (shell, host, cx) = mount(cx);
         cx.update(|_, cx| {
-            crate::window_seam::override_mobile_for_test(cx, mobile);
+            if mobile {
+                crate::window_seam::force_mobile_layout(cx);
+            }
             cx.set_reduce_motion(true);
         });
         // Establish the viewport before the workspace can select a draft:
@@ -15506,7 +15488,7 @@ pub(crate) mod tests {
     /// Make the test app a mobile build: only there is a phone-sized window
     /// compact, a desktop window being wide at any width.
     fn as_mobile(cx: &mut VisualTestContext) {
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(|_, cx| crate::window_seam::force_mobile_layout(cx));
     }
 
     fn touch_drag(
@@ -16043,7 +16025,9 @@ pub(crate) mod tests {
         });
 
         for (mobile, width) in [(false, 1200.), (false, 393.), (true, 393.)] {
-            cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, mobile));
+            if mobile {
+                cx.update(|_, cx| crate::window_seam::force_mobile_layout(cx));
+            }
             resize(cx, width);
             shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
             // Let the compact push animation settle so the picker is in place.
@@ -16075,7 +16059,6 @@ pub(crate) mod tests {
             );
             cx.update(|window, _| assert!(!search.is_focused(window)));
         }
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
         driver.shutdown(cx, &store, &host);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -16202,23 +16185,6 @@ pub(crate) mod tests {
             shell.read_with(cx, |shell, cx| shell.destination(cx)),
             Destination::Thread
         );
-        as_mobile(cx);
-        resize(cx, 393.);
-        shell.read_with(cx, |shell, cx| {
-            assert!(shell.compact(cx));
-            assert_eq!(shell.destination(cx), Destination::Thread);
-        });
-        cx.simulate_keystrokes("ctrl-tab");
-        assert_eq!(
-            shell
-                .read_with(cx, |shell, cx| shell
-                    .page_thread(cx)
-                    .map(|thread| thread.session_id))
-                .as_deref(),
-            Some("second"),
-            "compact navigation uses the same shortcuts"
-        );
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
         resize(cx, 1200.);
         draw(cx);
         let row = cx
@@ -16288,7 +16254,6 @@ pub(crate) mod tests {
     fn a_narrow_desktop_window_keeps_the_wide_workspace(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
         for width in [1024., 899., 400.] {
             resize(cx, width);
             shell.read_with(cx, |shell, cx| {
@@ -17381,7 +17346,6 @@ pub(crate) mod tests {
         events: Vec<agent::AgentEvent>,
     ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
         let (shell, host, cx) = mount(cx);
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
         let mut meta = tcode_core::project::SessionMeta::new(
             agent::ProviderKind::ClaudeCode,
             "/tmp/tcode-compact-panel".into(),

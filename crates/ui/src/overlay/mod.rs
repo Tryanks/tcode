@@ -799,7 +799,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) -> &mut VisualTestContext {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (_, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)
@@ -986,7 +986,7 @@ mod tests {
     #[gpui::test]
     fn compact_toast_obeys_seam_replaces_and_wide_keeps_card(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)
@@ -1037,7 +1037,7 @@ mod tests {
     #[gpui::test]
     fn a_shown_toast_glides_to_the_bottom_as_the_window_turns_compact(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)
@@ -1088,7 +1088,7 @@ mod tests {
     #[gpui::test]
     fn a_dismissed_toast_leaves_inert_then_unmounts(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)
@@ -1126,7 +1126,7 @@ mod tests {
     #[gpui::test]
     fn a_card_that_stays_leaves_when_closed_later(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)
@@ -1156,7 +1156,7 @@ mod tests {
     #[gpui::test]
     fn compact_notification_timeouts(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.update(crate::window_seam::force_mobile_layout);
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)

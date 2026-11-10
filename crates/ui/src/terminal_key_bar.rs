@@ -653,7 +653,9 @@ mod tests {
             (true, false, false),
         ] {
             cx.update(|window, cx| {
-                crate::window_seam::override_mobile_for_test(cx, mobile);
+                if mobile {
+                    crate::window_seam::force_mobile_layout(cx);
+                }
                 if focused {
                     focus.focus(window, cx);
                 } else {
