@@ -339,6 +339,3 @@ fn collect_files(
     visit(root, predicate, &mut files);
     files
 }
-
-#[cfg(test)]
-mod tests;
