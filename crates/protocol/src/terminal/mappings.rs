@@ -275,7 +275,7 @@ fn kitty_control_key(key: &str) -> Option<(String, char)> {
         "enter" => 13,
         "escape" => 27,
         "space" => 32,
-        "backspace" | "back" => 127,
+        "backspace" => 127,
         _ => return None,
     };
     Some((code.to_string(), 'u'))
@@ -374,7 +374,7 @@ fn modify_other_keys_bytes(key: &str, modifiers: Modifiers, level: Option<u8>) -
     let codepoint = match key {
         "enter" => 13,
         "tab" => 9,
-        "backspace" | "back" => 127,
+        "backspace" => 127,
         "escape" => 27,
         "space" => 32,
         _ => u32::from(shifted_key(single_printable_char(key)?, modifiers.shift).0),
@@ -441,7 +441,6 @@ fn legacy_key_bytes(
         } else {
             "\x1b[D"
         }),
-        "back" if none => Some("\x7f"),
         "insert" if none => Some("\x1b[2~"),
         "delete" if none => Some("\x1b[3~"),
         "pageup" if none => Some("\x1b[5~"),
@@ -768,6 +767,10 @@ mod tests {
             ("a", plain, Mode::empty(), legacy, Some(2), None),
             ("a", ctrl, Mode::empty(), kitty, Some(2), Some("\x1b[97;5u")),
             ("ab", plain, Mode::empty(), kitty, None, None),
+            // GPUI's "back" is the browser Back key, not Backspace.
+            ("back", plain, Mode::empty(), legacy, None, None),
+            ("back", plain, Mode::empty(), kitty, None, None),
+            ("back", ctrl, Mode::empty(), legacy, Some(2), None),
         ] {
             assert_eq!(
                 key_bytes(key, modifiers, mode, keyboard, other_keys, true),
