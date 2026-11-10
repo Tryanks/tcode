@@ -208,6 +208,102 @@ pub fn usage_from_payload(
 mod tests {
     use super::*;
 
+    /// `get_usage` in the shape Claude Code 2.1.322's control schema
+    /// describes (`rate_limits` with nullable `five_hour`, `seven_day`,
+    /// `seven_day_opus`, `seven_day_sonnet` windows of `utilization` and
+    /// ISO 8601 `resets_at`); the numbers are invented.
+    #[test]
+    fn claude_usage_lists_the_session_week_and_model_weeks() {
+        let usage = parse_claude_usage(
+            &serde_json::json!({
+                "subscription_type": "max",
+                "rate_limits_available": true,
+                "rate_limits": {
+                    "five_hour": {"utilization": 12.0, "resets_at": "2026-01-02T03:00:00.000Z"},
+                    "seven_day": {"utilization": 40.0, "resets_at": "2026-01-08T00:00:00.000Z"},
+                    "seven_day_oauth_apps": null,
+                    "seven_day_opus": null,
+                    "seven_day_sonnet": {"utilization": 5.0, "resets_at": null}
+                }
+            }),
+            7,
+        );
+        assert_eq!(usage.plan.as_deref(), Some("max"));
+        assert_eq!(usage.error, None);
+        assert_eq!(
+            usage.windows,
+            [
+                UsageWindow {
+                    kind: UsageWindowKind::FiveHour,
+                    scope: None,
+                    used_percent: 12.0,
+                    resets_at: Some(1_767_322_800),
+                },
+                UsageWindow {
+                    kind: UsageWindowKind::Weekly,
+                    scope: None,
+                    used_percent: 40.0,
+                    resets_at: Some(1_767_830_400),
+                },
+                UsageWindow {
+                    kind: UsageWindowKind::Weekly,
+                    scope: Some("Sonnet".into()),
+                    used_percent: 5.0,
+                    resets_at: None,
+                },
+            ]
+        );
+
+        // An API-key session: "rate_limits will be null".
+        let api_key = parse_claude_usage(
+            &serde_json::json!({
+                "subscription_type": null,
+                "rate_limits_available": false,
+                "rate_limits": null
+            }),
+            7,
+        );
+        assert_eq!(api_key.error.as_deref(), Some("usage not available"));
+        assert!(api_key.windows.is_empty());
+    }
+
+    /// `account/rateLimits/read` in the shape of codex-cli 0.167.0's
+    /// app-server schema (`GetAccountRateLimitsResponse.rateLimits`, a
+    /// `RateLimitSnapshot` of `RateLimitWindow`s); the numbers are invented.
+    #[test]
+    fn codex_rate_limits_list_the_five_hour_window_before_the_week() {
+        let usage = parse_codex_rate_limits(
+            &serde_json::json!({
+                "rateLimits": {
+                    "limitId": "codex",
+                    "planType": "plus",
+                    "primary": {"usedPercent": 30, "windowDurationMins": 10080, "resetsAt": 1_767_830_400},
+                    "secondary": {"usedPercent": 4, "windowDurationMins": 300, "resetsAt": null},
+                    "credits": null
+                }
+            }),
+            7,
+        );
+        assert_eq!(usage.plan.as_deref(), Some("plus"));
+        assert_eq!(
+            usage.windows,
+            [
+                UsageWindow {
+                    kind: UsageWindowKind::FiveHour,
+                    scope: None,
+                    used_percent: 4.0,
+                    resets_at: None,
+                },
+                UsageWindow {
+                    kind: UsageWindowKind::Weekly,
+                    scope: None,
+                    used_percent: 30.0,
+                    resets_at: Some(1_767_830_400),
+                },
+            ]
+        );
+    }
+
     #[test]
     #[ignore = "requires installed and signed-in Codex and Claude Code CLIs"]
     fn live_provider_usage() {
