@@ -42,7 +42,7 @@ pub async fn run_capture_env(
 }
 
 /// `<program> --version`'s answer, or what it printed when it failed: its
-/// exit status and the last lines of its error output, as the CLI wrote them.
+/// exit status and its error output, as the CLI wrote them.
 async fn run_version(program: &str, env: &[(String, String)]) -> Result<String, Option<String>> {
     let output = provider_command(program, env)
         .arg("--version")
@@ -57,12 +57,10 @@ async fn run_version(program: &str, env: &[(String, String)]) -> Result<String, 
         return if text.is_empty() { Err(None) } else { Ok(text) };
     }
     let printed = if stderr.is_empty() { stdout } else { stderr };
-    let tail: Vec<&str> = printed.lines().rev().take(8).collect();
-    let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
-    Err(Some(if tail.is_empty() {
+    Err(Some(if printed.is_empty() {
         output.status.to_string()
     } else {
-        format!("{}: {tail}", output.status)
+        format!("{}: {printed}", output.status)
     }))
 }
 
