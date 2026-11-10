@@ -858,13 +858,13 @@ mod tests {
     #[test]
     fn marketplaces_keep_their_native_source_and_location() {
         assert_eq!(
-            parse_marketplaces(&fixture("real-home-marketplace-list.json")).unwrap(),
+            parse_marketplaces(&fixture("user-home-marketplace-list.json")).unwrap(),
             [ProviderPluginMarketplace {
                 name: "claude-plugins-official".into(),
                 source: "anthropics/claude-plugins-official".into(),
                 kind: PluginSourceKind::Official,
                 location: Some(PathBuf::from(
-                    "/Users/me/.claude/plugins/marketplaces/claude-plugins-official"
+                    "/home/user/.claude/plugins/marketplaces/claude-plugins-official"
                 )),
             }]
         );
