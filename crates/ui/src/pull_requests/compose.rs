@@ -338,9 +338,7 @@ pub(super) fn answer_of(
     match result {
         Ok(CommandResponse::PullRequestAction(result)) => Ok(result),
         Ok(_) => Ok(PullRequestActionResult::Uncertain),
-        Err(error) if matches!(error.code.as_str(), "disconnected" | "timeout") => {
-            Ok(PullRequestActionResult::Uncertain)
-        }
+        Err(error) if error.code == "disconnected" => Ok(PullRequestActionResult::Uncertain),
         Err(error) => Err(error),
     }
 }
