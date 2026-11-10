@@ -2865,7 +2865,7 @@ impl Actor {
                 let steps = params
                     .get("plan")
                     .and_then(Value::as_array)
-                    .map(|steps| steps.iter().map(map_plan_step).collect())
+                    .map(|steps| steps.iter().filter_map(map_plan_step).collect())
                     .unwrap_or_default();
                 self.events
                     .emit(AgentEvent::PlanUpdated {
@@ -4214,8 +4214,6 @@ fn notification_turn_id(params: &Value, active_turn: &Option<String>) -> Option<
         .or_else(|| active_turn.clone())
 }
 
-/// Map one `turn/plan/updated` step, falling back to `pending` status and
-/// `"step"` text when those fields are absent or unusable.
 /// A `ThreadGoal`; `null` (no goal) maps to `None`.
 fn map_goal(goal: &Value) -> Option<Goal> {
     let status = match goal.get("status")?.as_str()? {
@@ -4250,20 +4248,18 @@ fn goal_status_wire(status: GoalStatus) -> &'static str {
     }
 }
 
-fn map_plan_step(step: &Value) -> PlanStep {
-    let text = step
-        .get("step")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("step")
-        .to_owned();
-    let status = match step.get("status").and_then(Value::as_str) {
-        Some("completed") => PlanStepStatus::Completed,
-        Some("inProgress") => PlanStepStatus::InProgress,
-        _ => PlanStepStatus::Pending,
+/// One `turn/plan/updated` step (`v2/TurnPlanStep.ts`).
+fn map_plan_step(step: &Value) -> Option<PlanStep> {
+    let status = match step.get("status")?.as_str()? {
+        "pending" => PlanStepStatus::Pending,
+        "inProgress" => PlanStepStatus::InProgress,
+        "completed" => PlanStepStatus::Completed,
+        _ => return None,
     };
-    PlanStep { step: text, status }
+    Some(PlanStep {
+        step: step.get("step")?.as_str()?.to_owned(),
+        status,
+    })
 }
 
 fn map_status(status: Option<&str>) -> ItemStatus {
