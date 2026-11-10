@@ -374,10 +374,8 @@ impl GitLab {
         // GitLab keeps the field set on a merge request it has merged.
         let armed = reads::state(&read) == Some(tcode_core::pull_request::PullRequestState::Open)
             && read["merge_when_pipeline_succeeds"].as_bool() == Some(true);
-        // GitLab keeps the squash choice beside a scheduled merge, and the project's one method.
-        let armed_with = if read["squash_on_merge"].as_bool() == Some(true)
-            || read["squash"].as_bool() == Some(true)
-        {
+        // Whether GitLab will squash the scheduled merge, else the project's one method.
+        let armed_with = if read["squash_on_merge"].as_bool() == Some(true) {
             PullRequestMergeMethod::Squash
         } else {
             merge_methods
