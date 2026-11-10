@@ -14,7 +14,6 @@ pub mod words;
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -89,13 +88,12 @@ struct Pending {
     sender: async_channel::Sender<HostMessage>,
     query: bool,
     retained: bool,
-    started: web_time::Instant,
 }
 
 struct Write {
     id: u64,
     entry: outbox::Entry,
-    sent: Option<web_time::Instant>,
+    sent: bool,
     adopted: bool,
     /// Saved where a relaunch finds it, or never saved at all (a secret, or a
     /// link without storage). Only a durable write goes on the wire, so a
@@ -126,7 +124,7 @@ impl Write {
         Ok(Self {
             id,
             entry,
-            sent: None,
+            sent: false,
             adopted: false,
             durable,
             stored_bytes,
@@ -261,52 +259,25 @@ impl HostLink {
     /// Decode and route host output until its transport channel closes.
     ///
     /// The owner of the transport is responsible for running exactly one pump.
+    ///
+    /// A command waits for its Ack for as long as the link is up: the
+    /// transport decides when the link is lost, and losing it fails or
+    /// resends what is outstanding.
     pub async fn pump(&self) {
-        self.pump_with_timer(delay).await;
-    }
-
-    /// Use the owning executor's clock when it has a deterministic scheduler.
-    /// `timer(delay)` completes after `delay`; the pump sleeps only until the
-    /// next request deadline, and not at all while nothing is outstanding.
-    pub async fn pump_with_timer<F, T>(&self, timer: F)
-    where
-        F: Fn(std::time::Duration) -> T,
-        T: Future,
-    {
         enum Input {
             Line(Result<String, async_channel::RecvError>),
             Work,
-            Deadline,
         }
-        let mut armed: Option<(web_time::Instant, Pin<Box<T>>)> = None;
         loop {
             self.save_outbox();
-            let deadline = self.next_deadline();
-            if armed.as_ref().map(|(at, _)| *at) != deadline {
-                armed = deadline.map(|at| {
-                    let delay = at.saturating_duration_since(web_time::Instant::now());
-                    (at, Box::pin(timer(delay)))
-                });
-            }
             let input = futures_lite::future::race(
                 async { Input::Line(self.inner.from_host.recv().await) },
-                futures_lite::future::race(
-                    async {
-                        match self.inner.pump_work.1.recv().await {
-                            Ok(()) => Input::Work,
-                            Err(_) => std::future::pending().await,
-                        }
-                    },
-                    async {
-                        match armed.as_mut() {
-                            Some((_, timer)) => {
-                                timer.as_mut().await;
-                                Input::Deadline
-                            }
-                            None => std::future::pending().await,
-                        }
-                    },
-                ),
+                async {
+                    match self.inner.pump_work.1.recv().await {
+                        Ok(()) => Input::Work,
+                        Err(_) => std::future::pending().await,
+                    }
+                },
             )
             .await;
             let line = match input {
@@ -314,11 +285,6 @@ impl HostLink {
                 Input::Line(Err(_)) => break,
                 Input::Work => {
                     self.flush_outbox();
-                    continue;
-                }
-                Input::Deadline => {
-                    armed = None;
-                    self.check_deadlines(web_time::Instant::now());
                     continue;
                 }
             };
@@ -386,6 +352,16 @@ impl HostLink {
         self.save_outbox();
         self.inner.pending.lock().unwrap().clear();
         self.inner.events_tx.close();
+    }
+
+    /// [`HostLink::pump`]: the link arms no timer, so `timer` is never
+    /// called. `crates/ui` still passes one.
+    pub async fn pump_with_timer<F, T>(&self, _timer: F)
+    where
+        F: Fn(std::time::Duration) -> T,
+        T: Future,
+    {
+        self.pump().await;
     }
 
     /// Save the outbox when it changed, without holding it locked while the
@@ -626,12 +602,10 @@ impl HostLink {
             return;
         }
         let mut delivery = self.inner.delivery.lock().unwrap();
-        let now = web_time::Instant::now();
-        let mut sent = false;
         for write in delivery
             .writes
             .iter_mut()
-            .skip_while(|write| write.sent.is_some())
+            .skip_while(|write| write.sent)
             .take_while(|write| write.durable)
         {
             let message = ClientMessage {
@@ -646,83 +620,7 @@ impl HostLink {
             if self.inner.to_host.try_send(line).is_err() {
                 break;
             }
-            write.sent = Some(now);
-            sent = true;
-        }
-        drop(delivery);
-        if sent {
-            // The pump arms the write's deadline.
-            let _ = self.inner.pump_work.0.try_send(());
-        }
-    }
-
-    /// When the oldest outstanding command runs out of time while connected:
-    /// a sent retained write or another command after 30 s.
-    fn next_deadline(&self) -> Option<web_time::Instant> {
-        if !matches!(
-            self.connection_state(),
-            ConnectionState::Connected { .. } | ConnectionState::Syncing { .. }
-        ) {
-            return None;
-        }
-        let command = std::time::Duration::from_millis(heartbeat::COMMAND_TIMEOUT_MS);
-        let request = self
-            .inner
-            .pending
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|waiter| !waiter.query && !waiter.retained)
-            .map(|waiter| waiter.started + command)
-            .min();
-        // The oldest sent write bounds the stall: later writes were sent after it.
-        let write = self
-            .inner
-            .delivery
-            .lock()
-            .unwrap()
-            .writes
-            .iter()
-            .find_map(|write| write.sent)
-            .map(|sent| sent + command);
-        request.into_iter().chain(write).min()
-    }
-
-    fn check_deadlines(&self, now: web_time::Instant) {
-        if !matches!(
-            self.connection_state(),
-            ConnectionState::Connected { .. } | ConnectionState::Syncing { .. }
-        ) {
-            return;
-        }
-        // The oldest sent write bounds the stall: later writes were sent after it.
-        let stalled = self
-            .inner
-            .delivery
-            .lock()
-            .unwrap()
-            .writes
-            .iter()
-            .find_map(|write| write.sent)
-            .is_some_and(|sent| {
-                now.duration_since(sent).as_millis() >= u128::from(heartbeat::COMMAND_TIMEOUT_MS)
-            });
-        let stalled = stalled
-            || self.inner.pending.lock().unwrap().values().any(|waiter| {
-                !waiter.query
-                    && !waiter.retained
-                    && now.duration_since(waiter.started).as_millis()
-                        >= u128::from(heartbeat::COMMAND_TIMEOUT_MS)
-            });
-        if stalled {
-            log::warn!("command acknowledgement stalled for 30 seconds; reconnecting");
-            self.set_connection_state(ConnectionState::Reconnecting {
-                attempt: 1,
-                reason: Some(ConnectionFailure::Timeout),
-            });
-            self.wake(recovery::Wake::Reconnect);
-        } else {
-            self.flush_outbox();
+            write.sent = true;
         }
     }
 
@@ -778,11 +676,8 @@ impl HostLink {
                 sender,
                 query,
                 retained: matches!(&payload, ClientPayload::Command(command) if command.requires_delivery_key()),
-                started: web_time::Instant::now(),
             },
         );
-        // The pump arms the request's deadline.
-        let _ = self.inner.pump_work.0.try_send(());
         if let ClientPayload::Command(command) = &payload
             && command.requires_delivery_key()
         {
@@ -1041,7 +936,7 @@ impl HostLink {
             });
             drop(pending);
             for write in &mut self.inner.delivery.lock().unwrap().writes {
-                write.sent = None;
+                write.sent = false;
             }
         }
         drop(current);
@@ -1162,33 +1057,6 @@ fn outbox_bytes(delivery: &Delivery) -> usize {
         .max(wire)
 }
 
-async fn delay(delay: std::time::Duration) {
-    #[cfg(not(target_arch = "wasm32"))]
-    async_io::Timer::after(delay).await;
-    #[cfg(target_arch = "wasm32")]
-    {
-        use wasm_bindgen::{JsCast as _, prelude::*};
-        let receiver = {
-            let (sender, receiver) = async_channel::bounded(1);
-            let callback = Closure::once_into_js(move || {
-                let _ = sender.try_send(());
-            });
-            let global = js_sys::global();
-            let timeout: js_sys::Function =
-                js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
-                    .unwrap()
-                    .unchecked_into();
-            let _ = timeout.call2(
-                &global,
-                &callback,
-                &JsValue::from_f64(delay.as_millis() as f64),
-            );
-            receiver
-        };
-        let _ = receiver.recv().await;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1221,7 +1089,7 @@ mod tests {
         let link = HostLink::new(to_host, from_host);
         link.restore_outbox(storage.clone()).unwrap();
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-        let mut pump = std::pin::pin!(link.pump_with_timer(|_| std::future::pending::<()>()));
+        let mut pump = std::pin::pin!(link.pump());
         assert!(pump.as_mut().poll(&mut cx).is_pending());
         link.dispatch(rename(0)).unwrap();
         assert!(outgoing.try_recv().is_err(), "sent before it was saved");
@@ -1259,7 +1127,7 @@ mod tests {
         let link = HostLink::new(to_host, from_host);
         link.restore_outbox(storage.clone()).unwrap();
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-        let mut pump = std::pin::pin!(link.pump_with_timer(|_| std::future::pending::<()>()));
+        let mut pump = std::pin::pin!(link.pump());
         for command in [
             Command::SetHostToken {
                 host: "github.com".into(),
@@ -1342,7 +1210,7 @@ mod tests {
             reason: None,
         });
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-        let mut pump = std::pin::pin!(link.pump_with_timer(|_| std::future::pending::<()>()));
+        let mut pump = std::pin::pin!(link.pump());
         link.dispatch(rename(0)).unwrap();
         for _ in 0..outbox::MAX_ITEMS {
             let _ = link.dispatch(Command::TerminalInput {
@@ -1397,7 +1265,7 @@ mod tests {
             matches!(first.as_mut().poll(&mut cx), std::task::Poll::Ready(Err(error)) if error.code == "outbox_full")
         );
         // The link's pump saves what was admitted, as it runs in the app.
-        let mut saving = std::pin::pin!(link.pump_with_timer(|_| std::future::pending::<()>()));
+        let mut saving = std::pin::pin!(link.pump());
         assert!(saving.as_mut().poll(&mut cx).is_pending());
         let entries = storage.0.lock().unwrap().clone();
         assert_eq!(entries.len(), 256);
@@ -1408,7 +1276,7 @@ mod tests {
         let recreated = HostLink::new(to_host, from_host);
         recreated.restore_outbox(storage.clone()).unwrap();
         recreated.set_connection_state(ConnectionState::Syncing { path: None });
-        let mut pump = std::pin::pin!(recreated.pump_with_timer(|_| std::future::pending::<()>()));
+        let mut pump = std::pin::pin!(recreated.pump());
         // Every restored write is on the wire before the first Ack arrives.
         let requests: Vec<_> = entries
             .iter()
@@ -1473,7 +1341,7 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         let link = HostLink::new(to_host, from_host);
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-        let mut pump = std::pin::pin!(link.pump_with_timer(|_| std::future::pending::<()>()));
+        let mut pump = std::pin::pin!(link.pump());
         let mut futures: Vec<_> = (0..3)
             .map(|title| Box::pin(link.command(rename(title))))
             .collect();
@@ -1530,7 +1398,7 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         let link = HostLink::new(to_host, from_host);
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-        let mut pump = std::pin::pin!(link.pump_with_timer(|_| std::future::pending::<()>()));
+        let mut pump = std::pin::pin!(link.pump());
         for title in 0..3 {
             link.dispatch(rename(title)).unwrap();
         }
@@ -1552,7 +1420,7 @@ mod tests {
                 .unwrap()
                 .writes
                 .iter()
-                .all(|write| write.sent.is_none())
+                .all(|write| !write.sent)
         );
         link.set_connection_state(ConnectionState::Syncing { path: None });
         let resent: Vec<_> = (0..2).map(|_| request(&outgoing)).collect();
@@ -1571,7 +1439,7 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         let link = HostLink::new(to_host, from_host);
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-        let mut pump = std::pin::pin!(link.pump_with_timer(|_| std::future::pending::<()>()));
+        let mut pump = std::pin::pin!(link.pump());
         for title in 0..4 {
             link.dispatch(rename(title)).unwrap();
         }
@@ -1583,7 +1451,7 @@ mod tests {
                 .unwrap()
                 .writes
                 .iter()
-                .map(|write| write.sent.is_some())
+                .map(|write| write.sent)
                 .collect::<Vec<_>>()
         };
         assert_eq!(sent_flags(&link), [true, true, false, false]);
@@ -1615,32 +1483,6 @@ mod tests {
         assert!(pump.as_mut().poll(&mut cx).is_ready());
     }
 
-    /// An idle link costs no wakeups: the pump arms a timer only for an
-    /// outstanding command, at that command's deadline.
-    #[test]
-    fn an_idle_link_arms_no_timer_and_a_sent_write_arms_its_deadline() {
-        let (to_host, _outgoing) = async_channel::unbounded();
-        let (_incoming, from_host) = async_channel::unbounded();
-        let link = HostLink::new(to_host, from_host);
-        let delays = std::cell::RefCell::new(Vec::new());
-        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-        let mut pump = std::pin::pin!(link.pump_with_timer(|delay| {
-            delays.borrow_mut().push(delay);
-            std::future::pending::<()>()
-        }));
-        assert!(pump.as_mut().poll(&mut cx).is_pending());
-        assert!(delays.borrow().is_empty(), "an idle link armed a timer");
-        link.dispatch(rename(0)).unwrap();
-        assert!(pump.as_mut().poll(&mut cx).is_pending());
-        let command_timeout = std::time::Duration::from_millis(heartbeat::COMMAND_TIMEOUT_MS);
-        assert!(matches!(
-            delays.borrow()[..],
-            [delay] if delay <= command_timeout && delay > command_timeout / 2
-        ));
-        link.close();
-        assert!(pump.as_mut().poll(&mut cx).is_ready());
-    }
-
     /// With no periodic tick, a write the transport's queue refused goes out
     /// as soon as the transport takes a line, with no host line to prompt it.
     #[test]
@@ -1649,7 +1491,7 @@ mod tests {
         let (_incoming, from_host) = async_channel::unbounded();
         let link = HostLink::new(to_host, from_host);
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-        let mut pump = std::pin::pin!(link.pump_with_timer(|_| std::future::pending::<()>()));
+        let mut pump = std::pin::pin!(link.pump());
         for _ in 0..outgoing::MAX_LINES {
             link.dispatch(Command::OpenLatestSession).unwrap();
         }

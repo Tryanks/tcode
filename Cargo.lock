@@ -12162,7 +12162,6 @@ name = "tcode-client"
 version = "0.1.0"
 dependencies = [
  "async-channel",
- "async-io",
  "base64 0.23.1",
  "block2 0.6.2",
  "cpal",
@@ -12181,7 +12180,6 @@ dependencies = [
  "url",
  "uuid",
  "wasm-bindgen",
- "web-time",
  "windows 0.62.2",
 ]
 

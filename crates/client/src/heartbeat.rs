@@ -4,7 +4,6 @@
 
 pub const BROWSER_IDLE_MS: u64 = 15_000;
 pub const LIVENESS_REPLY_MS: u64 = 20_000;
-pub const COMMAND_TIMEOUT_MS: u64 = 30_000;
 
 pub struct Heartbeat {
     deadline_ms: u64,
