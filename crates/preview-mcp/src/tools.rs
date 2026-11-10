@@ -452,25 +452,16 @@ pub fn service(broker: Broker, session_id: String) -> Service {
 mod tests {
     use super::*;
 
-    fn broker(
-        requests: async_channel::Sender<crate::BrokerRequest>,
-        timeout: std::time::Duration,
-    ) -> Broker {
-        Broker::new(
-            requests,
-            timeout,
-            mcp_host::BrokerErrors {
-                unavailable: "preview UI is not available",
-                dropped: "preview UI dropped the request",
-                timed_out: "preview operation timed out",
-            },
-        )
-    }
-
     #[tokio::test]
     async fn tools_preserve_session_and_map_replies_and_disconnects() {
         let (tx, rx) = async_channel::unbounded::<crate::BrokerRequest>();
-        let broker = broker(tx, std::time::Duration::from_secs(30));
+        let broker = Broker::new(
+            tx,
+            mcp_host::BrokerErrors {
+                unavailable: "preview UI is not available",
+                dropped: "preview UI dropped the request",
+            },
+        );
         let resolver = tokio::spawn(async move {
             for (op, reply) in [
                 (

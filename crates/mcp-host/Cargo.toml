@@ -11,5 +11,5 @@ rmcp = { version = "3.0", features = [
     "server",
     "transport-streamable-http-server",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
 uuid = { version = "1", features = ["v4"] }

@@ -8,10 +8,7 @@ use rmcp::{
     },
 };
 use serde::Deserialize;
-use std::{
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -70,11 +67,9 @@ pub fn start(host: &mut mcp_host::Host) -> PullRequestMcpServer {
     let (sender, requests) = async_channel::unbounded();
     let broker = Broker::new(
         sender,
-        Duration::from_secs(35),
         mcp_host::BrokerErrors {
             unavailable: "pull request host is unavailable",
             dropped: "pull request host dropped the request",
-            timed_out: "pull request operation timed out",
         },
     );
     let hosts = HostNames::default();

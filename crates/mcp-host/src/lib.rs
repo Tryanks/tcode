@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use axum::Router;
 use axum::http::{StatusCode, header::AUTHORIZATION};
@@ -16,12 +15,12 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 pub struct BrokerErrors {
     pub unavailable: &'static str,
     pub dropped: &'static str,
-    pub timed_out: &'static str,
 }
 
+/// Hands a tool call to the host and waits for its answer. How long a call
+/// may take is the harness's to decide, as for any MCP server it runs.
 pub struct Broker<Request> {
     requests: async_channel::Sender<Request>,
-    timeout: Duration,
     errors: BrokerErrors,
 }
 
@@ -29,23 +28,14 @@ impl<Request> Clone for Broker<Request> {
     fn clone(&self) -> Self {
         Self {
             requests: self.requests.clone(),
-            timeout: self.timeout,
             errors: self.errors,
         }
     }
 }
 
 impl<Request> Broker<Request> {
-    pub fn new(
-        requests: async_channel::Sender<Request>,
-        timeout: Duration,
-        errors: BrokerErrors,
-    ) -> Self {
-        Self {
-            requests,
-            timeout,
-            errors,
-        }
+    pub fn new(requests: async_channel::Sender<Request>, errors: BrokerErrors) -> Self {
+        Self { requests, errors }
     }
 
     pub async fn invoke<Reply>(
@@ -57,11 +47,10 @@ impl<Request> Broker<Request> {
             .send(request(reply))
             .await
             .map_err(|_| self.errors.unavailable.to_string())?;
-        match tokio::time::timeout(self.timeout, response.recv()).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(self.errors.dropped.to_string()),
-            Err(_) => Err(self.errors.timed_out.to_string()),
-        }
+        response
+            .recv()
+            .await
+            .unwrap_or_else(|_| Err(self.errors.dropped.to_string()))
     }
 }
 

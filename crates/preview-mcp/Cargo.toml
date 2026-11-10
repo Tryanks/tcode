@@ -19,4 +19,4 @@ mcp-host = { path = "../mcp-host" }
 tcode-protocol = { path = "../protocol", default-features = false }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros", "time"] }
+tokio = { version = "1", features = ["rt", "macros"] }
