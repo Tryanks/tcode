@@ -16,6 +16,7 @@
 //! only add versions and update states when they have them.
 
 use std::path::{Path, PathBuf};
+use std::process::Output;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -39,6 +40,16 @@ async fn run_cli(
     args: &[String],
     timeout: Duration,
 ) -> Result<String, AgentError> {
+    cli_stdout(cli_output(provider, default, context, args, timeout).await?)
+}
+
+async fn cli_output(
+    provider: ProviderKind,
+    default: &str,
+    context: &PluginContext,
+    args: &[String],
+    timeout: Duration,
+) -> Result<Output, AgentError> {
     let display = format!("{default} {}", args.join(" "));
     let binary = crate::resolve_binary(context.binary_path.as_deref(), default)?;
     let mut command = crate::process::command(binary);
@@ -50,13 +61,16 @@ async fn run_cli(
     // `output()` gives the child a null stdin, so a prompt can never wait on
     // input, and dropping it on timeout kills the child.
     command.kill_on_drop(true);
-    let output = smol::future::or(async { Some(command.output().await) }, async {
+    smol::future::or(async { Some(command.output().await) }, async {
         smol::Timer::after(timeout).await;
         None
     })
     .await
     .ok_or_else(|| AgentError::Provider(format!("`{display}` timed out")))?
-    .map_err(|error| AgentError::Spawn(format!("spawning `{display}`: {error}")))?;
+    .map_err(|error| AgentError::Spawn(format!("spawning `{display}`: {error}")))
+}
+
+fn cli_stdout(output: Output) -> Result<String, AgentError> {
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     if output.status.success() {
         return Ok(stdout);
@@ -306,11 +320,21 @@ fn parse_opencode_check(stdout: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// `opencode plugin check` prints its report and then exits 1 when any
+/// plugin's check failed; a command that fails outright prints nothing to
+/// stdout.
+fn opencode_check_report(output: Output) -> Result<String, AgentError> {
+    if output.stdout.is_empty() {
+        return cli_stdout(output);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 pub(crate) async fn list_opencode(context: &PluginContext) -> Result<PluginListing, AgentError> {
     let run = |args: &'static [&'static str]| {
         let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
         async move {
-            run_cli(
+            cli_output(
                 ProviderKind::OpenCode,
                 "opencode",
                 context,
@@ -334,12 +358,14 @@ pub(crate) async fn list_opencode(context: &PluginContext) -> Result<PluginListi
         smol::future::zip(run(&["plugin", "list"]), run(&["plugin", "check"])).await;
     let mut errors = Vec::new();
     let loaded = loaded
+        .and_then(cli_stdout)
         .map(|out| parse_opencode_list(&out))
         .unwrap_or_else(|error| {
             errors.push(format!("opencode plugin list: {error}"));
             Vec::new()
         });
     let checked = checked
+        .and_then(opencode_check_report)
         .map(|out| parse_opencode_check(&out))
         .unwrap_or_else(|error| {
             errors.push(format!("opencode plugin check: {error}"));
@@ -487,6 +513,47 @@ mod tests {
                 ("broken@1.3.0".to_string(), "check failed".to_string()),
             ]
         );
+    }
+
+    fn exited(code: i32, stdout: &str, stderr: &str) -> Output {
+        #[cfg(unix)]
+        let status = std::os::unix::process::ExitStatusExt::from_raw(code << 8);
+        #[cfg(windows)]
+        let status = std::os::windows::process::ExitStatusExt::from_raw(code as u32);
+        Output {
+            status,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    /// OpenCode 2.2.6's `cli.plugin.check` writes its report, then sets exit
+    /// code 1 if any plugin's check failed; a check that cannot run at all
+    /// (here `cli.plugin.inspect`'s "Plugin is not configured") writes only
+    /// the error, to stderr, and exits 1.
+    #[test]
+    fn a_failed_plugin_check_keeps_every_plugins_state() {
+        let report = opencode_check_report(exited(
+            1,
+            "Server\n  opencode.wakatime 1.4.0 (current)\n  broken@1.3.0 (check failed)\n",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(
+            parse_opencode_check(&report),
+            [
+                ("opencode.wakatime".to_string(), "current".to_string()),
+                ("broken@1.3.0".to_string(), "check failed".to_string()),
+            ]
+        );
+        let Err(AgentError::Provider(message)) = opencode_check_report(exited(
+            1,
+            "",
+            "Error: Plugin is not configured: broken@1.3.0\n",
+        )) else {
+            panic!("a check that did not run is an error");
+        };
+        assert_eq!(message, "Error: Plugin is not configured: broken@1.3.0");
     }
 
     #[test]
