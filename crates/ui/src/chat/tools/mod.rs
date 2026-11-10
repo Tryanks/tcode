@@ -349,59 +349,6 @@ fn kind_activity(entry: &TimelineEntry, live_reasoning: bool, cwd: &Path) -> Act
     }
 }
 
-/// An activity's window drawn outside a chat, for the component gallery:
-/// its header, and a command's terminal when open.
-pub(crate) fn preview_window(
-    entry: &TimelineEntry,
-    open: bool,
-    hover: crate::motion::ListHover,
-    cx: &App,
-) -> AnyElement {
-    let activity = activity(entry, false, Path::new(""));
-    let error = activity.failure();
-    let elapsed_ms = window::elapsed(&activity.header, entry);
-    let Activity {
-        header,
-        status,
-        copy,
-        expandable,
-        ..
-    } = activity;
-    let detail = match &entry.content {
-        EntryContent::Item(ItemContent::CommandExecution {
-            command, output, ..
-        }) if open => window::Detail::Open(shell::CommandPanelCache::new().render(
-            entry,
-            command,
-            output,
-            Default::default(),
-            None,
-            shell::OutputHandlers::inert(),
-            cx,
-        )),
-        _ if expandable => window::Detail::Shut,
-        _ => window::Detail::None,
-    };
-    window::tool_window(
-        window::WindowSpec {
-            key: entry.id.clone(),
-            header,
-            status,
-            error,
-            elapsed_ms,
-            compact: false,
-            copy,
-            whole_output: None,
-            path: None,
-            hover,
-            motion: Default::default(),
-        },
-        detail,
-        |_, _, _| {},
-        cx,
-    )
-}
-
 /// What a window copies, for a surface outside the window that offers the
 /// same (an image tile of the call).
 pub(in crate::chat) fn copy_items(entry: &TimelineEntry) -> Vec<(String, String)> {

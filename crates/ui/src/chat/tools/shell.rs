@@ -419,20 +419,6 @@ pub(crate) struct OutputHandlers {
     copy: Handler<gpui_base::input::Copy>,
 }
 
-impl OutputHandlers {
-    /// For a panel drawn outside a conversation, which nothing scrolls or
-    /// selects in.
-    pub(crate) fn inert() -> Self {
-        Self {
-            wheel: Box::new(|_, _, _| {}),
-            press: Box::new(|_, _, _| {}),
-            drag: Box::new(|_, _, _| {}),
-            release: Box::new(|_, _, _| {}),
-            copy: Box::new(|_, _, cx| cx.propagate()),
-        }
-    }
-}
-
 fn output_handlers(id: &str, ctx: &mut ToolCtx<'_, '_>) -> OutputHandlers {
     let wheel = {
         let id = id.to_owned();
