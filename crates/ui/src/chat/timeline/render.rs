@@ -110,12 +110,12 @@ impl TimelineView {
                     ));
                 }
                 Segment::ContextCompacted(entry) => {
+                    let EntryContent::ContextCompacted(compaction) = &entry.content else {
+                        unreachable!();
+                    };
                     column = column.child(components::dividers::context_compacted_divider(
                         &entry.id,
-                        match &entry.content {
-                            EntryContent::ContextCompacted(c) => Some(c),
-                            _ => None,
-                        },
+                        Some(compaction),
                         &self.motion,
                         cx,
                     ));
