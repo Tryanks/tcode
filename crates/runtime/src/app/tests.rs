@@ -6593,6 +6593,9 @@ fn a_new_threads_permission_is_its_projects_then_its_harness_then_the_recommende
 
 #[test]
 fn native_permission_selection_stays_pending_until_provider_confirmation() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-permission-confirmation");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
     for (provider, id, initial, requested, restart) in [
         (
             ProviderKind::ClaudeCode,
@@ -6623,36 +6626,35 @@ fn native_permission_selection_stays_pending_until_provider_confirmation() {
             true,
         ),
     ] {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("tcode-permission-confirmation");
-        let state = cx.new_entity(TestClientState::new((*store).clone()));
+        let session_id = format!("permission-{provider:?}");
+        let session_id = session_id.as_str();
         let (commands, receiver) = smol::channel::unbounded();
         state.update(cx, |state, cx| {
             let mut session = live_session(provider, commands);
-            session.meta.id = "permission-session".into();
+            session.meta.id = session_id.into();
             state.sessions.push(session.meta.clone());
             state.install_selected(session);
             let confirmed = |value| AgentEvent::ProviderOptions {
                 descriptors: vec![permission_control(provider).unwrap()],
                 selections: vec![OptionSelection { id: id.into(), value }],
             };
-            state.on_event("permission-session", confirmed(initial.clone()), cx);
-            assert!(!state.session_status_snapshot("permission-session").unwrap().options_pending_restart);
-            state.set_active_option("permission-session", id, Some(requested.clone()), cx);
+            state.on_event(session_id, confirmed(initial.clone()), cx);
+            assert!(!state.session_status_snapshot(session_id).unwrap().options_pending_restart);
+            state.set_active_option(session_id, id, Some(requested.clone()), cx);
             if restart {
                 assert!(receiver.try_recv().is_err());
             } else {
                 assert!(matches!(receiver.try_recv(), Ok(SessionCommand::SetOption { id: sent_id, value }) if sent_id == id && value == requested));
             }
-            state.on_event("permission-session", confirmed(initial.clone()), cx);
-            let pending = state.session_status_snapshot("permission-session").unwrap();
+            state.on_event(session_id, confirmed(initial.clone()), cx);
+            let pending = state.session_status_snapshot(session_id).unwrap();
             assert_eq!(pending.provider_option_selections.iter().find(|selection| selection.id == id).unwrap().value, initial);
             assert_eq!(pending.provider_option_requested_selections.iter().find(|selection| selection.id == id).unwrap().value, requested);
             assert_eq!(pending.options_pending_restart, restart);
-            assert!(matches!(state.resident("permission-session").unwrap().runtime, Runtime::Live(_)));
+            assert!(matches!(state.resident(session_id).unwrap().runtime, Runtime::Live(_)));
             if !restart {
-                state.on_event("permission-session", confirmed(requested.clone()), cx);
-                let applied = state.session_status_snapshot("permission-session").unwrap();
+                state.on_event(session_id, confirmed(requested.clone()), cx);
+                let applied = state.session_status_snapshot(session_id).unwrap();
                 assert_eq!(applied.provider_option_selections.iter().find(|selection| selection.id == id).unwrap().value, requested);
                 assert_eq!(applied.provider_option_requested_selections, applied.provider_option_selections);
                 assert!(!applied.options_pending_restart);
@@ -7549,45 +7551,39 @@ fn a_new_model_is_taken_on_the_running_process() {
     });
 }
 
-/// What the process refuses takes a restart: at once when nothing would be
-/// killed, and otherwise after the background work, with the message going out
-/// on the old settings in the meantime.
+/// What the process refuses takes a restart at once when nothing would be
+/// killed. With background work running, the message goes out on the old
+/// settings instead (settings_restart_waits_for_background_follow_up).
 #[test]
 fn a_refused_settings_change_falls_back_to_the_restart() {
-    for background in [0, 1] {
-        let cx = &mut TestAppContext::default();
-        let test_store = TestStore::new("tcode-refused-settings-test");
-        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-        let (commands, actor) = smol::channel::unbounded();
-        let mut session = live_session(ProviderKind::ClaudeCode, commands);
-        session.meta.id = "refused-settings".into();
-        session.live_model = Some("claude-opus-4-8".into());
-        session.meta.model = Some("claude-sonnet-4-6".into());
-        session.background_task_count = background;
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-refused-settings-test");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (commands, actor) = smol::channel::unbounded();
+    let mut session = live_session(ProviderKind::ClaudeCode, commands);
+    session.meta.id = "refused-settings".into();
+    session.live_model = Some("claude-opus-4-8".into());
+    session.meta.model = Some("claude-sonnet-4-6".into());
 
-        state.update(cx, |state, cx| {
-            state
-                .settings
-                .provider_mut(ProviderKind::ClaudeCode)
-                .binary_path = Some("/nonexistent/tcode-test-claude".into());
-            state.sessions.push(session.meta.clone());
-            state.install_selected(session);
-            state.send_turn("refused-settings", "go".into(), Vec::new(), cx);
-            assert!(matches!(
-                next_command(&actor),
-                Ok(SessionCommand::ApplySettings { .. })
-            ));
-            state.on_event(
-                "refused-settings",
-                AgentEvent::SettingsApplied { applied: false },
-                cx,
-            );
-        });
-        match (background, next_command(&actor)) {
-            (0, Ok(SessionCommand::Shutdown)) | (1, Ok(SessionCommand::SendTurn { .. })) => {}
-            other => panic!("with {background} background task(s): {other:?}"),
-        }
-    }
+    state.update(cx, |state, cx| {
+        state
+            .settings
+            .provider_mut(ProviderKind::ClaudeCode)
+            .binary_path = Some("/nonexistent/tcode-test-claude".into());
+        state.sessions.push(session.meta.clone());
+        state.install_selected(session);
+        state.send_turn("refused-settings", "go".into(), Vec::new(), cx);
+        assert!(matches!(
+            next_command(&actor),
+            Ok(SessionCommand::ApplySettings { .. })
+        ));
+        state.on_event(
+            "refused-settings",
+            AgentEvent::SettingsApplied { applied: false },
+            cx,
+        );
+    });
+    assert!(matches!(next_command(&actor), Ok(SessionCommand::Shutdown)));
 }
 
 /// Whether a lead's agents hold it: one still runs, or a dispatched one
@@ -14126,7 +14122,9 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
 fn an_old_profiles_activity_backfills_and_updates_the_index() {
     let store = TestStore::new("activity-backfill");
     std::fs::create_dir_all(store.root()).unwrap();
-    let metas: Vec<_> = (0..48)
+    // One more thread than a backfill batch holds, so the backfill goes on
+    // past its first batch.
+    let metas: Vec<_> = (0..17)
         .map(|index| {
             let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
             meta.id = format!("old-{index}");
