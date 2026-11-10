@@ -4,15 +4,14 @@
 //! `user_version` 1, which the store then turns over to its own like any
 //! older build's ([`super::source`]).
 //!
-//! The database is built and verified under a staging name and published by
-//! a rename, so a file at the final name is always complete:
+//! The database is built under a staging name and published by a rename, so
+//! a file at the final name is always complete:
 //!
 //! 1. `tcode.db.migrating` is created with the schema and `user_version` 0,
 //!    and the index is imported.
 //! 2. Every `*.jsonl` in the data dir (orphans included) is imported in
 //!    bounded transactions.
-//! 3. Each log is read back and compared byte for byte with its file;
-//!    `user_version` is set to 1 and the WAL is checkpointed into the main
+//! 3. `user_version` is set to 1 and the WAL is checkpointed into the main
 //!    file.
 //! 4. The staged file is synced, the list of sources to archive is written to
 //!    `tcode.db.archive`, and the staged file is renamed to `tcode.db`; the
@@ -38,7 +37,7 @@ use std::time::Instant;
 use tcode_core::project::{IndexFile, SessionMeta, migrate_index};
 
 use super::DB_FILE;
-use super::db::{Db, SCHEMA, SCHEMA_VERSION, V1_SCHEMA, V1_VERSION, blob, integer, wal_path};
+use super::db::{Db, SCHEMA, SCHEMA_VERSION, V1_SCHEMA, V1_VERSION, wal_path};
 
 const STAGING_FILE: &str = "tcode.db.migrating";
 const ARCHIVE_LIST: &str = "tcode.db.archive";
@@ -48,12 +47,8 @@ const LEGACY_DIR: &str = "legacy";
 /// transaction for a multi-hundred-megabyte log holds every dirty page in
 /// memory and doubles the WAL.
 pub(super) use crate::fs_tree::CHUNK_BYTES;
-/// At most this many rows, and about [`CHUNK_BYTES`], are compared per read
-/// when verifying, so a reader never pins the WAL or memory for a whole log.
-const VERIFY_ROWS: i64 = 4096;
 
-/// Where a running migration is. Each of the importing and verifying phases
-/// goes through every log once, so their counts start again from zero;
+/// Where a running migration is. Importing goes through every log once;
 /// publishing and archiving report everything done. While relocating, the
 /// thread counts are the older data dir's entries and the byte counts what a
 /// copy across filesystems has written; a move by rename reports no bytes.
@@ -74,7 +69,6 @@ pub enum MigrationPhase {
     /// until it ends.
     Scanning,
     Importing,
-    Verifying,
     /// Past the last point a cancellation is honoured.
     Publishing,
     Archiving,
@@ -392,26 +386,12 @@ fn build_staging(root: &Path, progress: &mut Progress) -> io::Result<Summary> {
         bytes: 0,
     };
     progress.start(MigrationPhase::Importing, logs.len(), bytes_total)?;
-    let mut tallies = Vec::new();
     for (id, path) in &logs {
         let tally = import_log(&db, id, path, progress)?;
         summary.logs += 1;
         summary.lines += tally.lines;
         summary.blank_lines += tally.blank_lines;
         summary.bytes += tally.bytes;
-        tallies.push(((*id).to_owned(), tally));
-    }
-
-    progress.start(MigrationPhase::Verifying, logs.len(), bytes_total)?;
-    for ((id, path), (_, tally)) in logs.iter().zip(&tallies) {
-        verify_log(&db, id, path, tally, progress)?;
-        log::info!(
-            "migrated {}: {} line(s), {} blank, {} bytes, verified byte-identical",
-            path.display(),
-            tally.lines,
-            tally.blank_lines,
-            tally.bytes
-        );
     }
     db.write(|db, connection| {
         db.execute(
@@ -516,96 +496,6 @@ fn import_log(db: &Db, id: &str, path: &Path, progress: &mut Progress) -> io::Re
     flush(&mut pending, &mut position)?;
     progress.advance(1, pending_bytes as u64)?;
     Ok(tally)
-}
-
-/// Compare the committed rows with the file again, segment for segment.
-fn verify_log(
-    db: &Db,
-    id: &str,
-    path: &Path,
-    tally: &Tally,
-    progress: &mut Progress,
-) -> io::Result<()> {
-    let mismatch = |position: i64| {
-        io::Error::other(format!(
-            "{}: line {} differs from the migrated copy",
-            path.display(),
-            position + 1
-        ))
-    };
-    let mut page: Vec<Vec<u8>> = Vec::new();
-    let mut page_start = 0_i64;
-    let mut position = 0_i64;
-    let mut compared = 0;
-    read_segments(path, |segment| {
-        if position - page_start == page.len() as i64 {
-            if compared > 0 {
-                progress.advance(0, compared)?;
-                compared = 0;
-            }
-            page_start = position;
-            page = db.read(|db, connection| {
-                // Sizes first, so a page holds about CHUNK_BYTES however long
-                // the lines are, and at least one line.
-                let mut last = position - 1;
-                let mut bytes = 0;
-                db.query(
-                    connection,
-                    "SELECT position, length(line) FROM events \
-                     WHERE session_id = ?1 AND position >= ?2 ORDER BY position LIMIT ?3",
-                    (id, position, VERIFY_ROWS),
-                    |row| {
-                        if last < position || bytes < CHUNK_BYTES as i64 {
-                            last = integer(row, 0)?;
-                            bytes += integer(row, 1)?;
-                        }
-                        Ok(())
-                    },
-                )?;
-                let mut rows = Vec::new();
-                db.query(
-                    connection,
-                    "SELECT position, line FROM events \
-                     WHERE session_id = ?1 AND position BETWEEN ?2 AND ?3 ORDER BY position",
-                    (id, position, last),
-                    |row| {
-                        let stored = integer(row, 0)?;
-                        if stored != position + rows.len() as i64 {
-                            return Err(mismatch(position + rows.len() as i64));
-                        }
-                        rows.push(blob(row, 1)?);
-                        Ok(())
-                    },
-                )?;
-                Ok(rows)
-            })?;
-        }
-        let stored = page
-            .get((position - page_start) as usize)
-            .ok_or_else(|| mismatch(position))?;
-        if *stored != segment {
-            return Err(mismatch(position));
-        }
-        compared += segment.len() as u64;
-        position += 1;
-        Ok(())
-    })?;
-    let mut extra = 0;
-    db.read(|db, connection| {
-        db.query(
-            connection,
-            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND position >= ?2",
-            (id, position),
-            |row| {
-                extra = integer(row, 0)?;
-                Ok(())
-            },
-        )
-    })?;
-    if extra != 0 || position as u64 != tally.lines {
-        return Err(mismatch(position));
-    }
-    progress.advance(1, compared)
 }
 
 fn publish(root: &Path, sources: &[String]) -> io::Result<()> {

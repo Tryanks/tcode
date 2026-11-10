@@ -454,7 +454,6 @@ migration:
   relocating_copy: "Copying the data folder to %{path}: %{bytes} of %{total_bytes}"
   scanning: "Looking for threads…"
   importing: "Copying threads: %{done} of %{total} · %{bytes} of %{total_bytes}"
-  verifying: "Checking the copy: %{done} of %{total} · %{bytes} of %{total_bytes}"
   publishing: "Finishing…"
   archiving: "Removing the original files…"
   quitting: "Stopping. Nothing is lost; the upgrade continues the next time Tcode starts."

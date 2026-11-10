@@ -454,7 +454,6 @@ migration:
   relocating_copy: "データフォルダーを %{path} にコピー中：%{bytes} / %{total_bytes}"
   scanning: "スレッドを検索中…"
   importing: "スレッドをコピー中：%{done} / %{total} · %{bytes} / %{total_bytes}"
-  verifying: "コピーを確認中：%{done} / %{total} · %{bytes} / %{total_bytes}"
   publishing: "仕上げ中…"
   archiving: "元のファイルを削除中…"
   quitting: "停止中です。データは失われません。次回 Tcode を起動したときにアップグレードを続行します。"

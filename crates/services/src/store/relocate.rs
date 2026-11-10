@@ -5,13 +5,13 @@
 //!
 //! Every entry of the older directory is renamed into the data dir. Across
 //! filesystems an entry is instead copied into `tcode.relocating/` in the data
-//! dir and compared byte for byte with its source; the source is then retired
-//! into the older directory's `tcode.relocated/`, the copy renamed into place
-//! and the retired source deleted. `tcode.relocating/` marks the move as
+//! dir and synced; the source is then retired into the older directory's
+//! `tcode.relocated/`, the copy renamed into place and the retired source
+//! deleted. `tcode.relocating/` marks the move as
 //! started and is removed last, after the emptied older directory.
 //!
 //! A start after an interruption publishes a staged copy whose source was
-//! retired (it was verified first), discards any other staged copy, deletes
+//! retired (it was complete first), discards any other staged copy, deletes
 //! retired sources whose copy is in place, and moves what is left.
 
 use std::fs::{self, File};
@@ -29,7 +29,7 @@ const LEGACY_DATA_DIR_ENV: &str = "LEGACY_TCODE_DATA_DIR";
 /// In the data dir: present while a move is unfinished, and the staging area
 /// of a copy.
 const STAGING_DIR: &str = "tcode.relocating";
-/// In the older directory: sources whose verified copy is staged.
+/// In the older directory: sources whose complete copy is staged.
 const RETIRED_DIR: &str = "tcode.relocated";
 /// Not data: the older directory's lock and Finder's view settings are deleted
 /// with it rather than moved, so they never collide with the data dir's own.
@@ -322,7 +322,7 @@ fn recover(root: &Path, previous: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Move one entry across filesystems: stage a verified copy, retire the
+/// Move one entry across filesystems: stage a synced copy, retire the
 /// source, publish the copy, delete the source.
 fn copy_entry(
     root: &Path,

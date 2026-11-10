@@ -119,7 +119,7 @@ fn a_cancelled_move_keeps_what_it_moved_and_the_next_start_finishes_it() {
 /// The branch a failed `rename` across filesystems takes, on one entry with
 /// nested directories, a file of several chunks, an empty file and a link.
 #[test]
-fn a_copied_entry_arrives_verified_and_its_source_is_deleted() {
+fn a_copied_entry_arrives_whole_and_its_source_is_deleted() {
     let dirs = Dirs::new();
     let attachments = dirs.previous.join("attachments");
     let large: Vec<u8> = (0..CHUNK_BYTES + 4096).map(|index| index as u8).collect();
@@ -188,7 +188,7 @@ fn a_copied_entry_arrives_verified_and_its_source_is_deleted() {
 /// Killed while copying: one entry's copy is staged but partial, another's
 /// is complete and its source already retired.
 #[test]
-fn a_start_after_an_interrupted_copy_recopies_a_partial_file_and_publishes_a_verified_one() {
+fn a_start_after_an_interrupted_copy_recopies_a_partial_file_and_publishes_a_complete_one() {
     let dirs = Dirs::new();
     let older = tree(&dirs.previous);
     let staging = dirs.root.join(STAGING_DIR);

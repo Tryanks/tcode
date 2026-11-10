@@ -454,7 +454,6 @@ migration:
   relocating_copy: "正在把数据目录复制到 %{path}：%{bytes}/%{total_bytes}"
   scanning: "正在查找线程…"
   importing: "正在复制线程：%{done}/%{total} · %{bytes}/%{total_bytes}"
-  verifying: "正在校验副本：%{done}/%{total} · %{bytes}/%{total_bytes}"
   publishing: "即将完成…"
   archiving: "正在删除原始文件…"
   quitting: "正在停止。数据不会丢失，下次启动 Tcode 时会继续升级。"

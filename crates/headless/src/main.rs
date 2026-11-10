@@ -313,8 +313,7 @@ fn migrate_store(store: &SessionStore) -> Result<Migration, String> {
             store.root().display()
         ),
         None => println!(
-            "Migrating threads into {}; each copy is verified before the original files are \
-             removed. Ctrl-C cancels.",
+            "Migrating threads into {}. Ctrl-C cancels.",
             store.root().join("tcode.db").display()
         ),
     }
@@ -347,7 +346,6 @@ fn migration_line(progress: &MigrationProgress) -> String {
         MigrationPhase::Relocating => ("moving", "entries"),
         MigrationPhase::Scanning => ("scanning", "threads"),
         MigrationPhase::Importing => ("importing", "threads"),
-        MigrationPhase::Verifying => ("verifying", "threads"),
         MigrationPhase::Publishing => ("publishing", "threads"),
         MigrationPhase::Archiving => ("archiving", "threads"),
     };

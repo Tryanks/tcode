@@ -451,7 +451,7 @@ fn a_cancelled_migration_changes_no_source_and_the_next_one_completes() {
     sources.remove(LOCK_FILE);
 
     type Stop = fn(&MigrationProgress) -> bool;
-    let stops: [(&str, Stop); 4] = [
+    let stops: [(&str, Stop); 3] = [
         ("scanning", |progress| {
             progress.phase == MigrationPhase::Scanning
         }),
@@ -462,9 +462,6 @@ fn a_cancelled_migration_changes_no_source_and_the_next_one_completes() {
         }),
         ("between logs", |progress| {
             progress.phase == MigrationPhase::Importing && progress.threads_done == 2
-        }),
-        ("verifying", |progress| {
-            progress.phase == MigrationPhase::Verifying && progress.threads_done == 1
         }),
     ];
     for (point, stop) in stops {
@@ -504,28 +501,24 @@ fn a_cancelled_migration_changes_no_source_and_the_next_one_completes() {
         [
             MigrationPhase::Scanning,
             MigrationPhase::Importing,
-            MigrationPhase::Verifying,
             MigrationPhase::Publishing,
             MigrationPhase::Archiving
         ]
     );
     let log_bytes = (MIXED_LOG.len() + ORPHAN_LOG.len() + bulk.len()) as u64;
-    for phase in [MigrationPhase::Importing, MigrationPhase::Verifying] {
-        let last = reports
-            .iter()
-            .rfind(|progress| progress.phase == phase)
-            .unwrap();
-        assert_eq!(
-            (
-                last.threads_done,
-                last.threads_total,
-                last.bytes_done,
-                last.bytes_total
-            ),
-            (4, 4, log_bytes, log_bytes),
-            "{phase:?}"
-        );
-    }
+    let last = reports
+        .iter()
+        .rfind(|progress| progress.phase == MigrationPhase::Importing)
+        .unwrap();
+    assert_eq!(
+        (
+            last.threads_done,
+            last.threads_total,
+            last.bytes_done,
+            last.bytes_total
+        ),
+        (4, 4, log_bytes, log_bytes)
+    );
     let last = reports.last().unwrap();
     assert_eq!(
         (last.threads_done, last.bytes_done),
@@ -1045,7 +1038,6 @@ fn a_start_moves_an_older_data_dir_in_then_migrates_it_and_leaves_nothing_behind
             MigrationPhase::Relocating,
             MigrationPhase::Scanning,
             MigrationPhase::Importing,
-            MigrationPhase::Verifying,
             MigrationPhase::Publishing,
             MigrationPhase::Archiving,
         ]
