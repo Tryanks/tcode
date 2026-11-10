@@ -139,46 +139,16 @@ pub fn evaluate(expression: &str) -> String {
     format!("(() => {{ return ({expression}); }})()")
 }
 
-/// Decode the string an engine's evaluation callback yields into JSON.
-///
-/// WKWebView may hand back the value already JSON-encoded, or double-encoded
-/// (a JSON string whose contents are themselves JSON). We try to parse, and
-/// if we land on a string that itself looks like JSON, parse one more level
-/// so callers see structured data rather than an opaque string.
+/// Decode the JSON an engine's evaluation callback yields; anything that is
+/// not JSON, such as wry's empty string for `undefined`, is returned as text.
 pub fn parse_result(raw: &str) -> Value {
-    match serde_json::from_str::<Value>(raw) {
-        Ok(Value::String(inner)) => {
-            let trimmed = inner.trim_start();
-            if trimmed.starts_with('{') || trimmed.starts_with('[') {
-                serde_json::from_str::<Value>(&inner).unwrap_or(Value::String(inner))
-            } else {
-                Value::String(inner)
-            }
-        }
-        Ok(value) => value,
-        Err(_) => Value::String(raw.to_string()),
-    }
+    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn webview_results_decode_once_or_twice_without_losing_plain_strings() {
-        for (raw, expected) in [
-            (
-                r#"{"url":"https://x","loading":false}"#,
-                json!({"url":"https://x","loading":false}),
-            ),
-            (r#""{\"ok\":true}""#, json!({"ok":true})),
-            (r#""hello""#, json!("hello")),
-            ("undefined", json!("undefined")),
-        ] {
-            assert_eq!(parse_result(raw), expected, "{raw}");
-        }
-    }
 
     /// What an agent passes reaches the page agent as data: a selector or
     /// text cannot end the call and run as script.
