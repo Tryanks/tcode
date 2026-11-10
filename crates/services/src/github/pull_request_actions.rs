@@ -10,7 +10,7 @@ use super::{
     },
     pull_request_watch,
 };
-use crate::forge::{Anchoring, Moved};
+use crate::forge::{Anchoring, Moved, Step, in_order};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use tcode_core::{
@@ -379,35 +379,6 @@ impl Reader<'_> {
     }
 }
 
-/// One request of a write made of several, and the names it covers.
-type Step<'a> = (Vec<String>, Box<dyn FnOnce() -> Outcome + 'a>);
-
-/// Sends the steps in order until one is not applied; when some went through before it, the
-/// answer is [`Outcome::Partial`] by the names each covers.
-fn in_order<'a>(steps: impl IntoIterator<Item = Step<'a>>) -> Outcome {
-    let mut applied = Vec::new();
-    let mut steps = steps.into_iter();
-    while let Some((names, send)) = steps.next() {
-        let outcome = send();
-        if outcome == Outcome::Applied {
-            applied.extend(names);
-            continue;
-        }
-        if applied.is_empty() {
-            return outcome;
-        }
-        return Outcome::Partial {
-            applied,
-            unapplied: names
-                .into_iter()
-                .chain(steps.flat_map(|(names, _)| names))
-                .collect(),
-            failure: Box::new(outcome),
-        };
-    }
-    Outcome::Applied
-}
-
 impl PullRequestReads {
     pub fn action_state(
         &self,
@@ -591,7 +562,7 @@ impl PullRequestReads {
                         }),
                     )
                 });
-                in_order(adding.into_iter().chain(removing))
+                in_order(adding.into_iter().chain(removing).collect())
             }
             PullRequestAction::SetReviewers { add, remove } => {
                 if add.is_empty() && remove.is_empty() {
@@ -628,7 +599,12 @@ impl PullRequestReads {
                     (names(add), Box::new(|| request("POST", add))),
                     (names(remove), Box::new(|| request("DELETE", remove))),
                 ];
-                in_order(steps.into_iter().filter(|(names, _)| !names.is_empty()))
+                in_order(
+                    steps
+                        .into_iter()
+                        .filter(|(names, _)| !names.is_empty())
+                        .collect(),
+                )
             }
             PullRequestAction::ReadyForReview
             | PullRequestAction::ConvertToDraft
