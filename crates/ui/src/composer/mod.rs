@@ -1953,13 +1953,12 @@ impl Composer {
             // the Paste *action* in the capture phase. Swallow it only when the
             // clipboard held an image; text paste propagates to the editor.
             .capture_action(cx.listener(|this, _: &Paste, window, cx| {
-                if this.interactive(cx) && !this.compact && this.paste_clipboard_image(window, cx) {
+                if this.interactive(cx) && this.paste_clipboard_image(window, cx) {
                     cx.stop_propagation();
                 }
             }))
             .capture_action(cx.listener(|this, paste: &BrowserPaste, window, cx| {
-                if this.interactive(cx) && !this.compact && this.paste_images(&paste.0, window, cx)
-                {
+                if this.interactive(cx) && this.paste_images(&paste.0, window, cx) {
                     cx.stop_propagation();
                 }
             }))
@@ -2005,7 +2004,7 @@ impl Composer {
                 move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
                     let paths: Vec<PathBuf> = paths.paths().to_vec();
                     composer.update(cx, |this, cx| {
-                        if this.compact || !this.interactive(cx) {
+                        if !this.interactive(cx) {
                             return;
                         }
                         for path in paths {
