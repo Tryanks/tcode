@@ -68,7 +68,6 @@ use gpui::{
     InspectorElementId, IntoElement, LayoutId, ParentElement as _, Pixels, Style, Styled as _,
     Window, div, point, prelude::FluentBuilder as _, px, relative, size,
 };
-use gpui_base::motion::{Easing, Timing};
 
 /// How long a row's height, and a list's tail, take to glide to a new one.
 const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
@@ -443,14 +442,8 @@ impl<V> Around<V> {
     }
 }
 
-fn curve(duration: Duration) -> Timing {
-    Timing::new(duration).ease(Easing::Custom(Rc::new(
-        gpui_base::animation::ease_out_cubic,
-    )))
-}
-
 fn eased(elapsed: Duration, duration: Duration) -> f32 {
-    curve(duration).sample(elapsed).directed_progress
+    super::Curve::new(duration).progress(elapsed)
 }
 
 /// How long the glide takes to come `progress` of the way: the inverse of

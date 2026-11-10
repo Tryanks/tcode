@@ -7,7 +7,7 @@
 //! target: gpui-base's dock re-parents a tab group whenever its tree changes
 //! (see `panes::ThreadPanes`), so a pane's fade under way when its group
 //! moved snapped to its end. [`Owned`] keeps the same clocks in a store the
-//! view holds, sampled with gpui-base's `Timing` against the executor's
+//! view holds, sampled along their [`Curve`] against the executor's
 //! clock, timing a glide and a reversal by the rule gpui-base's `transition`
 //! uses, and settled at once under reduced motion as `transition` settles.
 //! Every sampler is written once over a [`Clock`]; its `Element` arm is
@@ -23,9 +23,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use gpui::{AnyElement, App, ElementId, SharedString, Window};
-use gpui_base::motion::{
-    Interpolate, MotionStatus, Presence, PresencePhase, PresenceSample, Timing,
-};
+use gpui_base::motion::{Interpolate, MotionStatus, Presence, PresencePhase, PresenceSample};
 #[cfg(target_family = "wasm")]
 use web_time::Instant;
 
@@ -803,23 +801,21 @@ impl Owned {
             }
             return (target, true);
         }
-        let sample = Timing::new(glide.duration)
-            .ease(curve.easing())
-            .sample(now.saturating_duration_since(glide.started_at));
+        let elapsed = now.saturating_duration_since(glide.started_at);
+        let finished = elapsed >= glide.duration;
+        let progress = Curve::new(glide.duration).progress(elapsed);
         // A finished glide is at its target exactly, as gpui-base's is, not
         // wherever interpolating all the way rounds to.
-        let value = if sample.finished {
+        let value = if finished {
             glide.target.clone()
         } else {
-            glide
-                .from
-                .interpolate(&glide.target, sample.directed_progress)
+            glide.from.interpolate(&glide.target, progress)
         };
         if glide.target != target {
             // gpui-base's reversal: turning back toward where the glide
             // started takes the share of a full glide it had travelled.
             let share = if target == glide.from {
-                (sample.directed_progress * glide.share + (1. - glide.share)).clamp(0., 1.)
+                (progress * glide.share + (1. - glide.share)).clamp(0., 1.)
             } else {
                 1.
             };
@@ -834,7 +830,7 @@ impl Owned {
             return (value, false);
         }
         if glide.from != glide.target {
-            if sample.finished {
+            if finished {
                 glide.from = glide.target.clone();
             } else {
                 window.request_animation_frame();
