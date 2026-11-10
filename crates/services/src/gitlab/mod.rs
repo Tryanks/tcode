@@ -609,11 +609,7 @@ impl Forge for GitLab {
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {
         let mr = self.mr(key);
         let read = mr.mr()?;
-        // The counts only decorate the summary; without them it shows no stat.
-        let stats = mr.diff_stats().unwrap_or_else(|failure| {
-            log::debug!("gitlab host={} diff stats unread: {failure}", key.host);
-            None
-        });
+        let stats = mr.diff_stats()?;
         Ok(Summary {
             snapshot: reads::snapshot(&read, stats, reads::mergeability(&read), Self::now())
                 .ok_or_else(|| {
