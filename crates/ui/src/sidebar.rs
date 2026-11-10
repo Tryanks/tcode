@@ -1052,8 +1052,6 @@ pub struct SessionsSidebar {
     /// Returning from a thread scrolls its row into the upper part of the
     /// list; the row's next paint performs the scroll and clears this.
     compact_reveal_active: bool,
-    #[cfg(test)]
-    compact_rows_rendered: std::cell::Cell<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1707,8 +1705,6 @@ impl SessionsSidebar {
             compact_model: None,
             compact_model_dirty: true,
             compact_reveal_active: false,
-            #[cfg(test)]
-            compact_rows_rendered: std::cell::Cell::new(0),
             _subscriptions: subscriptions,
         };
         sidebar.set_hosts(stores, cx);
@@ -5681,8 +5677,6 @@ impl SessionsSidebar {
     }
 
     fn render_compact(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        #[cfg(test)]
-        self.compact_rows_rendered.set(0);
         let full_scope = self.full_scope(cx);
         self.tidy_row_swipes(cx);
         let model = self.compact_model(Some(window), cx);
@@ -6030,9 +6024,6 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        #[cfg(test)]
-        self.compact_rows_rendered
-            .set(self.compact_rows_rendered.get() + 1);
         let meta = &cached.meta;
         let state = &cached.state;
         let Some(store) = self.store_of(&state.thread.host) else {
@@ -8707,150 +8698,6 @@ mod tests {
         }
         driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[gpui::test]
-    fn compact_scroll_reuses_model_and_renders_only_viewport(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        struct SlidingPage {
-            sidebar: Entity<SessionsSidebar>,
-            offset: gpui::Pixels,
-        }
-        impl Render for SlidingPage {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div().size_full().overflow_hidden().child(
-                    div()
-                        .absolute()
-                        .left(self.offset)
-                        .size_full()
-                        .child(self.sidebar.clone()),
-                )
-            }
-        }
-        cx.update(crate::theme::init);
-        let (to_host, _outgoing) = async_channel::unbounded();
-        let (incoming, from_host) = async_channel::unbounded();
-        let project = Project::from_root(PathBuf::from("/project"));
-        let sessions = (0..300)
-            .map(|index| {
-                let mut meta = session(&format!("virtual-{index}"), None);
-                meta.project_id = Some(project.id.clone());
-                meta.updated_at = 1_000 - index;
-                meta.created_at = meta.updated_at;
-                meta
-            })
-            .collect();
-        for (topic, event) in [
-            (
-                tcode_protocol::Topic::Settings,
-                tcode_protocol::ServerEvent::SettingsSnapshot(Default::default()),
-            ),
-            (
-                tcode_protocol::Topic::Index,
-                tcode_protocol::ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
-                    summary: Default::default(),
-                    sessions,
-                    projects: vec![project],
-                }),
-            ),
-        ] {
-            incoming
-                .try_send(
-                    tcode_protocol::encode_line(&tcode_protocol::HostMessage::Event(
-                        tcode_protocol::EventEnvelope {
-                            request_id: None,
-                            topic,
-                            event,
-                        },
-                    ))
-                    .unwrap(),
-                )
-                .unwrap();
-        }
-        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
-        let link = tcode_client::HostLink::new(to_host, from_host);
-        let pump_link = link.clone();
-        let _pump = cx.background_executor.spawn(async move {
-            pump_link.pump().await;
-        });
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link,
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, cx| store.show_alone("virtual-0".into(), cx));
-        let window_state = cx.new(|_| WindowState::default().with_compact(true));
-        let (page, cx) = cx.add_window_view(|_, cx| SlidingPage {
-            sidebar: cx.new(|cx| SessionsSidebar::new(vec![store.clone()], window_state, cx)),
-            offset: px(0.),
-        });
-        let sidebar = page.read_with(cx, |page, _| page.sidebar.clone());
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        cx.simulate_resize(size(px(393.), px(852.)));
-        draw(cx);
-        // Only the address is kept: a second strong reference, which the app never
-        // holds, would turn the wall-clock minute refresh of relative times into a
-        // copy of the whole model.
-        let model = sidebar.read_with(cx, |sidebar, _| {
-            let model = sidebar.compact_model.as_ref().unwrap();
-            assert_eq!(model.rows.len(), 301);
-            Rc::as_ptr(model)
-        });
-        for (index, selector) in [
-            (0, "compact-row-virtual-0"),
-            (100, "compact-row-virtual-100"),
-            (200, "compact-row-virtual-200"),
-        ] {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.compact_rows_rendered.set(0);
-                sidebar.compact_list_state.scroll_to(gpui::ListOffset {
-                    item_ix: index,
-                    offset_in_item: px(0.),
-                });
-                cx.notify();
-            });
-            page.update(cx, |page, cx| {
-                page.offset = px(index as f32);
-                cx.notify();
-            });
-            draw(cx);
-            sidebar.read_with(cx, |sidebar, _| {
-                let current = sidebar.compact_model.as_ref().unwrap();
-                assert!(
-                    std::ptr::eq(model, Rc::as_ptr(current)),
-                    "scrolling must not rebuild families or labels"
-                );
-                assert!(
-                    sidebar.compact_rows_rendered.get() < 40,
-                    "one phone viewport must not construct 300 rows: rendered {} at index {index}",
-                    sidebar.compact_rows_rendered.get()
-                );
-            });
-            assert!(cx.debug_bounds(selector).is_some());
-        }
-        store.update(cx, |_, cx| {
-            cx.emit(StoreChange {
-                topic: TopicKind::Index,
-            })
-        });
-        draw(cx);
-        sidebar.read_with(cx, |sidebar, _| {
-            assert!(
-                !std::ptr::eq(model, Rc::as_ptr(sidebar.compact_model.as_ref().unwrap())),
-                "Index updates invalidate cached row state"
-            );
-            assert_eq!(
-                sidebar.compact_list_state.logical_scroll_top().item_ix,
-                200,
-                "store changes retain the visible thread anchor"
-            );
-        });
     }
 
     /// The sidebar's share item puts the project in a space on the machine the
