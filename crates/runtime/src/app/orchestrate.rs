@@ -697,7 +697,7 @@ impl AppState {
         let instruction = if self.settings.subagents.child_approval == ChildApprovalMode::Manual {
             "The user answers in the child thread."
         } else {
-            "You are the approver: answer with tcode_control respond_approval, passing this thread_id and approval_id with option: <exact id> or cancel: true; reject anything outside the brief's scope. To allow, prefer an allow_always option over allow_once when one is offered."
+            "You are the approver: answer with tcode_control respond_approval, passing this thread_id and approval_id with option: <exact id> or cancel: true; reject anything outside the brief's scope."
         };
         let text = format!(
             "{} {ORCHESTRATE_APPROVAL_PHRASE}{} (approval_id: {}). Native options: {}. {}",

@@ -293,7 +293,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Answer a pending tool-call approval of your own subagent with an exact native option id from its approval message, or cancel: true; never both. Allowed only while Settings → Control subagent approvals makes you the approver (any mode but manual); reject anything outside the scope you gave it, and prefer an allow_always option over allow_once when you allow. Approvals of any other thread are the user's and are refused. Every use is logged in both threads."
+        description = "Answer a pending tool-call approval of your own subagent with an exact native option id from its approval message, or cancel: true; never both. Allowed only while Settings → Control subagent approvals makes you the approver (any mode but manual); reject anything outside the scope you gave it. Approvals of any other thread are the user's and are refused. Every use is logged in both threads."
     )]
     async fn respond_approval(
         &self,
