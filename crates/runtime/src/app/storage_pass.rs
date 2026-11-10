@@ -222,8 +222,11 @@ async fn pass(
     let work = match host_cx.unblock(move || reader.storage_work()).await {
         Ok(work) => work,
         Err(error) => {
-            log::warn!("could not list the storage pass's work: {error}");
-            totals.failed += 1;
+            failed(
+                host_cx,
+                totals,
+                format!("could not list the storage pass's work: {error}"),
+            );
             return Finish::Done;
         }
     };
@@ -248,8 +251,11 @@ async fn pass(
             }
             Ok(None) => {}
             Err(error) => {
-                log::warn!("could not train the row dictionary: {error}");
-                totals.failed += 1;
+                failed(
+                    host_cx,
+                    totals,
+                    format!("could not train the row dictionary: {error}"),
+                );
             }
         }
     }
@@ -263,8 +269,11 @@ async fn pass(
             Ok(Some(plan)) => plan,
             Ok(None) => continue,
             Err(error) => {
-                log::warn!("could not plan moving {id}: {error}");
-                totals.failed += 1;
+                failed(
+                    host_cx,
+                    totals,
+                    format!("could not plan moving {id}: {error}"),
+                );
                 continue;
             }
         };
@@ -291,8 +300,11 @@ async fn pass(
                     return Finish::NoSpace;
                 }
                 Err(error) => {
-                    log::warn!("could not prepare moving {id}: {error}");
-                    totals.failed += 1;
+                    failed(
+                        host_cx,
+                        totals,
+                        format!("could not prepare moving {id}: {error}"),
+                    );
                     break;
                 }
             };
@@ -329,8 +341,11 @@ async fn pass(
             Ok(true) => log::info!("every thread moved; the older database is retired"),
             Ok(false) => {}
             Err(error) => {
-                log::warn!("could not retire the older database: {error}");
-                totals.failed += 1;
+                failed(
+                    host_cx,
+                    totals,
+                    format!("could not retire the older database: {error}"),
+                );
             }
         }
     }
@@ -349,8 +364,11 @@ async fn pass(
         {
             Ok(plan) => Box::new(plan),
             Err(error) => {
-                log::warn!("could not read {id} to compact it: {error}");
-                totals.failed += 1;
+                failed(
+                    host_cx,
+                    totals,
+                    format!("could not read {id} to compact it: {error}"),
+                );
                 continue;
             }
         };
@@ -379,8 +397,7 @@ async fn pass(
                 }
                 Ok(StorageJobDone::Committed(_)) => break,
                 Err(error) => {
-                    log::warn!("could not compact {id}: {error}");
-                    totals.failed += 1;
+                    failed(host_cx, totals, format!("could not compact {id}: {error}"));
                     if store.is_failed() {
                         return Finish::Stopped;
                     }
@@ -406,8 +423,11 @@ async fn pass(
             }
         }
         Err(error) => {
-            log::warn!("could not list blob files to collect: {error}");
-            totals.failed += 1;
+            failed(
+                host_cx,
+                totals,
+                format!("could not list blob files to collect: {error}"),
+            );
         }
     }
     Finish::Done
@@ -419,9 +439,15 @@ async fn commit(host_cx: &HostCx, step: StorageStep, totals: &mut Totals) -> Opt
         Ok(StorageJobDone::Committed(outcome)) => Some(outcome),
         Ok(StorageJobDone::Compacted(..)) => None,
         Err(error) => {
-            log::warn!("a storage step failed: {error}");
-            totals.failed += 1;
+            failed(host_cx, totals, format!("a storage step failed: {error}"));
             None
         }
     }
+}
+
+/// A step of the pass that failed, reported to the host's clients with the
+/// store's own words: what it left undone stays undone until the next start.
+fn failed(host_cx: &HostCx, totals: &mut Totals, message: String) {
+    totals.failed += 1;
+    host_cx.enqueue(move |state, cx| state.report_error(RuntimeError::External(message), cx));
 }
