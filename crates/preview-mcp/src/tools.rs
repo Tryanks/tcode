@@ -60,8 +60,6 @@ pub struct TypeParams {
     pub text: String,
 }
 
-const TARGET_REQUIRED: &str = "give the element's ref from preview_snapshot, or a selector";
-
 /// Fixed-canvas dimensions or a named device preset.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ResizeParams {
@@ -265,9 +263,6 @@ impl PreviewTools {
         description = "Click an element in the preview page: its ref from preview_snapshot, or the first match of a CSS selector."
     )]
     async fn preview_click(&self, Parameters(params): Parameters<ClickParams>) -> CallToolResult {
-        if params.reference.is_none() && params.selector.is_none() {
-            return tool_error(TARGET_REQUIRED);
-        }
         self.run(PreviewOp::Click {
             selector: params.selector,
             r#ref: params.reference,
@@ -279,9 +274,6 @@ impl PreviewTools {
         description = "Type text into a field in the preview page: its ref from preview_snapshot, or the first match of a CSS selector."
     )]
     async fn preview_type(&self, Parameters(params): Parameters<TypeParams>) -> CallToolResult {
-        if params.reference.is_none() && params.selector.is_none() {
-            return tool_error(TARGET_REQUIRED);
-        }
         self.run(PreviewOp::Type {
             selector: params.selector,
             r#ref: params.reference,
