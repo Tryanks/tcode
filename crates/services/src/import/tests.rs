@@ -96,27 +96,67 @@ fn tool(
 /// gives a call it dropped. `thread_rolled_back` is the `EventMsg` variant
 /// (`ThreadRolledBackEvent { num_turns }`, `protocol/src/protocol.rs` at
 /// `rust-v0.167.0`) that release keeps replaying from existing rollouts.
+/// `exec_command` and `apply_patch` are that release's tools
+/// (`core/src/tools/handlers/shell_spec.rs`, `apply_patch_spec.rs`); a
+/// command's output is worded by `ExecCommandToolOutput::response_header`
+/// (`core/src/tools/context.rs`) or `format_exec_output_for_model`
+/// (`core/src/tools/mod.rs`), a stopped command's by `abort_message`; a
+/// legacy rollout keeps `patch_apply_end` (`PatchApplyEndEvent`,
+/// `protocol/src/protocol.rs`), whose `changes` are `FileChange`s.
 const CODEX_ROLLOUT: &str = r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000001","timestamp":"2026-01-02T03:04:05.000Z","cwd":"/work/example","originator":"codex_cli_rs","cli_version":"0.167.0"}}
 {"timestamp":"2026-01-02T03:04:07.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"List the files"}]}}
 {"timestamp":"2026-01-02T03:04:08.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Listing first."}],"encrypted_content":null}}
 {"timestamp":"2026-01-02T03:04:09.000Z","type":"response_item","payload":{"type":"local_shell_call","call_id":"call_local","status":"completed","action":{"type":"exec","command":["ls","-la"],"timeout_ms":null,"working_directory":null,"env":null,"user":null}}}
-{"timestamp":"2026-01-02T03:04:10.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"cat\",\"README.md\"]}","call_id":"call_read"}}
-{"timestamp":"2026-01-02T03:04:11.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_read","output":"Example readme"}}
-{"timestamp":"2026-01-02T03:04:12.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"make\"]}","call_id":"call_dropped"}}
+{"timestamp":"2026-01-02T03:04:10.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cat README.md\",\"workdir\":\"/work/example\"}","call_id":"call_read"}}
+{"timestamp":"2026-01-02T03:04:11.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_read","output":"Chunk ID: 0a1b2c\nWall time: 0.0123 seconds\nProcess exited with code 0\nOriginal token count: 4\nOutput:\nExample readme\n"}}
+{"timestamp":"2026-01-02T03:04:11.500Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"make lint\"}","call_id":"call_lint"}}
+{"timestamp":"2026-01-02T03:04:11.600Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_lint","output":"Wall time: 1.2000 seconds\nProcess exited with code 2\nOutput:\nmake: *** No rule to make target 'lint'.  Stop.\n"}}
+{"timestamp":"2026-01-02T03:04:11.700Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"sleep 60\"}","call_id":"call_stopped"}}
+{"timestamp":"2026-01-02T03:04:11.800Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_stopped","output":"Wall time: 4.0 seconds\naborted by user"}}
+{"timestamp":"2026-01-02T03:04:11.900Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch\n*** Update File: README.md\n@@\n-Example readme\n+Example readme, revised\n*** End Patch\n"}}
+{"timestamp":"2026-01-02T03:04:11.950Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"call_patch","turn_id":"turn-1","stdout":"Success. Updated the following files:\nM README.md\n","stderr":"","success":true,"changes":{"/work/example/README.md":{"type":"update","unified_diff":"@@ -1 +1 @@\n-Example readme\n+Example readme, revised\n","move_path":null}},"status":"completed"}}
+{"timestamp":"2026-01-02T03:04:11.990Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_patch","output":"Exit code: 0\nWall time: 0.1 seconds\nOutput:\nSuccess. Updated the following files:\nM README.md\n"}}
+{"timestamp":"2026-01-02T03:04:12.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"make\"}","call_id":"call_dropped"}}
 {"timestamp":"2026-01-02T03:04:13.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_dropped","output":"aborted before dispatch"}}
-{"timestamp":"2026-01-02T03:04:14.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"make\",\"test\"]}","call_id":"call_open"}}
+{"timestamp":"2026-01-02T03:04:14.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"make test\"}","call_id":"call_open"}}
 {"timestamp":"2026-01-02T03:04:15.000Z","type":"event_msg","payload":{"type":"context_compacted"}}
 {"timestamp":"2026-01-02T03:04:16.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}
 {"timestamp":"2026-01-02T03:04:17.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Delete the build"}]}}
-{"timestamp":"2026-01-02T03:04:18.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"rm\",\"-r\",\"build\"]}","call_id":"call_rolled_back"}}
+{"timestamp":"2026-01-02T03:04:18.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"rm -r build\"}","call_id":"call_rolled_back"}}
 {"timestamp":"2026-01-02T03:04:19.000Z","type":"event_msg","payload":{"type":"thread_rolled_back","num_turns":1}}
 {"timestamp":"2026-01-02T03:04:20.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Keep the build"}]}}
 "#;
 
+fn command(
+    command: &str,
+    output: &str,
+    exit_code: Option<i32>,
+    status: ItemStatus,
+) -> Option<ItemContent> {
+    Some(ItemContent::CommandExecution {
+        command: command.into(),
+        output: output.into(),
+        exit_code,
+        status,
+    })
+}
+
+fn readme_revised(status: ItemStatus) -> Option<ItemContent> {
+    Some(ItemContent::FileChange {
+        changes: vec![agent::FileChange {
+            path: "/work/example/README.md".into(),
+            kind: agent::FileChangeKind::Modify,
+            diff: Some("@@ -1 +1 @@\n-Example readme\n+Example readme, revised\n".into()),
+        }],
+        status,
+    })
+}
+
 /// A rollout shows what Codex recorded: a local shell call shows the
-/// command in its `action`, a call shows the output answered to its
-/// `call_id`, a call Codex dropped or never answered is interrupted, and a
-/// turn the user rolled back is gone.
+/// command in its `action`, a command shows what it printed and the code
+/// it exited with, failing when that is not 0 as Codex judges it, a patch
+/// shows the changes Codex applied, a call Codex dropped, stopped or never
+/// answered is interrupted, and a turn the user rolled back is gone.
 #[test]
 fn a_codex_rollout_imports_as_codex_recorded_it() {
     let rollout = Transcript::new(CODEX_ROLLOUT);
@@ -128,36 +168,79 @@ fn a_codex_rollout_imports_as_codex_recorded_it() {
             Some(ItemContent::Reasoning {
                 text: "Listing first.".into(),
             }),
-            Some(ItemContent::CommandExecution {
-                command: "ls -la".into(),
-                output: String::new(),
-                exit_code: None,
-                status: ItemStatus::Completed,
-            }),
-            tool(
-                "shell",
-                json!({"command": ["cat", "README.md"]}),
-                Some("Example readme"),
-                ItemStatus::Completed,
+            command("ls -la", "", None, ItemStatus::Completed),
+            command(
+                "cat README.md",
+                "Example readme\n",
+                Some(0),
+                ItemStatus::Completed
             ),
-            tool(
-                "shell",
-                json!({"command": ["make"]}),
-                Some("aborted before dispatch"),
-                ItemStatus::Interrupted,
+            command(
+                "make lint",
+                "make: *** No rule to make target 'lint'.  Stop.\n",
+                Some(2),
+                ItemStatus::Failed,
             ),
-            tool(
-                "shell",
-                json!({"command": ["make", "test"]}),
-                None,
-                ItemStatus::Interrupted,
-            ),
+            command("sleep 60", "", None, ItemStatus::Interrupted),
+            readme_revised(ItemStatus::Completed),
+            command("make", "", None, ItemStatus::Interrupted),
+            command("make test", "", None, ItemStatus::Interrupted),
             None,
             Some(ItemContent::AssistantMessage {
                 text: "Done.".into(),
                 summarized: false,
             }),
             user("Keep the build"),
+        ]
+    );
+}
+
+/// A rollout of a thread whose history Codex 0.167.0 keeps paginated
+/// (`session_meta.history_mode`, `ThreadHistoryMode` in
+/// `protocol/src/protocol.rs`), content invented. Such a rollout also keeps
+/// every turn item Codex completed as an `item_completed` event
+/// (`persisted_item_completed_event`, `rollout/src/policy.rs`): a
+/// `CommandExecution` or `FileChange` (`protocol/src/items.rs`) whose `id` is
+/// the id of the call it ran for, or a command of its own, such as one a
+/// code-mode `exec` script ran.
+const CODEX_PAGINATED_ROLLOUT: &str = r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000002","timestamp":"2026-01-02T03:04:05.000Z","cwd":"/work/example","originator":"codex_cli_rs","cli_version":"0.167.0","history_mode":"paginated"}}
+{"timestamp":"2026-01-02T03:04:06.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Test it"}]}}
+{"timestamp":"2026-01-02T03:04:07.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"make test\"}","call_id":"call_test"}}
+{"timestamp":"2026-01-02T03:04:08.000Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"00000000-0000-4000-8000-000000000002","turn_id":"turn-1","item":{"type":"CommandExecution","id":"call_test","command":["/bin/zsh","-lc","make test"],"cwd":"/work/example","parsed_cmd":[],"source":"agent","status":"failed","aggregated_output":"1 failed\n","exit_code":1,"duration":{"secs":0,"nanos":500000000}},"started_at_ms":1767323047000,"completed_at_ms":1767323048000}}
+{"timestamp":"2026-01-02T03:04:08.100Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_test","output":"Wall time: 0.5000 seconds\nProcess exited with code 1\nOutput:\n1 failed\n"}}
+{"timestamp":"2026-01-02T03:04:09.000Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_script","name":"exec","input":"await tools.exec_command({cmd: 'git status --short'})"}}
+{"timestamp":"2026-01-02T03:04:10.000Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"00000000-0000-4000-8000-000000000002","turn_id":"turn-1","item":{"type":"CommandExecution","id":"call_inner","command":["/bin/zsh","-lc","git status --short"],"cwd":"/work/example","parsed_cmd":[],"source":"agent","status":"completed","aggregated_output":" M README.md\n","exit_code":0,"duration":{"secs":0,"nanos":10000000}},"started_at_ms":1767323049000,"completed_at_ms":1767323050000}}
+{"timestamp":"2026-01-02T03:04:10.100Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_script","output":[{"type":"input_text","text":" M README.md\n"}]}}
+{"timestamp":"2026-01-02T03:04:11.000Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch\n*** Update File: README.md\n@@\n-Example readme\n+Example readme, revised\n*** End Patch\n"}}
+{"timestamp":"2026-01-02T03:04:12.000Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"00000000-0000-4000-8000-000000000002","turn_id":"turn-1","item":{"type":"FileChange","id":"call_patch","changes":{"/work/example/README.md":{"type":"update","unified_diff":"@@ -1 +1 @@\n-Example readme\n+Example readme, revised\n","move_path":null}},"status":"completed","stdout":"Success. Updated the following files:\nM README.md\n","stderr":""},"started_at_ms":1767323051000,"completed_at_ms":1767323052000}}
+{"timestamp":"2026-01-02T03:04:12.100Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_patch","output":"Exit code: 0\nWall time: 0.1 seconds\nOutput:\nSuccess. Updated the following files:\nM README.md\n"}}
+"#;
+
+/// A paginated rollout shows each command and patch as Codex's own item
+/// records it, in the place of the call it ran for, and a command a script
+/// ran where the script ran it.
+#[test]
+fn a_paginated_codex_rollout_shows_the_items_codex_recorded() {
+    let rollout = Transcript::new(CODEX_PAGINATED_ROLLOUT);
+    let thread = codex::convert(&rollout.0, "codex:example").unwrap();
+    assert_eq!(
+        shown(thread),
+        [
+            user("Test it"),
+            command("make test", "1 failed\n", Some(1), ItemStatus::Failed),
+            tool(
+                "exec",
+                json!("await tools.exec_command({cmd: 'git status --short'})"),
+                Some(" M README.md\n"),
+                ItemStatus::Completed,
+            ),
+            command(
+                "git status --short",
+                " M README.md\n",
+                Some(0),
+                ItemStatus::Completed
+            ),
+            readme_revised(ItemStatus::Completed),
         ]
     );
 }

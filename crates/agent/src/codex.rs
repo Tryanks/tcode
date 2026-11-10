@@ -4161,6 +4161,67 @@ pub fn image_generation(item: &Value) -> ItemContent {
     }
 }
 
+/// A command as a rollout records Codex's own `CommandExecution` turn item
+/// (`CommandExecutionItem`, `protocol/src/items.rs` at `rust-v0.167.0`: the
+/// argv as `command`, `aggregated_output`, `exit_code`, a snake_case
+/// `status`), shown as the live `commandExecution` item of the same command
+/// is. The importer reads it through this.
+pub fn rollout_command(item: &Value) -> ItemContent {
+    let argv: Vec<&str> = item
+        .get("command")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    ItemContent::CommandExecution {
+        command: shell_script(&shell_words::join(argv)),
+        output: string_field(item, "aggregated_output"),
+        exit_code: item
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok()),
+        status: map_status(item.get("status").and_then(Value::as_str)),
+    }
+}
+
+/// The files a rollout records a patch changing: the `changes` of Codex's
+/// `FileChange` turn item or of its `patch_apply_end` event, each path's
+/// `FileChange` (`protocol/src/protocol.rs` at `rust-v0.167.0`: `add` and
+/// `delete` with the file's `content`, `update` with a `unified_diff` and a
+/// `move_path`). They are converted as the app-server converts them for the
+/// live `fileChange` item (`convert_patch_changes`,
+/// `app-server-protocol/src/protocol/item_builders.rs`), and then read as
+/// that item's changes are.
+pub fn rollout_file_changes(changes: &Value) -> Vec<FileChange> {
+    let mut changes: Vec<FileChange> = changes
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(path, change)| {
+            let text = |key: &str| change.get(key).and_then(Value::as_str).unwrap_or_default();
+            let move_path = change.get("move_path").and_then(Value::as_str);
+            let diff = match (change.get("type").and_then(Value::as_str), move_path) {
+                (Some("update"), Some(to)) => format!("{}\n\nMoved to: {to}", text("unified_diff")),
+                (Some("update"), None) => text("unified_diff").to_owned(),
+                _ => text("content").to_owned(),
+            };
+            map_file_change(&json!({
+                "path": path,
+                "kind": {"type": change.get("type"), "move_path": move_path},
+                "diff": diff,
+            }))
+        })
+        .collect();
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
+    changes
+}
+
+/// A rollout's snake_case status of a turn item, as its live item's.
+pub fn rollout_status(status: Option<&str>) -> ItemStatus {
+    map_status(status)
+}
+
 fn collab_tool_input(item: &Value) -> Value {
     let mut input = serde_json::Map::new();
     for key in [

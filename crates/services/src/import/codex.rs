@@ -123,12 +123,23 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             .as_str()
                             .and_then(|text| serde_json::from_str(text).ok())
                             .unwrap_or(arguments);
-                        let content = ItemContent::ToolCall {
-                            image_reads: Vec::new(),
-                            name: tool_name(payload),
-                            input,
-                            output: None,
-                            status: ItemStatus::InProgress,
+                        let name = tool_name(payload);
+                        let content = match input.get("cmd").and_then(Value::as_str) {
+                            Some(command) if name == EXEC_COMMAND => {
+                                ItemContent::CommandExecution {
+                                    command: command.to_owned(),
+                                    output: String::new(),
+                                    exit_code: None,
+                                    status: ItemStatus::InProgress,
+                                }
+                            }
+                            _ => ItemContent::ToolCall {
+                                image_reads: Vec::new(),
+                                name,
+                                input,
+                                output: None,
+                                status: ItemStatus::InProgress,
+                            },
                         };
                         let index = entries.len();
                         push_item(&mut entries, ts, &mut next_id, content, Some(&call_id));
@@ -143,25 +154,50 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                         let Some(index) = pending.remove(call_id) else {
                             continue;
                         };
-                        if let Some(ConvertedEntry::Item { item, .. }) = entries.get_mut(index)
-                            && let ItemContent::ToolCall {
+                        let Some(ConvertedEntry::Item { item, .. }) = entries.get_mut(index) else {
+                            continue;
+                        };
+                        let (result, failed) =
+                            call_output(payload.get("output").unwrap_or(&Value::Null));
+                        match &mut item.content {
+                            ItemContent::CommandExecution {
+                                output,
+                                exit_code,
+                                status,
+                                ..
+                            } => {
+                                if aborted(&result.text) {
+                                    *status = ItemStatus::Interrupted;
+                                } else {
+                                    let (code, printed) = exec_result(&result.text);
+                                    *exit_code = code;
+                                    // Codex's own rule for a command's status
+                                    // (`core/src/tools/events.rs`): it failed
+                                    // when it exited non-zero.
+                                    *status = match code {
+                                        Some(code) if code != 0 => ItemStatus::Failed,
+                                        _ => ItemStatus::Completed,
+                                    };
+                                    *output = printed.to_owned();
+                                }
+                            }
+                            ItemContent::ToolCall {
                                 image_reads,
                                 output,
                                 status,
                                 ..
-                            } = &mut item.content
-                        {
-                            let (result, failed) =
-                                call_output(payload.get("output").unwrap_or(&Value::Null));
-                            *status = if failed {
-                                ItemStatus::Failed
-                            } else if result.text == ABORTED_BEFORE_DISPATCH {
-                                ItemStatus::Interrupted
-                            } else {
-                                ItemStatus::Completed
-                            };
-                            *image_reads = result.images;
-                            *output = Some(result.text);
+                            } => {
+                                *status = if failed {
+                                    ItemStatus::Failed
+                                } else if aborted(&result.text) {
+                                    ItemStatus::Interrupted
+                                } else {
+                                    ItemStatus::Completed
+                                };
+                                *image_reads = result.images;
+                                *output = Some(result.text);
+                            }
+                            _ => {}
                         }
                     }
                     "web_search_call" => {
@@ -268,6 +304,42 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                 }
             }
             Some("event_msg") => match value.pointer("/payload/type").and_then(Value::as_str) {
+                // A paginated rollout's own record of a command or a patch,
+                // and a legacy one's of a patch, are what Codex shows for
+                // the call of the same id: they replace its call.
+                Some("item_completed") => {
+                    let item = value.pointer("/payload/item").unwrap_or(&Value::Null);
+                    let content = match item.get("type").and_then(Value::as_str) {
+                        Some("CommandExecution") => agent::codex::rollout_command(item),
+                        Some("FileChange") => ItemContent::FileChange {
+                            changes: agent::codex::rollout_file_changes(
+                                item.get("changes").unwrap_or(&Value::Null),
+                            ),
+                            status: agent::codex::rollout_status(
+                                item.get("status").and_then(Value::as_str),
+                            ),
+                        },
+                        _ => continue,
+                    };
+                    let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+                    record(&mut entries, &mut pending, ts, &mut next_id, id, content);
+                }
+                Some("patch_apply_end") => {
+                    let payload = &value["payload"];
+                    let content = ItemContent::FileChange {
+                        changes: agent::codex::rollout_file_changes(
+                            payload.get("changes").unwrap_or(&Value::Null),
+                        ),
+                        status: agent::codex::rollout_status(
+                            payload.get("status").and_then(Value::as_str),
+                        ),
+                    };
+                    let id = payload
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    record(&mut entries, &mut pending, ts, &mut next_id, id, content);
+                }
                 Some("context_compacted") => entries.push(ConvertedEntry::Compacted { ts }),
                 Some("thread_rolled_back") => {
                     if let Some(turns) = value.pointer("/payload/num_turns").and_then(Value::as_u64)
@@ -283,7 +355,8 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
     // A call the rollout never answered was cut off with its turn.
     for index in pending.into_values() {
         if let Some(ConvertedEntry::Item { item, .. }) = entries.get_mut(index)
-            && let ItemContent::ToolCall { status, .. } = &mut item.content
+            && let ItemContent::CommandExecution { status, .. }
+            | ItemContent::ToolCall { status, .. } = &mut item.content
         {
             *status = ItemStatus::Interrupted;
         }
@@ -326,6 +399,31 @@ fn roll_back(entries: &mut Vec<ConvertedEntry>, pending: &mut HashMap<String, us
     let cut = starts[starts.len().saturating_sub(turns)];
     entries.truncate(cut);
     pending.retain(|_, index| *index < cut);
+}
+
+/// `content` as the item `id` names: in place of the call of that id, which
+/// is then answered, or as an item of its own when no call has the id.
+fn record(
+    entries: &mut Vec<ConvertedEntry>,
+    pending: &mut HashMap<String, usize>,
+    ts: u64,
+    next_id: &mut u64,
+    id: &str,
+    content: ItemContent,
+) {
+    pending.remove(id);
+    let call = (!id.is_empty())
+        .then(|| {
+            entries.iter_mut().rev().find_map(|entry| match entry {
+                ConvertedEntry::Item { item, .. } if item.id == id => Some(item),
+                _ => None,
+            })
+        })
+        .flatten();
+    match call {
+        Some(item) => item.content = content,
+        None => push_item(entries, ts, next_id, content, Some(id)),
+    }
 }
 
 fn push_item(
@@ -372,9 +470,48 @@ fn is_harness_text(text: &str) -> bool {
         .any(|prefix| text.starts_with(prefix))
 }
 
-/// What Codex writes as the output of a call it dropped when its turn was
-/// interrupted.
-const ABORTED_BEFORE_DISPATCH: &str = "aborted before dispatch";
+/// Whether `output` is what Codex writes for a call its interrupted turn
+/// cut off (`abort_message`, `core/src/tools/parallel.rs` at
+/// `rust-v0.167.0`): one it never dispatched, a command it stopped, or
+/// another call it stopped.
+fn aborted(output: &str) -> bool {
+    output == "aborted before dispatch"
+        || output
+            .strip_prefix("Wall time: ")
+            .is_some_and(|rest| rest.ends_with(" seconds\naborted by user"))
+        || output
+            .strip_prefix("aborted by user after ")
+            .is_some_and(|rest| rest.ends_with('s'))
+}
+
+/// Codex 0.167's tool that runs a command line (`create_exec_command_tool`,
+/// `core/src/tools/handlers/shell_spec.rs`), whose `cmd` is the command.
+const EXEC_COMMAND: &str = "exec_command";
+
+/// A command's result as Codex words it for the model: a header of
+/// `Key: value` lines, the code it exited with among them, then `Output:`
+/// and what it printed. `exec_command` writes `Process exited with code N`
+/// (`ExecCommandToolOutput::response_header`, `core/src/tools/context.rs`),
+/// a command run through the exec runtime `Exit code: N`
+/// (`format_exec_output_for_model`, `core/src/tools/mod.rs`); a process
+/// still running when the call returned has no code yet. A text with no
+/// header is all output.
+fn exec_result(text: &str) -> (Option<i32>, &str) {
+    let Some((header, printed)) = text
+        .split_once("\nOutput:\n")
+        .or_else(|| text.strip_suffix("\nOutput:").map(|header| (header, "")))
+    else {
+        return (None, text);
+    };
+    let code = header.lines().find_map(|line| {
+        line.strip_prefix("Process exited with code ")
+            .or_else(|| line.strip_prefix("Exit code: "))?
+            .trim()
+            .parse()
+            .ok()
+    });
+    (code, printed)
+}
 
 /// The live adapter's name for a call: an MCP tool, which the rollout files
 /// under a `mcp__<server>` namespace, is `<server>/<tool>`.
