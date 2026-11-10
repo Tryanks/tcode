@@ -460,11 +460,10 @@ pub(super) fn conversation(
 
 /// A participant's vote, the nearest Bitbucket has to a review.
 fn vote(participant: &Value) -> Option<PullRequestReviewState> {
-    match participant["state"].as_str() {
-        Some("approved") => Some(PullRequestReviewState::Approved),
-        Some("changes_requested") => Some(PullRequestReviewState::ChangesRequested),
-        _ => (participant["approved"].as_bool() == Some(true))
-            .then_some(PullRequestReviewState::Approved),
+    match participant["state"].as_str()? {
+        "approved" => Some(PullRequestReviewState::Approved),
+        "changes_requested" => Some(PullRequestReviewState::ChangesRequested),
+        _ => None,
     }
 }
 
