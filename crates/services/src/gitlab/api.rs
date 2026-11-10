@@ -326,14 +326,7 @@ impl Api {
         ) else {
             return Vec::new();
         };
-        let status: Value = serde_json::from_str(&output).unwrap_or_default();
-        status["hosts"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|host| host["host"].as_str())
-            .filter_map(|host| HostKind::Gitlab.authority(host).ok())
-            .collect()
+        logins(&output)
     }
 
     fn run_glab(&self, args: &[&str], input: Option<&str>, success: bool) -> Option<String> {
@@ -645,6 +638,18 @@ pub(super) fn messages(body: &[u8]) -> Vec<String> {
     }
 }
 
+/// The servers `glab auth status --all --output json` lists.
+fn logins(output: &str) -> Vec<String> {
+    let status: Value = serde_json::from_str(output).unwrap_or_default();
+    status["hosts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|host| host["host"].as_str())
+        .filter_map(|host| HostKind::Gitlab.authority(host).ok())
+        .collect()
+}
+
 /// The page size asked for.
 pub(super) const PAGE_LIMIT: usize = 100;
 
@@ -718,5 +723,20 @@ mod tests {
             messages(br#"{"message":{"title":["is too long","is invalid"]}}"#),
             ["title is too long", "title is invalid"]
         );
+    }
+
+    /// glab's login listing names each server it holds a login for, a failing one included
+    /// (shape: glab's `internal/commands/auth/status/status.go`, `--output json`: a `hosts`
+    /// array of host statuses whose `host`, `state`, `api_endpoint` and `graphql_endpoint` are
+    /// always present; content invented).
+    #[test]
+    fn glabs_logins_name_their_servers() {
+        let output = r#"{"hosts":[
+            {"host":"gitlab.com","state":"success","user":"ada",
+             "api_endpoint":"https://gitlab.com/api/v4/","graphql_endpoint":"https://gitlab.com/api/graphql/"},
+            {"host":"code.acme.test:8443","state":"error","error":"401 Unauthorized",
+             "api_endpoint":"https://code.acme.test:8443/api/v4/","graphql_endpoint":"https://code.acme.test:8443/api/graphql/"}
+        ]}"#;
+        assert_eq!(super::logins(output), ["gitlab.com", "code.acme.test:8443"]);
     }
 }
