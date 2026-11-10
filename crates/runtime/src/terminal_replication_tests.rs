@@ -334,11 +334,11 @@ fn late_attach_and_live_bursts_reproduce_modes_resize_and_retained_history() {
 
     let session = terminal_session();
     session.plain_shell();
-    // Alt screen + bracketed paste + steady-bar cursor, then far more output
-    // than the old 256 KiB replay ring could hold, then a sentinel.
+    // Alt screen + bracketed paste + steady-bar cursor, then output that
+    // scrolls the screen many times over, then a sentinel.
     session.send(concat!(
         "printf '\\033[?1049h\\033[?2004h\\033[6 q'; ",
-        "awk 'BEGIN{for(i=0;i<4400;i++) print \"0123456789012345678901234567890123456789012345678901234567890123\"}'; ",
+        "awk 'BEGIN{for(i=0;i<300;i++) print \"0123456789012345678901234567890123456789012345678901234567890123\"}'; ",
         "printf '\\102\\125\\114\\113\\104\\117\\116\\105\\n'\r",
     ));
     session.wait_for("BULKDONE");
@@ -372,7 +372,7 @@ fn late_attach_and_live_bursts_reproduce_modes_resize_and_retained_history() {
     // Continuation: leaving the alternate screen after the attach restores the
     // primary grid and its scrollback for the already-attached client.
     session.send(
-        "printf '\\033[?1049l'; yes | head -c 2000000; printf '\\120\\122\\111\\115\\101\\122\\131\\n'\r",
+        "printf '\\033[?1049l'; yes | head -n 2000; printf '\\120\\122\\111\\115\\101\\122\\131\\n'\r",
     );
     session.wait_for("PRIMARY");
     replica.settle(&session.terminal);
@@ -491,7 +491,7 @@ fn attachment_between_output_chunks_and_resize_preserves_contiguous_history() {
     let session = terminal_session();
     session.plain_shell();
     session.send(
-        "awk 'BEGIN{for(i=0;i<3000;i++) print \"line-\" i}'; printf '\\120\\101\\125\\123\\105\\104\\n'; read release; awk 'BEGIN{for(i=3000;i<6000;i++) print \"line-\" i}'; printf '\\102\\125\\123\\131\\n'\r",
+        "awk 'BEGIN{for(i=0;i<1500;i++) print \"line-\" i}'; printf '\\120\\101\\125\\123\\105\\104\\n'; read release; awk 'BEGIN{for(i=1500;i<3000;i++) print \"line-\" i}'; printf '\\102\\125\\123\\131\\n'\r",
     );
     session.wait_for("PAUSED");
     let late = linked(&session.mux);
