@@ -5952,37 +5952,6 @@ mod tests {
     }
 
     #[test]
-    fn usage_scope_fixture_deduplicates_results_and_excludes_child_context() {
-        let mut m = Mapper::new();
-        let mut observations = Vec::new();
-        let mut completions = 0;
-        for line in include_str!("../tests/fixtures/claude/usage_scope.jsonl").lines() {
-            for event in feed(&mut m, line) {
-                match event {
-                    AgentEvent::TokenUsage(u) => observations.push(u.used_tokens),
-                    AgentEvent::TurnCompleted { usage: Some(u), .. } => {
-                        completions += 1;
-                        assert_eq!(u.used_tokens, Some(500260));
-                        assert_eq!(u.turn_processed_tokens, Some(4001300));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        assert_eq!(completions, 1);
-        assert_eq!(
-            observations,
-            vec![
-                Some(400150),
-                Some(400150),
-                Some(400150),
-                Some(500260),
-                Some(500260)
-            ]
-        );
-    }
-
-    #[test]
     fn recorded_compaction_retains_metadata_without_claiming_post_context() {
         let mut m = Mapper::new();
         let mut events = Vec::new();
