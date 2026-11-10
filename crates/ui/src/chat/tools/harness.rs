@@ -36,17 +36,21 @@ struct ProposedPlan<'a> {
     plan: &'a str,
 }
 
+/// A reviewer's verdict on an action: the action, and the risk it rated
+/// when it rated one. Its rationale is the call's output.
 #[derive(Deserialize)]
 struct Review<'a> {
     #[serde(borrow)]
     summary: &'a str,
+    #[serde(default, borrow)]
+    risk: Option<&'a str>,
 }
 
 enum Kind<'a> {
     LoadTools(&'a str),
     Skill(&'a str),
     Plan(&'a str),
-    Review(&'a str),
+    Review(Review<'a>),
 }
 
 pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView + 'a>> {
@@ -57,7 +61,7 @@ pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView
     } else if call.named(&["exitplanmode", "exit_plan_mode"]) {
         Kind::Plan(call.input::<ProposedPlan<'a>>()?.plan)
     } else if call.named(&["auto-reviewer"]) {
-        Kind::Review(call.input::<Review<'a>>()?.summary)
+        Kind::Review(call.input::<Review<'a>>()?)
     } else {
         return None;
     };
@@ -80,35 +84,6 @@ fn loaded_tools(output: &str) -> Vec<String> {
                 .flatten()
         })
         .collect()
-}
-
-/// A reviewer's verdict: its rationale, and the risk it rated on the
-/// `Risk: <level>. <action>` line the adapter writes after it.
-struct Verdict<'o> {
-    rationale: &'o str,
-    risk: Option<&'o str>,
-}
-
-fn verdict(output: &str) -> Verdict<'_> {
-    let (rationale, last) = match output.trim_end().rsplit_once('\n') {
-        Some((rationale, last)) => (rationale, last),
-        None => ("", output.trim_end()),
-    };
-    let risk = last
-        .strip_prefix("Risk: ")
-        .and_then(|rest| rest.split_once('.'))
-        .map(|(risk, _)| risk)
-        .filter(|risk| *risk != "unknown");
-    match risk {
-        Some(_) => Verdict {
-            rationale: rationale.trim(),
-            risk,
-        },
-        None => Verdict {
-            rationale: output.trim(),
-            risk: None,
-        },
-    }
 }
 
 /// The plan's title: its first heading, else its first line.
@@ -138,13 +113,12 @@ impl ToolView for Harness<'_> {
             }
             Kind::Plan(plan) => Header::new(IconName::ListOrdered, Verb("propose_plan"))
                 .argument(Argument::plain(plan_title(plan))),
-            Kind::Review(summary) => {
+            Kind::Review(Review { summary, risk }) => {
                 let verb = match call.status {
                     ItemStatus::InProgress => Verb("review"),
                     ItemStatus::Completed => Verb("review_approved"),
                     _ => Verb("review_denied"),
                 };
-                let Verdict { rationale, risk } = verdict(output);
                 let risk = risk.map(|risk| {
                     let label = crate::tr!("tools.risk", level = risk).into_owned();
                     if risk == "low" {
@@ -156,7 +130,7 @@ impl ToolView for Harness<'_> {
                 Header::new(IconName::BadgeCheck, verb)
                     .argument(Argument::plain(one_line(summary)))
                     .chip(risk)
-                    .error(first_line(rationale))
+                    .error(first_line(output))
             }
         }
     }
@@ -195,7 +169,7 @@ impl ToolView for Harness<'_> {
                 super::body(std::iter::once(plan).chain(output))
             }
             Kind::Review(_) => {
-                let Verdict { rationale, .. } = verdict(output);
+                let rationale = output.trim();
                 let text = (!rationale.is_empty()).then(|| {
                     let text =
                         bounded_text(call.entry, "output", rationale, false, Bound::HEAD, ctx);
