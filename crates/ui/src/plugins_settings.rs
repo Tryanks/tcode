@@ -3422,7 +3422,7 @@ mod tests {
             .unwrap();
     }
 
-    /// Two Claude Code accounts, the built-in `claude` and `tryanks`, with
+    /// Two Claude Code accounts, the built-in `claude` and `user`, with
     /// the project last worked in.
     fn settings() -> Settings {
         let mut settings = Settings {
@@ -3430,11 +3430,11 @@ mod tests {
             ..Default::default()
         };
         settings.profiles.insert(
-            "tryanks".into(),
+            "user".into(),
             ProviderProfile {
                 kind: ProviderKind::ClaudeCode,
                 settings: ProviderSettings {
-                    display_name: Some("tryanks".into()),
+                    display_name: Some("user".into()),
                     ..ProviderSettings::default()
                 },
             },
@@ -3520,8 +3520,8 @@ mod tests {
     const PROJECT: PluginScope = PluginScope::Project;
 
     /// What the host listed for the two accounts. `alpha` is installed in
-    /// both, on in `claude` and off in `tryanks`; `delta` only in `claude`,
-    /// from a marketplace `tryanks` lacks; `beta` is enabled by the project
+    /// both, on in `claude` and off in `user`; `delta` only in `claude`,
+    /// from a marketplace `user` lacks; `beta` is enabled by the project
     /// and only `claude` has its files; `gamma` is offered to both.
     fn catalogs() -> Vec<ProviderPluginCatalog> {
         let alpha = |on: bool| {
@@ -3556,7 +3556,7 @@ mod tests {
                     gamma(),
                 ],
             ),
-            catalog("tryanks", None, vec![alpha(false), gamma()]),
+            catalog("user", None, vec![alpha(false), gamma()]),
             catalog(
                 "claude",
                 Some(ROOT),
@@ -3573,7 +3573,7 @@ mod tests {
                 )],
             ),
             catalog(
-                "tryanks",
+                "user",
                 Some(ROOT),
                 vec![entry(
                     "beta@mkt",
@@ -3692,8 +3692,8 @@ mod tests {
         for wanted in [
             ("claude", None),
             ("claude", Some(ROOT)),
-            ("tryanks", None),
-            ("tryanks", Some(ROOT)),
+            ("user", None),
+            ("user", Some(ROOT)),
         ] {
             let wanted = (wanted.0.to_string(), wanted.1.map(PathBuf::from));
             assert!(listed.contains(&wanted), "{wanted:?} in {listed:?}");
@@ -3701,27 +3701,27 @@ mod tests {
 
         for drawn in [
             "plugin-switch-claude-alpha@mkt",
-            "plugin-switch-tryanks-alpha@mkt",
+            "plugin-switch-user-alpha@mkt",
             "plugin-switch-claude-delta@other",
-            "plugin-cell-tryanks-delta@other",
+            "plugin-cell-user-delta@other",
             "plugin-project-switch-project-beta@mkt",
             "plugin-ready-claude-beta@mkt",
-            "plugin-ready-tryanks-beta@mkt",
+            "plugin-ready-user-beta@mkt",
         ] {
             assert!(cx.debug_bounds(drawn).is_some(), "{drawn}");
         }
         for absent in [
-            "plugin-switch-tryanks-delta@other",
-            "plugin-install-tryanks-delta@other",
+            "plugin-switch-user-delta@other",
+            "plugin-install-user-delta@other",
             // Offered but installed nowhere: it is browsed, not listed.
             "plugin-row-user-gamma@mkt",
         ] {
             assert!(cx.debug_bounds(absent).is_none(), "{absent}");
         }
 
-        click("plugin-switch-tryanks-alpha@mkt", cx);
+        click("plugin-switch-user-alpha@mkt", cx);
         click("plugin-project-switch-project-beta@mkt", cx);
-        click("plugin-ready-install-tryanks-beta@mkt", cx);
+        click("plugin-ready-install-user-beta@mkt", cx);
         let changes: Vec<Command> = host
             .commands(cx)
             .into_iter()
@@ -3731,7 +3731,7 @@ mod tests {
             changes,
             [
                 Command::SetProviderPluginEnabled {
-                    profile_id: "tryanks".into(),
+                    profile_id: "user".into(),
                     entry_id: "alpha@mkt".into(),
                     scope: USER,
                     enabled: true,
@@ -3745,7 +3745,7 @@ mod tests {
                     cwd: Some(ROOT.into()),
                 },
                 Command::InstallProviderPlugin {
-                    profile_id: "tryanks".into(),
+                    profile_id: "user".into(),
                     entry_id: "beta@mkt".into(),
                     scope: PROJECT,
                     cwd: Some(ROOT.into()),
@@ -3764,7 +3764,7 @@ mod tests {
         click("plugin-install-open-gamma@mkt", cx);
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("plugin-install-command-claude").is_some());
-        assert!(cx.debug_bounds("plugin-install-command-tryanks").is_none());
+        assert!(cx.debug_bounds("plugin-install-command-user").is_none());
         click("plugin-install-confirm", cx);
         let installs = |host: &Host, cx: &mut VisualTestContext| -> Vec<String> {
             host.commands(cx)
@@ -3785,10 +3785,10 @@ mod tests {
         crate::test_frames::draw_settled(cx);
         click("plugin-install-open-gamma@mkt", cx);
         crate::test_frames::draw_settled(cx);
-        click("plugin-install-account-tryanks", cx);
-        assert!(cx.debug_bounds("plugin-install-command-tryanks").is_some());
+        click("plugin-install-account-user", cx);
+        assert!(cx.debug_bounds("plugin-install-command-user").is_some());
         click("plugin-install-confirm", cx);
-        assert_eq!(installs(&host, cx), ["claude", "tryanks"]);
+        assert_eq!(installs(&host, cx), ["claude", "user"]);
     }
 
     /// An uninstalled plugin's row folds away where it was, and the row below
