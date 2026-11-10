@@ -1314,12 +1314,13 @@ impl PiMapper {
                         .unwrap_or("transient provider error")
                 ),
             }],
-            "auto_retry_end"
-                if !message
-                    .get("success")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false) =>
-            {
+            // pi ends a retry with success once a retried request answers;
+            // the failures it retried are behind the turn then.
+            "auto_retry_end" if message.get("success").and_then(Value::as_bool) == Some(true) => {
+                self.failed = false;
+                Vec::new()
+            }
+            "auto_retry_end" => {
                 self.failed = true;
                 vec![AgentEvent::Warning {
                     message: format!(
@@ -2258,6 +2259,54 @@ mod tests {
             events.last(),
             Some(AgentEvent::TurnCompleted {
                 status: TurnStatus::Failed,
+                ..
+            })
+        ));
+    }
+
+    /// A failed request pi retried and then got an answer for, as pi 1.5.2
+    /// reports it (`dist/core/agent-session.js`): the failed attempt's
+    /// `message_end`, `auto_retry_start` before it continues the run, and
+    /// `auto_retry_end` with `success: true` once an assistant message ends
+    /// without an error. The turn completed.
+    #[test]
+    fn a_request_that_succeeds_on_retry_completes_its_turn() {
+        let mut mapper = PiMapper::new();
+        let usage = json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,
+                           "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}});
+        let failed = json!({
+            "role":"assistant","content":[],"api":"openai-responses","provider":"openai",
+            "model":"gpt-test","usage":usage,"stopReason":"error",
+            "errorMessage":"429 rate limit reached for gpt-test","timestamp":1785400000000_u64
+        });
+        let answered = json!({
+            "role":"assistant","content":[{"type":"text","text":"Done."}],
+            "api":"openai-responses","provider":"openai","model":"gpt-test","usage":usage,
+            "stopReason":"stop","timestamp":1785400002000_u64
+        });
+        let mut events = Vec::new();
+        for line in [
+            json!({"type":"agent_start"}),
+            json!({"type":"message_start","message":failed}),
+            json!({"type":"message_end","message":failed}),
+            json!({"type":"turn_end","message":failed,"toolResults":[]}),
+            json!({"type":"agent_end","messages":[failed]}),
+            json!({"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":2000,
+                   "errorMessage":"429 rate limit reached for gpt-test"}),
+            json!({"type":"agent_start"}),
+            json!({"type":"message_start","message":answered}),
+            json!({"type":"message_end","message":answered}),
+            json!({"type":"auto_retry_end","success":true,"attempt":1}),
+            json!({"type":"turn_end","message":answered,"toolResults":[]}),
+            json!({"type":"agent_end","messages":[answered]}),
+            json!({"type":"agent_settled","aborted":false}),
+        ] {
+            events.extend(mapper.on_message(&line));
+        }
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted {
+                status: TurnStatus::Completed,
                 ..
             })
         ));
