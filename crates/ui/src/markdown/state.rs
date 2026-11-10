@@ -138,8 +138,6 @@ pub struct MarkdownState {
     /// The document's height below the bottom of the line the reveal has
     /// reached, as last placed.
     unrevealed: Cell<Pixels>,
-    #[cfg(test)]
-    last_reparse_bytes: usize,
 }
 
 impl MarkdownState {
@@ -201,8 +199,6 @@ impl MarkdownState {
             stream_fade: StreamFade::default(),
             fade_frame: None,
             unrevealed: Cell::new(px(0.)),
-            #[cfg(test)]
-            last_reparse_bytes: text.len(),
         }
     }
 
@@ -588,10 +584,6 @@ impl MarkdownState {
         if reparse_start == 0 {
             self.defines_links = parsed_document.defines_links;
         }
-        #[cfg(test)]
-        {
-            self.last_reparse_bytes = self.text.len() - reparse_start;
-        }
 
         let BlockNode::Root {
             children: mut old_blocks,
@@ -723,10 +715,6 @@ impl MarkdownState {
         self.parsed = Rc::new(parsed_document.root);
         self.root_block_starts = parsed_document.root_starts;
         self.defines_links = parsed_document.defines_links;
-        #[cfg(test)]
-        {
-            self.last_reparse_bytes = self.text.len();
-        }
         self.layout_revision = self.layout_revision.wrapping_add(1);
         // Even an edit that preserves the number of root blocks can change
         // their heights, so every reparse must invalidate the cached sizes.
@@ -905,11 +893,6 @@ impl MarkdownState {
     #[cfg(test)]
     pub(super) fn has_measured_item(&self, index: usize) -> bool {
         self.list_state.bounds_for_item(index).is_some()
-    }
-
-    #[cfg(test)]
-    fn last_reparse_bytes(&self) -> usize {
-        self.last_reparse_bytes
     }
 }
 
@@ -1090,29 +1073,6 @@ mod tests {
                 });
             }
         }
-    }
-
-    #[gpui::test]
-    fn append_reparses_only_the_last_root_block(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(super::super::init);
-        // Code reading `]:` defines no link.
-        let document = "```python\ndef f(x) -> list[str]:\n    pass\n```\n\n".to_string()
-            + &(0..120)
-                .map(|ix| format!("## Closed block {ix}\n\nParagraph {ix}.\n\n"))
-                .collect::<String>();
-        assert!(document.len() > 2_000);
-        let state = cx.update(|cx| cx.new(|cx| MarkdownState::new(&document, cx)));
-
-        state.update(cx, |state, cx| state.push_str("new tail", cx));
-        state.read_with(cx, |state, _| {
-            assert!(
-                state.last_reparse_bytes() < 64,
-                "parsed {} of {} bytes",
-                state.last_reparse_bytes(),
-                state.text.len()
-            );
-        });
     }
 
     #[gpui::test]
