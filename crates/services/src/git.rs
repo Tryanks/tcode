@@ -462,14 +462,30 @@ pub fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-pub fn is_git_repo(cwd: &Path) -> bool {
-    run_git(cwd, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|out| out.trim() == "true")
+/// Whether `cwd` is inside a work tree: `false` where git says it is not a repository, and
+/// git's error, or why git could not run, otherwise.
+fn is_git_repo(cwd: &Path) -> Result<bool, String> {
+    let args = ["rev-parse", "--is-inside-work-tree"];
+    // Git's own words decide "not a repository", so they are read untranslated.
+    let out = git_command(cwd)
+        .env("LC_ALL", "C")
+        .args(args)
+        .output()
+        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim() == "true")
+    } else if stderr.contains("not a git repository") {
+        Ok(false)
+    } else {
+        Err(format!("git {} failed: {}", args.join(" "), stderr.trim()))
+    }
 }
 
 /// The repository state of `cwd`; the default outside a repository, and git's
-/// own error when it cannot read the status or the changed lines.
+/// own error when it cannot tell, or cannot read the status or the changed lines.
 pub fn read_status(cwd: &Path) -> Result<GitStatus, String> {
-    if !is_git_repo(cwd) {
+    if !is_git_repo(cwd)? {
         return Ok(GitStatus::default());
     }
     // `-z` prints paths unquoted; `status.relativePaths=false` makes them
@@ -977,6 +993,17 @@ mod tests {
         let asked = load_git_diff(&root, GitDiffScope::Branch, Some("main"), false);
         assert_eq!(asked.base.as_deref(), Some("main"));
 
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// A folder git says is no repository has the empty status; one git cannot run in is the
+    /// reason, not "no repository".
+    #[test]
+    fn no_repository_is_told_apart_from_git_failing_to_run() {
+        let temp = std::env::temp_dir().join(format!("tcode-no-repo-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        assert_eq!(read_status(&temp), Ok(GitStatus::default()));
+        assert!(read_status(&temp.join("gone")).is_err());
         let _ = std::fs::remove_dir_all(temp);
     }
 
