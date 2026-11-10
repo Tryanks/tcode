@@ -250,14 +250,9 @@ pub(super) fn ago_rfc3339(stamp: &str) -> Option<String> {
         .map(|time| ago(time.timestamp().max(0) as u64))
 }
 
-/// The host's reason, at most 320 characters on screen.
+/// The host's reason, as it gave it.
 pub(super) fn reason(error: &ProtocolError) -> String {
-    let message = error.message.trim();
-    if message.chars().count() > 320 {
-        format!("{}…", message.chars().take(320).collect::<String>())
-    } else {
-        message.to_owned()
-    }
+    error.message.trim().to_owned()
 }
 
 impl PullRequestView {
@@ -2360,13 +2355,8 @@ impl PullRequestView {
                         .child(div().text_title(cx).child(title))
                         .child(
                             div()
-                                .id("pr-failure-reason")
                                 .text_secondary(self.compact(cx), cx)
-                                .child(reason(error))
-                                .with_tooltip({
-                                    let full = error.message.clone();
-                                    move |_, _| Tooltip::new(full.clone())
-                                }),
+                                .child(reason(error)),
                         )
                         .child(
                             div().child(

@@ -2399,7 +2399,6 @@ pull_requests:
     rebase_started: "Rebase started for %{head}"
     rebase_started_body: "%{host_name} rebases it shortly. Pull before pushing from this thread."
   actions:
-    and_more: "and %{count} more"
     ask_agent: "Ask the model in this thread"
     ask_checks: "Checks are failing on #%{number}: %{names}. Fix them and push."
     ask_checks_unnamed: "Checks are failing on #%{number}. Fix them and push."

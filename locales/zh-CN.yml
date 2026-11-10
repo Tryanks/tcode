@@ -2392,7 +2392,6 @@ pull_requests:
     rebase_started: "已开始变基 %{head}"
     rebase_started_body: "%{host_name} 将很快完成变基。在此线程推送前请先拉取。"
   actions:
-    and_more: "等另外 %{count} 项"
     ask_agent: "在此线程中让模型处理"
     ask_checks: "#%{number} 的检查未通过：%{names}。请修复并推送。"
     ask_checks_unnamed: "#%{number} 的检查未通过。请修复并推送。"

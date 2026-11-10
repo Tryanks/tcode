@@ -2399,7 +2399,6 @@ pull_requests:
     rebase_started: "%{head} のリベースを開始しました"
     rebase_started_body: "%{host_name} がまもなくリベースします。このスレッドからプッシュする前にプルしてください。"
   actions:
-    and_more: "ほか %{count} 件"
     ask_agent: "このスレッドのモデルに依頼"
     ask_checks: "#%{number} のチェックが失敗しています：%{names}。修正してプッシュしてください。"
     ask_checks_unnamed: "#%{number} のチェックが失敗しています。修正してプッシュしてください。"

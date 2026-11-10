@@ -1387,12 +1387,7 @@ pub(super) fn answer_toast(
                     let body = if messages.is_empty() {
                         tr("result_refused_body")
                     } else {
-                        let joined = messages.join(" ");
-                        if joined.chars().count() > 320 {
-                            format!("{}…", joined.chars().take(320).collect::<String>())
-                        } else {
-                            joined
-                        }
+                        messages.join(" ")
                     };
                     not(tr("result_refused"), body)
                 }
@@ -1587,8 +1582,8 @@ fn line(icon: IconName, color: Hsla, text: String) -> AnyElement {
         .into_any_element()
 }
 
-/// A note of the merge confirmation: its glyph and colour, if it has one, and its words.
-type MergeNote = (Option<(IconName, Hsla)>, String);
+/// A note of the merge confirmation: its glyph, its colour and its words.
+type MergeNote = (IconName, Hsla, String);
 
 /// The text role of a confirmation's notes.
 fn notes(cx: &App) -> gpui::Div {
@@ -2134,7 +2129,7 @@ impl Render for MergeStackDialog {
                 let mut notes: Vec<(SharedString, MergeNote)> = vec![(
                     "merge".into(),
                     (
-                        Some((IconName::GitMerge, theme.info)),
+                        IconName::GitMerge, theme.info,
                         tr_with(
                             "note_merge",
                             &[
@@ -2147,14 +2142,14 @@ impl Render for MergeStackDialog {
                 if state.merge_queue {
                     notes.push((
                         "queue".into(),
-                        (Some((IconName::ListOrdered, theme.info)), tr("note_queue")),
+                        (IconName::ListOrdered, theme.info, tr("note_queue")),
                     ));
                 }
                 let blockers = self.blockers(state);
                 for blocker in &blockers {
                     notes.push((
                         SharedString::from(format!("blocker-{blocker}")),
-                        (Some((IconName::Lock, theme.danger)), blocker.clone()),
+                        (IconName::Lock, theme.danger, blocker.clone()),
                     ));
                 }
                 let links = target.store.read(cx).pull_requests(&target.session);
@@ -2177,24 +2172,12 @@ impl Render for MergeStackDialog {
                         })
                     })
                     .collect();
-                for number in failing.iter().take(3) {
+                for number in failing {
                     notes.push((
                         SharedString::from(format!("checks-{number}")),
                         (
-                            Some((IconName::CircleX, theme.danger)),
+                            IconName::CircleX, theme.danger,
                             tr_with("note_checks", &[("number", number.to_string())]),
-                        ),
-                    ));
-                }
-                if failing.len() > 3 {
-                    notes.push((
-                        "checks-more".into(),
-                        (
-                            None,
-                            tr_with(
-                                "summary_more",
-                                &[("count", (failing.len() - 3).to_string())],
-                            ),
                         ),
                     ));
                 }
@@ -2205,7 +2188,7 @@ impl Render for MergeStackDialog {
                         notes.push((
                             SharedString::from(format!("changes-{number}")),
                             (
-                                Some((IconName::MessageSquareWarning, theme.danger)),
+                                IconName::MessageSquareWarning, theme.danger,
                                 tr_with("note_changes", &[("number", number.to_string())]),
                             ),
                         ));
@@ -2224,7 +2207,7 @@ impl Render for MergeStackDialog {
                     notes.push((
                         "unconfirmed".into(),
                         (
-                            Some((IconName::CircleQuestionMark, theme.warning)),
+                            IconName::CircleQuestionMark, theme.warning,
                             tr_with(
                                 "previous_unconfirmed",
                                 &[("ago", super::detail::ago(*started_at))],
@@ -2239,13 +2222,10 @@ impl Render for MergeStackDialog {
                     ROWS,
                     window,
                     cx,
-                    |_, (icon, text), _, _| {
+                    |_, (icon, color, text), _, _| {
                         div()
                             .pt_1()
-                            .child(match icon {
-                                Some((icon, color)) => line(icon.clone(), *color, text.clone()),
-                                None => div().child(text.clone()).into_any_element(),
-                            })
+                            .child(line(icon.clone(), *color, text.clone()))
                             .into_any_element()
                     },
                 );

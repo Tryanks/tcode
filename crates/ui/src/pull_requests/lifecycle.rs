@@ -750,18 +750,10 @@ impl Target {
             if failing.is_empty() {
                 crate::tr!("pull_requests.actions.ask_checks_unnamed", number = number).into_owned()
             } else {
-                let mut names = crate::i18n::join_list(failing.iter().take(5));
-                if failing.len() > 5 {
-                    names.push(' ');
-                    names.push_str(&crate::tr!(
-                        "pull_requests.actions.and_more",
-                        count = (failing.len() - 5).to_string()
-                    ));
-                }
                 crate::tr!(
                     "pull_requests.actions.ask_checks",
                     number = number,
-                    names = names
+                    names = crate::i18n::join_list(failing.iter())
                 )
                 .into_owned()
             }
