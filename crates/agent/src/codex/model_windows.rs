@@ -60,6 +60,9 @@ fn parse(cache: Cache) -> HashMap<String, ModelWindows> {
 mod tests {
     use super::*;
 
+    /// The cache's shape is not in the app-server schema; its field names
+    /// (`fetched_at`, `slug`, `context_window`, `max_context_window`,
+    /// `visibility`) are the ones the codex-cli 0.167.0 binary deserializes.
     #[test]
     fn reads_windows_from_the_cached_catalog() {
         let dir = std::env::temp_dir().join(format!("tcode-codex-windows-{}", std::process::id()));

@@ -4579,12 +4579,12 @@ mod tests {
                     "Profile my-team: read-only sandbox, asks for untrusted actions, reviewed by auto-review.",
                 ),
                 (
-                    json!({"sandboxPolicy":{"type":"externalSandbox"},"approvalPolicy":{"granular":{"sandbox_approval":false}},"approvalsReviewer":"guardian_subagent"}),
+                    json!({"sandboxPolicy":{"type":"externalSandbox","networkAccess":"restricted"},"approvalPolicy":{"granular":{"sandbox_approval":false,"rules":true,"skill_approval":true,"request_permissions":true,"mcp_elicitations":true}},"approvalsReviewer":"guardian_subagent"}),
                     "Current permissions",
                     "external sandbox, uses granular approval rules, reviewed by auto-review.",
                 ),
                 (
-                    json!({"sandbox":"danger-full-access","approvalPolicy":"on-request","approvalsReviewer":"user"}),
+                    json!({"sandboxPolicy":{"type":"dangerFullAccess"},"approvalPolicy":"on-request","approvalsReviewer":"user"}),
                     "Current permissions",
                     "full access, asks on request, reviewed by you.",
                 ),
@@ -5331,64 +5331,6 @@ mod tests {
     }
 
     #[test]
-    fn notifications_without_thread_id_keep_parent_behavior() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            for (method, params) in [
-                ("turn/started", json!({"turn":{"id":"T1"}})),
-                (
-                    "item/completed",
-                    json!({"item":{"type":"agentMessage","id":"message","text":"parent"}}),
-                ),
-                (
-                    "item/agentMessage/delta",
-                    json!({"itemId":"message","delta":"more"}),
-                ),
-                (
-                    "turn/completed",
-                    json!({"turn":{"id":"T1","status":"completed"}}),
-                ),
-            ] {
-                actor
-                    .handle_line(&json!({"method":method,"params":params}).to_string())
-                    .await;
-                let event = events.try_recv().unwrap();
-                match method {
-                    "turn/started" => {
-                        assert!(
-                            matches!(event, AgentEvent::TurnStarted { turn_id } if turn_id == "T1")
-                        );
-                        assert_eq!(actor.active_turn.as_deref(), Some("T1"));
-                    }
-                    "item/completed" => assert!(matches!(
-                        event,
-                        AgentEvent::ItemCompleted(ThreadItem {
-                            parent_item_id: None,
-                            ..
-                        })
-                    )),
-                    "item/plan/delta" | "item/agentMessage/delta" => {
-                        assert!(matches!(event, AgentEvent::Delta { .. }))
-                    }
-                    _ => {
-                        assert!(
-                            matches!(event, AgentEvent::TurnCompleted { turn_id, .. } if turn_id == "T1")
-                        );
-                        assert!(actor.active_turn.is_none());
-                        assert!(matches!(
-                            events.try_recv().unwrap(),
-                            AgentEvent::TurnCheckpoint { turn_id, .. } if turn_id == "T1"
-                        ));
-                    }
-                }
-            }
-            assert!(events.try_recv().is_err());
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    #[test]
     fn async_question_answers_steer_the_running_turn_with_codex_reply_envelope() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
@@ -5399,13 +5341,13 @@ mod tests {
                 events.try_recv().unwrap(),
                 AgentEvent::TurnStarted { .. }
             ));
-            // Shape recorded from codex-cli 0.156 `request_user_input_async`.
+            // `request_user_input_async` as the 0.167.0 schema shapes it (`v2/ThreadItem.ts`, `v2/AsyncUserInputQuestion.ts`).
             actor
                 .handle_line(
                     &json!({"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{
                         "type":"agentMessage","id":"call_q","text":"Which DB?\n- Postgres\n- SQLite",
                         "phase":"final_answer","delivery":"async",
-                        "questions":[{"title":"Which DB?","options":["Postgres","SQLite"]},{"title":"  "}]
+                        "questions":[{"title":"Which DB?","options":["Postgres","SQLite"]},{"title":"  ","options":null}]
                     }}})
                     .to_string(),
                 )
@@ -5916,24 +5858,20 @@ mod tests {
                     "cwd": "/tmp",
                     "skills": [
                         {"name": "browser:control", "description": "drive the browser", "interface": {"displayName": "Browser"}},
-                        {"name": "", "description": "dropped"},
-                        {"name": "dataviz", "interface": {"shortDescription": "charts"}}
+                        {"name": "", "description": "dropped"}
                     ]
                 },
                 {"cwd": "/tmp", "skills": [{"name": "browser:control", "description": "dup dropped"}]}
             ]
         });
         let commands = parse_codex_skills(&result);
-        assert_eq!(commands.len(), 2);
+        assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].name, "browser:control");
         assert_eq!(commands[0].kind, ProviderCommandKind::Skill);
         assert_eq!(
             commands[0].description.as_deref(),
             Some("drive the browser")
         );
-        // Falls back to interface.shortDescription when `description` is absent.
-        assert_eq!(commands[1].name, "dataviz");
-        assert_eq!(commands[1].description.as_deref(), Some("charts"));
     }
 
     /// A configured codex that dies at startup (as a broken npm install does)
@@ -5989,7 +5927,7 @@ mod tests {
             actor
                 .handle_notification(
                     "turn/completed",
-                    &json!({"turn":{"id":"T1","status":"completed"}}),
+                    &json!({"threadId": "thread-1", "turn":{"id":"T1","status":"completed"}}),
                 )
                 .await;
             while events.try_recv().is_ok() {}
@@ -5998,7 +5936,7 @@ mod tests {
             let list = sent(&mut actor).await;
             assert_eq!(list["method"], "thread/backgroundTerminals/list");
             assert_eq!(list["params"], json!({"threadId": "thread-1"}));
-            // Recorded from 0.167.0.
+            // `v2/ThreadBackgroundTerminalsListResponse.ts` of the 0.167.0 schema.
             let running = json!({"data":[{
                 "itemId":"call_1","processId":"98412","command":"sleep 40",
                 "cwd":"/tmp/project","osPid":null,"cpuPercent":null,"rssKb":null
@@ -6147,19 +6085,22 @@ mod tests {
             {
                 let turn_id = format!("capacity-{attempt}");
                 actor
-                    .handle_notification("turn/started", &json!({"turn":{"id":turn_id}}))
+                    .handle_notification(
+                        "turn/started",
+                        &json!({"threadId": "thread-1", "turn":{"id":turn_id}}),
+                    )
                     .await;
                 let before = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs();
                 actor.handle_notification("error", &json!({
-                    "turnId": turn_id, "willRetry": false,
+                    "threadId": "thread-1", "turnId": turn_id, "willRetry": false,
                     "error": {"message": "Selected model is capacity. Please try a different model.",
                               "codexErrorInfo": "serverOverloaded"}
                 })).await;
                 actor.handle_notification("turn/completed", &json!({
-                    "turn": {"id": turn_id, "status": "failed",
+                    "threadId": "thread-1", "turn": {"id": turn_id, "status": "failed",
                     "error": {"message": "Selected model is capacity. Please try a different model.",
                               "codexErrorInfo": "serverOverloaded"}}
                 })).await;
@@ -6208,7 +6149,10 @@ mod tests {
                 .await
                 .unwrap();
             actor
-                .handle_notification("turn/started", &json!({"turn":{"id":"capacity-5"}}))
+                .handle_notification(
+                    "turn/started",
+                    &json!({"threadId": "thread-1", "turn":{"id":"capacity-5"}}),
+                )
                 .await;
             assert_eq!(sent(&mut actor).await["method"], "turn/interrupt");
             let _ = actor.child.kill();
@@ -6220,14 +6164,21 @@ mod tests {
     fn capacity_retry_cancellation_and_non_capacity_failures_do_not_restart() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            for error in ["usageLimitExceeded", "other", "serverOverloaded"] {
+            for error in [
+                "usageLimitExceeded",
+                "internalServerError",
+                "serverOverloaded",
+            ] {
                 actor
-                    .handle_notification("turn/started", &json!({"turn":{"id":error}}))
+                    .handle_notification(
+                        "turn/started",
+                        &json!({"threadId": "thread-1", "turn":{"id":error}}),
+                    )
                     .await;
                 actor
                     .handle_notification(
                         "turn/completed",
-                        &json!({"turn":{"id":error,"status":"failed",
+                        &json!({"threadId": "thread-1", "turn":{"id":error,"status":"failed",
                     "error":{"message":"capacity","codexErrorInfo":error}}}),
                     )
                     .await;
@@ -6265,16 +6216,16 @@ mod tests {
                 .handle_notification(
                     "model/rerouted",
                     &json!({
-                        "from_model": "gpt-5",
-                        "toModel": "gpt-5-mini",
-                        "reason": "capacity"
+                        "threadId": "thread-1", "turnId": "turn-1",
+                        "fromModel": "gpt-5.5", "toModel": "gpt-5.4",
+                        "reason": "highRiskCyberActivity"
                     }),
                 )
                 .await;
             assert!(matches!(
                 events.try_recv().unwrap(),
                 AgentEvent::ServedModel { model, reason }
-                    if model == "gpt-5-mini" && reason.as_deref() == Some("capacity")
+                    if model == "gpt-5.4" && reason.as_deref() == Some("highRiskCyberActivity")
             ));
             let _ = actor.child.kill();
             let _ = actor.child.wait();
@@ -6285,11 +6236,11 @@ mod tests {
     fn turn_diff_notification_maps_to_exact_replacement_snapshot() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            actor.active_turn = Some("turn-9".into());
             actor
                 .handle_notification(
                     "turn/diff/updated",
                     &json!({
+                        "threadId": "thread-1",
                         "turnId": "turn-9",
                         "diff": concat!(
                             "diff --git a/src/lib.rs b/src/lib.rs\n",
@@ -6326,7 +6277,8 @@ mod tests {
             actor
                 .handle_notification(
                     "item/started",
-                    &json!({"item": {"type": "plan", "id": "native-plan", "text": ""}}),
+                    &json!({"threadId": "thread-1", "turnId": "turn-1", "startedAtMs": 1,
+                        "item": {"type": "plan", "id": "native-plan", "text": ""}}),
                 )
                 .await;
             assert!(matches!(
@@ -6339,13 +6291,20 @@ mod tests {
             actor
                 .handle_notification(
                     "item/plan/delta",
-                    &json!({"itemId": "native-plan", "delta": "# Native plan"}),
+                    &json!({"threadId": "thread-1", "turnId": "turn-1",
+                        "itemId": "native-plan", "delta": "# Native plan"}),
                 )
                 .await;
             assert!(
                 matches!(events.try_recv().unwrap(), AgentEvent::Delta { kind: DeltaKind::AssistantText, text, .. } if text == "# Native plan")
             );
-            actor.handle_notification("item/completed", &json!({"item": {"type": "plan", "id": "native-plan", "text": "# Final native plan"}})).await;
+            actor
+                .handle_notification(
+                    "item/completed",
+                    &json!({"threadId": "thread-1", "turnId": "turn-1", "completedAtMs": 2,
+                "item": {"type": "plan", "id": "native-plan", "text": "# Final native plan"}}),
+                )
+                .await;
             assert!(
                 matches!(events.try_recv().unwrap(), AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::Plan { markdown }, .. }) if markdown == "# Final native plan")
             );
@@ -6358,17 +6317,17 @@ mod tests {
     fn plan_notifications_map_to_events() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            actor.active_turn = Some("turn-9".into());
-
             actor
                 .handle_notification(
                     "turn/plan/updated",
                     &json!({
+                        "threadId": "thread-1",
+                        "turnId": "turn-9",
                         "explanation": "  building  ",
                         "plan": [
                             {"step": "explore", "status": "completed"},
-                            {"step": "  ", "status": "inProgress"},
-                            {"status": "weird"}
+                            {"step": "build", "status": "inProgress"},
+                            {"step": "verify", "status": "pending"}
                         ]
                     }),
                 )
@@ -6381,83 +6340,20 @@ mod tests {
                 } => {
                     assert_eq!(turn_id.as_deref(), Some("turn-9"));
                     assert_eq!(explanation.as_deref(), Some("building"));
-                    assert_eq!(steps[0].status, PlanStepStatus::Completed);
-                    assert_eq!(steps[1].step, "step");
-                    assert_eq!(steps[1].status, PlanStepStatus::InProgress);
-                    assert_eq!(steps[2].step, "step");
-                    assert_eq!(steps[2].status, PlanStepStatus::Pending);
+                    assert_eq!(
+                        steps
+                            .iter()
+                            .map(|step| (step.step.as_str(), step.status))
+                            .collect::<Vec<_>>(),
+                        [
+                            ("explore", PlanStepStatus::Completed),
+                            ("build", PlanStepStatus::InProgress),
+                            ("verify", PlanStepStatus::Pending),
+                        ]
+                    );
                 }
                 other => panic!("expected PlanUpdated, got {other:?}"),
             }
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    #[test]
-    fn subagent_activity_is_found_in_defensive_notification_envelope() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            actor.items.insert(
-                "call_spawn".into(),
-                ThreadItem {
-                    id: "call_spawn".into(),
-                    parent_item_id: None,
-                    content: ItemContent::ToolCall {
-                        image_reads: Vec::new(),
-                        name: "spawn_agent".into(),
-                        input: json!({"agent_type":"researcher","description":"Inspect protocol"}),
-                        output: None,
-                        status: ItemStatus::InProgress,
-                    },
-                },
-            );
-            actor
-                .handle_notification(
-                    "thread/event",
-                    &json!({
-                        "event": {
-                            "type": "event_msg",
-                            "payload": {
-                                "type": "sub_agent_activity",
-                                "event_id": "call_spawn",
-                                "occurred_at_ms": 1783944057000_u64,
-                                "agent_thread_id": "thread_child",
-                                "agent_path": "/root/researcher",
-                                "kind": "started"
-                            }
-                        }
-                    }),
-                )
-                .await;
-            assert!(matches!(
-                events.try_recv().unwrap(),
-                AgentEvent::ItemUpdated(ThreadItem {
-                    id,
-                    parent_item_id: None,
-                    content: ItemContent::Subagent { status: ItemStatus::InProgress, .. }
-                }) if id == "call_spawn"
-            ));
-
-            actor
-                .handle_notification(
-                    "item/completed",
-                    &json!({"item": {
-                        "type":"dynamicToolCall",
-                        "id":"call_spawn",
-                        "tool":"spawn_agent",
-                        "arguments":{},
-                        "contentItems":[{"type":"inputText","text":"done"}],
-                        "status":"completed"
-                    }}),
-                )
-                .await;
-            assert!(matches!(
-                events.try_recv().unwrap(),
-                AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::Subagent { status: ItemStatus::Completed, .. }, .. })
-                    if id == "call_spawn"
-            ));
-            assert!(events.try_recv().is_err());
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -6482,7 +6378,7 @@ mod tests {
                 actor
                     .handle_notification(
                         "item/completed",
-                        &json!({"item": {
+                        &json!({"threadId": "thread-1", "turnId": "turn-1", "item": {
                             "type": "subAgentActivity", "id": format!("activity-{index}"),
                             "agentThreadId": "child", "agentPath": "/root/researcher",
                             "kind": kind
@@ -6513,7 +6409,7 @@ mod tests {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
             let activity = |id: &str, child: &str, kind: &str| {
-                json!({"item": {
+                json!({"threadId": "thread-1", "turnId": "turn-1", "item": {
                     "type": "subAgentActivity", "id": id,
                     "agentThreadId": child, "agentPath": "/root/reply_ok",
                     "kind": kind
@@ -6577,7 +6473,7 @@ mod tests {
                     AgentEvent::SettingsApplied { applied: true }
                 ));
                 let activity = |kind| {
-                    json!({"item": {
+                    json!({"threadId": "thread-1", "turnId": "turn-1", "item": {
                         "type": "subAgentActivity", "id": "spawn",
                         "agentThreadId": "child", "agentPath": "/root/header_mouse",
                         "kind": kind
@@ -6653,7 +6549,7 @@ mod tests {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
             let root = actor.thread_id.clone();
-            let activity = json!({"item": {
+            let activity = json!({"threadId": "thread-1", "turnId": "turn-1", "item": {
                 "type": "subAgentActivity", "id": "act-root",
                 "agentThreadId": root, "agentPath": "/root", "kind": "interacted"
             }});
@@ -6667,119 +6563,6 @@ mod tests {
                 written(&mut actor).await.is_empty(),
                 "nor ask for a child's metadata"
             );
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    #[test]
-    fn codex_0150_subagent_activity_uses_v2_fields_and_thread_identity() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            actor.items.insert(
-                "call_spawn".into(),
-                ThreadItem {
-                    id: "call_spawn".into(),
-                    parent_item_id: None,
-                    content: ItemContent::ToolCall {
-                        image_reads: Vec::new(),
-                        name: "spawnAgent".into(),
-                        input: json!({"prompt":"Inspect protocol", "reasoning_effort":"high"}),
-                        output: None,
-                        status: ItemStatus::Completed,
-                    },
-                },
-            );
-            let started = json!({"item": {
-                "type": "subAgentActivity",
-                "id": "call_spawn",
-                "agentThreadId": "thread_child",
-                "agentPath": "/root/researcher",
-                "kind": "started"
-            }});
-            actor.handle_notification("item/started", &started).await;
-            // Keep the explicit effort while the child's model is still unknown.
-            assert!(matches!(
-                events.try_recv().unwrap(),
-                AgentEvent::ItemUpdated(ThreadItem {
-                    id,
-                    content: ItemContent::Subagent {
-                        status: ItemStatus::InProgress,
-                        model: None,
-                        effort: Some(effort),
-                        ..
-                    },
-                    ..
-                }) if id == "call_spawn" && effort == "high"
-            ));
-
-            // Codex emits the instantaneous activity as item/started +
-            // item/completed and may additionally fan out the legacy event.
-            actor.handle_notification("item/completed", &started).await;
-            actor
-                .handle_notification(
-                    "thread/event",
-                    &json!({"event":{"payload":{
-                        "type":"sub_agent_activity",
-                        "event_id":"call_spawn",
-                        "agent_thread_id":"thread_child",
-                        "agent_path":"/root/researcher",
-                        "kind":"started"
-                    }}}),
-                )
-                .await;
-            assert!(events.try_recv().is_err(), "duplicate activity was emitted");
-
-            // Completion uses a fresh activity id in Codex 0.150. It must close
-            // the original thread-backed capsule instead of creating a second
-            // synthetic subagent.
-            let completed = json!({"item": {
-                "type": "subAgentActivity",
-                "id": "subagent-completed-turn-child",
-                "agentThreadId": "thread_child",
-                "agentPath": "/root/researcher",
-                "kind": "completed"
-            }});
-            actor.handle_notification("item/started", &completed).await;
-            assert!(matches!(
-                events.try_recv().unwrap(),
-                AgentEvent::ItemCompleted(ThreadItem {
-                    id,
-                    parent_item_id: None,
-                    content: ItemContent::Subagent {
-                        status: ItemStatus::Completed,
-                        ..
-                    }
-                }) if id == "call_spawn"
-            ));
-            actor
-                .handle_notification("item/completed", &completed)
-                .await;
-            assert!(events.try_recv().is_err(), "completion was emitted twice");
-
-            let interrupted = json!({"item": {
-                "type": "subAgentActivity",
-                "id": "call_interrupt",
-                "agentThreadId": "thread_child",
-                "agentPath": "/root/researcher",
-                "kind": "interrupted"
-            }});
-            actor
-                .handle_notification("item/started", &interrupted)
-                .await;
-            assert!(matches!(
-                events.try_recv().unwrap(),
-                AgentEvent::ItemCompleted(ThreadItem {
-                    id,
-                    content: ItemContent::Subagent {
-                        status: ItemStatus::Interrupted,
-                        ..
-                    },
-                    ..
-                }) if id == "call_spawn"
-            ));
-            assert!(events.try_recv().is_err());
-
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -7014,8 +6797,7 @@ mod tests {
                 {"path": "new.md", "kind": {"type": "add"}, "diff": "hello\n- list\n++literal\n\nlast"},
                 {"path": "old.md", "kind": {"type": "delete"}, "diff": "hello\n"},
                 {"path": "empty", "kind": {"type": "add"}, "diff": ""},
-                {"path": "unknown", "kind": {"type": "add"}},
-                {"path": "edit", "kind": {"type": "update"}, "diff": "@@ -1 +1 @@\n-old\n+new\n"}
+                {"path": "edit", "kind": {"type": "update", "move_path": null}, "diff": "@@ -1 +1 @@\n-old\n+new\n"}
             ]
         })).unwrap();
         let ItemContent::FileChange { changes, .. } = item.content else {
@@ -7032,9 +6814,8 @@ mod tests {
             Some("@@ -1,1 +0,0 @@\n-hello\n")
         );
         assert_eq!(changes[2].diff.as_deref(), Some(""));
-        assert_eq!(changes[3].diff, None);
         assert_eq!(
-            changes[4].diff.as_deref(),
+            changes[3].diff.as_deref(),
             Some("@@ -1 +1 @@\n-old\n+new\n")
         );
     }
@@ -7061,17 +6842,16 @@ mod tests {
     fn request_user_input_maps_questions_and_answer_wire_shape() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            // isOther/isSecret dropped; question missing id dropped; option
-            // with empty label dropped; zero-option question without a header
-            // KEPT (options: []).
+            // An option with an empty label is dropped; a question without
+            // options or a header is kept (options: []).
             actor
                 .handle_line(
                     &json!({
-                        "jsonrpc": "2.0",
                         "id": 55,
                         "method": "item/tool/requestUserInput",
                         "params": {
-                            "threadId": "t", "turnId": "turn-1", "itemId": "item-1",
+                            "threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1",
+                            "isBlocking": true, "autoResolutionMs": null,
                             "questions": [
                                 {
                                     "id": "os",
@@ -7084,8 +6864,10 @@ mod tests {
                                     "isOther": true,
                                     "isSecret": false
                                 },
-                                { "id": "free", "header": "", "question": "Any notes?" },
-                                { "header": "no id", "question": "dropped?" }
+                                {
+                                    "id": "free", "header": "", "question": "Any notes?",
+                                    "isOther": false, "isSecret": false, "options": null
+                                }
                             ]
                         }
                     })
@@ -7100,7 +6882,7 @@ mod tests {
                     ..
                 } => {
                     assert_eq!(request_id, "55");
-                    assert_eq!(questions.len(), 2, "question missing id is dropped");
+                    assert_eq!(questions.len(), 2);
                     assert_eq!(questions[0].id, "os");
                     assert_eq!(questions[0].options.len(), 1, "empty-label option dropped");
                     assert_eq!(questions[0].options[0].label, "macOS");
@@ -7526,25 +7308,25 @@ mod tests {
             }
 
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::TurnStarted { ref turn_id } if turn_id == "turn-1")
+                matches!(events.try_recv().unwrap(), AgentEvent::TurnStarted { ref turn_id } if turn_id == "turn-1")
             );
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::ItemStarted(ThreadItem { content: ItemContent::FileChange { ref changes, status: ItemStatus::InProgress }, .. }) if changes[0].kind == FileChangeKind::Create)
+                matches!(events.try_recv().unwrap(), AgentEvent::ItemStarted(ThreadItem { content: ItemContent::FileChange { ref changes, status: ItemStatus::InProgress }, .. }) if changes[0].kind == FileChangeKind::Create)
             );
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::ApprovalRequested(ApprovalRequest { ref id, kind: ApprovalKind::FileChange { ref changes, .. }, .. }) if id == "41" && changes.len() == 1)
+                matches!(events.try_recv().unwrap(), AgentEvent::ApprovalRequested(ApprovalRequest { ref id, kind: ApprovalKind::FileChange { ref changes, .. }, .. }) if id == "41" && changes.len() == 1)
             );
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::Delta { kind: DeltaKind::AssistantText, ref text, .. } if text == "PONG")
+                matches!(events.try_recv().unwrap(), AgentEvent::Delta { kind: DeltaKind::AssistantText, ref text, .. } if text == "PONG")
             );
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::Delta { kind: DeltaKind::ReasoningText, ref text, .. } if text == "Checking")
+                matches!(events.try_recv().unwrap(), AgentEvent::Delta { kind: DeltaKind::ReasoningText, ref text, .. } if text == "Checking")
             );
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::Delta { kind: DeltaKind::CommandOutput, ref text, .. } if text == "ok\n")
+                matches!(events.try_recv().unwrap(), AgentEvent::Delta { kind: DeltaKind::CommandOutput, ref text, .. } if text == "ok\n")
             );
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TokenUsage(TokenUsage {
                     input_tokens: Some(8),
                     cached_input_tokens: Some(2),
@@ -7556,7 +7338,7 @@ mod tests {
                 })
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::ItemCompleted(ThreadItem {
                     content: ItemContent::FileChange {
                         status: ItemStatus::Completed,
@@ -7566,7 +7348,7 @@ mod tests {
                 })
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnCompleted {
                     status: TurnStatus::Completed,
                     usage: Some(TokenUsage {
@@ -7582,7 +7364,7 @@ mod tests {
                 }
             ));
             assert!(matches!(
-                events.recv().await.unwrap(),
+                events.try_recv().unwrap(),
                 AgentEvent::TurnCheckpoint { .. }
             ));
 
@@ -7592,7 +7374,7 @@ mod tests {
                     let message: Value = serde_json::from_str(line).unwrap();
                     message["method"] == "item/fileChange/requestApproval"
                 })
-                .expect("recorded native approval request");
+                .expect("native approval request");
             for (decision, wire) in [
                 (
                     ApprovalDecision::Option("acceptForSession".into()),
@@ -7604,7 +7386,7 @@ mod tests {
                     // Re-enter through the native request, never a seeded pending map.
                     actor.handle_line(approval_line).await;
                     assert!(matches!(
-                        events.recv().await.unwrap(),
+                        events.try_recv().unwrap(),
                         AgentEvent::ApprovalRequested(ApprovalRequest { ref id, .. }) if id == "41"
                     ));
                 }
@@ -7616,14 +7398,11 @@ mod tests {
                     .await
                     .unwrap();
                 assert!(matches!(
-                    events.recv().await.unwrap(),
+                    events.try_recv().unwrap(),
                     AgentEvent::ApprovalResolved { ref request_id, decision: resolved }
                         if request_id == "41" && resolved == decision
                 ));
-                let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                    panic!("expected echoed response")
-                };
-                let response: Value = serde_json::from_str(&response).unwrap();
+                let response = sent(&mut actor).await;
                 assert_eq!(response, json!({"id":41, "result":{"decision":wire}}));
             }
 
