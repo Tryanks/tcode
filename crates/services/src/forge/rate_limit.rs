@@ -4,8 +4,10 @@ use std::{
 };
 
 /// How long a host is left alone after its rate limit refuses a request, per host and credential:
-/// until the time the host names, else `min(30 s·2^(n−1), 15 min)` for the n-th refusal in a row.
-/// A success after the pause starts the count again.
+/// until the time the host names, else `min(60 s·2^(n−1), 15 min)` for the n-th refusal in a row.
+/// GitHub asks for at least a minute, growing exponentially while refusals continue, when it names
+/// no time ("Rate limits for the REST API"); GitLab, Azure DevOps and Bitbucket document only the
+/// headers that name one. A success after the pause starts the count again.
 ///
 /// A request runs under the lease [`Self::admit`] gave it, so the refusals of requests already in
 /// flight when a pause began count once, not once each.
@@ -65,7 +67,7 @@ impl RateLimits {
             return pause.retry_at.unwrap_or(now);
         }
         pause.attempt = pause.attempt.saturating_add(1);
-        let cooldown = 30_u64
+        let cooldown = 60_u64
             .saturating_mul(2_u64.saturating_pow(pause.attempt - 1))
             .min(900);
         let proposed = explicit.unwrap_or(now + Duration::from_secs(cooldown));
