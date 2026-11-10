@@ -340,9 +340,10 @@ impl LocalKernel {
 
     /// Make this kernel the process's host: it hosts remote devices when its
     /// settings say so, and stops when the application quits. Returns its
-    /// settings.
-    fn own(&self, data_dir: &std::path::Path, cx: &mut App) -> settings::Settings {
-        let local_settings = self.settings();
+    /// settings, or why they could not be read, which the window shows
+    /// instead of this host.
+    fn own(&self, data_dir: &std::path::Path, cx: &mut App) -> Result<settings::Settings, String> {
+        let local_settings = self.settings()?;
         // Hosting belongs to the process-owned local kernel; it carries no
         // current-attachment mode.
         cx.set_global(RemoteController::new(
@@ -374,7 +375,7 @@ impl LocalKernel {
             }
         })
         .detach();
-        local_settings
+        Ok(local_settings)
     }
 
     /// A window's link to the local kernel. The mux keeps the kernel alive
@@ -401,16 +402,17 @@ impl LocalKernel {
         }
     }
 
-    fn settings(&self) -> settings::Settings {
+    /// The host's settings, read once before the window opens. Nothing on
+    /// screen can stop this wait yet, so it ends after five seconds.
+    fn settings(&self) -> Result<settings::Settings, String> {
         let topic = tcode_protocol::Topic::Settings;
-        if let Err(error) = self.control_link.subscribe(tcode_protocol::Subscription {
-            known_index: None,
-            topic: topic.clone(),
-            after: None,
-        }) {
-            log::error!("could not request local settings: {}", error.message);
-            return settings::Settings::default();
-        }
+        self.control_link
+            .subscribe(tcode_protocol::Subscription {
+                known_index: None,
+                topic: topic.clone(),
+                after: None,
+            })
+            .map_err(|error| error.message)?;
         let events = self.control_link.events();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let result = loop {
@@ -420,12 +422,17 @@ impl LocalKernel {
                         tcode_protocol::ServerEvent::SettingsSnapshot(settings)
                         | tcode_protocol::ServerEvent::SettingsReplaced(settings),
                     ..
-                }) => break settings,
+                }) => break Ok(settings),
                 Ok(_) => {}
                 Err(async_channel::TryRecvError::Empty) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(1));
                 }
-                Err(_) => break settings::Settings::default(),
+                Err(async_channel::TryRecvError::Empty) => {
+                    break Err(tcode_ui::tr!("remote.failure.timeout").into_owned());
+                }
+                Err(async_channel::TryRecvError::Closed) => {
+                    break Err(tcode_ui::tr!("remote.failure.host_closed").into_owned());
+                }
             }
         };
         let _ = self.control_link.unsubscribe(tcode_protocol::Subscription {
@@ -774,15 +781,15 @@ fn main() {
 
         let launch = move |cx: &mut App, started: Result<LocalKernel, String>| {
             let initial_target = initial_target();
-            let (kernel, failure) = match started {
-                Ok(kernel) => (Some(Rc::new(kernel)), None),
-                Err(reason) => (None, Some(reason)),
+            let owned = started.and_then(|kernel| {
+                let settings = kernel.own(&data_dir, cx)?;
+                Ok((Rc::new(kernel), settings))
+            });
+            let (kernel, failure, local_settings) = match owned {
+                Ok((kernel, settings)) => (Some(kernel), None, settings),
+                // A window without a local host has read none of its settings.
+                Err(reason) => (None, Some(reason), settings::Settings::default()),
             };
-            // A window without a local host has read none of its settings.
-            let local_settings = kernel
-                .as_ref()
-                .map(|kernel| kernel.own(&data_dir, cx))
-                .unwrap_or_default();
             let owned = Rc::new(RefCell::new(kernel.clone()));
             let local: tcode_ui::attachment::LocalTransport = Rc::new(move |cx| {
                 if let Some(kernel) = owned.borrow().as_ref() {
@@ -790,7 +797,7 @@ fn main() {
                 }
                 match start_local_host()? {
                     LocalStart::Started(kernel) => {
-                        kernel.own(&data_dir, cx);
+                        kernel.own(&data_dir, cx)?;
                         let transport = kernel.transport();
                         *owned.borrow_mut() = Some(Rc::new(kernel));
                         Ok(transport)
