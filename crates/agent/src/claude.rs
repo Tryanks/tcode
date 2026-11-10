@@ -4236,6 +4236,18 @@ impl Mapper {
         {
             return Vec::new();
         }
+        // A task notification the CLI closes without asking the model ran no
+        // turn, so it ends none: a resumed session reports its stopped
+        // background work this way before it takes up the message just sent.
+        if self.current_turn_id.is_some()
+            && msg.pointer("/origin/kind").and_then(Value::as_str) == Some("task-notification")
+            && msg.get("num_turns").and_then(Value::as_u64) == Some(0)
+        {
+            self.background_drain_withheld = false;
+            return vec![AgentEvent::BackgroundTasksChanged {
+                count: self.background_tasks.len(),
+            }];
+        }
         self.awaiting_turn_checkpoint = false;
         let mut events = self.observe_stop_reason(msg.get("stop_reason").and_then(Value::as_str));
         let turn_id = self
@@ -6947,6 +6959,50 @@ mod tests {
             },
             other => panic!("expected ItemCompleted, got {other:?}"),
         }
+    }
+
+    /// A message sent to a resumed session whose background command did not
+    /// outlive the previous process: Claude Code first reports the command
+    /// stopped and closes that notification with a `result` of its own
+    /// (`num_turns: 0`, origin `task-notification`), then runs the message
+    /// (2.1.321, recorded).
+    #[test]
+    fn a_resumed_sessions_stopped_task_result_leaves_the_message_turn_open() {
+        let mut m = Mapper::new();
+        let turn_id = m.start_turn();
+        let turn_events: Vec<_> =
+            include_str!("../tests/fixtures/claude/resume_stopped_task_trace.jsonl")
+                .lines()
+                .flat_map(|line| feed(&mut m, line))
+                .filter(|event| {
+                    matches!(
+                        event,
+                        AgentEvent::TurnStarted { .. }
+                            | AgentEvent::TurnCompleted { .. }
+                            | AgentEvent::ItemCompleted(ThreadItem {
+                                content: ItemContent::AssistantMessage { .. },
+                                ..
+                            })
+                    )
+                })
+                .collect();
+        assert!(
+            matches!(
+                turn_events.as_slice(),
+                [
+                    AgentEvent::ItemCompleted(ThreadItem {
+                        content: ItemContent::AssistantMessage { text, .. },
+                        ..
+                    }),
+                    AgentEvent::TurnCompleted {
+                        turn_id: completed,
+                        status: TurnStatus::Completed,
+                        ..
+                    },
+                ] if text == "PONG" && completed == &turn_id
+            ),
+            "{turn_events:?}"
+        );
     }
 
     #[test]
