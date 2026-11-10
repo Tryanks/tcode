@@ -1792,24 +1792,58 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
     )
 }
 
-/// Text without its terminal escape sequences (`ESC [ … letter`).
+/// Text without its ECMA-48 control sequences (`ESC [`) and operating
+/// system commands (`ESC ]`).
 pub fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
+    let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            if chars.next() == Some('[') {
+        if ch != '\u{1b}' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            // A control sequence ends at its final byte, 0x40..=0x7E.
+            Some('[') => {
                 for next in chars.by_ref() {
-                    if next.is_ascii_alphabetic() {
+                    if ('\u{40}'..='\u{7e}').contains(&next) {
                         break;
                     }
                 }
             }
-            continue;
+            // An operating system command, such as an OSC 8 hyperlink,
+            // ends at BEL or at the string terminator ESC \.
+            Some(']') => {
+                while let Some(next) = chars.next() {
+                    if next == '\u{7}' {
+                        break;
+                    }
+                    if next == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
         }
-        out.push(ch);
     }
     out
+}
+
+#[cfg(test)]
+mod strip_ansi_tests {
+    /// Claude Code 2.1.322 prints its sign-in URL as an OSC 8 hyperlink
+    /// (`ESC ]8;; url BEL text ESC ]8;; BEL`) whenever it judges the
+    /// terminal to support links, which it does from TERM_PROGRAM and the
+    /// like even when its stdout is a pipe.
+    #[test]
+    fn a_hyperlinked_sign_in_url_reads_as_the_url() {
+        let printed = "If the browser didn't open, visit: \u{1b}]8;;https://example.invalid/oauth?code=1\u{7}\u{1b}[94mhttps://example.invalid/oauth?code=1\u{1b}[39m\u{1b}]8;;\u{7}\n";
+        assert_eq!(
+            super::strip_ansi(printed),
+            "If the browser didn't open, visit: https://example.invalid/oauth?code=1\n"
+        );
+    }
 }
 
 /// The executable extensions to try for a bare name: `PATHEXT` on Windows
