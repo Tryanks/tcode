@@ -87,6 +87,12 @@ chat:
   start_hub_title: "开始新线程"
   start_hub_title_on: "在 %{host} 上开始新线程"
   palette_hint: "或按 %{shortcut} 搜索"
+  slogan_project:
+    "1": "准备在 %{project} 中打造 SOTA 了吗？"
+  slogan_quick:
+    "1": "做点什么？"
+  continue_recent: "继续最近的线程"
+  choose_project: "选择项目"
   scroll_end: "滚动到底部"
   rail_plan: "计划"
   rail_agents: "委派线程"
@@ -1025,6 +1031,9 @@ palette:
   navigate: "↑↓ 导航"
   select: "Enter 选择"
   close: "Esc 关闭"
+  projects_placeholder: "搜索项目…"
+  projects_results: "项目"
+  recent_first: "最近活跃优先"
 composer:
   stop_unanswered: "%{harness} 没有响应停止"
   force_terminate: "强制终止"

@@ -87,6 +87,12 @@ chat:
   start_hub_title: "新しいスレッドを開始するプロジェクト"
   start_hub_title_on: "%{host} で新しいスレッドを開始するプロジェクト"
   palette_hint: "または %{shortcut} を押して検索"
+  slogan_project:
+    "1": "%{project} で SOTA を作る準備はできましたか？"
+  slogan_quick:
+    "1": "次は何をしますか？"
+  continue_recent: "最近のスレッドを続ける"
+  choose_project: "プロジェクトを選択"
   scroll_end: "末尾までスクロール"
   rail_plan: "計画"
   rail_agents: "サブエージェント"
@@ -1032,6 +1038,9 @@ palette:
   navigate: "↑↓ 移動"
   select: "Enter 選択"
   close: "Esc 閉じる"
+  projects_placeholder: "プロジェクトを検索…"
+  projects_results: "プロジェクト"
+  recent_first: "最近のアクティビティ順"
 composer:
   stop_unanswered: "%{harness} が停止に応答しません"
   force_terminate: "強制終了"

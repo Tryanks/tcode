@@ -247,6 +247,18 @@ pub(crate) fn translate_english(key: &str, english: &str) -> Cow<'static, str> {
         .unwrap_or_else(|| Cow::Owned(english.to_owned()))
 }
 
+/// One of the interchangeable texts listed under `key` as `key.1`, `key.2`, …,
+/// picked by `seed`. English decides how many there are; every language
+/// numbers the same texts alike, so a seed reads the same text in each. A new
+/// text is a new numbered entry in each language and nothing else.
+pub(crate) fn variant_key(key: &str, seed: u64) -> String {
+    let count = (1..)
+        .take_while(|n| _rust_i18n_try_translate(LANGUAGE_ENGLISH, format!("{key}.{n}")).is_some())
+        .count()
+        .max(1) as u64;
+    format!("{key}.{}", seed % count + 1)
+}
+
 /// A provider option's name in the current locale (the descriptor label, never
 /// its id or values), looked up by the English name under `harness_options`.
 pub(crate) fn translate_option_name(english: &str) -> String {
