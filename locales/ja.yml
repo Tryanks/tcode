@@ -515,6 +515,7 @@ settings:
   archived_section: "アーカイブ済みスレッド"
   archived_empty: "アーカイブ済みのスレッドはありません"
   archived_loading: "アーカイブ済みのスレッドを読み込み中…"
+  archived_failed: "アーカイブ済みのスレッドを読み込めません：%{error}"
   archived_at: "アーカイブ：%{when}"
   archived_created: "作成：%{when}"
   unarchive: "アーカイブを解除"

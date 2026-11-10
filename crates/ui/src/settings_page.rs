@@ -2560,12 +2560,15 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// Archived sessions: loading, the empty state and the list cross-fade
-    /// into one another.
+    /// Archived sessions: loading, a failed load, the empty state and the
+    /// list cross-fade into one another.
     fn render_archived(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let groups = self.store.read(cx).archived_groups();
+        let failure = self.store.read(cx).archived_failure().map(str::to_owned);
         let slot = if !groups.is_empty() {
             "list"
+        } else if failure.is_some() {
+            "failed"
         } else if self.store.read(cx).archived_loading() {
             "loading"
         } else {
@@ -2595,6 +2598,14 @@ impl SettingsPage {
                         ))
                         .child(if slot == "loading" {
                             crate::material::empty_row(crate::tr!("settings.archived_loading"), cx)
+                        } else if slot == "failed" {
+                            crate::material::empty_row(
+                                crate::tr!(
+                                    "settings.archived_failed",
+                                    error = failure.clone().unwrap_or_default()
+                                ),
+                                cx,
+                            )
                         } else {
                             crate::material::empty_state(
                                 Icon::new(Section::Archived.icon()),

@@ -515,6 +515,7 @@ settings:
   archived_section: "已归档线程"
   archived_empty: "没有已归档的线程"
   archived_loading: "正在加载已归档的线程…"
+  archived_failed: "读不到已归档的线程：%{error}"
   archived_at: "归档于 %{when}"
   archived_created: "创建于 %{when}"
   unarchive: "取消归档"

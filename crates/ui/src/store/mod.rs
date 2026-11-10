@@ -266,6 +266,9 @@ pub struct WorkspaceStore {
     /// Archived threads, which the index leaves out; loaded while a view
     /// holds them.
     archived_replica: Option<ArchivedSessions>,
+    /// Why the last load of the archived threads failed, and the archived
+    /// revision it was asked at: the same revision is not asked for again.
+    archived_failure: Option<(u64, String)>,
     archived_holds: usize,
     archived_task: Option<Task<()>>,
     /// The thread the index event being applied removed, so the destination
@@ -471,6 +474,7 @@ impl WorkspaceStore {
             index_summary: IndexSummary::default(),
             thread_list_revision: 0,
             archived_replica: None,
+            archived_failure: None,
             archived_holds: 0,
             archived_task: None,
             storage_migration: None,
@@ -726,6 +730,7 @@ impl WorkspaceStore {
         }
         if needs_baseline {
             self.archived_replica = None;
+            self.archived_failure = None;
             self.archived_task = None;
             self.baseline_topics.clear();
             self.index_hydrated = false;
@@ -2472,6 +2477,10 @@ impl WorkspaceStore {
                 .archived_replica
                 .as_ref()
                 .is_none_or(|archived| archived.revision != summary.archived_revision)
+            && self
+                .archived_failure
+                .as_ref()
+                .is_none_or(|(revision, _)| *revision != summary.archived_revision)
         {
             self.load_archived_sessions(cx);
         }
@@ -2486,17 +2495,20 @@ impl WorkspaceStore {
             let result = host.query(Query::ArchivedSessions).await;
             let _ = this.update(cx, |store, cx| {
                 store.archived_task = None;
-                match result {
+                let failure = match result {
                     Ok(QueryResponse::ArchivedSessions(archived)) => {
                         if archived.revision < store.index_summary.archived_revision {
                             store.load_archived_sessions(cx);
                         } else {
                             store.archived_replica = Some(archived);
                         }
+                        None
                     }
-                    Ok(other) => log::warn!("unexpected archived-sessions response: {other:?}"),
-                    Err(error) => log::warn!("archived sessions failed: {}", error.message),
-                }
+                    Ok(other) => Some(format!("unexpected response: {other:?}")),
+                    Err(error) => Some(error.message),
+                };
+                store.archived_failure =
+                    failure.map(|message| (store.index_summary.archived_revision, message));
                 cx.notify();
             });
         }));
@@ -2515,12 +2527,20 @@ impl WorkspaceStore {
         self.archived_holds = self.archived_holds.saturating_sub(1);
         if self.archived_holds == 0 {
             self.archived_replica = None;
+            self.archived_failure = None;
             self.archived_task = None;
         }
     }
 
     pub fn archived_loading(&self) -> bool {
-        self.archived_replica.is_none()
+        self.archived_replica.is_none() && self.archived_failure.is_none()
+    }
+
+    /// Why the archived threads could not be loaded, until a load succeeds.
+    pub fn archived_failure(&self) -> Option<&str> {
+        self.archived_failure
+            .as_ref()
+            .map(|(_, message)| message.as_str())
     }
 
     pub fn archived_sessions(&self) -> &[SessionMeta] {
@@ -5658,6 +5678,80 @@ pub(crate) mod tests {
             store.release_archived_sessions();
             assert!(store.archived_loading());
         });
+        link.close();
+    }
+
+    /// A load the host refuses is shown with the host's words, and the
+    /// summary repeating the same archived revision does not ask again; a new
+    /// revision does.
+    #[gpui::test]
+    fn archived_list_that_fails_says_why_and_waits_for_a_new_revision(cx: &mut TestAppContext) {
+        let (to_host, requests) = async_channel::unbounded();
+        let (replies, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, None, cx)
+        });
+        crate::store::tests::seed_full_scope(&store, &replies, deferred, cx);
+        let mut pump = std::pin::pin!(link.pump());
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let queries = || {
+            std::iter::from_fn(|| requests.try_recv().ok())
+                .filter_map(|line| {
+                    let message = tcode_protocol::decode_client_line(&line).unwrap();
+                    matches!(
+                        message.payload,
+                        tcode_protocol::ClientPayload::Query(
+                            tcode_protocol::Query::ArchivedSessions
+                        )
+                    )
+                    .then_some(message.id)
+                })
+                .collect::<Vec<_>>()
+        };
+        let revision_event = |revision| EventEnvelope {
+            request_id: None,
+            topic: Topic::Index,
+            event: ServerEvent::IndexSummaryReplaced(tcode_protocol::IndexSummary {
+                archived_revision: revision,
+                ..Default::default()
+            }),
+        };
+        store.update(cx, |store, cx| {
+            store.receive(revision_event(10), cx);
+            store.hold_archived_sessions(cx);
+        });
+        cx.run_until_parked();
+        let asked = queries();
+        assert_eq!(asked.len(), 1);
+        replies
+            .try_send(
+                tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
+                    id: asked[0],
+                    result: Err(tcode_protocol::ProtocolError {
+                        code: "storage".into(),
+                        message: "the archive index is unreadable".into(),
+                    }),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        cx.run_until_parked();
+        store.read_with(cx, |store, _| {
+            assert_eq!(
+                store.archived_failure(),
+                Some("the archive index is unreadable")
+            );
+            assert!(!store.archived_loading());
+        });
+        store.update(cx, |store, cx| store.receive(revision_event(10), cx));
+        cx.run_until_parked();
+        assert!(queries().is_empty(), "the same revision is not asked again");
+        store.update(cx, |store, cx| store.receive(revision_event(11), cx));
+        cx.run_until_parked();
+        assert_eq!(queries().len(), 1, "a new revision is asked for");
         link.close();
     }
 

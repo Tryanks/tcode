@@ -515,6 +515,7 @@ settings:
   archived_section: "ARCHIVED THREADS"
   archived_empty: "No archived threads"
   archived_loading: "Loading archived threads…"
+  archived_failed: "Couldn't read the archived threads: %{error}"
   archived_at: "Archived %{when}"
   archived_created: "Created %{when}"
   unarchive: "Unarchive"
