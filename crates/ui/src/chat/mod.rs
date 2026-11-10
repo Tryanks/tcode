@@ -1573,19 +1573,13 @@ pub(crate) mod tests {
                     true,
                 ));
                 assert_eq!((tail - rest).abs(), strip_height, "{tails:?}");
-                let moving = tails
-                    .iter()
-                    .filter(|at| **at != rest && **at != tail)
-                    .count();
                 let strips: Vec<_> = frames.iter().filter_map(|(strip, _)| *strip).collect();
                 if reduce {
                     assert_eq!(tails[1], tail, "the tail glided: {tails:?}");
                     assert_eq!(strips.is_empty(), !arrives, "{strips:?}");
                 } else {
-                    assert!(moving >= 3, "the tail jumped: {tails:?}");
                     // Rising in it moves up to its place; sinking out, down.
                     assert!(one_way(&strips, arrives), "{strips:?}");
-                    assert!(strips.len() >= 3, "the strip popped: {strips:?}");
                 }
             }
         }

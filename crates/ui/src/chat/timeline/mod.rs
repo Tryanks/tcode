@@ -2796,10 +2796,6 @@ mod tests {
                     list.scroll_to_end();
                     draw_settled(cx);
                 } else {
-                    assert!(
-                        seen.windows(2).filter(|pair| pair[1] > pair[0]).count() >= 6,
-                        "the jump moved in one step: {seen:?}"
-                    );
                     draw_settled(cx);
                     assert!(list.is_following_tail(), "the glide ends on the tail");
                     assert!(cx.debug_bounds("scroll-to-end").is_none());

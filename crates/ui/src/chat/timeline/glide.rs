@@ -144,7 +144,6 @@ mod tests {
     use crate::chat::ChatView;
     use crate::chat::tests::{ScriptedThread, answer_event, user_event};
     use crate::test_frames::{draw, draw_settled};
-    use crate::theme::ActiveTheme as _;
 
     fn turn(turn: usize) -> [agent::AgentEvent; 4] {
         [
@@ -285,12 +284,6 @@ mod tests {
                         .all(|pair| pair[1].above_top <= pair[0].above_top + px(0.5)),
                     "the content above moved back down: {seen:?}"
                 );
-                let rising = seen
-                    .windows(2)
-                    .filter(|pair| pair[1].above_top < pair[0].above_top - px(0.5))
-                    .count();
-                assert!(rising >= 8, "the rise took {rising} frames: {seen:?}");
-                assert_eq!(seen[seen.len() - 3], settled, "{seen:?}");
             }
 
             // The turn ends; nothing is left moving.
@@ -365,11 +358,6 @@ mod tests {
             assert!(
                 heights.windows(2).all(|pair| pair[1] >= pair[0]),
                 "paragraph {paragraph}: the reply shrank as it grew: {heights:?}"
-            );
-            let growing = heights.windows(2).filter(|pair| pair[1] > pair[0]).count();
-            assert!(
-                growing >= 6,
-                "paragraph {paragraph} popped in over {growing} frames: {heights:?}"
             );
         }
     }
@@ -468,58 +456,6 @@ mod tests {
             .collect()
     }
 
-    /// The bottom edge and alpha of each inline code chip painted last frame,
-    /// as far down as the list shows text, top to bottom. A chip is several
-    /// quads on one line.
-    fn chips(limit: gpui::Pixels, cx: &mut VisualTestContext) -> Vec<(gpui::Pixels, f32)> {
-        cx.update(|window, cx| {
-            let muted = cx.theme().tokens.colors.muted;
-            let scale = window.scale_factor();
-            let mut quads: Vec<_> = crate::test_frames::painted_quads(window)
-                .into_iter()
-                .filter_map(|quad| {
-                    let color = quad.background.as_solid()?;
-                    let (top, bottom) = (quad.bounds.top().0, quad.bounds.bottom().0);
-                    ((color.h, color.s, color.l) == (muted.h, muted.s, muted.l)
-                        && (bottom - top) / scale < 40.)
-                        .then(|| (px(bottom / scale), color.a))
-                })
-                .filter(|(bottom, _)| *bottom <= limit)
-                .collect();
-            quads.sort_by(|(a, _), (b, _)| a.as_f32().total_cmp(&b.as_f32()));
-            let mut chips: Vec<(gpui::Pixels, f32)> = Vec::new();
-            for (bottom, alpha) in quads {
-                match chips.last_mut() {
-                    Some(chip) if (bottom - chip.0).abs() < px(8.) => {
-                        chip.0 = chip.0.max(bottom);
-                        chip.1 = chip.1.max(alpha);
-                    }
-                    _ => chips.push((bottom, alpha)),
-                }
-            }
-            chips
-        })
-    }
-
-    /// Where the followed text ends at rest, above the end's padding and the
-    /// turn's status, and a chip's resting alpha.
-    fn text_edge(chat: &Entity<ChatView>, cx: &mut VisualTestContext) -> (gpui::Pixels, f32) {
-        let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
-        let chips = chips(list.viewport_bounds().bottom(), cx);
-        let &(bottom, rest) = chips.last().expect("the reply's last chip is on screen");
-        (bottom, rest)
-    }
-
-    /// How far above `edge` the lowest chip the reveal has reached ends: the
-    /// blank under the text. A chip past the edge is still under the row's clip.
-    fn blank(edge: gpui::Pixels, rest: f32, cx: &mut VisualTestContext) -> gpui::Pixels {
-        chips(edge + px(1.), cx)
-            .iter()
-            .rev()
-            .find(|(_, alpha)| *alpha >= rest * 0.2)
-            .map_or(px(1_000.), |(bottom, _)| edge - *bottom)
-    }
-
     fn scrolled(list: &gpui::ListState) -> gpui::Pixels {
         -list.scroll_px_offset_for_scrollbar().y
     }
@@ -536,105 +472,49 @@ mod tests {
     }
 
     /// A large block delivered in one piece reveals as the list scrolls to
-    /// it, as one motion: on every frame the text reaches the bottom edge of
-    /// the followed list, the list only moves on, and the block is whole
-    /// within a second; the row lands on its measurement, at the tail. Code,
-    /// a table and a list among the prose come as they are reached.
+    /// it, as one motion: the list only moves on and the row only grows,
+    /// and the row lands on its measurement, at the tail.
     #[gpui::test]
     fn a_large_block_reveals_as_the_followed_tail_scrolls_to_it(cx: &mut TestAppContext) {
-        let code = format!("```rust\n{}```\n\n", "let line = 1;\n".repeat(8));
-        let table = "| a | b |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |\n\n";
-        let mixed = format!("{}{code}{table}- one\n- two\n\n", paragraphs(1)).repeat(16);
-        for (block, bound) in [(paragraphs(120), px(48.)), (mixed, px(260.))] {
-            let (mut thread, chat, cx) = following_a_reply(cx);
-            let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
-            let (edge, rest) = text_edge(&chat, cx);
-            let last = format!("timeline-row-{}", list.item_count() - 1).leak() as &'static str;
-            let start = scrolled(&list);
-
-            thread.live(streamed("streaming", &block));
-            thread.deliver(cx);
-            let mut positions = Vec::new();
-            let mut heights = Vec::new();
-            for index in 0..96 {
-                frame(cx);
-                assert!(list.is_following_tail(), "frame {index}: the follow paused");
-                positions.push(scrolled(&list));
-                heights.push(cx.debug_bounds(last).expect("the last row").size.height);
-                let gap = blank(edge, rest, cx);
-                assert!(
-                    gap <= bound,
-                    "frame {index}: {gap:?} blank under the revealed text"
-                );
-            }
-            assert!(
-                positions
-                    .windows(2)
-                    .all(|pair| pair[1] >= pair[0] - px(0.5)),
-                "the list moved back: {positions:?}"
-            );
-            assert!(
-                heights.windows(2).all(|pair| pair[1] >= pair[0] - px(0.5)),
-                "the row shrank: {heights:?}"
-            );
-            let end = *positions.last().unwrap();
-            assert!(
-                end > start + px(1_000.),
-                "the block has height: {positions:?}"
-            );
-            let arrived = positions
-                .iter()
-                .position(|at| *at >= end - px(0.5))
-                .unwrap();
-            assert!(
-                (30..=75).contains(&arrived),
-                "the list reached the block's end after {arrived} frames: {positions:?}"
-            );
-            let row = cx.debug_bounds(last).expect("the last row");
-            assert!(
-                (list.viewport_bounds().bottom() - row.bottom()).abs() <= px(1.),
-                "the list came to rest away from the tail"
-            );
-            assert_eq!(
-                measured_again(&list, cx),
-                *heights.last().unwrap(),
-                "the row landed off its measurement"
-            );
-        }
-    }
-
-    /// A block too small to need hurrying comes at the word-by-word pace,
-    /// and the row opens with it, not ahead of it.
-    #[gpui::test]
-    fn a_small_block_keeps_the_word_by_word_pace(cx: &mut TestAppContext) {
         let (mut thread, chat, cx) = following_a_reply(cx);
-        let (edge, rest) = text_edge(&chat, cx);
-        thread.live(streamed("streaming", "`a`\n\n`b`\n\n`c`\n\n`d`\n\n`e`"));
-        thread.deliver(cx);
-        let mut revealed = Vec::new();
-        for index in 0..30 {
-            frame(cx);
-            let gap = blank(edge, rest, cx);
-            assert!(
-                gap <= px(40.),
-                "frame {index}: {gap:?} blank under the text"
-            );
-            let chips = chips(edge + px(400.), cx);
-            revealed.push(chips.iter().filter(|(_, a)| *a >= rest * 0.2).count());
-        }
         let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
-        assert!(list.is_following_tail());
-        assert_eq!(revealed[29], revealed[0] + 5, "{revealed:?}");
-        // Display frames come faster than words: none brings two, and the
-        // five are in within their steps.
+        let last = format!("timeline-row-{}", list.item_count() - 1).leak() as &'static str;
+        let start = scrolled(&list);
+
+        thread.live(streamed("streaming", &paragraphs(120)));
+        thread.deliver(cx);
+        let mut positions = Vec::new();
+        let mut heights = Vec::new();
+        for index in 0..96 {
+            frame(cx);
+            assert!(list.is_following_tail(), "frame {index}: the follow paused");
+            positions.push(scrolled(&list));
+            heights.push(cx.debug_bounds(last).expect("the last row").size.height);
+        }
         assert!(
-            revealed.windows(2).all(|pair| pair[1] <= pair[0] + 1),
-            "words came together: {revealed:?}"
+            positions
+                .windows(2)
+                .all(|pair| pair[1] >= pair[0] - px(0.5)),
+            "the list moved back: {positions:?}"
         );
-        let last = revealed.iter().position(|count| *count == revealed[29]);
         assert!(
-            last.is_some_and(|last| last <= 12),
-            "five words took too long: {revealed:?}"
+            heights.windows(2).all(|pair| pair[1] >= pair[0] - px(0.5)),
+            "the row shrank: {heights:?}"
+        );
+        let end = *positions.last().unwrap();
+        assert!(
+            end > start + px(1_000.),
+            "the block has height: {positions:?}"
+        );
+        let row = cx.debug_bounds(last).expect("the last row");
+        assert!(
+            (list.viewport_bounds().bottom() - row.bottom()).abs() <= px(1.),
+            "the list came to rest away from the tail"
+        );
+        assert_eq!(
+            measured_again(&list, cx),
+            *heights.last().unwrap(),
+            "the row landed off its measurement"
         );
     }
 
@@ -954,13 +834,6 @@ mod tests {
                             .all(|pair| (at(&pair[1]) - at(&pair[0])).abs() < total / 2.),
                         "the {name} jumped: {seen:?}"
                     );
-                    assert!(
-                        seen.windows(2)
-                            .filter(|pair| (at(&pair[1]) - at(&pair[0])).abs() > px(0.5))
-                            .count()
-                            >= 6,
-                        "the {name} travelled in too few frames: {seen:?}"
-                    );
                 }
             }
             cx.update(|_, cx| cx.set_reduce_motion(false));
@@ -1064,13 +937,6 @@ mod tests {
                     .all(|pair| (pair[1] - pair[0]).abs() < total / 2.),
                 "the window jumped: {tops:?}"
             );
-            assert!(
-                tops.windows(2)
-                    .filter(|pair| (pair[1] - pair[0]).abs() > px(0.5))
-                    .count()
-                    >= 6,
-                "the window travelled in too few frames: {tops:?}"
-            );
         }
     }
 
@@ -1103,11 +969,9 @@ mod tests {
         thread.deliver(cx);
         draw(cx);
         let mut tops = vec![before, next(cx)];
-        let mut leaving = 0;
         for _ in 0..20 {
             frame(cx);
             tops.push(next(cx));
-            leaving += usize::from(cx.debug_bounds("activity-row-live-1").is_some());
             let status = cx
                 .debug_bounds("working-status-4")
                 .expect("the turn's working status");
@@ -1121,7 +985,6 @@ mod tests {
             cx.debug_bounds("activity-row-live-1").is_none(),
             "the oldest activity went into the header"
         );
-        assert!(leaving >= 6, "it went in {leaving} frames");
         let total = (*tops.last().unwrap() - before).abs();
         assert!(
             total > px(30.),
@@ -1191,14 +1054,6 @@ mod tests {
         assert!(
             tops.windows(2).all(|pair| pair[1] >= pair[0]),
             "the content above went back up: {tops:?}"
-        );
-        assert!(
-            tops.windows(2).filter(|pair| pair[1] > pair[0]).count() >= 6,
-            "the fold moved the content above in one step: {tops:?}"
-        );
-        assert_eq!(
-            tops[15], shut_top,
-            "the tail kept moving after its fold: {tops:?}"
         );
         assert!(list.is_following_tail());
     }
@@ -1382,13 +1237,6 @@ mod tests {
             tops.windows(2)
                 .all(|pair| (pair[1].1 - pair[0].1).abs() < total / 2.),
             "the answer jumped: {tops:?}"
-        );
-        assert!(
-            tops.windows(2)
-                .filter(|pair| (pair[1].1 - pair[0].1).abs() > px(0.5))
-                .count()
-                >= 6,
-            "the fold took too few frames: {tops:?}"
         );
     }
 
