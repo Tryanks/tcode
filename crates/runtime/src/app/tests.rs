@@ -3586,12 +3586,10 @@ fn report_callbacks_carry_the_report_verbatim_and_label_fallbacks() {
         "the lead's view shows the report alone"
     );
 
-    // A fallback is labelled as such and bounded.
-    for (output, expected_tail, truncated) in [
-        (String::new(), "(no assistant output)".into(), false),
-        ("done".into(), "done".into(), false),
-        ("界".repeat(1200), "界".repeat(1200), false),
-        ("界".repeat(1201), "界".repeat(600), true),
+    // A fallback is labelled as such.
+    for (output, expected_tail) in [
+        (String::new(), String::from("(no assistant output)")),
+        ("done".into(), "done".into()),
     ] {
         let text = assemble_report_callback(
             "child",
@@ -3604,7 +3602,6 @@ fn report_callbacks_carry_the_report_verbatim_and_label_fallbacks() {
             "[orchestrate] thread child (\"Title\") unreported.\n{ORCHESTRATE_FALLBACK_LABEL}"
         )));
         assert!(!text.contains("tokens:"));
-        assert_eq!(text.contains("Final output tail"), truncated);
         assert_eq!(text.lines().last().unwrap(), expected_tail);
         let callback = only_callback(&text);
         assert_eq!(callback.event, CallbackEvent::Ended("unreported".into()));

@@ -1,15 +1,14 @@
 use super::*;
 use tcode_core::notice::{
     CHILD_REPORT_REMINDER, ORCHESTRATE_APPROVAL_PHRASE, ORCHESTRATE_FALLBACK_LABEL,
-    ORCHESTRATE_OUTPUT_TAIL_LABEL, ORCHESTRATE_QUESTION_PHRASE, ORCHESTRATE_REPORT_LABEL,
-    callback_header,
+    ORCHESTRATE_QUESTION_PHRASE, ORCHESTRATE_REPORT_LABEL, callback_header,
 };
 use tcode_core::project::ChildExpectation;
 use tcode_core::settlement::{AgentDelivery, AgentReport};
 
 /// Appended to every subagent's first message so the report contract reaches it
 /// regardless of what the thread that started it wrote.
-pub(super) const CHILD_REPORT_FOOTER: &str = "\n\n---\nThe tcode_control report_result tool is the only channel through which your work reaches the thread that started you as its subagent; it cannot see your transcript, and your own turns, waits, background tasks and wake-ups never reach it. When your work is complete, send your complete final report through it once, then end your turn. Make the report self-contained: for a discussion, give your reasoning, recommendations, disagreements, and open questions; for execution, include files changed and commands actually run with their outcomes. Include the evidence behind your conclusions. Only if the tool call fails, write that same complete report as your final message instead — it is sent back as the fallback, truncated when long.";
+pub(super) const CHILD_REPORT_FOOTER: &str = "\n\n---\nThe tcode_control report_result tool is the only channel through which your work reaches the thread that started you as its subagent; it cannot see your transcript, and your own turns, waits, background tasks and wake-ups never reach it. When your work is complete, send your complete final report through it once, then end your turn. Make the report self-contained: for a discussion, give your reasoning, recommendations, disagreements, and open questions; for execution, include files changed and commands actually run with their outcomes. Include the evidence behind your conclusions. Only if the tool call fails, write that same complete report as your final message instead — it is sent back as the fallback.";
 
 /// A thread's pull request tool registration.
 pub(super) struct PullRequestRegistration {
@@ -1037,11 +1036,6 @@ fn trailing_error(timeline: &Timeline) -> Option<&str> {
     }
 }
 
-pub(super) fn tail_chars(text: &str, max: usize) -> String {
-    let count = text.chars().count();
-    text.chars().skip(count.saturating_sub(max)).collect()
-}
-
 pub(super) fn approval_request_summary(request: &agent::ApprovalRequest) -> String {
     let detail = match &request.kind {
         agent::ApprovalKind::ExecCommand { command, .. } => format!("command `{command}`"),
@@ -1062,14 +1056,10 @@ pub(super) fn approval_request_summary(request: &agent::ApprovalRequest) -> Stri
     }
 }
 
-/// The longest final message a fallback delivers whole; a longer one arrives as its tail.
-const FALLBACK_MAX_CHARS: usize = 1200;
-
 pub(super) enum CallbackBody<'a> {
     /// The child's own report, delivered verbatim.
     Report(&'a str),
-    /// The child never reported: its final message stands in, bounded by
-    /// [`FALLBACK_MAX_CHARS`].
+    /// The child never reported: its final message stands in, delivered verbatim.
     Fallback(&'a str),
     Failure(&'a str),
 }
@@ -1106,20 +1096,12 @@ pub(super) fn assemble_report_callback(
     let body = match body {
         CallbackBody::Report(report) => format!("{ORCHESTRATE_REPORT_LABEL}{report}"),
         CallbackBody::Fallback(final_message) => {
-            let digest = if final_message.is_empty() {
-                "(no assistant output)".to_string()
+            let message = if final_message.is_empty() {
+                "(no assistant output)"
             } else {
-                let count = final_message.chars().count();
-                if count <= FALLBACK_MAX_CHARS {
-                    final_message.to_string()
-                } else {
-                    format!(
-                        "{ORCHESTRATE_OUTPUT_TAIL_LABEL}{count} chars total; outline and read thread {child_id} for the full text):\n{}",
-                        tail_chars(final_message, 600)
-                    )
-                }
+                final_message
             };
-            format!("{ORCHESTRATE_FALLBACK_LABEL}{digest}")
+            format!("{ORCHESTRATE_FALLBACK_LABEL}{message}")
         }
         CallbackBody::Failure(error) => error.to_string(),
     };
