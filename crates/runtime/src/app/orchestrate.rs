@@ -899,17 +899,12 @@ impl AppState {
     }
 }
 
-/// A native provider as a model names it: `claude`, `codex`, `opencode`, …
+/// The native provider `list_providers` lists under `name`.
 pub(super) fn native_provider_named(name: &str) -> Option<ProviderKind> {
-    match name.trim().to_ascii_lowercase().as_str() {
-        "claude" | "claude_code" | "claude-code" => Some(ProviderKind::ClaudeCode),
-        "codex" => Some(ProviderKind::Codex),
-        "pi" => Some(ProviderKind::Pi),
-        "opencode" | "open_code" | "open-code" => Some(ProviderKind::OpenCode),
-        "cursor" => Some(ProviderKind::Cursor),
-        "grok" => Some(ProviderKind::Grok),
-        _ => None,
-    }
+    let name = name.trim();
+    ProviderKind::NATIVE
+        .into_iter()
+        .find(|kind| tcode_core::settings::provider_key(*kind) == name)
 }
 
 /// The permission value a subagent starts with: what Settings → Control child approval
