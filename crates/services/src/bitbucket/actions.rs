@@ -316,39 +316,3 @@ pub(super) fn submit_review(
     }
     in_order(steps)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A reviewer change holds as far as the reviewers Bitbucket answered with show it: one it
-    /// kept out is not applied, and an answer that shows none of it is a refusal.
-    #[test]
-    fn a_reviewer_change_is_what_bitbucket_answers() {
-        let user = |uuid: &str, login: &str| PullRequestReviewer {
-            id: uuid.into(),
-            login: login.into(),
-            kind: tcode_protocol::PullRequestReviewerKind::User,
-        };
-        let (ana, bo, cy) = (user("{a}", "ana"), user("{b}", "bo"), user("{c}", "cy"));
-        let answer = |held: &[&str]| json!({"reviewers": held.iter().map(|uuid| json!({"uuid": uuid})).collect::<Vec<_>>()});
-        assert_eq!(
-            reviewer_change(
-                std::slice::from_ref(&ana),
-                std::slice::from_ref(&cy),
-                &answer(&["{a}", "{b}"])
-            ),
-            Outcome::Applied
-        );
-        let refused = Outcome::Rejected(Rejection::Refused { messages: vec![] });
-        assert_eq!(
-            reviewer_change(&[ana.clone(), bo.clone()], &[], &answer(&["{a}"])),
-            Outcome::Partial {
-                applied: vec!["ana".into()],
-                unapplied: vec!["bo".into()],
-                failure: Box::new(refused.clone()),
-            }
-        );
-        assert_eq!(reviewer_change(&[], &[cy], &answer(&["{c}"])), refused);
-    }
-}

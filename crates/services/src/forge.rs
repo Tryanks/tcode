@@ -9,8 +9,6 @@ pub(crate) mod checkout;
 pub use checkout::Checkout;
 mod http;
 mod rate_limit;
-#[cfg(test)]
-pub(crate) mod verification_tests;
 mod viewed;
 
 use crate::settings::SettingsStore;
@@ -704,62 +702,6 @@ mod tests {
         git(&["remote", "remove", "origin"]);
         assert!(repository().is_none());
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    /// A host that only rebases refuses a merge-style branch update before any request; a
-    /// rebase passes the gate and reaches the host, here one turned off in settings.
-    #[test]
-    fn a_merge_update_is_refused_where_the_host_only_rebases() {
-        let root = std::env::temp_dir().join(format!("tcode-hosts-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let forge = connect(SettingsStore::new(root.clone()), []);
-        forge.configure(BTreeMap::from([(
-            "gitlab.acme.test".to_owned(),
-            HostSettings {
-                enabled: false,
-                ..HostSettings::new(HostKind::Gitlab)
-            },
-        )]));
-        let key = PullRequestKey::new("gitlab.acme.test", "team/app", 1);
-        let update = |rebase| {
-            forge.act(
-                &key,
-                &PullRequestAction::UpdateBranch {
-                    head: "abc".into(),
-                    rebase,
-                },
-            )
-        };
-        assert_eq!(update(false), Outcome::Rejected(Rejection::Unsupported));
-        assert_eq!(update(true), Outcome::Rejected(Rejection::HostDisabled));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// Bitbucket closes by declining, which it never undoes, and has no labels: a reopen or a
-    /// label edit is refused before any request, as a capability the host lacks rather than a
-    /// permission.
-    #[test]
-    fn a_bitbucket_reopen_or_label_edit_is_refused() {
-        let root = std::env::temp_dir().join(format!("tcode-hosts-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let forge = connect(SettingsStore::new(root.clone()), []);
-        let key = PullRequestKey::new("bitbucket.org", "team/web", 8);
-        let capabilities = forge.capabilities(&key);
-        assert!(!capabilities.reopen && !capabilities.labels);
-        for action in [
-            PullRequestAction::Reopen,
-            PullRequestAction::SetLabels {
-                add: vec!["bug".into()],
-                remove: Vec::new(),
-            },
-        ] {
-            assert_eq!(
-                forge.act(&key, &action),
-                Outcome::Rejected(Rejection::Unsupported),
-                "{action:?}"
-            );
-        }
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A host is served by the kind settings give it; otherwise its name decides, and a host

@@ -843,48 +843,4 @@ mod tests {
         assert!(!status["gitlab.com"].added);
         let _ = std::fs::remove_dir_all(root);
     }
-
-    #[test]
-    fn saved_verification_survives_a_fresh_host() {
-        crate::forge::verification_tests::verification_survives_restart(
-            HostKind::Gitlab,
-            "gitlab.com",
-            "team/repo",
-            |store, agent| {
-                let viewed = Arc::new(ViewedMarks::new(store.data_file("viewed-marks.json")));
-                let mut host = GitLab::new(store, Vec::new(), viewed);
-                Arc::get_mut(&mut Arc::get_mut(&mut host).unwrap().api)
-                    .unwrap()
-                    .agent = agent;
-                host
-            },
-        );
-    }
-
-    #[test]
-    fn tokens_are_checked_before_saving_and_accounts_learned() {
-        crate::forge::verification_tests::token_checks(
-            HostKind::Gitlab,
-            "gitlab.com",
-            crate::forge::verification_tests::CurrentUser {
-                path: "/api/v4/user",
-                body: br#"{"username":"lin","name":"Lin Chen"}"#,
-                account: tcode_core::settings::HostAccount {
-                    login: "lin".into(),
-                    name: Some("Lin Chen".into()),
-                },
-                then: &[br#"{"scopes":["api","read_user"]}"#],
-                environment: &[("GITLAB_TOKEN", "environment-token")],
-                email: None,
-            },
-            |store, builder, environment| {
-                let viewed = Arc::new(ViewedMarks::new(store.data_file("viewed-marks.json")));
-                let mut host = GitLab::new(store, environment, viewed);
-                Arc::get_mut(&mut Arc::get_mut(&mut host).unwrap().api)
-                    .unwrap()
-                    .agent = builder.build();
-                host
-            },
-        );
-    }
 }

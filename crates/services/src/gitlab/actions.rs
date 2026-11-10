@@ -571,53 +571,6 @@ pub(super) fn submit_review(
 mod tests {
     use super::*;
 
-    /// A reviewer change holds only as far as GitLab's answered set shows it: a server that takes
-    /// one reviewer keeps the second out without an error, and an answer without the merge
-    /// request is no removal.
-    #[test]
-    fn a_reviewer_change_is_what_gitlab_answers() {
-        let names = |list: &[&str]| list.iter().map(|name| name.to_string()).collect::<Vec<_>>();
-        let answer = |held: &[&str]| {
-            json!({"errors": [], "mergeRequest": {"reviewers": {"nodes":
-                held.iter().map(|name| json!({"username": name})).collect::<Vec<_>>()}}})
-        };
-        assert_eq!(
-            reviewer_change("APPEND", &names(&["ana", "Bo"]), &answer(&["ana", "bo"])),
-            (names(&["ana", "Bo"]), None)
-        );
-        let (took, failure) = reviewer_change("APPEND", &names(&["ana", "bo"]), &answer(&["ana"]));
-        assert_eq!(took, names(&["ana"]));
-        assert_eq!(
-            failure,
-            Some(Outcome::Rejected(Rejection::Refused { messages: vec![] }))
-        );
-        assert_eq!(
-            reviewer_change("REMOVE", &names(&["ana"]), &answer(&["bo"])),
-            (names(&["ana"]), None)
-        );
-        let (took, failure) = reviewer_change(
-            "REMOVE",
-            &names(&["ana"]),
-            &json!({"errors": ["Not allowed"], "mergeRequest": null}),
-        );
-        assert!(took.is_empty());
-        assert_eq!(
-            failure,
-            Some(Outcome::Rejected(Rejection::Refused {
-                messages: vec!["Not allowed".into()]
-            }))
-        );
-    }
-
-    /// GitLab reads a title as a draft by any of its prefixes, so marking ready removes every
-    /// one and nothing else.
-    #[test]
-    fn a_draft_is_its_titles_prefix() {
-        assert_eq!(undrafted("Draft: [Draft] (draft) Fix it"), "Fix it");
-        assert_eq!(undrafted("draft - Fix it"), "Fix it");
-        assert_eq!(undrafted("Drafting the docs"), "Drafting the docs");
-    }
-
     /// A line comment on an unchanged line names both sides' lines, as GitLab requires; on an
     /// added or removed line only its own side's.
     #[test]

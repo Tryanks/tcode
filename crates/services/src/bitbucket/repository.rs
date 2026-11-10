@@ -114,7 +114,7 @@ mod tests {
         );
         let project = repository(&["atlassian", "ace.js"]);
         for remote_url in [
-            "https://tryanks@bitbucket.org/atlassian/ace.js.git",
+            "https://user@bitbucket.org/atlassian/ace.js.git",
             "https://bitbucket.org/atlassian/ace.js",
             "git@bitbucket.org:atlassian/ace.js.git",
             "ssh://git@bitbucket.org/atlassian/ace.js.git",

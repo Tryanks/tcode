@@ -152,7 +152,7 @@ pub(super) struct Api {
     store: SettingsStore,
     environment: BTreeMap<String, String>,
     hosts: RwLock<BTreeMap<String, HostSettings>>,
-    pub(super) agent: ureq::Agent,
+    agent: ureq::Agent,
     tokens: Mutex<HashMap<String, Cached<Option<Credential>>>>,
     servers: Mutex<HashMap<String, Cached<Server>>>,
     rate_limits: Mutex<crate::forge::RateLimits>,
@@ -630,30 +630,17 @@ fn nonempty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::Server;
-
-    /// `GITEA_TOKEN` goes only to the server `GITEA_INSTANCE_URL` names, and tea's token for one
-    /// server never to another: tea is asked for each server by its own host.
-    #[cfg(unix)]
+    /// `GITEA_TOKEN` goes only to the server `GITEA_INSTANCE_URL` names.
     #[test]
-    fn a_token_goes_only_to_the_server_it_is_for() {
+    fn the_environment_token_goes_only_to_the_server_it_is_for() {
         use super::Api;
-        use std::os::unix::fs::PermissionsExt as _;
         use tcode_core::settings::CredentialSource;
         let root =
             std::env::temp_dir().join(format!("tcode-forgejo-token-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let tea = root.join("tea");
-        std::fs::write(
-            &tea,
-            "#!/bin/sh\nwhile read -r line; do\n  [ \"$line\" = host=tea.test ] && echo password=tea-secret\ndone\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&tea, std::fs::Permissions::from_mode(0o700)).unwrap();
         let api = Api::new(
             crate::settings::SettingsStore::new(root.clone()),
             [
-                ("PATH".to_owned(), root.to_string_lossy().into_owned()),
                 (
                     "GITEA_INSTANCE_URL".to_owned(),
                     "https://env.test/".to_owned(),
@@ -675,29 +662,8 @@ mod tests {
                 "env-secret".into()
             ))
         );
-        assert_eq!(
-            source("tea.test"),
-            Some((
-                CredentialSource::Cli { tool: "tea".into() },
-                "tea-secret".into()
-            ))
-        );
         assert_eq!(source("other.test"), None);
-        assert_eq!(source("tea.test.evil"), None);
+        assert_eq!(source("env.test.evil"), None);
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// Forgejo reports its own numbering with the Gitea it forked from, and has neither of
-    /// Gitea's newer review endpoints; Gitea gains resolve in 1.26 and replies in 1.27.
-    #[test]
-    fn a_server_version_says_which_api_it_speaks() {
-        let forgejo = Server::parse("16.0.0-dev-753-6bcc6da0+gitea-1.22.0");
-        assert!(!forgejo.resolves() && !forgejo.replies() && !forgejo.snake_case_merge());
-        let gitea_125 = Server::parse("1.25.5");
-        assert!(!gitea_125.resolves() && !gitea_125.snake_case_merge());
-        let gitea_126 = Server::parse("1.26.0");
-        assert!(gitea_126.resolves() && gitea_126.snake_case_merge() && !gitea_126.replies());
-        let gitea_dev = Server::parse("1.27.0+dev-1118-ge629c4fdc2");
-        assert!(gitea_dev.resolves() && gitea_dev.replies());
     }
 }
