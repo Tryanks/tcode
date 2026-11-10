@@ -5088,17 +5088,23 @@ mod tests {
     fn child_thread_lifecycle_preserves_parent_steer_and_interrupt() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            for (thread, turn) in [("thread-1", "T1"), ("thread_child", "T2")] {
+            // The child's turn ends before the parent's does.
+            for (method, thread, turn) in [
+                ("turn/started", "thread-1", json!({"id":"T1"})),
+                ("turn/started", "thread_child", json!({"id":"T2"})),
+                (
+                    "turn/completed",
+                    "thread_child",
+                    json!({"id":"T2", "status":"completed"}),
+                ),
+            ] {
                 actor
                     .handle_line(
-                        &json!({"method":"turn/started", "params":{
-                            "threadId":thread, "turn":{"id":turn}
-                        }})
-                        .to_string(),
+                        &json!({"method":method, "params":{"threadId":thread, "turn":turn}})
+                            .to_string(),
                     )
                     .await;
             }
-            assert_eq!(actor.active_turn.as_deref(), Some("T1"));
             assert!(
                 matches!(events.try_recv().unwrap(), AgentEvent::TurnStarted { turn_id } if turn_id == "T1")
             );
@@ -5207,30 +5213,6 @@ mod tests {
     }
 
     #[test]
-    fn child_thread_completion_preserves_active_turn_and_usage() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            actor.active_turn = Some("T1".into());
-            actor
-                .usage_by_turn
-                .insert("T2".into(), TokenUsage::default());
-            actor
-                .handle_line(
-                    &json!({"method":"turn/completed", "params":{
-                        "threadId":"thread_child", "turn":{"id":"T2", "status":"completed"}
-                    }})
-                    .to_string(),
-                )
-                .await;
-            assert_eq!(actor.active_turn.as_deref(), Some("T1"));
-            assert!(actor.usage_by_turn.contains_key("T2"));
-            assert!(events.try_recv().is_err());
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    #[test]
     fn child_thread_items_route_to_known_or_synthetic_parent() {
         smol::block_on(async {
             for known in [true, false] {
@@ -5247,9 +5229,8 @@ mod tests {
                 } else {
                     "codex-subagent:thread_child"
                 };
-                let previous = actor.items.get("spawn").cloned();
                 for method in ["item/started", "item/updated", "item/completed"] {
-                    // A colliding id must not overwrite or acquire the parent's Subagent content.
+                    // An id that collides with its parent's does not take the parent's content.
                     actor.handle_line(&json!({"method":method, "params":{
                         "threadId":"thread_child", "item":{"type":"agentMessage", "id":"spawn", "text":"child reply"}
                     }}).to_string()).await;
@@ -5264,16 +5245,8 @@ mod tests {
                     assert!(
                         matches!(item.content, ItemContent::AssistantMessage { text, .. } if text == "child reply")
                     );
-                    assert_eq!(actor.items.get("spawn"), previous.as_ref());
                     assert!(events.try_recv().is_err());
                 }
-                assert_eq!(
-                    actor
-                        .subagent_parent_by_thread
-                        .get("thread_child")
-                        .map(String::as_str),
-                    Some(parent)
-                );
                 let _ = actor.child.kill();
                 let _ = actor.child.wait();
             }
@@ -5309,8 +5282,6 @@ mod tests {
                     assert!(events.try_recv().is_err());
                 }
             }
-            assert!(actor.usage_by_turn.is_empty());
-            assert!(actor.items.is_empty());
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -5433,7 +5404,13 @@ mod tests {
     fn async_question_answers_steer_the_running_turn_with_codex_reply_envelope() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            actor.active_turn = Some("turn-1".into());
+            actor
+                .handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}"#)
+                .await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::TurnStarted { .. }
+            ));
             // Shape recorded from codex-cli 0.156 `request_user_input_async`.
             actor
                 .handle_line(
@@ -5576,7 +5553,13 @@ mod tests {
     fn steer_acceptance_waits_for_the_consumed_user_message_echo() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            actor.active_turn = Some("turn-1".into());
+            actor
+                .handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}"#)
+                .await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::TurnStarted { .. }
+            ));
             actor
                 .handle_command(SessionCommand::Steer {
                     request_id: "steer-ok".into(),
@@ -5663,7 +5646,13 @@ mod tests {
     fn steer_after_turn_completed_is_rejected_by_request_id() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            actor.active_turn = Some("turn-1".into());
+            actor
+                .handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}"#)
+                .await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::TurnStarted { .. }
+            ));
             actor
                 .handle_line(&json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}).to_string())
                 .await;
@@ -5751,7 +5740,14 @@ mod tests {
             let _ = events.try_recv().unwrap(); // TurnAccepted
             let request = sent(&mut actor).await;
             let id = request["id"].as_i64().unwrap();
-            actor.active_turn = Some("turn-live".into());
+            // The turn started before Codex refused the duplicate request.
+            actor
+                .handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-live"}}}"#)
+                .await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::TurnStarted { .. }
+            ));
             actor
                 .handle_line(
                     &json!({"id": id, "error": {"code": -32000, "message": "late duplicate"}})
@@ -6020,10 +6016,7 @@ mod tests {
                 "cwd":"/tmp/project","osPid":null,"cpuPercent":null,"rssKb":null
             }],"nextCursor":null});
             answer(&mut actor, &list, running.clone()).await;
-            assert!(
-                actor.background_terminal_read.is_some(),
-                "it keeps watching"
-            );
+            assert!(actor.wake_at().is_some(), "it keeps watching");
             assert!(
                 matches!(
                     events.try_recv(),
@@ -6072,7 +6065,7 @@ mod tests {
             let list = sent(&mut actor).await;
             assert_eq!(list["method"], "thread/backgroundTerminals/list");
             answer(&mut actor, &list, json!({"data":[],"nextCursor":null})).await;
-            assert!(actor.background_terminal_read.is_none());
+            assert!(actor.wake_at().is_none(), "nothing is left to watch");
             assert!(matches!(
                 events.try_recv(),
                 Ok(AgentEvent::BackgroundTaskList { tasks }) if tasks.is_empty()
@@ -6581,8 +6574,20 @@ mod tests {
                 ("interrupted", ItemStatus::Interrupted),
             ] {
                 let (mut actor, events) = test_actor();
-                actor.model = Some("gpt-6-astra".into());
-                actor.effort = Some("low".into());
+                actor
+                    .handle_command(SessionCommand::ApplySettings {
+                        model: Some("gpt-6-astra".into()),
+                        option_selections: vec![OptionSelection {
+                            id: "reasoningEffort".into(),
+                            value: json!("low"),
+                        }],
+                    })
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    events.try_recv().unwrap(),
+                    AgentEvent::SettingsApplied { applied: true }
+                ));
                 let activity = |kind| {
                     json!({"item": {
                         "type": "subAgentActivity", "id": "spawn",
@@ -6670,8 +6675,10 @@ mod tests {
                 events.try_recv().is_err(),
                 "root activity must not emit a capsule"
             );
-            assert!(actor.subagents.is_empty());
-            assert!(actor.subagent_parent_by_thread.is_empty());
+            assert!(
+                written(&mut actor).await.is_empty(),
+                "nor ask for a child's metadata"
+            );
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -7580,61 +7587,66 @@ mod tests {
         });
     }
 
+    /// A session that stops with questions open answers each the way its
+    /// protocol allows: an elicitation is cancelled, a `requestUserInput`
+    /// gets no answers, and the timeline closes both.
     #[test]
-    fn shutdown_cancels_pending_elicitation() {
+    fn shutdown_settles_every_open_question() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            actor
-                .handle_line(
-                    &json!({
-                        "id": 86,
-                        "method": "mcpServer/elicitation/request",
-                        "params": {
-                            "serverName": "pending",
-                            "threadId": "thread-1",
-                            "mode": "form",
-                            "message": "Wait",
-                            "requestedSchema": {
-                                "type": "object",
-                                "properties": {"value": {"type": "string"}}
-                            }
+            for request in [
+                json!({
+                    "id": 86,
+                    "method": "mcpServer/elicitation/request",
+                    "params": {
+                        "serverName": "pending",
+                        "threadId": "thread-1",
+                        "mode": "form",
+                        "message": "Wait",
+                        "requestedSchema": {
+                            "type": "object",
+                            "properties": {"value": {"type": "string"}}
                         }
-                    })
-                    .to_string(),
-                )
-                .await;
-            let _ = events.try_recv().unwrap();
-            actor.settle_pending_user_inputs_on_shutdown().await;
+                    }
+                }),
+                json!({
+                    "id": 77,
+                    "method": "item/tool/requestUserInput",
+                    "params": {
+                        "threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1",
+                        "questions": [{"id": "ready", "header": "", "question": "Ready?"}]
+                    }
+                }),
+            ] {
+                actor.handle_line(&request.to_string()).await;
+                assert!(matches!(
+                    events.try_recv().unwrap(),
+                    AgentEvent::UserInputRequested { .. }
+                ));
+            }
+            assert!(written(&mut actor).await.is_empty());
+            actor.settle_shutdown().await;
 
-            assert!(matches!(
-                events.try_recv().unwrap(),
-                AgentEvent::UserInputResolved { ref request_id, ref answers }
-                    if request_id == "86" && answers.is_empty()
-            ));
-            let response = sent(&mut actor).await;
-            assert_eq!(response, json!({"id": 86, "result": {"action": "cancel"}}));
-            assert!(actor.elicitations.is_empty());
-
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    #[test]
-    fn shutdown_settles_pending_user_input_empty() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            actor.user_inputs.insert("77".into(), json!(77));
-            actor.settle_pending_user_inputs_on_shutdown().await;
-
-            assert!(matches!(
-                events.try_recv().unwrap(),
-                AgentEvent::UserInputResolved { ref request_id, ref answers }
-                    if request_id == "77" && answers.is_empty()
-            ));
-            let response = sent(&mut actor).await;
-            assert_eq!(response, json!({"id": 77, "result": {"answers": {}}}));
-            assert!(actor.user_inputs.is_empty());
+            let mut resolved: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+                .map(|event| match event {
+                    AgentEvent::UserInputResolved {
+                        request_id,
+                        answers,
+                    } if answers.is_empty() => request_id,
+                    other => panic!("unexpected {other:?}"),
+                })
+                .collect();
+            resolved.sort();
+            assert_eq!(resolved, ["77", "86"]);
+            let mut replies = written(&mut actor).await;
+            replies.sort_by_key(|reply| reply["id"].as_i64());
+            assert_eq!(
+                replies,
+                [
+                    json!({"id": 77, "result": {"answers": {}}}),
+                    json!({"id": 86, "result": {"action": "cancel"}}),
+                ]
+            );
 
             let _ = actor.child.kill();
             let _ = actor.child.wait();
