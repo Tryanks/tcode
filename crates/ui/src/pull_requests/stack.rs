@@ -13,7 +13,7 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_core::pull_request::{
-    self as core_pr, GITHUB, PullRequestKey, PullRequestMergeMethod, PullRequestStackOperation,
+    self as core_pr, PullRequestKey, PullRequestMergeMethod, PullRequestStackOperation,
     PullRequestState, StackBlocker, StackLayerCondition, StackLayerRole, StackMap,
     StackOperationKind, StackRebaseFailure, StackRebaseGitStep, StackRebaseStep,
     ThreadPullRequestLink,
@@ -1138,6 +1138,8 @@ pub(super) struct Answer<'a> {
     pub(super) base: &'a str,
     /// Each layer's head branch, for the words that name one.
     pub(super) branches: Vec<(u64, String)>,
+    /// The stack's host as a person reads it.
+    pub(super) host_name: String,
     pub(super) url: Option<String>,
     pub(super) rebase: bool,
     pub(super) late: bool,
@@ -1151,17 +1153,21 @@ pub(super) fn answer_toast(
 ) -> Option<Notification> {
     let number = answer.target.to_string();
     let count = answer.layers.len().max(1);
+    let host_name = answer.host_name.as_str();
     let open = |note: Notification| match answer.url.clone() {
-        Some(url) => note.action(move |_, _, _| {
-            let url = url.clone();
-            Button::new("pr-stack-result-open")
-                .ghost()
-                .xsmall()
-                .label(crate::tr!(
-                    "pull_requests.open_on_host",
-                    host_name = tcode_core::pull_request::GITHUB.name
-                ))
-                .on_click(move |_, _, cx| cx.open_url(&url))
+        Some(url) => note.action({
+            let host_name = host_name.to_owned();
+            move |_, _, _| {
+                let url = url.clone();
+                Button::new("pr-stack-result-open")
+                    .ghost()
+                    .xsmall()
+                    .label(crate::tr!(
+                        "pull_requests.open_on_host",
+                        host_name = &host_name
+                    ))
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+            }
         }),
         None => note,
     };
@@ -1289,7 +1295,7 @@ pub(super) fn answer_toast(
             not(
                 tr_with(
                     "result_not_rebased",
-                    &[("reason", rejection_reason(rejection, GITHUB.name))],
+                    &[("reason", rejection_reason(rejection, host_name))],
                 ),
                 tr("nothing_changed"),
             )
@@ -1365,10 +1371,7 @@ pub(super) fn answer_toast(
                     };
                     not(tr("result_refused"), body)
                 }
-                rejection => titled(
-                    tr("result_refused"),
-                    rejection_reason(rejection, GITHUB.name),
-                ),
+                rejection => titled(tr("result_refused"), rejection_reason(rejection, host_name)),
             }
         }
         PullRequestActionResult::Uncertain => open(
@@ -1376,7 +1379,7 @@ pub(super) fn answer_toast(
                 crate::tr!(
                     "pull_requests.result.uncertain_body",
                     message = crate::tr!("pull_requests.result.connection_lost").into_owned(),
-                    host_name = GITHUB.name
+                    host_name = host_name
                 )
                 .into_owned(),
             )
@@ -1454,6 +1457,7 @@ pub fn present_result(
         layers,
         base,
         branches: branches(links, target),
+        host_name: super::host_name(store.read(cx), &target.host),
         url: super::page_url(links, target),
         rebase,
         late,
@@ -1811,6 +1815,7 @@ impl MergeStackDialog {
                         target.store.read(cx).pull_requests(&target.session),
                         &target.offer.key,
                     ),
+                    host_name: super::host_name(target.store.read(cx), &target.offer.key.host),
                     url: Some(target.offer.url.clone()).filter(|url| !url.is_empty()),
                     rebase: false,
                     late: false,
@@ -2462,6 +2467,7 @@ impl RebaseStackDialog {
                             target.store.read(cx).pull_requests(&target.session),
                             &target.offer.key,
                         ),
+                        host_name: super::host_name(target.store.read(cx), &target.offer.key.host),
                         url: Some(target.offer.url.clone()).filter(|url| !url.is_empty()),
                         rebase: true,
                         late: false,

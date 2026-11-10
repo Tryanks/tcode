@@ -387,16 +387,7 @@ impl PullRequestView {
                     ),
                 };
                 let team = state.reviewer.kind == PullRequestReviewerKind::Team;
-                let name = if team {
-                    let owner = self
-                        .current
-                        .as_ref()
-                        .and_then(|(_, key)| key.repository.split('/').next().map(str::to_owned))
-                        .unwrap_or_default();
-                    format!("@{owner}/{}", state.reviewer.login)
-                } else {
-                    state.reviewer.login.clone()
-                };
+                let name = state.reviewer.login.clone();
                 let tooltip = crate::tr!(
                     "pull_requests.meta.reviewer_state",
                     login = name.clone(),

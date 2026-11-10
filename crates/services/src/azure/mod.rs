@@ -758,6 +758,10 @@ impl Forge for Azure {
         Some(repository::url(key))
     }
 
+    fn file_url(&self, key: &PullRequestKey, revision: &str, path: &str) -> Option<String> {
+        Some(repository::file_url(key, revision, path))
+    }
+
     /// The pull request with its statuses and policy evaluations.
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {
         let pr = self.pr(key);

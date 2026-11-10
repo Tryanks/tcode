@@ -836,6 +836,7 @@ pub(super) fn file(row: &Value) -> Option<PullRequestFile> {
         } else {
             PullRequestPatch::Hunks(hunks.to_owned())
         },
+        url: None,
         path,
     })
 }

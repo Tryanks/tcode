@@ -100,14 +100,6 @@ impl PullRequestView {
             .map(|files| files.head.clone())
     }
 
-    /// The file's text at the revision Files is read for, on GitHub.
-    pub(super) fn file_url(&self, path: &str, cx: &App) -> Option<String> {
-        let url = self.url(cx)?;
-        let head = self.head()?;
-        let repository = url.rsplit_once("/pull/")?.0.to_owned();
-        Some(format!("{repository}/blob/{head}/{path}"))
-    }
-
     fn viewed_state(&self, path: &str) -> Viewed {
         let Some(page) = self.page() else {
             return Viewed::Unknown;
@@ -1556,7 +1548,7 @@ impl PullRequestView {
             ),
             PullRequestPatch::Hunks(_) => return div().into_any_element(),
         };
-        let url = self.file_url(&entry.path, cx);
+        let url = entry.url.clone();
         // A file with no patch keeps a block about a short hunk's height in the list; no
         // owner carries a placeholder height.
         material::card(cx)
@@ -1745,12 +1737,9 @@ impl DiffListHost for PullRequestView {
     }
 
     fn file_menu(&self, file: usize, cx: &App) -> FileMenu {
-        let path = self
-            .files_of()
-            .and_then(|files| files.get(file))
-            .map(|file| file.path.clone())
-            .unwrap_or_default();
-        let url = self.file_url(&path, cx);
+        let file = self.files_of().and_then(|files| files.get(file));
+        let path = file.map(|file| file.path.clone()).unwrap_or_default();
+        let url = file.and_then(|file| file.url.clone());
         let host_name = self.host_name(cx);
         Rc::new(move |menu, _, _| {
             menu.menu(

@@ -82,6 +82,7 @@ pub(super) fn file(
         additions,
         deletions,
         patch,
+        url: None,
     }
 }
 

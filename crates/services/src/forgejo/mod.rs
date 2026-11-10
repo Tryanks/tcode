@@ -192,6 +192,7 @@ impl Forgejo {
                         additions: row["additions"].as_u64()?,
                         deletions: row["deletions"].as_u64()?,
                         patch: PullRequestPatch::Withheld,
+                        url: None,
                     })
                 })
                 .collect(),
@@ -791,6 +792,10 @@ impl Forge for Forgejo {
 
     fn url(&self, key: &PullRequestKey) -> Option<String> {
         Some(repository::url(key))
+    }
+
+    fn file_url(&self, key: &PullRequestKey, revision: &str, path: &str) -> Option<String> {
+        Some(repository::file_url(key, revision, path))
     }
 
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {

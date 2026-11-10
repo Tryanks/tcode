@@ -22,6 +22,15 @@ impl Repository {
             self.host, self.owner, self.name
         )
     }
+    pub fn file_url(&self, revision: &str, path: &str) -> String {
+        format!(
+            "https://{}/{}/{}/blob/{revision}/{}",
+            self.host,
+            self.owner,
+            self.name,
+            crate::forge::url_path(path)
+        )
+    }
 }
 
 fn component(value: &str) -> bool {
@@ -166,4 +175,22 @@ pub fn resolve(checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
         .into_iter()
         .find(|(_, repository)| repository.host == host)
         .map(|(_, repository)| repository.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_page_names_the_revision_and_encodes_the_path() {
+        let repository = Repository {
+            host: "github.example.test".into(),
+            owner: "acme".into(),
+            name: "widget".into(),
+        };
+        assert_eq!(
+            repository.file_url("abc123", "docs/read me.md"),
+            "https://github.example.test/acme/widget/blob/abc123/docs/read%20me.md"
+        );
+    }
 }

@@ -601,6 +601,10 @@ impl Forge for GitLab {
         Some(repository::url(key))
     }
 
+    fn file_url(&self, key: &PullRequestKey, revision: &str, path: &str) -> Option<String> {
+        Some(repository::file_url(key, revision, path))
+    }
+
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {
         let mr = self.mr(key);
         let read = mr.mr()?;

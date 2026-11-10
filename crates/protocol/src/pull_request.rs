@@ -76,6 +76,8 @@ pub struct PullRequestFile {
     pub additions: u64,
     pub deletions: u64,
     pub patch: PullRequestPatch,
+    /// The file's page on the host: at the head, or at the base for a deleted file.
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

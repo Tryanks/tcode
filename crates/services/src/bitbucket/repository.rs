@@ -33,6 +33,14 @@ pub(super) fn url(key: &PullRequestKey) -> String {
     )
 }
 
+pub(super) fn file_url(key: &PullRequestKey, revision: &str, path: &str) -> String {
+    format!(
+        "https://{HOST}/{}/src/{revision}/{}",
+        key.repository,
+        crate::forge::url_path(path)
+    )
+}
+
 /// A pull request's web URL, `https://bitbucket.org/workspace/slug/pull-requests/N[/…]`.
 pub(super) fn pull_request_url(value: &str) -> Option<(PullRequestKey, String)> {
     let value = value.trim().split(['?', '#']).next()?;
@@ -111,6 +119,10 @@ mod tests {
         assert_eq!(
             url,
             "https://bitbucket.org/acme/widget.js/pull-requests/547"
+        );
+        assert_eq!(
+            file_url(&key, "abc123", "docs/read me.md"),
+            "https://bitbucket.org/acme/widget.js/src/abc123/docs/read%20me.md"
         );
         let project = repository(&["acme", "widget.js"]);
         for remote_url in [

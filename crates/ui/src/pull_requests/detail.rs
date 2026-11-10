@@ -279,21 +279,21 @@ impl PullRequestView {
         }
     }
 
+    /// The host of the open pull request. Only what the view renders asks, and it renders
+    /// nothing until [`Self::show`] sets `current`, which is never cleared.
+    fn shown_host(&self) -> &str {
+        let (_, key) = self.current.as_ref().expect("a pull request is shown");
+        &key.host
+    }
+
     /// What the open pull request's host calls a pull request.
     pub(super) fn noun(&self, cx: &App) -> super::Noun {
-        let store = self.store.read(cx);
-        match &self.current {
-            Some((_, key)) => super::Noun::at(store, &key.host),
-            None => super::Noun::of(&tcode_core::pull_request::GITHUB),
-        }
+        super::Noun::at(self.store.read(cx), self.shown_host())
     }
 
     /// The open pull request's host as a person reads it.
     pub(super) fn host_name(&self, cx: &App) -> String {
-        self.current
-            .as_ref()
-            .map(|(_, key)| super::host_name(self.store.read(cx), &key.host))
-            .unwrap_or_default()
+        super::host_name(self.store.read(cx), self.shown_host())
     }
 
     pub fn new(
@@ -2477,6 +2477,7 @@ mod tests {
                     additions: 1,
                     deletions: 0,
                     patch: PullRequestPatch::Hunks("@@ -1 +1,2 @@\n a\n+b\n".into()),
+                    url: None,
                 })
                 .collect(),
             next_cursor: next_cursor.map(str::to_owned),

@@ -124,6 +124,10 @@ impl Forge for GitHub {
         repository::Repository::from_key(key).map(|repository| repository.url(key.number))
     }
 
+    fn file_url(&self, key: &PullRequestKey, revision: &str, path: &str) -> Option<String> {
+        repository::Repository::from_key(key).map(|repository| repository.file_url(revision, path))
+    }
+
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {
         Ok(self.pull_requests.summary(key)?)
     }

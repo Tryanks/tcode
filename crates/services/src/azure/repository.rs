@@ -66,6 +66,19 @@ pub(super) fn url(key: &PullRequestKey) -> String {
     )
 }
 
+/// A file's page in the repository at a commit.
+pub(super) fn file_url(key: &PullRequestKey, revision: &str, path: &str) -> String {
+    let (project, repository) = names(key);
+    let encode = crate::github::pull_request_reads::percent_encode;
+    format!(
+        "https://{}/{}/_git/{}?path={}&version=GC{revision}",
+        key.host,
+        encode(project),
+        encode(repository),
+        encode(&format!("/{path}"))
+    )
+}
+
 /// A pull request's web URL on dev.azure.com, or on an organization's older visualstudio.com
 /// host, which reads as the same organization.
 pub(super) fn pull_request_url(value: &str) -> Option<(PullRequestKey, String)> {
@@ -164,6 +177,10 @@ mod tests {
         assert_eq!(
             url,
             "https://dev.azure.com/fabrikam/fiber%20optics/_git/web/pullrequest/42"
+        );
+        assert_eq!(
+            file_url(&key, "abc123", "docs/read me.md"),
+            "https://dev.azure.com/fabrikam/fiber%20optics/_git/web?path=%2Fdocs%2Fread%20me.md&version=GCabc123"
         );
         assert_eq!(
             pull_request_url(

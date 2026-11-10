@@ -247,6 +247,7 @@ impl Bitbucket {
                         additions: row["lines_added"].as_u64()?,
                         deletions: row["lines_removed"].as_u64()?,
                         patch: PullRequestPatch::Withheld,
+                        url: None,
                         path,
                     })
                 })
@@ -601,6 +602,10 @@ impl Forge for Bitbucket {
 
     fn url(&self, key: &PullRequestKey) -> Option<String> {
         Some(repository::url(key))
+    }
+
+    fn file_url(&self, key: &PullRequestKey, revision: &str, path: &str) -> Option<String> {
+        Some(repository::file_url(key, revision, path))
     }
 
     /// The pull request and its head's build statuses.
