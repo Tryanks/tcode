@@ -26,8 +26,8 @@ use std::{
 };
 use tcode_core::{
     pull_request::{
-        AZURE, HostKind, HostTerms, Mergeability, PullRequestKey, PullRequestMergeMethod,
-        PullRequestReviewDraftComment, PullRequestStackState, PullRequestState,
+        AZURE, HostKind, HostTerms, PullRequestKey, PullRequestMergeMethod,
+        PullRequestReviewDraftComment, PullRequestStackState,
     },
     pull_request_watch::{CheckStatus, PullRequestRemark, PullRequestWatchRead},
     session::ReviewSide,
@@ -146,14 +146,6 @@ impl Azure {
 
     fn account_of(key: &PullRequestKey, viewer: Option<&str>) -> String {
         format!("{}:{}", key.host, viewer.unwrap_or(ANONYMOUS))
-    }
-
-    /// The trial merge; a pull request no longer open has none to read.
-    fn mergeability(pr: &Value) -> Mergeability {
-        if reads::state(pr) != Some(PullRequestState::Open) {
-            return Mergeability::Unknown;
-        }
-        reads::mergeability(pr)
     }
 
     /// Every push, oldest first. Azure keeps them from anonymous reads.
@@ -560,7 +552,7 @@ impl Azure {
         let pr = self.pr(key);
         let read = pr.pr()?;
         let checks = pr.checks(&read)?;
-        let mergeability = Self::mergeability(&read);
+        let mergeability = reads::mergeability(&read);
         let signed_in = self.api.credential(&key.host)?.is_some();
         Ok(PullRequestActionState {
             merge_state: reads::merge_state(&read, mergeability, &checks),
@@ -769,7 +761,7 @@ impl Forge for Azure {
         let read = pr.pr()?;
         let checks = pr.checks(&read)?;
         Ok(Summary {
-            snapshot: reads::snapshot(&read, &checks, Self::mergeability(&read), Self::now())
+            snapshot: reads::snapshot(&read, &checks, reads::mergeability(&read), Self::now())
                 .ok_or_else(|| {
                     error(
                         ForgeErrorKind::Uncertain,
@@ -962,7 +954,7 @@ impl Forge for Azure {
             state: reads::state(&read)
                 .ok_or_else(|| error(ForgeErrorKind::Uncertain, "Azure DevOps state unreadable"))?,
             checks: pr.checks(&read)?,
-            mergeability: Self::mergeability(&read),
+            mergeability: reads::mergeability(&read),
             head_sha: reads::head(&read),
             base_branch: read["targetRefName"]
                 .as_str()
