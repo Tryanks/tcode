@@ -683,11 +683,11 @@ impl Forge for Forgejo {
             .iter()
             .map(|(host, choice)| (host.clone(), (choice.kind, true)))
             .collect();
-        let detected = self
-            .api
-            .tea_logins()
-            .into_iter()
-            .chain(self.api.environment_host());
+        let (logins, listing) = match self.api.tea_logins() {
+            Ok(logins) => (logins, None),
+            Err(error) => (Vec::new(), error.cli_problem()),
+        };
+        let detected = logins.into_iter().chain(self.api.environment_host());
         for host in detected {
             // tea is Gitea's CLI; a server named for Forgejo, or Codeberg, says otherwise.
             let kind = HostKind::detect(&host)
@@ -708,7 +708,14 @@ impl Forge for Forgejo {
             .into_iter()
             .map(|(host, (kind, added))| {
                 let enabled = configured.get(&host).is_none_or(|choice| choice.enabled);
-                let credential = self.api.credential(&host).ok().flatten();
+                let read = self.api.credential(&host);
+                // Without a login of its own, tea failing to list them leaves it unknown.
+                let failed = read
+                    .as_ref()
+                    .err()
+                    .and_then(ForgeError::cli_problem)
+                    .or_else(|| listing.clone());
+                let credential = read.ok().flatten();
                 let (assessed, login) = credential
                     .as_ref()
                     .map(|credential| self.api.assessed(&host, credential))
@@ -716,6 +723,7 @@ impl Forge for Forgejo {
                 let source = credential.map(|credential| credential.source);
                 let problem = match &source {
                     _ if !enabled => None,
+                    None if failed.is_some() => failed,
                     None if tea => Some(HostProblem::NotSignedIn {
                         tool: "tea".into(),
                         command: Some(format!("tea login add --url https://{host}")),

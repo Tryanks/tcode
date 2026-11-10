@@ -494,11 +494,11 @@ impl Forge for GitLab {
         // Each host, and whether only settings name it.
         let mut hosts: BTreeMap<String, bool> =
             configured.keys().map(|host| (host.clone(), true)).collect();
-        let detected = self
-            .api
-            .glab_logins()
-            .into_iter()
-            .chain(self.api.environment_host());
+        let (logins, listing) = match self.api.glab_logins() {
+            Ok(logins) => (logins, None),
+            Err(error) => (Vec::new(), error.cli_problem()),
+        };
+        let detected = logins.into_iter().chain(self.api.environment_host());
         for host in detected {
             hosts.insert(host, false);
         }
@@ -514,7 +514,14 @@ impl Forge for GitLab {
             .into_iter()
             .map(|(host, added)| {
                 let enabled = configured.get(&host).is_none_or(|choice| choice.enabled);
-                let credential = self.api.credential(&host).ok().flatten();
+                let read = self.api.credential(&host);
+                // Without a login of its own, glab failing to list them leaves it unknown.
+                let failed = read
+                    .as_ref()
+                    .err()
+                    .and_then(ForgeError::cli_problem)
+                    .or_else(|| listing.clone());
+                let credential = read.ok().flatten();
                 let source = credential
                     .as_ref()
                     .map(|credential| credential.source.clone());
@@ -524,6 +531,7 @@ impl Forge for GitLab {
                     .unwrap_or_default();
                 let problem = match &credential {
                     None if !enabled => None,
+                    None if failed.is_some() => failed,
                     None if glab => Some(HostProblem::NotSignedIn {
                         tool: "glab".into(),
                         command: Some(format!("glab auth login --hostname {host}")),

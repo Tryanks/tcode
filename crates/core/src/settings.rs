@@ -107,6 +107,9 @@ pub enum HostProblem {
     Rejected { status: u16, at: u64 },
     /// The machine's saved tokens could not be read, so no request is sent with any token.
     CredentialsUnreadable { error: String },
+    /// The CLI failed when asked for its login, saying `error`, so whether it has one for the
+    /// host is unknown.
+    CliFailed { tool: String, error: String },
 }
 
 /// The account a token signs in as. Only names cross to clients, never the token.

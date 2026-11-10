@@ -11,13 +11,14 @@ use tcode_core::{
     settings::{CredentialSource, HostProblem, HostSettings, HostStatus},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialError {
     InvalidHost,
     Disabled,
     CliMissing,
     NotSignedIn,
-    CliFailed,
+    /// gh failed when asked for its login, in its own words.
+    CliFailed(String),
     HostMismatch,
     /// The token Tcode saved could not be read.
     SavedUnreadable,
@@ -25,7 +26,10 @@ pub enum CredentialError {
 
 impl std::fmt::Display for CredentialError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "GitHub credential unavailable: {self:?}")
+        match self {
+            Self::CliFailed(said) => f.write_str(said),
+            _ => write!(f, "GitHub credential unavailable: {self:?}"),
+        }
     }
 }
 impl std::error::Error for CredentialError {}
@@ -56,6 +60,24 @@ impl Credential {
             token,
             fingerprint,
             source,
+        }
+    }
+}
+
+/// Why gh gave no answer.
+enum GhFailure {
+    Missing,
+    Ran(crate::forge::CliFailure),
+}
+
+impl From<GhFailure> for CredentialError {
+    fn from(failure: GhFailure) -> Self {
+        match failure {
+            GhFailure::Missing => Self::CliMissing,
+            GhFailure::Ran(failure) if failure.said.is_empty() => {
+                Self::CliFailed("gh exited unsuccessfully without saying why".into())
+            }
+            GhFailure::Ran(failure) => Self::CliFailed(failure.said),
         }
     }
 }
@@ -146,7 +168,7 @@ impl Credentials {
             .map(|token| Credential::new(host, token, CredentialSource::Cli { tool: "gh".into() }));
         let ttl = match &value {
             Ok(_) => 300,
-            Err(CredentialError::CliFailed) => 0,
+            Err(CredentialError::CliFailed(_)) => 0,
             Err(_) => 10,
         };
         if ttl > 0 {
@@ -249,72 +271,67 @@ impl Credentials {
         if let Some(account) = account {
             args.extend(["--user", account]);
         }
-        self.run_gh(&args)
-            .and_then(|output| nonempty(output).ok_or(CredentialError::NotSignedIn))
+        // Without a token for the host gh fails like any other error, saying "no oauth token
+        // found for <host>" (gh 2.103, `pkg/cmd/auth/token/token.go`); that is no login.
+        match self.run_gh(&args) {
+            Ok(output) => nonempty(output).ok_or(CredentialError::NotSignedIn),
+            Err(GhFailure::Ran(failure))
+                if failure.exited && failure.said.contains("no oauth token found for") =>
+            {
+                Err(CredentialError::NotSignedIn)
+            }
+            Err(failure) => Err(failure.into()),
+        }
     }
 
-    fn run_gh(&self, args: &[&str]) -> Result<String, CredentialError> {
-        use smol::io::AsyncReadExt as _;
-        let mut command = crate::process::async_command(self.gh_program()?);
-        command
-            .args(args)
-            .env_clear()
-            .envs(&self.environment)
-            .env("GH_DEBUG", "")
-            .env("GH_PROMPT_DISABLED", "1")
+    fn run_gh(&self, args: &[&str]) -> Result<String, GhFailure> {
+        let program = self.gh_program().map_err(|_| GhFailure::Missing)?;
+        let mut environment = self.environment.clone();
+        environment.insert("GH_DEBUG".into(), String::new());
+        environment.insert("GH_PROMPT_DISABLED".into(), "1".into());
+        crate::forge::run_cli(
+            program,
+            args,
+            None,
+            &environment,
             // Ambient tokens must not let gh bypass the explicit GH_HOST binding.
-            .env_remove("GH_TOKEN")
-            .env_remove("GITHUB_TOKEN")
-            .env_remove("GH_ENTERPRISE_TOKEN")
-            .env_remove("GITHUB_ENTERPRISE_TOKEN")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let mut child = command.spawn().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                CredentialError::CliMissing
-            } else {
-                CredentialError::CliFailed
-            }
-        })?;
-        let mut stdout = child.stdout.take().ok_or(CredentialError::CliFailed)?;
-        futures_lite::future::block_on(smol::future::race(
-            async {
-                let mut bytes = Vec::new();
-                stdout
-                    .read_to_end(&mut bytes)
-                    .await
-                    .map_err(|_| CredentialError::CliFailed)?;
-                if !child
-                    .status()
-                    .await
-                    .map_err(|_| CredentialError::CliFailed)?
-                    .success()
-                {
-                    return Err(CredentialError::NotSignedIn);
-                }
-                String::from_utf8(bytes).map_err(|_| CredentialError::CliFailed)
-            },
-            async {
-                smol::Timer::after(Duration::from_secs(10)).await;
-                Err(CredentialError::CliFailed)
-            },
-        ))
+            &[
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "GH_ENTERPRISE_TOKEN",
+                "GITHUB_ENTERPRISE_TOKEN",
+            ],
+            true,
+        )
+        .map_err(GhFailure::Ran)
     }
 
     /// Discovery is safe to replicate: login names and source only, never a token or fingerprint.
     pub fn discover(&self) -> BTreeMap<String, HostStatus> {
-        let gh = self.run_gh(&["auth", "status", "--json", "hosts"]);
+        // Signed out, gh still answers `{"hosts":{}}` (gh 2.103).
+        let gh = self
+            .run_gh(&["auth", "status", "--json", "hosts"])
+            .map_err(CredentialError::from)
+            .and_then(|text| {
+                serde_json::from_str::<serde_json::Value>(&text).map_err(|error| {
+                    CredentialError::CliFailed(format!(
+                        "gh auth status answered with what is not its JSON: {error}"
+                    ))
+                })
+            });
         let tools_missing = if gh == Err(CredentialError::CliMissing) {
             vec!["gh".to_owned()]
         } else {
             Vec::new()
         };
-        let accounts: serde_json::Value = gh
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
+        let listing = match &gh {
+            Err(CredentialError::CliFailed(said)) => Some(HostProblem::CliFailed {
+                tool: "gh".into(),
+                error: said.clone(),
+            }),
+            _ => None,
+        };
+        let accounts = gh.unwrap_or_default();
         let configured = self.hosts.read().unwrap().clone();
         // Whether only settings name the host.
         let mut hosts: BTreeMap<String, bool> =
@@ -352,7 +369,16 @@ impl Credentials {
                             .map(str::to_owned)
                     })
                     .collect();
-                let credential = self.get(&host).ok();
+                let read = self.get(&host);
+                // Without a login of its own, gh failing to list them leaves it unknown.
+                let failed = match &read {
+                    Err(CredentialError::CliFailed(said)) => Some(HostProblem::CliFailed {
+                        tool: "gh".into(),
+                        error: said.clone(),
+                    }),
+                    _ => listing.clone(),
+                };
+                let credential = read.ok();
                 let (assessed, login) = credential
                     .as_ref()
                     .map(|credential| {
@@ -390,6 +416,7 @@ impl Credentials {
                 order.push(CredentialSource::Cli { tool: "gh".into() });
                 let problem = match &source {
                     _ if !choice.enabled => None,
+                    None if failed.is_some() => failed,
                     None if tools_missing.is_empty() => Some(HostProblem::NotSignedIn {
                         tool: "gh".into(),
                         command: Some(format!("gh auth login --hostname {host}")),

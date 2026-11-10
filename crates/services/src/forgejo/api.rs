@@ -124,6 +124,9 @@ impl<'a> Request<'a> {
     }
 }
 
+/// A server's credential, none to read anonymously, or the CLI's failure.
+type CredentialRead = Result<Option<Credential>, ForgeError>;
+
 struct Cached<V> {
     value: V,
     expires: Instant,
@@ -134,7 +137,7 @@ pub(super) struct Api {
     environment: BTreeMap<String, String>,
     hosts: RwLock<BTreeMap<String, HostSettings>>,
     agent: ureq::Agent,
-    tokens: Mutex<HashMap<String, Cached<Option<Credential>>>>,
+    tokens: Mutex<HashMap<String, Cached<CredentialRead>>>,
     servers: Mutex<HashMap<String, Cached<Server>>>,
     rate_limits: Mutex<crate::forge::RateLimits>,
 }
@@ -210,12 +213,16 @@ impl Api {
         let mut tokens = self.tokens.lock().unwrap();
         tokens.retain(|_, cached| cached.expires > Instant::now());
         if let Some(cached) = tokens.get(authority) {
-            return Ok(cached.value.clone());
+            return cached.value.clone();
         }
-        let found = self.tea_token(authority);
-        let ttl = if found.is_some() { 300 } else { 10 };
-        let value =
-            found.map(|token| Credential::new(token, CredentialSource::Cli { tool: "tea".into() }));
+        let value = self.tea_token(authority).map(|found| {
+            found.map(|token| Credential::new(token, CredentialSource::Cli { tool: "tea".into() }))
+        });
+        let ttl = if matches!(value, Ok(Some(_))) {
+            300
+        } else {
+            10
+        };
         tokens.insert(
             authority.to_owned(),
             Cached {
@@ -223,7 +230,7 @@ impl Api {
                 expires: Instant::now() + Duration::from_secs(ttl),
             },
         );
-        Ok(value)
+        value
     }
 
     pub(super) fn forget(&self, authority: &str) {
@@ -315,39 +322,64 @@ impl Api {
     }
 
     /// tea's git credential helper answers with the stored token of the login whose URL is the
-    /// server's; `tea login list` never prints one.
-    fn tea_token(&self, authority: &str) -> Option<String> {
+    /// server's; `tea login list` never prints one. Without a login it fails like any other
+    /// error, saying "no login found for host" (tea 0.16, `cmd/login/helper.go`), which is
+    /// none; any other failure is tea's.
+    fn tea_token(&self, authority: &str) -> Result<Option<String>, ForgeError> {
+        let Some(program) = self.tea_program() else {
+            return Ok(None);
+        };
         let (host, path) = authority.split_once('/').unwrap_or((authority, ""));
         let mut input = format!("protocol=https\nhost={host}\n");
         if !path.is_empty() {
             input.push_str(&format!("path={path}\n"));
         }
         input.push('\n');
-        let output = self.run_tea(&["login", "helper", "get"], Some(&input))?;
-        output
+        let output = match self.run_tea(program, &["login", "helper", "get"], Some(&input)) {
+            Ok(output) => output,
+            Err(failure) if failure.exited && failure.said.contains("no login found for host") => {
+                return Ok(None);
+            }
+            Err(failure) => return Err(failure.error("tea")),
+        };
+        Ok(output
             .lines()
             .find_map(|line| line.strip_prefix("password="))
             .map(str::to_owned)
-            .and_then(nonempty)
+            .and_then(nonempty))
     }
 
-    /// The servers tea has logins for.
-    pub(super) fn tea_logins(&self) -> Vec<String> {
-        let Some(output) = self.run_tea(&["logins", "list", "--output", "json"], None) else {
-            return Vec::new();
+    /// The servers tea has logins for; none without tea.
+    pub(super) fn tea_logins(&self) -> Result<Vec<String>, ForgeError> {
+        let Some(program) = self.tea_program() else {
+            return Ok(Vec::new());
         };
-        let logins: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap_or_default();
-        logins
+        let output = self
+            .run_tea(program, &["logins", "list", "--output", "json"], None)
+            .map_err(|failure| failure.error("tea"))?;
+        let logins: Vec<serde_json::Value> = serde_json::from_str(&output).map_err(|error| {
+            crate::forge::CliFailure {
+                exited: false,
+                said: format!("tea logins list answered with what is not its JSON: {error}"),
+            }
+            .error("tea")
+        })?;
+        Ok(logins
             .iter()
             .filter_map(|login| login["url"].as_str())
             .filter_map(|url| HostKind::Gitea.authority(url).ok())
-            .collect()
+            .collect())
     }
 
-    fn run_tea(&self, args: &[&str], input: Option<&str>) -> Option<String> {
+    fn run_tea(
+        &self,
+        program: PathBuf,
+        args: &[&str],
+        input: Option<&str>,
+    ) -> Result<String, crate::forge::CliFailure> {
         // tea would otherwise prefer these over its stored login.
         crate::forge::run_cli(
-            self.tea_program()?,
+            program,
             args,
             input,
             &self.environment,

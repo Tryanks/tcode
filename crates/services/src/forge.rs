@@ -12,7 +12,7 @@ mod rate_limit;
 mod viewed;
 
 use crate::settings::SettingsStore;
-pub(crate) use http::{Step, answered, in_order, media, run_cli, same_origin};
+pub(crate) use http::{CliFailure, Step, answered, in_order, media, run_cli, same_origin};
 pub(crate) use rate_limit::RateLimits;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -220,6 +220,10 @@ pub enum ForgeErrorKind {
     UnsupportedMedia,
     /// The credentials Tcode saved could not be read, so nothing was sent.
     CredentialsUnreadable,
+    /// The host's CLI failed when asked for its login; the description is its own words.
+    CliFailed {
+        tool: String,
+    },
 }
 
 impl std::fmt::Display for ForgeError {
@@ -230,6 +234,17 @@ impl std::fmt::Display for ForgeError {
 impl std::error::Error for ForgeError {}
 
 impl ForgeError {
+    /// The problem a host's status names when its CLI failed to give a login.
+    pub(crate) fn cli_problem(&self) -> Option<HostProblem> {
+        match &self.kind {
+            ForgeErrorKind::CliFailed { tool } => Some(HostProblem::CliFailed {
+                tool: tool.clone(),
+                error: self.description.clone(),
+            }),
+            _ => None,
+        }
+    }
+
     pub(crate) fn credentials_unreadable(error: std::io::Error) -> Self {
         Self {
             kind: ForgeErrorKind::CredentialsUnreadable,

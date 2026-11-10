@@ -677,7 +677,9 @@ impl Forge for Azure {
             .into_iter()
             .map(|(host, added)| {
                 let enabled = configured.get(&host).is_none_or(|choice| choice.enabled);
-                let credential = self.api.credential(&host).ok().flatten();
+                let read = self.api.credential(&host);
+                let failed = read.as_ref().err().and_then(ForgeError::cli_problem);
+                let credential = read.ok().flatten();
                 let source = credential
                     .as_ref()
                     .map(|credential| credential.source.clone());
@@ -687,6 +689,7 @@ impl Forge for Azure {
                     .unwrap_or_default();
                 let problem = match &credential {
                     None if !enabled => None,
+                    None if failed.is_some() => failed,
                     None if az => Some(HostProblem::NotSignedIn {
                         tool: "az".into(),
                         command: Some("az login".into()),

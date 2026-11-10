@@ -159,9 +159,39 @@ pub(crate) fn media(
     })
 }
 
+/// Why a host CLI gave no answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CliFailure {
+    /// It ran and exited unsuccessfully, rather than failing to run or to answer.
+    pub(crate) exited: bool,
+    /// What it wrote to stderr, trimmed, or why it could not be run.
+    pub(crate) said: String,
+}
+
+impl CliFailure {
+    fn run(said: impl std::fmt::Display) -> Self {
+        Self {
+            exited: false,
+            said: said.to_string(),
+        }
+    }
+
+    /// The failure as `tool`'s, in its own words.
+    pub(crate) fn error(self, tool: &str) -> ForgeError {
+        ForgeError {
+            kind: ForgeErrorKind::CliFailed { tool: tool.into() },
+            description: if self.said.is_empty() {
+                format!("{tool} exited unsuccessfully without saying why")
+            } else {
+                self.said
+            },
+        }
+    }
+}
+
 /// A host CLI's output, given `input` on stdin, in the launch environment without `remove`,
-/// which the CLI would prefer over its stored login. `None` when it does not answer within ten
-/// seconds, or, with `success`, when it fails.
+/// which the CLI would prefer over its stored login. A failure when it does not answer within
+/// ten seconds, or, with `success`, when it exits unsuccessfully.
 pub(crate) fn run_cli(
     program: PathBuf,
     args: &[&str],
@@ -169,8 +199,12 @@ pub(crate) fn run_cli(
     environment: &BTreeMap<String, String>,
     remove: &[&str],
     success: bool,
-) -> Option<String> {
+) -> Result<String, CliFailure> {
     use smol::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let name = program.file_name().map_or_else(
+        || program.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
     let mut command = crate::process::async_command(program);
     command.args(args).env_clear().envs(environment);
     for name in remove {
@@ -183,26 +217,52 @@ pub(crate) fn run_cli(
             std::process::Stdio::null()
         })
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command.spawn().ok()?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| CliFailure::run(format!("{name}: {error}")))?;
     let stdin = child.stdin.take();
-    let mut stdout = child.stdout.take()?;
+    let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(CliFailure::run(format!("{name}: no output pipe")));
+    };
     futures_lite::future::block_on(smol::future::race(
         async {
             if let (Some(mut stdin), Some(input)) = (stdin, input) {
-                stdin.write_all(input.as_bytes()).await.ok()?;
+                stdin
+                    .write_all(input.as_bytes())
+                    .await
+                    .map_err(|error| CliFailure::run(format!("{name}: {error}")))?;
                 drop(stdin);
             }
-            let mut bytes = Vec::new();
-            stdout.read_to_end(&mut bytes).await.ok()?;
-            let status = child.status().await.ok()?;
-            (status.success() || !success).then_some(())?;
-            String::from_utf8(bytes).ok()
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let (read_out, read_err) = futures_lite::future::zip(
+                stdout.read_to_end(&mut out),
+                stderr.read_to_end(&mut err),
+            )
+            .await;
+            read_out
+                .and(read_err)
+                .map_err(|error| CliFailure::run(format!("{name}: {error}")))?;
+            let status = child
+                .status()
+                .await
+                .map_err(|error| CliFailure::run(format!("{name}: {error}")))?;
+            if success && !status.success() {
+                return Err(CliFailure {
+                    exited: true,
+                    said: String::from_utf8_lossy(&err).trim().to_owned(),
+                });
+            }
+            String::from_utf8(out).map_err(|_| {
+                CliFailure::run(format!("{name} answered with text that is not UTF-8"))
+            })
         },
         async {
             smol::Timer::after(Duration::from_secs(10)).await;
-            None
+            Err(CliFailure::run(format!(
+                "{name} did not answer within ten seconds"
+            )))
         },
     ))
 }
@@ -210,6 +270,29 @@ pub(crate) fn run_cli(
 #[cfg(test)]
 mod tests {
     use super::same_origin;
+
+    /// A CLI that fails is its exit and its own words on stderr, not an absent answer.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_cli_is_what_it_said() {
+        let environment = std::env::vars().collect();
+        let failure = super::run_cli(
+            "/bin/sh".into(),
+            &["-c", "echo partial; echo 'config is torn' >&2; exit 3"],
+            None,
+            &environment,
+            &[],
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure,
+            super::CliFailure {
+                exited: true,
+                said: "config is torn".into(),
+            }
+        );
+    }
 
     /// An upload's redirect keeps the token only on the server's own origin.
     #[test]

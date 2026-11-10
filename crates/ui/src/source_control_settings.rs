@@ -124,6 +124,10 @@ impl Platform {
             Some(HostProblem::CredentialsUnreadable { error }) => Standing::CredentialsUnreadable {
                 error: error.clone(),
             },
+            Some(HostProblem::CliFailed { tool, error }) => Standing::CliFailed {
+                tool: tool.clone(),
+                error: error.clone(),
+            },
             _ if self.source().is_some() => Standing::Connected {
                 login: status.and_then(|status| status.login.clone()),
             },
@@ -176,13 +180,21 @@ pub(crate) enum Standing {
     CredentialsUnreadable {
         error: String,
     },
+    /// The platform's CLI failed when asked for its login, in its own words.
+    CliFailed {
+        tool: String,
+        error: String,
+    },
     NotConnected,
 }
 
 impl Standing {
     /// Whether the row offers to connect rather than to manage.
     pub(crate) fn connects(&self) -> bool {
-        matches!(self, Self::NotConnected | Self::NotSignedIn { .. })
+        matches!(
+            self,
+            Self::NotConnected | Self::NotSignedIn { .. } | Self::CliFailed { .. }
+        )
     }
 
     /// A name for tests and debug selectors.
@@ -194,6 +206,7 @@ impl Standing {
             Self::Unverified => "unverified",
             Self::NotSignedIn { .. } => "not-signed-in",
             Self::CredentialsUnreadable { .. } => "credentials-unreadable",
+            Self::CliFailed { .. } => "cli-failed",
             Self::NotConnected => "not-connected",
         }
     }
@@ -204,7 +217,7 @@ impl Standing {
         match self {
             Self::Paused => None,
             Self::Connected { .. } => Some((theme.success, true)),
-            Self::Rejected { .. } | Self::CredentialsUnreadable { .. } => {
+            Self::Rejected { .. } | Self::CredentialsUnreadable { .. } | Self::CliFailed { .. } => {
                 Some((theme.danger, true))
             }
             Self::Unverified | Self::NotSignedIn { .. } => Some((theme.warning, true)),
@@ -215,7 +228,9 @@ impl Standing {
     fn color(&self, cx: &App) -> Hsla {
         let theme = cx.theme();
         match self {
-            Self::Rejected { .. } | Self::CredentialsUnreadable { .. } => theme.danger,
+            Self::Rejected { .. } | Self::CredentialsUnreadable { .. } | Self::CliFailed { .. } => {
+                theme.danger
+            }
             Self::Unverified | Self::NotSignedIn { .. } => theme.warning,
             _ => theme.muted_foreground,
         }
@@ -235,6 +250,9 @@ pub(crate) fn status_text(standing: &Standing, cx: &App) -> AnyElement {
         }
         Standing::CredentialsUnreadable { error } => {
             text(crate::tr!("source_control.credentials_unreadable", error = error).into())
+        }
+        Standing::CliFailed { tool, error } => {
+            text(crate::tr!("source_control.cli_failed", tool = tool, error = error).into())
         }
         Standing::NotConnected => text(crate::tr!("source_control.not_connected").into()),
         Standing::Paused => text(crate::tr!("source_control.paused").into()),

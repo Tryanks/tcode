@@ -106,6 +106,9 @@ impl<'a> Request<'a> {
     }
 }
 
+/// A server's credential, none to read anonymously, or the CLI's failure.
+type CredentialRead = Result<Option<Credential>, ForgeError>;
+
 struct Cached<V> {
     value: V,
     expires: Instant,
@@ -116,7 +119,7 @@ pub(super) struct Api {
     environment: BTreeMap<String, String>,
     hosts: RwLock<BTreeMap<String, HostSettings>>,
     agent: ureq::Agent,
-    tokens: Mutex<HashMap<String, Cached<Option<Credential>>>>,
+    tokens: Mutex<HashMap<String, Cached<CredentialRead>>>,
     rate_limits: Mutex<crate::forge::RateLimits>,
 }
 
@@ -189,16 +192,22 @@ impl Api {
         let mut tokens = self.tokens.lock().unwrap();
         tokens.retain(|_, cached| cached.expires > Instant::now());
         if let Some(cached) = tokens.get(authority) {
-            return Ok(cached.value.clone());
+            return cached.value.clone();
         }
         let found = self.glab_token(authority);
-        let ttl = if found.is_some() { 300 } else { 10 };
-        let value = found.map(|token| Credential {
-            verification: crate::settings::credential_fingerprint(&token, None),
-            token,
-            source: CredentialSource::Cli {
-                tool: "glab".into(),
-            },
+        let ttl = if matches!(found, Ok(Some(_))) {
+            300
+        } else {
+            10
+        };
+        let value = found.map(|found| {
+            found.map(|token| Credential {
+                verification: crate::settings::credential_fingerprint(&token, None),
+                token,
+                source: CredentialSource::Cli {
+                    tool: "glab".into(),
+                },
+            })
         });
         tokens.insert(
             authority.to_owned(),
@@ -207,7 +216,7 @@ impl Api {
                 expires: Instant::now() + Duration::from_secs(ttl),
             },
         );
-        Ok(value)
+        value
     }
 
     pub(super) fn forget(&self, authority: &str) {
@@ -305,33 +314,68 @@ impl Api {
     }
 
     /// glab's git credential helper answers with the stored token of the server named by
-    /// host; `glab auth status` prints one only to a terminal reader.
-    fn glab_token(&self, authority: &str) -> Option<String> {
+    /// host; `glab auth status` prints one only to a terminal reader. Without a login it exits
+    /// unsuccessfully saying nothing (`cmdutils.SilentError` in
+    /// `internal/commands/auth/login/helper.go`), which is none; anything it says is a failure.
+    fn glab_token(&self, authority: &str) -> Result<Option<String>, ForgeError> {
+        let Some(program) = self.glab_program() else {
+            return Ok(None);
+        };
         let input = format!("protocol=https\nhost={authority}\n\n");
-        let output = self.run_glab(&["auth", "git-credential", "get"], Some(&input), true)?;
-        output
+        let output = match self.run_glab(
+            program,
+            &["auth", "git-credential", "get"],
+            Some(&input),
+            true,
+        ) {
+            Ok(output) => output,
+            Err(failure) if failure.exited && failure.said.is_empty() => return Ok(None),
+            Err(failure) => return Err(failure.error("glab")),
+        };
+        Ok(output
             .lines()
             .find_map(|line| line.strip_prefix("password="))
             .map(str::to_owned)
-            .and_then(nonempty)
+            .and_then(nonempty))
     }
 
-    /// The servers glab has logins for. glab exits with a failure when any of them refuses its
-    /// token, and still lists them all.
-    pub(super) fn glab_logins(&self) -> Vec<String> {
-        let Some(output) = self.run_glab(
-            &["auth", "status", "--all", "--output", "json"],
-            None,
-            false,
-        ) else {
-            return Vec::new();
+    /// The servers glab has logins for; none without glab. glab exits with a failure when any
+    /// of them refuses its token, and still lists them all.
+    pub(super) fn glab_logins(&self) -> Result<Vec<String>, ForgeError> {
+        let Some(program) = self.glab_program() else {
+            return Ok(Vec::new());
         };
-        logins(&output)
+        let output = self
+            .run_glab(
+                program,
+                &["auth", "status", "--all", "--output", "json"],
+                None,
+                false,
+            )
+            .map_err(|failure| failure.error("glab"))?;
+        // With no login glab prints nothing and says so on stderr
+        // (`internal/commands/auth/status/status.go`).
+        if output.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        logins(&output).map_err(|error| {
+            crate::forge::CliFailure {
+                exited: false,
+                said: format!("glab auth status answered with what is not its JSON: {error}"),
+            }
+            .error("glab")
+        })
     }
 
-    fn run_glab(&self, args: &[&str], input: Option<&str>, success: bool) -> Option<String> {
+    fn run_glab(
+        &self,
+        program: PathBuf,
+        args: &[&str],
+        input: Option<&str>,
+        success: bool,
+    ) -> Result<String, crate::forge::CliFailure> {
         crate::forge::run_cli(
-            self.glab_program()?,
+            program,
             args,
             input,
             &self.environment,
@@ -648,15 +692,15 @@ pub(super) fn messages(body: &[u8]) -> Vec<String> {
 }
 
 /// The servers `glab auth status --all --output json` lists.
-fn logins(output: &str) -> Vec<String> {
-    let status: Value = serde_json::from_str(output).unwrap_or_default();
-    status["hosts"]
+fn logins(output: &str) -> serde_json::Result<Vec<String>> {
+    let status: Value = serde_json::from_str(output)?;
+    Ok(status["hosts"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|host| host["host"].as_str())
         .filter_map(|host| HostKind::Gitlab.authority(host).ok())
-        .collect()
+        .collect())
 }
 
 /// The page size asked for.
@@ -751,6 +795,9 @@ mod tests {
             {"host":"code.acme.test:8443","state":"error","error":"401 Unauthorized",
              "api_endpoint":"https://code.acme.test:8443/api/v4/","graphql_endpoint":"https://code.acme.test:8443/api/graphql/"}
         ]}"#;
-        assert_eq!(super::logins(output), ["gitlab.com", "code.acme.test:8443"]);
+        assert_eq!(
+            super::logins(output).unwrap(),
+            ["gitlab.com", "code.acme.test:8443"]
+        );
     }
 }

@@ -146,6 +146,9 @@ impl<'a> Request<'a> {
     }
 }
 
+/// az's token, none signed out, or az's failure.
+type TokenRead = Result<Option<String>, ForgeError>;
+
 struct Cached<V> {
     value: V,
     expires: Instant,
@@ -157,7 +160,7 @@ pub(super) struct Api {
     hosts: RwLock<BTreeMap<String, HostSettings>>,
     agent: ureq::Agent,
     /// az's token, which is its signed-in account's for every organization.
-    az: Mutex<Option<Cached<Option<String>>>>,
+    az: Mutex<Option<Cached<TokenRead>>>,
     rate_limits: Mutex<crate::forge::RateLimits>,
     /// The account each credential reads as, by fingerprint, for a few minutes.
     viewers: Mutex<HashMap<String, Cached<Value>>>,
@@ -236,7 +239,7 @@ impl Api {
                 )
             }));
         }
-        Ok(self.az_token().and_then(|token| {
+        Ok(self.az_token()?.and_then(|token| {
             Credential::new(&token, true, CredentialSource::Cli { tool: "az".into() })
         }))
     }
@@ -335,8 +338,10 @@ impl Api {
     }
 
     /// The Entra token az mints for Azure DevOps while it is signed in, held five minutes, or
-    /// ten seconds when there is none.
-    fn az_token(&self) -> Option<String> {
+    /// ten seconds when there is none. Signed out, az fails saying "Please run 'az login' to
+    /// setup account." (azure-cli `_profile.py`, `_AZ_LOGIN_MESSAGE`), which is none; any
+    /// other failure is az's.
+    fn az_token(&self) -> Result<Option<String>, ForgeError> {
         let mut held = self.az.lock().unwrap();
         if let Some(cached) = held
             .as_ref()
@@ -344,7 +349,7 @@ impl Api {
         {
             return cached.value.clone();
         }
-        let token = self.az_program().and_then(|program| {
+        let token = self.az_program().map(|program| {
             crate::forge::run_cli(
                 program,
                 &[
@@ -363,10 +368,24 @@ impl Api {
                 true,
             )
         });
-        let token = token
-            .map(|token| token.trim().to_owned())
-            .filter(|token| !token.is_empty());
-        let ttl = if token.is_some() { 300 } else { 10 };
+        let token = match token {
+            None => Ok(None),
+            Some(Ok(token)) => Ok(Some(token.trim().to_owned()).filter(|token| !token.is_empty())),
+            Some(Err(failure))
+                if failure.exited
+                    && failure
+                        .said
+                        .contains("Please run 'az login' to setup account.") =>
+            {
+                Ok(None)
+            }
+            Some(Err(failure)) => Err(failure.error("az")),
+        };
+        let ttl = if matches!(token, Ok(Some(_))) {
+            300
+        } else {
+            10
+        };
         *held = Some(Cached {
             value: token.clone(),
             expires: Instant::now() + Duration::from_secs(ttl),
