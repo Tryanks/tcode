@@ -1,11 +1,7 @@
-use crate::{
-    sizing::{Sizable, Size},
-    theme::ActiveTheme,
-};
+use crate::sizing::{Sizable, Size};
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, Hsla, IntoElement, Radians, Render, RenderOnce,
-    SharedString, StyleRefinement, Styled, Svg, Transformation, Window,
-    prelude::FluentBuilder as _, svg,
+    AnyElement, App, Hsla, IntoElement, Radians, RenderOnce, SharedString, StyleRefinement, Styled,
+    Svg, Transformation, Window, prelude::FluentBuilder as _, svg,
 };
 
 /// Types implementing this trait can automatically be converted to [`Icon`].
@@ -20,12 +16,6 @@ impl<T: IconNamed> From<T> for Icon {
 }
 
 include!(concat!(env!("OUT_DIR"), "/icon_names.rs"));
-
-impl IconName {
-    pub fn view(self, cx: &mut App) -> Entity<Icon> {
-        Icon::build(self).view(cx)
-    }
-}
 
 impl From<IconName> for AnyElement {
     fn from(value: IconName) -> Self {
@@ -97,10 +87,6 @@ impl Icon {
         self
     }
 
-    pub fn view(self, cx: &mut App) -> Entity<Icon> {
-        cx.new(|_| self)
-    }
-
     pub fn transform(mut self, transformation: Transformation) -> Self {
         self.base = self.base.with_transformation(transformation);
         self
@@ -155,22 +141,6 @@ impl RenderOnce for Icon {
 impl From<Icon> for AnyElement {
     fn from(value: Icon) -> Self {
         value.into_any_element()
-    }
-}
-
-impl Render for Icon {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let text_color = self.text_color.unwrap_or_else(|| cx.theme().foreground);
-        let text_size = window.text_style().font_size.to_pixels(window.rem_size());
-        let has_base_size = self.style.size.width.is_some() || self.style.size.height.is_some();
-        let mut base = svg();
-        *base.style() = self.style.clone();
-
-        base.flex_shrink_0()
-            .text_color(text_color)
-            .when(!has_base_size, |this| this.size(text_size))
-            .when_some(self.size, apply_size)
-            .path(self.path.clone())
     }
 }
 
