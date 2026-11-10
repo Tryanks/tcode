@@ -175,11 +175,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
 }
 
 fn should_skip(value: &Value) -> bool {
-    matches!(
-        value.get("type").and_then(Value::as_str),
-        Some("queue-operation" | "summary" | "file-history-snapshot")
-    ) || value.get("attachment").is_some()
-        || value.get("isSidechain").and_then(Value::as_bool) == Some(true)
+    value.get("isSidechain").and_then(Value::as_bool) == Some(true)
         || value.get("isMeta").and_then(Value::as_bool) == Some(true)
 }
 
