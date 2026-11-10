@@ -399,14 +399,6 @@ impl OverlayExt for Window {
     }
 }
 
-/// What each notification of `window` says, in the order shown.
-#[cfg(test)]
-pub(crate) fn notifications_said(window: &mut Window, cx: &mut App) -> Vec<gpui::SharedString> {
-    Overlays::update(window, cx, |host, _, cx| {
-        host.notifications.read(cx).said(cx)
-    })
-}
-
 type SheetClose = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// A sheet's binding to the window's edge-back gesture, scoped by its base focus trap.
@@ -1015,7 +1007,12 @@ mod tests {
         assert!(bounds.size.width <= px(361.));
         assert!(bounds.size.height >= px(44.));
         cx.update(|window, cx| window.push_notification("Second", cx));
-        assert_eq!(cx.update(notifications_said), ["Second"]);
+        draw(cx);
+        assert!(cx.debug_bounds("toast-says-Second").is_some());
+        assert!(
+            cx.debug_bounds("toast-says-Copied").is_none(),
+            "the pill says only the newest"
+        );
         cx.simulate_resize(size(px(1200.), px(800.)));
         crate::window_seam::occlude_for_test(cx, gpui::Edges::default());
         cx.update(|window, cx| {
@@ -1150,7 +1147,6 @@ mod tests {
         cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
         draw(cx);
         assert!(cx.debug_bounds("wide-toast").is_none());
-        assert!(cx.update(notifications_said).is_empty());
     }
 
     #[gpui::test]

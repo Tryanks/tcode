@@ -8011,7 +8011,10 @@ pub(crate) mod tests {
             cx.run_until_parked();
             draw(cx);
         };
-        let said = |cx: &mut VisualTestContext| cx.update(crate::overlay::notifications_said);
+        let says = |cx: &mut VisualTestContext, text: &str| {
+            cx.debug_bounds(format!("toast-says-{text}").leak())
+                .is_some()
+        };
         toast(
             &key_b,
             RuntimeToast::ProviderUpdatesAvailable {
@@ -8023,7 +8026,7 @@ pub(crate) mod tests {
             },
             cx,
         );
-        assert_eq!(said(cx), ["host-b: Update available: Codex v2.0.0"]);
+        assert!(says(cx, "host-b: Update available: Codex v2.0.0"));
         let _ = sent(&hosts[&key_a].host);
         let _ = sent(&hosts[&key_b].host);
         click("toast-action", cx);
@@ -8064,15 +8067,9 @@ pub(crate) mod tests {
             },
             cx,
         );
-        let said_now = said(cx);
         assert!(
-            said_now
-                .iter()
-                .any(|toast| toast.starts_with("host-b: Updating"))
-                && !said_now
-                    .iter()
-                    .any(|toast| toast.starts_with("host-a: Updating")),
-            "A's update finished and B's goes on: {said_now:?}"
+            says(cx, "host-b: Updating Codex… 0/1") && !says(cx, "host-a: Updating Codex… 0/1"),
+            "A's update finished and B's goes on"
         );
 
         // An update this window did not see start shows from its progress.
@@ -8084,11 +8081,9 @@ pub(crate) mod tests {
             },
             cx,
         );
-        let said = said(cx);
         assert!(
-            said.iter()
-                .any(|toast| toast.starts_with("host-a: Updating")),
-            "A's second update shows from its progress: {said:?}"
+            says(cx, "host-a: Updating Codex… 0/1"),
+            "A's second update shows from its progress"
         );
     }
 

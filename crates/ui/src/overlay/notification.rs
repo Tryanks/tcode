@@ -293,15 +293,22 @@ impl Render for Notification {
                     }
                 }))
                 .children(icon)
-                .child(
-                    div().min_w_0().line_clamp(2).child(
-                        self.compact_message
-                            .clone()
-                            .or_else(|| self.message.clone())
-                            .or_else(|| self.title.clone())
-                            .unwrap_or_default(),
-                    ),
-                )
+                .child({
+                    let says = self
+                        .compact_message
+                        .clone()
+                        .or_else(|| self.message.clone())
+                        .or_else(|| self.title.clone())
+                        .unwrap_or_default();
+                    div()
+                        .debug_selector({
+                            let says = says.clone();
+                            move || format!("toast-says-{says}")
+                        })
+                        .min_w_0()
+                        .line_clamp(2)
+                        .child(says)
+                })
                 .children(action)
                 .children(cover)
                 .opacity(progress)
@@ -351,9 +358,26 @@ impl Render for Notification {
                 .min_w_0()
                 .gap(spacing.xs)
                 .when_some(self.title.clone(), |el, title| {
-                    el.child(div().font_semibold().child(title))
+                    el.child(
+                        div()
+                            .debug_selector({
+                                let title = title.clone();
+                                move || format!("toast-says-{title}")
+                            })
+                            .font_semibold()
+                            .child(title),
+                    )
                 })
-                .when_some(self.message.clone(), |el, message| el.child(message))
+                .when_some(self.message.clone(), |el, message| {
+                    el.child(
+                        div()
+                            .debug_selector({
+                                let message = message.clone();
+                                move || format!("toast-says-{message}")
+                            })
+                            .child(message),
+                    )
+                })
                 .when_some(content, |el, content| el.child(content)),
         )
         .when_some(action, |el, action| el.child(action))
@@ -649,22 +673,5 @@ impl Render for NotificationList {
             .w(DEFAULT_WIDTH)
             .max_h(window.viewport_size().height)
             .into_any_element()
-    }
-}
-
-#[cfg(test)]
-impl NotificationList {
-    /// What each card says in the compact pill, in the order shown.
-    pub(super) fn said(&self, cx: &App) -> Vec<SharedString> {
-        self.manager
-            .iter()
-            .filter_map(|(_, note, _)| {
-                let note = note.read(cx);
-                note.compact_message
-                    .clone()
-                    .or_else(|| note.message.clone())
-                    .or_else(|| note.title.clone())
-            })
-            .collect()
     }
 }
