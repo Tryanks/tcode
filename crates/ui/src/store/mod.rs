@@ -1034,9 +1034,11 @@ impl WorkspaceStore {
         })
     }
 
-    pub(crate) fn retry_delivery(&self, key: &str) {
+    pub(crate) fn retry_delivery(&self, key: &str, cx: &mut Context<Self>) {
         if let Err(error) = self.host.retry_failed(key) {
-            log::error!("retry failed: {}", error.message);
+            cx.emit(RuntimeEvent::Error(tcode_protocol::RuntimeError::External(
+                error.message,
+            )));
         }
     }
 
@@ -5269,7 +5271,7 @@ pub(crate) mod tests {
         });
         assert!(visual.debug_bounds("retry-delivery").is_some());
         assert!(visual.debug_bounds("discard-delivery").is_some());
-        store.update(cx, |store, _| store.retry_delivery(&key));
+        store.update(cx, |store, cx| store.retry_delivery(&key, cx));
         let retry = next_command();
         assert_ne!(retry.key, request.key);
         assert_eq!(retry.payload, request.payload);

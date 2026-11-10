@@ -1118,8 +1118,9 @@ impl ChatView {
                                     .debug_selector(|| "retry-delivery".into())
                                     .label(crate::tr!("chat.retry_delivery"))
                                     .on_click(move |_, _, cx| {
-                                        retry_store
-                                            .update(cx, |store, _| store.retry_delivery(&retry_key))
+                                        retry_store.update(cx, |store, cx| {
+                                            store.retry_delivery(&retry_key, cx)
+                                        })
                                     }),
                             )
                             .child(

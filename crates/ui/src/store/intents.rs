@@ -788,12 +788,14 @@ impl WorkspaceStore {
                         cx.notify();
                     }
                     Ok(QueryResponse::ThreadAnchorTurn(None)) => {}
-                    Ok(other) => {
-                        log::warn!("Unexpected anchor-turn response for {session_id}: {other:?}")
-                    }
-                    Err(error) => {
-                        log::warn!("Anchor in {session_id} at {position} unresolved: {error:?}")
-                    }
+                    Ok(other) => cx.emit(tcode_protocol::RuntimeNotification::Error(
+                        tcode_protocol::RuntimeError::External(format!(
+                            "unexpected anchor-turn response: {other:?}"
+                        )),
+                    )),
+                    Err(error) => cx.emit(tcode_protocol::RuntimeNotification::Error(
+                        tcode_protocol::RuntimeError::External(error.message),
+                    )),
                 }
             });
         }));
@@ -1045,7 +1047,18 @@ impl WorkspaceStore {
             let _ = this.update(cx, |store, cx| {
                 let created = match response {
                     Ok(CommandResponse::SessionId(id)) => id,
-                    _ => None,
+                    Ok(_) => None,
+                    // A workspace's own fallback to a draft is asked again
+                    // with every index change; the user is told of what they
+                    // asked for.
+                    Err(error) => {
+                        if asked {
+                            cx.emit(tcode_protocol::RuntimeNotification::Error(
+                                tcode_protocol::RuntimeError::External(error.message),
+                            ));
+                        }
+                        None
+                    }
                 };
                 if store.creation_request_generation != request_generation {
                     return;
