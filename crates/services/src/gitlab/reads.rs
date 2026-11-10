@@ -441,10 +441,7 @@ fn absolute(authority: &str, url: Option<String>) -> Option<String> {
 pub(super) fn actor(authority: &str, raw: &Value) -> Option<PullRequestActor> {
     Some(PullRequestActor {
         login: text(raw, "username")?,
-        avatar_url: absolute(
-            authority,
-            text(raw, "avatarUrl").or_else(|| text(raw, "avatar_url")),
-        ),
+        avatar_url: absolute(authority, text(raw, "avatarUrl")),
     })
 }
 
