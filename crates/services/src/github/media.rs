@@ -253,10 +253,11 @@ pub(super) fn fetch(
         .header("etag")
         .or_else(|| response.header("last-modified"))
         .map(str::to_owned);
+    let limit = tcode_protocol::max_pull_request_media_bytes(&mime, validator.as_deref());
     let mut bytes = Vec::new();
     response
         .into_reader()
-        .take(MAX_PULL_REQUEST_MEDIA_BYTES as u64 + 1)
+        .take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| {
             if started.elapsed() >= TIMEOUT {
@@ -265,7 +266,7 @@ pub(super) fn fetch(
                 GitHubError::Request
             }
         })?;
-    if bytes.len() > MAX_PULL_REQUEST_MEDIA_BYTES {
+    if bytes.len() > limit {
         return Err(GitHubError::BodyTooLarge);
     }
     bounded(&mime, &bytes)?;

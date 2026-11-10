@@ -6,6 +6,31 @@ use serde_json::json;
 
 use super::*;
 
+/// The largest image a media read returns still goes out as one network line.
+#[test]
+fn the_largest_pull_request_image_fits_one_network_line() {
+    let (mime, validator) = ("image/png", Some("\"etag-of-an-invented-image\""));
+    let limit = max_pull_request_media_bytes(mime, validator);
+    let answer = |bytes: usize| {
+        encode_line(&HostMessage::QueryResult {
+            id: u64::MAX,
+            result: Ok(QueryResponse::PullRequest {
+                response: Box::new(PullRequestReadResponse::Media(PullRequestMedia::Image {
+                    bytes: vec![0; bytes],
+                    mime: mime.into(),
+                    validator: validator.map(str::to_owned),
+                    expires_at: u64::MAX,
+                })),
+                expires_at: u64::MAX,
+            }),
+        })
+        .unwrap()
+        .len()
+    };
+    assert!(answer(limit) <= MAX_LINE_BYTES);
+    assert!(answer(limit + 3) > MAX_LINE_BYTES);
+}
+
 #[test]
 fn client_ndjson_preserves_ids_text_and_record_boundaries() {
     let message = ClientMessage {

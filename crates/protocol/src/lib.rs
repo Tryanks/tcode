@@ -28,7 +28,7 @@ pub use pull_request::{
     PullRequestReviewerCandidates, PullRequestReviewerKind, PullRequestReviewerState,
     PullRequestStackActionState, PullRequestStackHead, PullRequestStackLayerState,
     PullRequestStackPushAccess, PullRequestThreadReplies, PullRequestViewedFiles,
-    PullRequestViewedState,
+    PullRequestViewedState, max_pull_request_media_bytes,
 };
 pub mod terminal;
 mod wire;

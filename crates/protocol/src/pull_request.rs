@@ -7,8 +7,28 @@ use tcode_core::{
     session::ReviewSide,
 };
 
-/// The largest image a media read returns; past it the host stops reading.
-pub const MAX_PULL_REQUEST_MEDIA_BYTES: usize = 8 * 1024 * 1024;
+/// No image past this fits one network line in base64, four bytes for every three; the bound
+/// of one answer is [`max_pull_request_media_bytes`].
+pub const MAX_PULL_REQUEST_MEDIA_BYTES: usize = crate::MAX_LINE_BYTES / 4 * 3;
+
+/// The largest image whose answer fits one network line beside its id, `mime`, `validator` and
+/// expiry; past it the host stops reading.
+pub fn max_pull_request_media_bytes(mime: &str, validator: Option<&str>) -> usize {
+    let empty = crate::HostMessage::QueryResult {
+        id: u64::MAX,
+        result: Ok(crate::QueryResponse::PullRequest {
+            response: Box::new(PullRequestReadResponse::Media(PullRequestMedia::Image {
+                bytes: Vec::new(),
+                mime: mime.to_owned(),
+                validator: validator.map(str::to_owned),
+                expires_at: u64::MAX,
+            })),
+            expires_at: u64::MAX,
+        }),
+    };
+    let envelope = crate::encode_line(&empty).map_or(crate::MAX_LINE_BYTES, |line| line.len());
+    crate::MAX_LINE_BYTES.saturating_sub(envelope) / 4 * 3
+}
 
 /// One read of a pull request linked to the named thread.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

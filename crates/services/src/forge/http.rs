@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use tcode_protocol::{
-    MAX_PULL_REQUEST_MEDIA_BYTES, PullRequestActionResult as Outcome, PullRequestMedia,
+    PullRequestActionResult as Outcome, PullRequestMedia, max_pull_request_media_bytes,
 };
 
 const DEADLINE: Duration = Duration::from_secs(60);
@@ -141,13 +141,14 @@ pub(crate) fn media(
         .header("etag")
         .or_else(|| response.header("last-modified"))
         .map(str::to_owned);
+    let limit = max_pull_request_media_bytes(&mime, validator.as_deref());
     let mut bytes = Vec::new();
     response
         .into_reader()
-        .take(MAX_PULL_REQUEST_MEDIA_BYTES as u64 + 1)
+        .take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| failed())?;
-    if bytes.len() > MAX_PULL_REQUEST_MEDIA_BYTES {
+    if bytes.len() > limit {
         return Err(error(ForgeErrorKind::TooLarge, "too large"));
     }
     media::bounded(&mime, &bytes)?;
