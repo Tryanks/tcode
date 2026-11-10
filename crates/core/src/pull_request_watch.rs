@@ -9,8 +9,6 @@ use crate::pull_request::{Mergeability, PullRequestState};
 pub const WAKE_LIMIT: u32 = 10;
 /// Reads in a row that failed for a reason other than a rate limit before the watch ends.
 pub const READ_FAILURE_LIMIT: u32 = 8;
-const LISTED_ITEMS: usize = 10;
-const SNIPPET_LENGTH: usize = 200;
 
 /// A watch on one linked pull request. `started_at` names the generation: a stop and a new
 /// start make a new one, and a read begun for an older generation is discarded.
@@ -347,7 +345,7 @@ const CLOSED_SUFFIX: &str =
     "was closed, so Tcode stopped watching it. Call watch_pull_request if it reopens.";
 const MERGED_SUFFIX: &str = "was merged, so Tcode stopped watching it.";
 
-fn snippet(body: &str) -> String {
+fn comment_text(body: &str) -> String {
     let mut text = String::new();
     let mut rest = body;
     // An unclosed `<!--` is no comment, so the rest of the body stays.
@@ -360,23 +358,7 @@ fn snippet(body: &str) -> String {
         rest = &rest[end..];
     }
     text.push_str(rest);
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if text.chars().count() <= SNIPPET_LENGTH {
-        text
-    } else {
-        format!(
-            "{}...",
-            text.chars().take(SNIPPET_LENGTH - 3).collect::<String>()
-        )
-    }
-}
-
-fn listed<T>(items: &[T], line: impl Fn(&T) -> String) -> Vec<String> {
-    let mut lines: Vec<_> = items.iter().take(LISTED_ITEMS).map(line).collect();
-    if items.len() > LISTED_ITEMS {
-        lines.push(format!("  - and {} more", items.len() - LISTED_ITEMS));
-    }
-    lines
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The wake the agent reads.
@@ -392,7 +374,7 @@ pub fn update_message(number: u64, url: &str, base_branch: &str, report: &WatchR
         match change {
             WatchChange::ChecksFailed(failed) => {
                 lines.push(format!("- Checks failed{commit}:"));
-                lines.extend(listed(failed, |check| {
+                lines.extend(failed.iter().map(|check| {
                     let status = match check.status {
                         CheckStatus::Cancelled => " (cancelled)",
                         CheckStatus::ActionRequired => " (action-required)",
@@ -421,13 +403,13 @@ pub fn update_message(number: u64, url: &str, base_branch: &str, report: &WatchR
                         "comments"
                     }
                 ));
-                lines.extend(listed(remarks, |remark| {
+                lines.extend(remarks.iter().map(|remark| {
                     let place = remark
                         .path
                         .as_ref()
                         .map(|path| format!(" on {path}"))
                         .unwrap_or_default();
-                    let body = snippet(&remark.body);
+                    let body = comment_text(&remark.body);
                     let said = if body.is_empty() {
                         remark
                             .review_state
@@ -796,8 +778,8 @@ mod tests {
     }
 
     #[test]
-    fn messages_list_ten_items_with_snippets_and_parse_back() {
-        let failed: Vec<_> = (0..12)
+    fn messages_list_every_item_and_parse_back() {
+        let failed: Vec<_> = (0..2)
             .map(|index| PullRequestCheck {
                 name: format!("job {index}"),
                 status: if index == 0 {
@@ -810,7 +792,7 @@ mod tests {
             })
             .collect();
         let mut long = remark("r", "reviewer", "2026-10-08T10:01:00Z", None);
-        long.body = format!("<!-- hidden -->  {}\n\nend", "word ".repeat(60));
+        long.body = "<!-- hidden -->  Rename this.\n\nThen add a test.".into();
         long.path = Some("src/lib.rs".into());
         let mut review = remark("v", "lead", "2026-10-08T10:02:00Z", None);
         review.body.clear();
@@ -842,20 +824,18 @@ mod tests {
         );
         assert_eq!(lines[1], "- Checks failed on 0123456:");
         assert_eq!(lines[2], "  - job 0 (cancelled) https://ci.test/0");
-        assert_eq!(lines[12], "  - and 2 more");
-        let snippet_line = lines[14];
-        assert!(snippet_line.starts_with("  - reviewer on src/lib.rs: \"word word"));
-        assert!(snippet_line.ends_with("...\""));
+        assert_eq!(lines[3], "  - job 1 https://ci.test/1");
+        assert_eq!(lines[4], "- 3 new comments:");
         assert_eq!(
-            snippet_line.len(),
-            "  - reviewer on src/lib.rs: \"\"".len() + 200
+            lines[5],
+            "  - reviewer on src/lib.rs: \"Rename this. Then add a test.\""
         );
-        assert_eq!(lines[15], "  - lead: APPROVED");
+        assert_eq!(lines[6], "  - lead: APPROVED");
         assert_eq!(
-            lines[16], "  - author: \"Needs a test <!-- unfinished\"",
+            lines[7], "  - author: \"Needs a test <!-- unfinished\"",
             "an unclosed comment marker hides nothing"
         );
-        assert_eq!(lines[17], "- The branch now conflicts with main.");
+        assert_eq!(lines[8], "- The branch now conflicts with main.");
         assert_eq!(lines.last(), Some(&KEEP_WATCHING));
         assert!(!text.contains("inbox"));
         assert_eq!(
