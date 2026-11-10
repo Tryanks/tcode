@@ -525,42 +525,6 @@ fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
     real_host::stop(runtime, &mux);
 }
 
-/// The heartbeat is the transport's own line, never charged to the outbox.
-/// Crediting it on send underflowed the outbox count at the first ping and
-/// killed the writer, so a connection that had been pinged silently stopped
-/// carrying commands while still reporting `Connected`. A network change
-/// probes the link, which pings at once rather than after the idle window.
-#[test]
-fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
-    let host_dir = TestDir::new("idle-host");
-    let (runtime, mux) = running_host(&host_dir);
-    let host = start_host(mux.clone(), &host_dir, None);
-    let dir = TestDir::new("idle-device");
-    let phone = device(&dir, "phone");
-    let minted = host.new_invitation();
-    let paired = pair(&minted.invite, &phone).unwrap();
-    let client = tcode_traverse::connect(&paired, &phone);
-    wait_state(&client, syncing_directly);
-    client.to_host.send_blocking(subscribe(1)).unwrap();
-    recv_type(&client, "ack", Some(1));
-    wait_state(&client, connected_directly);
-
-    phone.network_changed();
-    recv_type(&client, "query_result", Some(0));
-    while let Ok(state) = client.state.try_recv() {
-        assert!(
-            connected_directly(&state),
-            "the idle link stayed up: {state:?}"
-        );
-    }
-    let ping = json!({"id": 2, "payload": {"type": "query", "content": {"type": "ping"}}});
-    client.to_host.send_blocking(ping.to_string()).unwrap();
-    recv_type(&client, "query_result", Some(2));
-    assert_eq!(client.state.try_recv().ok(), None);
-    host.shutdown();
-    real_host::stop(runtime, &mux);
-}
-
 /// Leaving the app parks its link: the connection closes and so does the
 /// device's endpoint, home relay and all, and the machine sees the device
 /// gone. The return binds a new endpoint with the same key, dials again

@@ -24,7 +24,6 @@ use iroh::{
 };
 use tcode_client::{
     ConnectionFailure, ConnectionState,
-    heartbeat::{Heartbeat, LIVENESS_REPLY_MS, NATIVE_IDLE_MS, Tick},
     host::{LiveHost, StreamTarget, Transport, Tunnel, TunnelFuture, TunnelOpener},
     outgoing::{Outgoing, OutgoingReceiver, subscription_key},
     pairing::{MAX_ADDRS, PairInvite, PairedHost},
@@ -428,8 +427,8 @@ impl DeviceIdentity {
         client.lookups.sources.lock().unwrap().clear();
     }
 
-    /// The device's network changed: rebind paths and probe every live
-    /// transport at once instead of waiting for the idle timer.
+    /// The device's network changed: rebind paths, and redial every
+    /// transport waiting out a backoff at once.
     pub fn network_changed(&self) {
         let Some(client) = self.open_client() else {
             return;
@@ -1181,22 +1180,6 @@ struct Lost {
     wake: Option<Wake>,
 }
 
-/// ID zero is reserved for transport probes; `HostLink` starts at one.
-fn ping_line() -> String {
-    tcode_protocol::encode_line(&tcode_protocol::ClientMessage {
-        principal: None,
-        key: None,
-        id: 0,
-        payload: tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Ping),
-    })
-    .expect("heartbeat serialization")
-}
-
-fn now_ms() -> u64 {
-    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_millis() as u64
-}
-
 async fn relay_connected(
     established: Established,
     outgoing: &Arc<OutgoingReceiver>,
@@ -1231,15 +1214,12 @@ async fn relay_connected(
     let writer_outgoing = outgoing.clone();
     let writer_task = tokio::spawn(async move {
         let mut unsent = Vec::new();
-        let ping = ping_line();
         while let Ok(line) = wire_rx.recv().await {
             if send.write_line(&line).await.is_err() {
                 unsent.push(line);
                 break;
             }
-            // The heartbeat is the transport's own line: the outbox never
-            // charged for it, so it must not be credited either.
-            if line != ping && subscription_key(&line).is_none() {
+            if subscription_key(&line).is_none() {
                 writer_outgoing.sent(&line);
             }
         }
@@ -1253,30 +1233,9 @@ async fn relay_connected(
             let _ = wire_tx.send(line).await;
         }
     }
-    let mut heartbeat = Heartbeat::with_idle(now_ms(), NATIVE_IDLE_MS);
     let mut healthy = false;
     let mut connected = false;
     let lost = loop {
-        let wait = match heartbeat.tick(now_ms()) {
-            Tick::Wait(ms) => ms,
-            Tick::Ping => {
-                if wire_tx.send(ping_line()).await.is_err() {
-                    break Lost {
-                        failure: ConnectionFailure::Unreachable(None),
-                        healthy,
-                        wake: None,
-                    };
-                }
-                LIVENESS_REPLY_MS
-            }
-            Tick::Lost => {
-                break Lost {
-                    failure: ConnectionFailure::Timeout,
-                    healthy,
-                    wake: None,
-                };
-            }
-        };
         tokio::select! {
             line = outgoing.recv() => match line {
                 Ok(line) => {
@@ -1288,7 +1247,6 @@ async fn relay_connected(
             },
             line = lines_rx.recv() => match line {
                 Ok(line) => {
-                    heartbeat.received(now_ms());
                     healthy = true;
                     if !connected {
                         connected = true;
@@ -1309,15 +1267,12 @@ async fn relay_connected(
             reason = connection.closed() => {
                 break Lost { failure: close_failure(&reason), healthy, wake: None };
             }
-            _ = tokio::time::sleep(Duration::from_millis(wait)) => {}
             wake = outgoing.wake.recv() => match wake {
                 Ok(wake @ (Wake::Reconnect | Wake::Park)) => {
                     break Lost { failure: ConnectionFailure::Unreachable(None), healthy, wake: Some(wake) };
                 }
-                // Probe now: the next tick pings.
-                Ok(Wake::Probe) => {
-                    heartbeat.probe(now_ms());
-                }
+                // QUIC keeps a live link's paths and ends it when they die.
+                Ok(Wake::Probe) => {}
                 Err(_) => break Lost { failure: ConnectionFailure::HostClosed, healthy, wake: None },
             },
         }
