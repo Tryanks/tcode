@@ -218,8 +218,8 @@ pub(super) fn actor(user: &Value) -> Option<PullRequestActor> {
     })
 }
 
-/// The pull request from one read; `checks` are the head's build statuses. Bitbucket keeps no
-/// closing time, so a closed or merged pull request's last update stands for it.
+/// The pull request from one read; `checks` are the head's build statuses. The pull request
+/// object holds no time it was closed or merged, so neither is known.
 pub(super) fn snapshot(
     pr: &Value,
     checks: &[PullRequestCheck],
@@ -227,7 +227,6 @@ pub(super) fn snapshot(
 ) -> Option<PullRequestSnapshot> {
     let state = state(pr)?;
     let updated_at = text(pr, "updated_on")?;
-    let ended_at = (state != PullRequestState::Open).then(|| updated_at.clone());
     Some(PullRequestSnapshot {
         state,
         title: text(pr, "title")?,
@@ -236,8 +235,8 @@ pub(super) fn snapshot(
         is_draft: pr["draft"].as_bool().unwrap_or(false),
         updated_at,
         synced_at,
-        closed_at: ended_at.clone(),
-        merged_at: ended_at.filter(|_| state == PullRequestState::Merged),
+        closed_at: None,
+        merged_at: None,
         author: login(&pr["author"]).map(|login| PullRequestAuthor {
             login,
             avatar_url: text(&pr["author"]["links"]["avatar"], "href"),
