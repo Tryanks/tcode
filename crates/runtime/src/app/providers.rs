@@ -367,13 +367,12 @@ impl AppState {
                         return;
                     }
                     match result {
-                        Ok(models) if !models.is_empty() => {
+                        Ok(models) => {
                             if let Err(err) = store.save_models(provider, &models) {
                                 log::warn!("failed to persist {provider:?} model catalog: {err}");
                             }
                             state.providers.model_catalogs.insert(provider, models);
                         }
-                        Ok(_) => log::info!("{provider:?} returned an empty model catalog"),
                         Err(err) => log::warn!("failed to list {provider:?} models: {err}"),
                     }
                 });
