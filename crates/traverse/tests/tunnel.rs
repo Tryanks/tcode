@@ -227,8 +227,10 @@ fn closed_ports_answer_connect_failed_and_a_reconnecting_attachment_fails_fast()
         reserved.local_addr().unwrap().port()
     };
     let error = open(&device, "127.0.0.1", port).unwrap_err();
+    let refused = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap_err();
+    assert_eq!(refused.kind(), io::ErrorKind::ConnectionRefused);
     assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
-    assert_eq!(error.to_string(), "connection refused");
+    assert_eq!(error.to_string(), refused.to_string());
 
     drop(machine);
     wait_reconnecting(&device.transport);

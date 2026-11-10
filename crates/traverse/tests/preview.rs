@@ -358,6 +358,13 @@ fn websocket_upgrades_pass_through_an_absolute_form_request() {
     origin.join().unwrap();
 }
 
+/// What this system says when a dial to the closed `port` is refused.
+fn refusal(port: u16) -> String {
+    let error = TcpStream::connect(("127.0.0.1", port)).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+    error.to_string()
+}
+
 #[test]
 fn unreachable_targets_answer_502_from_the_proxy() {
     let machine = Machine::start();
@@ -374,9 +381,10 @@ fn unreachable_targets_answer_502_from_the_proxy() {
     let mut response = String::new();
     browser.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 502 "), "{response}");
+    let refused = refusal(port);
     assert!(
         response.ends_with(&format!(
-            "Preview Host could not connect to 127.0.0.1:{port}: connection refused"
+            "Preview Host could not connect to 127.0.0.1:{port}: {refused}"
         )),
         "{response}"
     );
@@ -455,8 +463,11 @@ fn mapped_loopback_connections_become_tunnels_and_close_with_the_slot() {
     assert_eq!(
         routes.error().as_deref(),
         Some(
-            format!("Preview Host could not connect to 127.0.0.1:{closed}: connection refused")
-                .as_str()
+            format!(
+                "Preview Host could not connect to 127.0.0.1:{closed}: {}",
+                refusal(closed)
+            )
+            .as_str()
         )
     );
 

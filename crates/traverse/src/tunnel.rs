@@ -32,7 +32,7 @@ pub(crate) async fn serve(
     .await;
     let socket = match dialed {
         Ok(Ok(socket)) => socket,
-        Ok(Err(error)) => return connect_failed(send, &dial_failure(&error)).await,
+        Ok(Err(error)) => return connect_failed(send, &error.to_string()).await,
         Err(_) => return connect_failed(send, "timed out").await,
     };
     let _ = socket.set_nodelay(true);
@@ -64,27 +64,6 @@ async fn connect_failed(mut send: SendStream, reason: &str) -> io::Result<()> {
     )
     .await?;
     send.finish().map_err(io::Error::other)
-}
-
-/// A short reason the device can show; the OS message may name interfaces
-/// or addresses the device has no use for.
-fn dial_failure(error: &io::Error) -> String {
-    match error.kind() {
-        io::ErrorKind::ConnectionRefused => "connection refused".into(),
-        io::ErrorKind::TimedOut => "timed out".into(),
-        io::ErrorKind::NotFound | io::ErrorKind::InvalidInput => "unknown host".into(),
-        io::ErrorKind::HostUnreachable | io::ErrorKind::NetworkUnreachable => "unreachable".into(),
-        _ => {
-            let message = error.to_string();
-            message
-                .split(" (os error")
-                .next()
-                .unwrap_or(&message)
-                .chars()
-                .take(80)
-                .collect()
-        }
-    }
 }
 
 async fn pump<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
