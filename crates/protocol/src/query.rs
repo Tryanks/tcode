@@ -309,8 +309,6 @@ pub struct SessionSearchHit {
 pub enum GitDiffScope {
     WorkingTree,
     Branch,
-    #[serde(other)]
-    Unknown,
 }
 
 /// Full base- and new-side text for one changed file.
@@ -389,8 +387,6 @@ pub enum SourceTool {
     T3Code,
     CodexCli,
     CodexDesktop,
-    #[serde(other)]
-    Unknown,
 }
 
 impl SourceTool {
@@ -402,7 +398,6 @@ impl SourceTool {
             Self::T3Code => "T3 Code",
             Self::CodexCli => "Codex CLI",
             Self::CodexDesktop => "Codex Desktop",
-            Self::Unknown => "Unknown",
         }
     }
 }

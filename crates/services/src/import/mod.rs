@@ -116,8 +116,7 @@ pub fn import_thread(
         SourceTool::ClaudeCode
         | SourceTool::ClaudeDesktop
         | SourceTool::ClaudeAgentSdk
-        | SourceTool::T3Code
-        | SourceTool::Unknown => claude::convert(&thread.file, &thread.external_id),
+        | SourceTool::T3Code => claude::convert(&thread.file, &thread.external_id),
         SourceTool::CodexCli | SourceTool::CodexDesktop => {
             codex::convert(&thread.file, &thread.external_id)
         }

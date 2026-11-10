@@ -320,6 +320,7 @@ pub use wire::{
 // tcode/group/1 no longer has the full rejection. RuntimeError gains
 // file_unreadable. GitStatusStatus carries git's error. HostProblem gains
 // cli_failed. PullRequestStack's url may be absent (GitHub gives none).
+// GitDiffScope and SourceTool have no unknown value.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

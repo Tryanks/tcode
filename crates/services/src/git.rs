@@ -206,7 +206,6 @@ fn load_file_texts(
                         .as_deref()
                         .and_then(|path| read_git_text(cwd, "HEAD", path)),
                 },
-                GitDiffScope::Unknown => GitFileText::default(),
             }
         })
         .collect()
@@ -285,14 +284,6 @@ pub fn load_git_diff(
             let args = branch_diff_args(&merge_base, ignore_whitespace);
             base_revision = Some(merge_base);
             args
-        }
-        GitDiffScope::Unknown => {
-            return GitDiffResult {
-                error: Some("unknown git diff scope".into()),
-                branches,
-                default_base,
-                ..GitDiffResult::default()
-            };
         }
     };
     let output = match git_output(cwd, &args) {

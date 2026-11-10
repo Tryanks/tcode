@@ -1305,17 +1305,6 @@ fn dispatch_query(
             base,
             ignore_whitespace,
         } => {
-            if !matches!(
-                scope,
-                tcode_protocol::GitDiffScope::WorkingTree | tcode_protocol::GitDiffScope::Branch
-            ) {
-                return cx.spawn_background(async {
-                    Err(ProtocolError {
-                        code: "unsupported_scope".into(),
-                        message: "unknown git diff scope".into(),
-                    })
-                });
-            }
             let task = cx.unblock(move || {
                 tcode_services::git::load_git_diff(&cwd, scope, base.as_deref(), ignore_whitespace)
             });

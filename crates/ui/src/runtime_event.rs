@@ -107,7 +107,6 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::ProfileConfig { error } => {
                     crate::tr!("errors.profile_config", error = error).into_owned()
                 }
-                _ => format!("Unknown runtime error: {error:?}"),
             };
             (RuntimeEventSeverity::Error, message)
         }
@@ -175,7 +174,6 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                     )
                     .into_owned(),
                 },
-                _ => format!("Unknown runtime notice: {notice:?}"),
             };
             (severity, message)
         }
