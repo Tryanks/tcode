@@ -721,10 +721,10 @@ impl SessionActor for OpenCodeActor {
         item: Result<Transport, smol::channel::RecvError>,
     ) -> TransportOutcome {
         match item {
-            Ok(Transport::Event(event)) => {
-                self.handle_event(&event).await;
-                TransportOutcome::Continue
-            }
+            Ok(Transport::Event(event)) => match self.handle_event(&event).await {
+                Ok(()) => TransportOutcome::Continue,
+                Err(err) => TransportOutcome::Fatal(err),
+            },
             Ok(Transport::ShellOutput { item_id, text }) => {
                 let events = self.mapper.shell_output(&item_id, text);
                 for event in events {
@@ -1145,7 +1145,7 @@ impl OpenCodeActor {
             .map_err(rewind_failure)
     }
 
-    async fn handle_event(&mut self, event: &Value) {
+    async fn handle_event(&mut self, event: &Value) -> Result<(), String> {
         let data = &event["data"];
         match event["type"].as_str().unwrap_or_default() {
             "permission.asked" => self.permission_asked(data).await,
@@ -1244,7 +1244,7 @@ impl OpenCodeActor {
             }
             _ => {}
         }
-        let mapped = self.mapper.on_event(event);
+        let mapped = self.mapper.on_event(event)?;
         let turn_completed = mapped
             .events
             .iter()
@@ -1259,6 +1259,7 @@ impl OpenCodeActor {
             let root = self.mapper.root.clone();
             self.cancel_forms(Some(&root)).await;
         }
+        Ok(())
     }
 
     async fn perform(&mut self, action: Action) {
@@ -1284,24 +1285,30 @@ impl OpenCodeActor {
                     stop.store(true, Ordering::Relaxed);
                 }
             }
-            Action::FetchDiff => match self.http.get(&self.session_path("diff")) {
-                Ok(diff) => {
-                    self.events
-                        .emit(AgentEvent::TurnChangesUpdated {
-                            turn_id: self.mapper.turn_id(),
-                            changes: file_diffs(&diff["data"]),
-                            completeness: ChangeCompleteness::Exact,
-                        })
-                        .await;
+            Action::FetchDiff => {
+                // A step ends only inside an execution, which names a turn.
+                let Some(turn_id) = self.mapper.turn_id() else {
+                    return;
+                };
+                match self.http.get(&self.session_path("diff")) {
+                    Ok(diff) => {
+                        self.events
+                            .emit(AgentEvent::TurnChangesUpdated {
+                                turn_id,
+                                changes: file_diffs(&diff["data"]),
+                                completeness: ChangeCompleteness::Exact,
+                            })
+                            .await;
+                    }
+                    Err(err) => {
+                        self.events
+                            .emit(AgentEvent::Warning {
+                                message: format!("failed to fetch OpenCode turn diff: {err}"),
+                            })
+                            .await;
+                    }
                 }
-                Err(err) => {
-                    self.events
-                        .emit(AgentEvent::Warning {
-                            message: format!("failed to fetch OpenCode turn diff: {err}"),
-                        })
-                        .await;
-                }
-            },
+            }
         }
     }
 
@@ -1747,7 +1754,6 @@ struct Mapper {
     context_windows: HashMap<String, u64>,
     served_model: Option<String>,
     context_window: Option<u64>,
-    turn_counter: u64,
     active_turn: Option<String>,
     /// The root's inbox items not yet delivered → whether the item is a move.
     undelivered: HashMap<String, bool>,
@@ -1773,7 +1779,6 @@ impl Mapper {
             context_windows,
             served_model: None,
             context_window: None,
-            turn_counter: 0,
             active_turn: None,
             undelivered: HashMap::new(),
             held_turn: None,
@@ -1808,14 +1813,11 @@ impl Mapper {
         Some(AgentEvent::TurnStarted { turn_id })
     }
 
-    fn turn_id(&self) -> String {
-        self.active_turn
-            .clone()
-            .or_else(|| self.last_turn.clone())
-            .unwrap_or_else(|| "opencode-turn".into())
+    fn turn_id(&self) -> Option<String> {
+        self.active_turn.clone().or_else(|| self.last_turn.clone())
     }
 
-    fn on_event(&mut self, event: &Value) -> Mapped {
+    fn on_event(&mut self, event: &Value) -> Result<Mapped, String> {
         let kind = event["type"].as_str().unwrap_or_default();
         let data = &event["data"];
         let mut mapped = Mapped::default();
@@ -1826,13 +1828,13 @@ impl Mapper {
             {
                 self.children.insert(session_id.to_owned(), None);
             }
-            return mapped;
+            return Ok(mapped);
         }
         let Some(session_id) = data["sessionID"].as_str() else {
-            return mapped;
+            return Ok(mapped);
         };
         let Some(parent_item_id) = self.scope(session_id) else {
-            return mapped;
+            return Ok(mapped);
         };
         let root = session_id == self.root;
         let message_id = data["assistantMessageID"].as_str().unwrap_or_default();
@@ -1857,10 +1859,9 @@ impl Mapper {
                 if self.active_turn.is_none() && self.held_turn.is_none() {
                     // The event's id, unique across the session's servers, names
                     // the turn: a counter restarts with every server.
-                    let turn_id = event["id"].as_str().map(str::to_owned).unwrap_or_else(|| {
-                        self.turn_counter += 1;
-                        format!("opencode-turn-{}", self.turn_counter)
-                    });
+                    let Some(turn_id) = event["id"].as_str().map(str::to_owned) else {
+                        return Err("OpenCode started an execution without an event id".into());
+                    };
                     self.turn_usage = None;
                     self.turn_failed = false;
                     // A move delivered on its own runs an execution with no
@@ -2057,7 +2058,7 @@ impl Mapper {
                 let item_id = tool_item_id(message_id, data);
                 let metadata = &data["metadata"];
                 let Some(tool) = self.tools.get_mut(&item_id) else {
-                    return mapped;
+                    return Ok(mapped);
                 };
                 if tool.name == "shell"
                     && let Some(shell_id) = metadata["shellID"].as_str()
@@ -2084,7 +2085,7 @@ impl Mapper {
                     item_id: item_id.clone(),
                 });
                 let Some(tool) = self.tools.get_mut(&item_id) else {
-                    return mapped;
+                    return Ok(mapped);
                 };
                 let success = kind == "session.tool.success";
                 if success
@@ -2101,7 +2102,7 @@ impl Mapper {
                         mapped.events.push(AgentEvent::ItemUpdated(item));
                         mapped.events.push(backgrounded);
                     }
-                    return mapped;
+                    return Ok(mapped);
                 }
                 if tool.name == "todowrite" {
                     let todos = data
@@ -2115,7 +2116,7 @@ impl Mapper {
                         });
                     }
                     self.tools.remove(&item_id);
-                    return mapped;
+                    return Ok(mapped);
                 }
                 let status = if success {
                     ItemStatus::Completed
@@ -2152,7 +2153,7 @@ impl Mapper {
             }),
             _ => {}
         }
-        mapped
+        Ok(mapped)
     }
 
     fn shell_output(&mut self, item_id: &str, text: String) -> Vec<AgentEvent> {
@@ -4434,7 +4435,7 @@ cat > /dev/null
             let mut mapper = Mapper::new("ses_root".into(), Vec::new(), HashMap::new());
             frames(fixture)
                 .iter()
-                .flat_map(|frame| mapper.on_event(frame).events)
+                .flat_map(|frame| mapper.on_event(frame).unwrap().events)
                 .filter_map(|event| match event {
                     AgentEvent::TurnStarted { turn_id } => Some(turn_id),
                     _ => None,
