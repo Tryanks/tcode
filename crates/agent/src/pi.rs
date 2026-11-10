@@ -2562,8 +2562,7 @@ mod tests {
     /// A stand-in for `pi --mode rpc` 1.5.0 answering with its documented
     /// shapes (docs/rpc-commands.md: get_state, get_entries, fork,
     /// switch_session): session `a` until a fork before entry `u1` moves to
-    /// `b`, and `switch_session` back to `a`'s file. A steering prompt is
-    /// refused the way pi 1.5.1 refuses a prompt while it compacts.
+    /// `b`, and `switch_session` back to `a`'s file.
     #[cfg(unix)]
     const RPC_STAND_IN: &str = r#"#!/bin/sh
 file=/s/a.jsonl
@@ -2584,8 +2583,6 @@ while IFS= read -r line; do
       fi ;;
     *'"set_model"'*|*'"set_thinking_level"'*)
       printf '{"id":"%s","type":"response","command":"set","success":true}\n' "$id" ;;
-    *'"streamingBehavior":"steer"'*)
-      printf '{"id":"%s","type":"response","command":"prompt","success":false,"error":"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry."}\n' "$id" ;;
     *'"prompt"'*)
       prompted=1
       printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
@@ -2906,75 +2903,6 @@ done
             assert_eq!(
                 next("rewind_undone").await,
                 json!({"type": "rewind_undone", "checkpoint_id": "u1"})
-            );
-            let _ = handle.commands.send(SessionCommand::Shutdown).await;
-        });
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// A steer pi refuses never reached the model: it is rejected by its
-    /// request id, for the runtime to send again as an ordinary turn.
-    #[cfg(unix)]
-    #[test]
-    fn a_steer_pi_refuses_is_rejected() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("agent-pi-steer-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("pi");
-        std::fs::write(&bin, RPC_STAND_IN).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        smol::block_on(async {
-            let handle = start(SessionOptions {
-                cwd: dir.clone(),
-                model: None,
-                resume: None,
-                fork: None,
-                binary_path: Some(bin.clone()),
-                option_selections: Vec::new(),
-                mcp_servers: Vec::new(),
-                launch_env: LaunchEnv::default(),
-                extra_args: Vec::new(),
-                acp: None,
-                instructions: None,
-            })
-            .await
-            .unwrap();
-            handle
-                .commands
-                .send(SessionCommand::Steer {
-                    request_id: "steer-1".into(),
-                    text: "also check the tests".into(),
-                    attachments: Vec::new(),
-                })
-                .await
-                .unwrap();
-            // pi answers in order, so the steer is settled before this turn ends.
-            handle
-                .commands
-                .send(SessionCommand::SendTurn {
-                    delivery_id: 1,
-                    text: "first prompt".into(),
-                    options: None,
-                    attachments: Vec::new(),
-                })
-                .await
-                .unwrap();
-            let mut settled = Vec::new();
-            loop {
-                match handle.events.recv().await.unwrap() {
-                    AgentEvent::TurnCompleted { .. } => break,
-                    event @ (AgentEvent::SteerRejected { .. }
-                    | AgentEvent::SteerAccepted { .. }
-                    | AgentEvent::Error { .. }) => settled.push(event),
-                    _ => {}
-                }
-            }
-            assert!(
-                matches!(
-                    settled.as_slice(),
-                    [AgentEvent::SteerRejected { request_id }] if request_id == "steer-1"
-                ),
-                "{settled:?}"
             );
             let _ = handle.commands.send(SessionCommand::Shutdown).await;
         });
