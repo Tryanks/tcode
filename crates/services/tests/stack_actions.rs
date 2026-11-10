@@ -56,6 +56,66 @@ impl Remote {
             &root,
             &["init", "--quiet", "--bare", path.to_str().unwrap()],
         );
+        // One `git fast-import` writes the history: `main`'s first commit, each layer on the one
+        // below it, then `main` moved ahead.
+        let data = |text: &str| format!("data {}\n{text}\n", text.len());
+        let mut stream = String::new();
+        let mut commit = |mark: usize,
+                          branch: &str,
+                          from: Option<usize>,
+                          file: &str,
+                          text: &str,
+                          message: &str| {
+            stream.push_str(&format!(
+                "commit refs/heads/{branch}\nmark :{mark}\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n{}",
+                data(message)
+            ));
+            if let Some(from) = from {
+                stream.push_str(&format!("from :{from}\n"));
+            }
+            stream.push_str(&format!("M 100644 inline {file}\n{}\n", data(text)));
+        };
+        commit(1, "main", None, "README.md", "start\n", "Initial");
+        commit(
+            2,
+            "layer-1",
+            Some(1),
+            "layer-1.txt",
+            "one\n",
+            "layer-1: add",
+        );
+        commit(
+            3,
+            "layer-2",
+            Some(2),
+            "layer-2.txt",
+            "one\n",
+            "layer-2: add",
+        );
+        commit(
+            4,
+            "layer-3",
+            Some(3),
+            "layer-3.txt",
+            "one\n",
+            "layer-3: add",
+        );
+        commit(
+            5,
+            "main",
+            Some(1),
+            "README.md",
+            "main moved ahead\n",
+            "Docs",
+        );
+        let mut import = tcode_services::process::command("git")
+            .current_dir(&path)
+            .args(["fast-import", "--quiet"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(&mut import.stdin.take().unwrap(), stream.as_bytes()).unwrap();
+        assert!(import.wait().unwrap().success());
         git(
             &root,
             &[
@@ -65,30 +125,11 @@ impl Remote {
                 work.to_str().unwrap(),
             ],
         );
-        let remote = Self {
+        Self {
             _root: tempdir::Dir(root),
             path,
             work,
-        };
-        remote.commit("README.md", "start\n", "Initial");
-        git(&remote.work, &["push", "--quiet", "origin", "HEAD:main"]);
-        for (layer, parent) in [
-            ("layer-1", "main"),
-            ("layer-2", "layer-1"),
-            ("layer-3", "layer-2"),
-        ] {
-            git(&remote.work, &["switch", "--quiet", "-c", layer, parent]);
-            remote.commit(&format!("{layer}.txt"), "one\n", &format!("{layer}: add"));
         }
-        git(&remote.work, &["switch", "--quiet", "main"]);
-        remote.commit("README.md", "main moved ahead\n", "Docs");
-        git(
-            &remote.work,
-            &[
-                "push", "--quiet", "origin", "main", "layer-1", "layer-2", "layer-3",
-            ],
-        );
-        remote
     }
 
     fn commit(&self, file: &str, text: &str, message: &str) {
