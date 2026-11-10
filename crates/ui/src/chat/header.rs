@@ -1631,10 +1631,13 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The git controls are offered only for a thread's checkout.
+        let Some(session_id) = self.session_id.clone() else {
+            return;
+        };
         if action.opens_commit_dialog() {
-            self.open_commit_dialog(action, window, cx);
+            self.open_commit_dialog(session_id, action, window, cx);
         } else {
-            let session_id = self.session_id.clone().unwrap_or_default();
             self.workspace_store.update(cx, |store, _cx| {
                 store.run_git_action_for(session_id, action, None, None, None)
             });
@@ -1644,11 +1647,11 @@ impl ChatView {
     /// Open the commit dialog for `action` (Commit or Commit & push).
     fn open_commit_dialog(
         &mut self,
+        session_id: String,
         action: GitAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let session_id = self.session_id.clone().unwrap_or_default();
         let dialog = cx.new(|cx| {
             CommitDialog::new(self.workspace_store.clone(), session_id, action, window, cx)
         });
@@ -1819,17 +1822,13 @@ fn render_commit_footer(
     cx: &mut App,
 ) -> AnyElement {
     let confirm_label = dialog.update(cx, |d, cx| d.confirm_label(cx));
-    let cancel_dialog = dialog.clone();
     let confirm_dialog = dialog.clone();
     crate::overlay::DialogActions::new()
         .child(
             Button::new("commit-cancel")
                 .ghost()
                 .label(crate::tr!("git.commit.cancel"))
-                .on_click(move |_, window, cx| {
-                    let _ = &cancel_dialog;
-                    window.close_dialog(cx);
-                }),
+                .on_click(move |_, window, cx| window.close_dialog(cx)),
         )
         .child(
             Button::new("commit-confirm")

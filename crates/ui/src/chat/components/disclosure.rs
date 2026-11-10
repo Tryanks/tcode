@@ -40,7 +40,7 @@ pub(crate) fn notice_label(notice: &HostNotice) -> String {
     }
 }
 
-pub(crate) fn callback_label(callback: &OrchestrateCallback) -> String {
+fn callback_label(callback: &OrchestrateCallback) -> String {
     format!(
         "{} {}",
         one_line(&callback.title),

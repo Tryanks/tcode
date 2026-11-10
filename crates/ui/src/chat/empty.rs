@@ -232,7 +232,11 @@ impl ChatView {
     ) -> AnyElement {
         let seed = self.slogan_seed();
         let project = self.location(cx);
-        let quick = project.as_ref().is_none_or(|project| project.quick_chat);
+        let named = project
+            .as_ref()
+            .filter(|project| !project.quick_chat)
+            .map(|project| project.name.clone());
+        let quick = named.is_none();
         let store = self.workspace_store.read(cx);
         let host = store.host_title();
         let image_host = store.image_host();
@@ -272,60 +276,57 @@ impl ChatView {
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(cx.theme().foreground)
             .debug_selector(|| "new-thread-title".into());
-        let title = if quick {
-            title
+        let title = match named {
+            None => title
                 .child(crate::tr!(crate::i18n::variant_key(
                     "chat.slogan_quick",
                     seed
                 )))
-                .into_any_element()
-        } else {
-            let sentence =
-                crate::tr!(crate::i18n::variant_key("chat.slogan_project", seed)).into_owned();
-            let (before, after) = sentence
-                .split_once("%{project}")
-                .map(|(before, after)| (before.to_owned(), after.to_owned()))
-                .unwrap_or((sentence.clone(), String::new()));
-            let name = project
-                .as_ref()
-                .map(|project| project.name.clone())
-                .unwrap_or_default();
-            h_flex()
-                .flex_wrap()
-                .justify_center()
-                .child(title.child(before.trim_end().to_owned()))
-                .child(
-                    crate::material::accessible_clickable(
+                .into_any_element(),
+            Some(name) => {
+                let sentence =
+                    crate::tr!(crate::i18n::variant_key("chat.slogan_project", seed)).into_owned();
+                let (before, after) = sentence
+                    .split_once("%{project}")
+                    .map(|(before, after)| (before.to_owned(), after.to_owned()))
+                    .unwrap_or((sentence.clone(), String::new()));
+                h_flex()
+                    .flex_wrap()
+                    .justify_center()
+                    .child(title.child(before.trim_end().to_owned()))
+                    .child(
+                        crate::material::accessible_clickable(
+                            div()
+                                .text_token(&cx.theme().tokens.typography.xl)
+                                .text_size(px(26.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(accent)
+                                .cursor_pointer()
+                                .when(!before.is_empty() && before.ends_with(' '), |name| {
+                                    name.ml(px(7.))
+                                })
+                                .when(!after.is_empty() && after.starts_with(' '), |name| {
+                                    name.mr(px(7.))
+                                })
+                                .debug_selector(|| "new-thread-project".into())
+                                .child(name),
+                            "new-thread-project",
+                            Role::Button,
+                            picker_label.clone(),
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.open_project_picker(cx))),
+                    )
+                    .child(
                         div()
                             .text_token(&cx.theme().tokens.typography.xl)
                             .text_size(px(26.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(accent)
-                            .cursor_pointer()
-                            .when(!before.is_empty() && before.ends_with(' '), |name| {
-                                name.ml(px(7.))
-                            })
-                            .when(!after.is_empty() && after.starts_with(' '), |name| {
-                                name.mr(px(7.))
-                            })
-                            .debug_selector(|| "new-thread-project".into())
-                            .child(name),
-                        "new-thread-project",
-                        Role::Button,
-                        picker_label.clone(),
-                        cx,
+                            .text_color(cx.theme().foreground)
+                            .child(after.trim_start().to_owned()),
                     )
-                    .on_click(cx.listener(|this, _, _, cx| this.open_project_picker(cx))),
-                )
-                .child(
-                    div()
-                        .text_token(&cx.theme().tokens.typography.xl)
-                        .text_size(px(26.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(cx.theme().foreground)
-                        .child(after.trim_start().to_owned()),
-                )
-                .into_any_element()
+                    .into_any_element()
+            }
         };
 
         // The host, and for a quick thread what kind of place it is, which
