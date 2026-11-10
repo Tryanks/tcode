@@ -984,6 +984,32 @@ impl ChatView {
         // The right-side cluster (Open split-button + panel toggles) shows for
         // any active thread, including a draft.
         let show_actions = is_draft || title.is_some();
+        // The title follows where the thread is: its project, or the host's
+        // quick threads, with the project's icon.
+        let crumb = show_actions
+            .then(|| self.location(cx))
+            .flatten()
+            .map(|project| {
+                h_flex()
+                    .flex_shrink_0()
+                    .max_w(px(220.))
+                    .min_w_0()
+                    .gap_1p5()
+                    .items_center()
+                    .debug_selector(|| "chat-crumb".into())
+                    .child(crate::project_icon::artwork(
+                        self.workspace_store.read(cx).image_host(),
+                        &project,
+                        16.,
+                    ))
+                    .child(
+                        crate::material::bar_title(crate::project_icon::label(&project), cx)
+                            .flex_initial()
+                            .min_w_0()
+                            .text_color(foreground),
+                    )
+                    .child(div().flex_none().text_color(muted).child("/"))
+            });
         let panel = self
             .workspace_store
             .read(cx)
@@ -1072,6 +1098,7 @@ impl ChatView {
                     .gap_2()
                     .items_center()
                     .relative()
+                    .children(crumb)
                     .child(
                         // Sized by its text, not `bar_title`'s zero basis, so the title
                         // runs its full length and the host follows it.

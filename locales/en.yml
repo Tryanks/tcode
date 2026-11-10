@@ -87,6 +87,12 @@ chat:
   start_hub_title: "Start a new thread in"
   start_hub_title_on: "Start a new thread on %{host} in"
   palette_hint: "or press %{shortcut} to search"
+  slogan_project:
+    "1": "Ready to build a SOTA in %{project}?"
+  slogan_quick:
+    "1": "What's next?"
+  continue_recent: "Continue a recent thread"
+  choose_project: "Choose a project"
   scroll_end: "Scroll to end"
   rail_plan: "Plan"
   rail_agents: "Subagents"
@@ -1032,6 +1038,9 @@ palette:
   navigate: "↑↓ Navigate"
   select: "Enter Select"
   close: "Esc Close"
+  projects_placeholder: "Search projects…"
+  projects_results: "Projects"
+  recent_first: "Recent first"
 composer:
   stop_unanswered: "%{harness} is not answering the stop"
   force_terminate: "Force terminate"
