@@ -122,7 +122,7 @@ fn mount_lead_scrolled(
         store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx) == Some(24)
     });
     cx.simulate_resize(size(px(WIDTH), px(852.)));
-    settle_panes(cx);
+    crate::test_frames::draw_settled(cx);
     let chat = shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().chat(cx));
     let viewport = chat
         .read_with(cx, |chat, _| chat.timeline())
@@ -175,7 +175,7 @@ fn open_agent_served(
     serve_agent(host, id);
     let id = id.to_owned();
     await_restore_update(shell, cx, move |store, _| store.timeline_settled_for(&id));
-    settle_panes(cx);
+    crate::test_frames::draw_settled(cx);
 }
 
 fn focused(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> Option<String> {
@@ -291,14 +291,14 @@ fn a_lead_is_held_under_its_agent_until_the_reader_goes_elsewhere(cx: &mut TestA
     await_restore_update(&shell, cx, |store, _| {
         store.timeline_settled_for("thread-2")
     });
-    settle_panes(cx);
+    crate::test_frames::draw_settled(cx);
     store.read_with(cx, |store, _| {
         assert!(!store.is_thread_open("thread-1"));
         assert!(!store.is_thread_open("agent-1"));
     });
     let back = cx.debug_bounds("compact-back").expect("the compact Back");
     cx.simulate_click(back.center(), gpui::Modifiers::default());
-    settle_panes(cx);
+    crate::test_frames::draw_settled(cx);
     let state = shell.read_with(cx, |shell, _| shell.window_state());
     assert_eq!(
         state.read_with(cx, |state, _| state.destination()),
@@ -313,7 +313,7 @@ fn an_agent_opened_from_the_panels_stands_on_its_lead(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx, reading) = mount_lead_scrolled(cx);
     shell.update(cx, |shell, cx| shell.go(Destination::Panel, cx));
-    settle_panes(cx);
+    crate::test_frames::draw_settled(cx);
     open_agent_served(&shell, &host, "agent-1", cx);
     assert!(cx.debug_bounds(agent_bubble("agent-1")).is_some());
 
@@ -343,7 +343,7 @@ fn an_agent_not_opened_from_its_lead_has_it_beneath(cx: &mut TestAppContext) {
     let (shell, host, cx, _) = mount_lead_scrolled(cx);
     let back = cx.debug_bounds("compact-back").expect("the compact Back");
     cx.simulate_click(back.center(), gpui::Modifiers::default());
-    settle_panes(cx);
+    crate::test_frames::draw_settled(cx);
 
     let store = store_of(&shell, cx);
     serve_agent(&host, "agent-1");
@@ -356,7 +356,7 @@ fn an_agent_not_opened_from_its_lead_has_it_beneath(cx: &mut TestAppContext) {
         .expect("the agent's page");
     assert!(page.left() > px(0.), "it slides in: {page:?}");
     await_restore_update(&shell, cx, |store, _| store.timeline_settled_for("agent-1"));
-    settle_panes(cx);
+    crate::test_frames::draw_settled(cx);
     // The frame the window asked for as the page came to rest, which a
     // display delivers: the lead is put beneath the agent there.
     cx.update(|window, cx| window.simulate_next_frame(cx));
@@ -365,7 +365,7 @@ fn an_agent_not_opened_from_its_lead_has_it_beneath(cx: &mut TestAppContext) {
     await_restore_update(&shell, cx, |store, _| {
         store.timeline_settled_for("thread-1")
     });
-    settle_panes(cx);
+    crate::test_frames::draw_settled(cx);
 
     touch_drag(
         cx,
