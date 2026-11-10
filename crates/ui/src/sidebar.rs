@@ -405,7 +405,7 @@ fn collapse_chevron(progress: f32, cx: &App) -> Icon {
         .text_color(cx.theme().muted_foreground)
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ThreadFlags {
     unread: bool,
     waiting_for_approval: bool,
@@ -416,6 +416,8 @@ struct ThreadFlags {
     background: (u32, u32),
     /// Dispatched agents finished and await the thread's settle.
     unsettled: bool,
+    /// What wakes the thread later though nothing of it runs.
+    wakes: tcode_protocol::ThreadWakes,
 }
 
 #[derive(Clone)]
@@ -429,6 +431,7 @@ struct ThreadRowState {
     /// Pieces of background work and agents still running.
     background: (u32, u32),
     unsettled: bool,
+    wakes: tcode_protocol::ThreadWakes,
     failed: bool,
     auto_settle_enabled: bool,
     is_worktree: bool,
@@ -445,7 +448,7 @@ impl ThreadRowState {
 }
 
 /// What keeps a thread going, written out: how much of its background work
-/// and how many of its agents run.
+/// and how many of its agents run, and what will wake it.
 fn keeps_going(state: &ThreadRowState) -> Option<String> {
     let (tasks, agents) = state.background;
     let mut parts = Vec::new();
@@ -454,6 +457,25 @@ fn keeps_going(state: &ThreadRowState) -> Option<String> {
     }
     if agents > 0 {
         parts.push(crate::tr!("sidebar.keeps_agents", count = agents).into_owned());
+    }
+    let wakes = &state.wakes;
+    parts.extend(
+        wakes
+            .pull_requests
+            .iter()
+            .map(|number| crate::tr!("background.keeps_watch", number = number).into_owned()),
+    );
+    if let Some(at) = wakes.scheduled_at {
+        parts.push(
+            crate::tr!(
+                "sidebar.keeps_scheduled",
+                time = crate::chat::model::format_local_time(at.saturating_mul(1000))
+            )
+            .into_owned(),
+        );
+    }
+    if wakes.notify > 0 {
+        parts.push(crate::tr!("sidebar.keeps_notify", count = wakes.notify).into_owned());
     }
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
@@ -1062,6 +1084,10 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
                     unsettled: store
                         .activity(&meta.id)
                         .is_some_and(|activity| activity.unsettled > 0),
+                    wakes: store
+                        .activity(&meta.id)
+                        .map(|activity| activity.wakes.clone())
+                        .unwrap_or_default(),
                 },
             )
         })
@@ -3813,7 +3839,7 @@ impl SessionsSidebar {
     ) -> ThreadRowState {
         let meta = &row.meta;
         let thread = row.key();
-        let own_flags = flags.get(&meta.id).copied().unwrap_or_default();
+        let own_flags = flags.get(&meta.id).cloned().unwrap_or_default();
         ThreadRowState {
             renaming: self
                 .renaming
@@ -3827,6 +3853,7 @@ impl SessionsSidebar {
             waiting_for_input: own_flags.waiting_for_input,
             background: own_flags.background,
             unsettled: own_flags.unsettled,
+            wakes: own_flags.wakes,
             failed: own_flags.failed,
             auto_settle_enabled: meta.auto_settle_disabled_at.is_none(),
             is_worktree: meta.worktree.is_some(),
@@ -4266,6 +4293,12 @@ impl SessionsSidebar {
                 cx.theme().muted_foreground,
                 crate::tr!("sidebar.background"),
                 true,
+            ))
+        } else if !state.wakes.is_empty() {
+            Some((
+                cx.theme().muted_foreground,
+                crate::tr!("sidebar.waiting"),
+                false,
             ))
         } else {
             None
@@ -6339,6 +6372,8 @@ fn compact_status_line(
         ))
     } else if state.show_unread {
         Some((crate::tr!("mobile.unread"), cx.theme().primary))
+    } else if !state.wakes.is_empty() {
+        Some((crate::tr!("sidebar.waiting"), cx.theme().muted_foreground))
     } else {
         None
     }
@@ -7018,18 +7053,33 @@ mod tests {
                 )
                 .unwrap();
         };
-        let summary = |waiting: bool| IndexSummary {
+        // The thread runs a turn, or only its background work goes on, or
+        // nothing of it runs and a watched pull request will wake it.
+        #[derive(Clone, Copy, PartialEq)]
+        enum Doing {
+            Turn,
+            Background,
+            Watch,
+        }
+        let summary = |doing: Doing| IndexSummary {
             activity: HashMap::from([(
                 "background".into(),
                 SessionActivity {
-                    working: !waiting,
-                    turn_running: !waiting,
+                    working: doing == Doing::Turn,
+                    turn_running: doing == Doing::Turn,
                     background: tcode_protocol::BackgroundActivity {
-                        tasks: waiting.into(),
+                        tasks: (doing == Doing::Background).into(),
                         agents: 0,
                     },
                     unsettled: 0,
-                    wakes: Default::default(),
+                    wakes: tcode_protocol::ThreadWakes {
+                        pull_requests: if doing == Doing::Watch {
+                            vec![1048]
+                        } else {
+                            Vec::new()
+                        },
+                        ..Default::default()
+                    },
                     waiting_for_approval: false,
                     waiting_for_input: false,
                     failed: false,
@@ -7053,7 +7103,7 @@ mod tests {
             ServerEvent::IndexSnapshot(IndexSnapshot {
                 sessions: vec![meta],
                 projects: vec![project],
-                summary: summary(true),
+                summary: summary(Doing::Background),
             }),
         );
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
@@ -7081,10 +7131,14 @@ mod tests {
             SessionsSidebar::new(vec![store.clone()], window_state.clone(), cx)
         });
         cx.simulate_resize(size(px(393.), px(852.)));
-        for (waiting, expected) in [(true, "Background"), (false, "Working")] {
+        for (doing, expected) in [
+            (Doing::Background, "Background"),
+            (Doing::Turn, "Working"),
+            (Doing::Watch, "Waiting"),
+        ] {
             send(
                 Topic::Index,
-                ServerEvent::IndexSummaryReplaced(summary(waiting)),
+                ServerEvent::IndexSummaryReplaced(summary(doing)),
             );
             cx.run_until_parked();
             store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
@@ -7110,10 +7164,10 @@ mod tests {
                 assert_eq!(label, expected);
                 assert_eq!(
                     color,
-                    if waiting {
-                        cx.theme().muted_foreground
-                    } else {
+                    if doing == Doing::Turn {
                         cx.theme().primary
+                    } else {
+                        cx.theme().muted_foreground
                     }
                 );
             });
