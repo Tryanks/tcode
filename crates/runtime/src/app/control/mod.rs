@@ -26,6 +26,10 @@ mod watches;
 /// How many writes Settings → Control lists.
 const CONTROL_ACTIVITY_LIMIT: usize = 200;
 
+/// What one answer may hold, whatever the caller asks for: about 16k tokens, under the
+/// 25 000-token MCP tool result Claude Code accepts by default (`MAX_MCP_OUTPUT_TOKENS`).
+const RESPONSE_CAP: usize = 64 * 1024;
+
 pub(super) struct ControlState {
     activity: VecDeque<ControlActivityEntry>,
     review_records: Vec<tcode_core::control::ReviewRecord>,

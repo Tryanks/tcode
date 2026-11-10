@@ -18,9 +18,6 @@ const SEARCH_CAP: u32 = 50;
 const PER_TURN_CAP: usize = 200;
 /// How many collapsed threads, and how many left-out thread ids, a review lists by name.
 const REVIEW_LIST_CAP: usize = 100;
-/// What one response may carry, about the size of one large file.
-const RESPONSE_BUDGET: usize = 60 * 1024;
-const TERMINAL_TAIL_BYTES: usize = 32 * 1024;
 const ASSISTANT_HEAD_CHARS: usize = 300;
 /// A thread active this recently is still in progress for a review, whatever its run state.
 const JUST_ACTIVE_MS: u64 = 10 * 60 * 1000;
@@ -1094,7 +1091,7 @@ impl AppState {
                         .iter()
                         .filter_map(|change| change.diff.as_ref())
                     {
-                        if text.len() + patch.len() > RESPONSE_BUDGET {
+                        if text.len() + patch.len() > RESPONSE_CAP {
                             left_out += 1;
                             continue;
                         }
@@ -1311,12 +1308,12 @@ impl AppState {
             .ok_or_else(|| format!("terminal {id} is not running"))?;
         let snapshot = terminal.peek_snapshot();
         let screen = snapshot.text();
-        let (shown, cut) = tail(&screen, TERMINAL_TAIL_BYTES);
+        let (shown, cut) = tail(&screen, RESPONSE_CAP);
         let (text, redacted) = redact(shown);
         let mut omitted = vec!["scrollback above the visible screen is not included".to_owned()];
         if cut {
             omitted.push(format!(
-                "the screen was cut to its last {TERMINAL_TAIL_BYTES} bytes"
+                "the screen was cut to its last {RESPONSE_CAP} bytes"
             ));
         }
         to_value(&TerminalAnswer {
@@ -1475,7 +1472,7 @@ impl AppState {
             let mut left_out = Vec::new();
             candidates.retain(|candidate| {
                 let size = serde_json::to_vec(candidate).map_or(0, |bytes| bytes.len());
-                if used + size > RESPONSE_BUDGET {
+                if used + size > RESPONSE_CAP {
                     left_out.push(candidate.thread.id.clone());
                     return false;
                 }

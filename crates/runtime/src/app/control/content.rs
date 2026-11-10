@@ -8,17 +8,11 @@ use serde::Serialize;
 use tcode_services::store::EventLog;
 use tcode_services::thread_index::{self, IndexedLog, OutlineLevel, ReadSelection};
 
-/// What one response may hold, whatever the caller asks for.
-const RESPONSE_CAP: usize = 64 * 1024;
-const OUTLINE_BUDGET: usize = 48 * 1024;
 const READ_DEFAULT_BYTES: usize = 32 * 1024;
-const FILE_HISTORY_BUDGET: usize = 48 * 1024;
-const SEARCH_BUDGET: usize = 48 * 1024;
 const CONTEXT_LINES_DEFAULT: usize = 2;
+/// The first hit is shown whatever its size, so its context and lines are bounded: minified
+/// output would otherwise put a megabyte line into one answer.
 const CONTEXT_LINES_MAX: usize = 10;
-const MAX_HITS: usize = 50;
-/// A matched line longer than this is cut: minified output would otherwise spend the
-/// budget on one hit.
 const HIT_LINE_BYTES: usize = 1024;
 
 fn anchor(thread_id: &str, position: u64) -> String {
@@ -473,7 +467,7 @@ impl AppState {
                     })
                 })
                 .collect();
-                fit(RESPONSE_CAP, OUTLINE_BUDGET, |budget| {
+                fit(RESPONSE_CAP, RESPONSE_CAP, |budget| {
                     let mut answer = to_json(&ThreadOutline {
                         thread_id: &meta.id,
                         title: &meta.title,
@@ -639,16 +633,11 @@ fn search_in_item(
         .context_lines
         .map_or(CONTEXT_LINES_DEFAULT, |lines| lines as usize)
         .min(CONTEXT_LINES_MAX);
-    let found = thread_index::search_in_item(&output, &params.query, context, MAX_HITS + 1);
+    let found = thread_index::search_in_item(&output, &params.query, context, usize::MAX);
     let mut notes = Vec::new();
-    if found.len() > MAX_HITS {
-        notes.push(format!(
-            "more than {MAX_HITS} matching lines; showing the first {MAX_HITS}, narrow the query"
-        ));
-    }
     let mut hits = Vec::new();
     let mut used = 0;
-    for (index, hit) in found.iter().take(MAX_HITS).enumerate() {
+    for (index, hit) in found.iter().enumerate() {
         let first = hit.line_no - hit.before.len();
         let last = hit.line_no + hit.after.len();
         let body = hit
@@ -661,19 +650,20 @@ fn search_in_item(
             .join("\n");
         let excerpt =
             thread_index::fence(&format!("{} lines {first}-{last}", params.anchor), &body);
-        used += excerpt.len();
-        if used > SEARCH_BUDGET && index > 0 {
+        let hit = LineHit {
+            line_no: hit.line_no,
+            excerpt,
+        };
+        used += json_len(&hit);
+        if used > RESPONSE_CAP && index > 0 {
             notes.push(format!(
                 "{} matches omitted for the byte budget, from line {}",
-                found.len().min(MAX_HITS) - index,
+                found.len() - index,
                 hit.line_no
             ));
             break;
         }
-        hits.push(LineHit {
-            line_no: hit.line_no,
-            excerpt,
-        });
+        hits.push(hit);
     }
     to_json(&SearchInItemAnswer {
         anchor: params.anchor.clone(),
@@ -714,7 +704,7 @@ fn file_history(
     let mut size: usize = edits.iter().map(|edit| json_len(edit) + 1).sum();
     let (mut dropped_diffs, mut dropped_edits) = (0, 0);
     for edit in &mut edits {
-        if size <= FILE_HISTORY_BUDGET {
+        if size <= RESPONSE_CAP {
             break;
         }
         if let Some(diff) = edit.diff_head.take() {
@@ -722,7 +712,7 @@ fn file_history(
             dropped_diffs += 1;
         }
     }
-    while size > FILE_HISTORY_BUDGET && !edits.is_empty() {
+    while size > RESPONSE_CAP && !edits.is_empty() {
         size -= json_len(&edits.remove(0)) + 1;
         dropped_edits += 1;
     }
