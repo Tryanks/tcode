@@ -333,8 +333,8 @@ impl BrowserLifecycle {
             .transpose()
         {
             Ok(mapped) => mapped,
-            Err(_) => {
-                cx.notify();
+            Err(message) => {
+                self.fail_load(key, url, "RemotePreview", message, cx);
                 return;
             }
         };
@@ -346,18 +346,32 @@ impl BrowserLifecycle {
         if objc2_foundation::NSURL::URLWithString(&objc2_foundation::NSString::from_str(url))
             .is_none()
         {
-            if let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) {
-                let outcome = page.events.handle(Event::Failed(LoadError {
-                    url: url.to_owned(),
-                    code: "InvalidURL".into(),
-                    message: "this is not a URL the browser can load".into(),
-                }));
-                self.apply(key, outcome, cx);
-            }
+            let message = "this is not a URL the browser can load".to_owned();
+            self.fail_load(key, url, "InvalidURL", message, cx);
             return;
         }
         if let Err(error) = raw.load_url(url) {
-            log::warn!("preview: failed to navigate {key}: {error}");
+            self.fail_load(key, url, "load_url", error.to_string(), cx);
+        }
+    }
+
+    /// End the navigation `load` started on `key` as failed before the
+    /// engine took it: its calls and waits answer with the failure.
+    fn fail_load(
+        &mut self,
+        key: &str,
+        url: &str,
+        code: &str,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) {
+            let outcome = page.events.handle(Event::Failed(LoadError {
+                url: url.to_owned(),
+                code: code.to_owned(),
+                message,
+            }));
+            self.apply(key, outcome, cx);
         }
     }
 
