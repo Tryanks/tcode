@@ -3,7 +3,7 @@ use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::ops::Range;
 use std::sync::{Arc, Weak};
 
-use agent::{ItemContent, ItemStatus, TurnStatus};
+use agent::{ItemContent, TurnStatus};
 use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta};
 
 use crate::chat::model::{
@@ -560,26 +560,13 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
         }
         EntryContent::RewindFailed { failure, .. } => failure.reason.hash(hash),
         EntryContent::Item(ItemContent::ImageRead { path, .. }) => path.hash(hash),
-        EntryContent::Item(ItemContent::WebSearch { query }) => {
-            "web_search".len().hash(hash);
-            serde_json::json!({ "query": query })
-                .to_string()
-                .len()
-                .hash(hash);
-            Option::<usize>::None.hash(hash);
-            std::mem::discriminant(&ItemStatus::Completed).hash(hash);
-        }
+        EntryContent::Item(ItemContent::WebSearch { query }) => query.len().hash(hash),
         EntryContent::Item(ItemContent::Other {
             provider_kind,
             summary,
         }) => {
             provider_kind.len().hash(hash);
-            serde_json::json!({ "summary": summary })
-                .to_string()
-                .len()
-                .hash(hash);
-            Option::<usize>::None.hash(hash);
-            std::mem::discriminant(&ItemStatus::Completed).hash(hash);
+            summary.len().hash(hash);
         }
     }
 }
@@ -803,7 +790,7 @@ mod tests {
     use crate::chat::model::tests::{
         REAL_DIFF, assistant, at_turn, command, entry, file_change, reasoning, user_item,
     };
-    use agent::{FileChange, FileChangeKind};
+    use agent::{FileChange, FileChangeKind, ItemStatus};
 
     /// The cache re-indexes only from the first turn a change reaches; the
     /// rows it keeps must be the rows a full index of the new timeline gives,
