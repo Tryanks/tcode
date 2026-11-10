@@ -17054,7 +17054,10 @@ pub(crate) mod tests {
             pending_approvals: Vec::new(),
             pending_user_input: None,
             steering_supported: false,
-            provider_option_descriptors: Vec::new(),
+            // As the host describes every thread of a harness with one.
+            provider_option_descriptors: agent::permission_control(agent::ProviderKind::ClaudeCode)
+                .into_iter()
+                .collect(),
             provider_option_selections: Vec::new(),
             provider_option_requested_selections: Vec::new(),
             provider_commands: Vec::new(),
