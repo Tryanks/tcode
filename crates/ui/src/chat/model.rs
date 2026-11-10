@@ -546,26 +546,15 @@ pub(crate) fn format_cost_usd(cost: f64) -> String {
     }
 }
 
-/// The quiet, visible portion of a finished turn's timing row. Bucket details
-/// intentionally live in [`turn_time_breakdown`] instead of competing with the
-/// completion clock, total duration, and cost.
-pub(crate) fn turn_time_parts(clock: String, timing: Option<TurnTiming>) -> Vec<String> {
-    let mut parts = vec![clock];
-    if let Some(timing) = timing {
-        parts.push(format_elapsed(timing.total_ms));
-    }
-    parts
-}
-
-pub(crate) fn turn_time_breakdown(timing: Option<TurnTiming>) -> Option<String> {
-    timing.map(|timing| {
-        let ai = timing.total_ms - timing.tool_ms;
-        [
-            crate::tr!("chat.turn_ai", duration = format_elapsed(ai)).into_owned(),
-            crate::tr!("chat.turn_tools", duration = format_elapsed(timing.tool_ms)).into_owned(),
-        ]
-        .join(" · ")
-    })
+/// The total's breakdown a finished turn's timing row shows on hover, so the
+/// buckets do not compete with the clock, the total and the cost.
+pub(crate) fn turn_time_breakdown(timing: TurnTiming) -> String {
+    let ai = timing.total_ms - timing.tool_ms;
+    [
+        crate::tr!("chat.turn_ai", duration = format_elapsed(ai)).into_owned(),
+        crate::tr!("chat.turn_tools", duration = format_elapsed(timing.tool_ms)).into_owned(),
+    ]
+    .join(" · ")
 }
 
 #[derive(Clone)]
@@ -577,27 +566,33 @@ pub(crate) struct TurnTimeClause {
     pub(crate) tooltip: Option<String>,
 }
 
+/// A finished turn's timing row: when it finished, how long it took, what it
+/// cost, and the model that served it where that is not the one asked for;
+/// each where the turn has it.
 pub(crate) fn turn_time_clauses(
-    clock: String,
+    clock: Option<String>,
     timing: Option<TurnTiming>,
     cost_usd: Option<f64>,
     served_model: Option<&str>,
     requested_model: Option<&str>,
 ) -> Vec<TurnTimeClause> {
-    const TIMING_SELECTORS: [&str; 2] = ["turn-time-clock", "turn-time-total"];
-
-    let mut clauses = turn_time_parts(clock, timing)
-        .into_iter()
-        .zip(TIMING_SELECTORS)
-        .map(|(text, selector)| TurnTimeClause {
-            text,
-            selector,
+    let mut clauses = Vec::new();
+    if let Some(clock) = clock {
+        clauses.push(TurnTimeClause {
+            text: clock,
+            selector: "turn-time-clock",
             warning: false,
-            tooltip: (selector == "turn-time-total")
-                .then(|| turn_time_breakdown(timing))
-                .flatten(),
-        })
-        .collect::<Vec<_>>();
+            tooltip: None,
+        });
+    }
+    if let Some(timing) = timing {
+        clauses.push(TurnTimeClause {
+            text: format_elapsed(timing.total_ms),
+            selector: "turn-time-total",
+            warning: false,
+            tooltip: Some(turn_time_breakdown(timing)),
+        });
+    }
     if let Some(cost) = cost_usd {
         clauses.push(TurnTimeClause {
             text: format_cost_usd(cost),
@@ -1499,7 +1494,7 @@ pub(in crate::chat) mod tests {
         crate::set_locale(crate::LANGUAGE_ENGLISH);
 
         let clauses = turn_time_clauses(
-            "3:04 PM".into(),
+            Some("3:04 PM".into()),
             Some(TurnTiming::new(80_000, 35_000)),
             Some(0.12),
             Some("claude-opus-5"),
@@ -1519,7 +1514,7 @@ pub(in crate::chat) mod tests {
         );
 
         let sub_cent = turn_time_clauses(
-            "3:04 PM".into(),
+            Some("3:04 PM".into()),
             None,
             Some(0.004),
             Some("claude-fable-5"),
@@ -1534,8 +1529,28 @@ pub(in crate::chat) mod tests {
         );
 
         let missing_requested =
-            turn_time_clauses("3:04 PM".into(), None, None, Some("served"), None);
+            turn_time_clauses(Some("3:04 PM".into()), None, None, Some("served"), None);
         assert_eq!(missing_requested.len(), 1);
+
+        // A turn with no finish time still says what it cost and which model
+        // served it.
+        let unclocked = turn_time_clauses(
+            None,
+            None,
+            Some(0.12),
+            Some("claude-opus-5"),
+            Some("claude-fable-5"),
+        );
+        assert_eq!(
+            unclocked
+                .iter()
+                .map(|clause| (clause.selector, clause.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("turn-time-cost", "$0.12"),
+                ("turn-time-model", "⚠ claude-opus-5"),
+            ]
+        );
     }
 
     #[test]
@@ -1565,16 +1580,18 @@ pub(in crate::chat) mod tests {
             .into_iter()
             .zip(totals)
             {
+                let clauses = turn_time_clauses(None, Some(timing), None, None, None);
                 assert_eq!(
-                    turn_time_parts("3:04 PM".into(), Some(timing)),
-                    ["3:04 PM", total]
+                    clauses
+                        .iter()
+                        .map(|clause| clause.text.as_str())
+                        .collect::<Vec<_>>(),
+                    [total]
                 );
                 if let Some(tooltip) = tooltip {
-                    assert_eq!(turn_time_breakdown(Some(timing)).as_deref(), Some(tooltip));
+                    assert_eq!(clauses[0].tooltip.as_deref(), Some(tooltip));
                 }
             }
-            assert_eq!(turn_time_parts("9:00 AM".into(), None), ["9:00 AM"]);
-            assert_eq!(turn_time_breakdown(None), None);
         }
     }
 
