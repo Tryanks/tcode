@@ -95,6 +95,7 @@ chat:
   rail_goal: "目标"
   rail_commands: "命令"
   rail_pull_requests: "拉取请求"
+  rail_thread: "线程信息"
   copy: "复制"
   copied: "已复制！"
   copy_message: "复制消息"

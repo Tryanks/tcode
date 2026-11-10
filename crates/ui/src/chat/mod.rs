@@ -1195,7 +1195,6 @@ impl ChatView {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .children(self.fork_origin(cx))
                     .child(self.timeline.clone())
                     .children(phone_strip),
             )

@@ -2330,6 +2330,17 @@ impl WorkspaceStore {
             .get(*self.index_positions.get(session_id)?)
     }
 
+    /// The thread `session_id` was forked from: its title, and its id while
+    /// it still exists.
+    pub(crate) fn fork_source(&self, session_id: &str) -> Option<(String, Option<String>)> {
+        let origin = self.thread_meta(session_id)?.fork_origin.as_ref()?;
+        let source = self.thread_meta(&origin.thread_id);
+        Some((
+            source.map_or(origin.title.clone(), |source| source.title.clone()),
+            source.map(|source| source.id.clone()),
+        ))
+    }
+
     fn reindex_sessions(&mut self) {
         self.index_positions = self
             .index_replica
