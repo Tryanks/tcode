@@ -664,8 +664,8 @@ impl HostLink {
         }
     }
 
-    /// When the oldest outstanding request runs out of time while connected:
-    /// a query after 15 s, a sent retained write or another command after 30 s.
+    /// When the oldest outstanding command runs out of time while connected:
+    /// a sent retained write or another command after 30 s.
     fn next_deadline(&self) -> Option<web_time::Instant> {
         if !matches!(
             self.connection_state(),
@@ -673,7 +673,6 @@ impl HostLink {
         ) {
             return None;
         }
-        let query = std::time::Duration::from_millis(heartbeat::QUERY_TIMEOUT_MS);
         let command = std::time::Duration::from_millis(heartbeat::COMMAND_TIMEOUT_MS);
         let request = self
             .inner
@@ -681,13 +680,8 @@ impl HostLink {
             .lock()
             .unwrap()
             .values()
-            .filter_map(|waiter| {
-                if waiter.query {
-                    Some(waiter.started + query)
-                } else {
-                    (!waiter.retained).then_some(waiter.started + command)
-                }
-            })
+            .filter(|waiter| !waiter.query && !waiter.retained)
+            .map(|waiter| waiter.started + command)
             .min();
         // The oldest sent write bounds the stall: later writes were sent after it.
         let write = self
@@ -709,23 +703,6 @@ impl HostLink {
         ) {
             return;
         }
-        self.inner.pending.lock().unwrap().retain(|id, waiter| {
-            if waiter.query
-                && now.duration_since(waiter.started).as_millis()
-                    >= u128::from(heartbeat::QUERY_TIMEOUT_MS)
-            {
-                let _ = waiter.sender.try_send(HostMessage::QueryResult {
-                    id: *id,
-                    result: Err(error(
-                        "timeout",
-                        "No query response within 15 seconds while connected",
-                    )),
-                });
-                false
-            } else {
-                true
-            }
-        });
         // The oldest sent write bounds the stall: later writes were sent after it.
         let stalled = self
             .inner
@@ -1225,56 +1202,6 @@ mod tests {
     use super::*;
     use tcode_protocol::ServerEvent;
 
-    #[test]
-    fn query_deadline_and_command_stall_use_connected_clock() {
-        let (outgoing, receiver) = outgoing::channel();
-        let (_incoming, from_host) = async_channel::unbounded();
-        let link = HostLink::new(outgoing, from_host);
-        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-        let mut query = std::pin::pin!(link.query(Query::Ping));
-        assert!(query.as_mut().poll(&mut cx).is_pending());
-        let start = link
-            .inner
-            .pending
-            .lock()
-            .unwrap()
-            .values()
-            .next()
-            .unwrap()
-            .started;
-        link.check_deadlines(start + std::time::Duration::from_millis(14_999));
-        assert!(query.as_mut().poll(&mut cx).is_pending());
-        link.check_deadlines(start + std::time::Duration::from_millis(15_000));
-        assert!(
-            matches!(query.as_mut().poll(&mut cx), std::task::Poll::Ready(Err(error)) if error.code == "timeout")
-        );
-        link.dispatch(Command::RenameSession {
-            session_id: "one".into(),
-            title: "new".into(),
-        })
-        .unwrap();
-        let sent = link
-            .inner
-            .delivery
-            .lock()
-            .unwrap()
-            .writes
-            .front()
-            .unwrap()
-            .sent
-            .unwrap();
-        link.check_deadlines(sent + std::time::Duration::from_secs(30));
-        assert_eq!(receiver.wake.try_recv().unwrap(), recovery::Wake::Reconnect);
-        assert!(matches!(
-            link.connection_state(),
-            ConnectionState::Reconnecting {
-                reason: Some(ConnectionFailure::Timeout),
-                ..
-            }
-        ));
-        assert_eq!(link.pending_commands().len(), 1);
-    }
-
     /// Platform storage; the flag makes every save fail, as a full disk does.
     #[derive(Default)]
     struct MemoryStorage(Mutex<Vec<outbox::Entry>>, std::sync::atomic::AtomicBool);
@@ -1697,11 +1624,11 @@ mod tests {
     }
 
     /// An idle link costs no wakeups: the pump arms a timer only for an
-    /// outstanding request, at that request's deadline.
+    /// outstanding command, at that command's deadline.
     #[test]
-    fn an_idle_link_arms_no_timer_and_a_request_arms_its_deadline() {
-        let (to_host, outgoing) = async_channel::unbounded();
-        let (incoming, from_host) = async_channel::unbounded();
+    fn an_idle_link_arms_no_timer_and_a_sent_write_arms_its_deadline() {
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
         let link = HostLink::new(to_host, from_host);
         let delays = std::cell::RefCell::new(Vec::new());
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
@@ -1711,34 +1638,11 @@ mod tests {
         }));
         assert!(pump.as_mut().poll(&mut cx).is_pending());
         assert!(delays.borrow().is_empty(), "an idle link armed a timer");
-        let mut query = std::pin::pin!(link.query(Query::Ping));
-        assert!(query.as_mut().poll(&mut cx).is_pending());
-        assert!(pump.as_mut().poll(&mut cx).is_pending());
-        let query_timeout = std::time::Duration::from_millis(heartbeat::QUERY_TIMEOUT_MS);
-        assert!(matches!(
-            delays.borrow()[..],
-            [delay] if delay <= query_timeout && delay > query_timeout / 2
-        ));
-        incoming
-            .try_send(
-                encode_line(&HostMessage::QueryResult {
-                    id: request(&outgoing).id,
-                    result: Ok(QueryResponse::Pong),
-                })
-                .unwrap(),
-            )
-            .unwrap();
-        assert!(pump.as_mut().poll(&mut cx).is_pending());
-        assert!(matches!(
-            query.as_mut().poll(&mut cx),
-            std::task::Poll::Ready(Ok(QueryResponse::Pong))
-        ));
-        assert_eq!(delays.borrow().len(), 1, "an answered link armed a timer");
         link.dispatch(rename(0)).unwrap();
         assert!(pump.as_mut().poll(&mut cx).is_pending());
         let command_timeout = std::time::Duration::from_millis(heartbeat::COMMAND_TIMEOUT_MS);
         assert!(matches!(
-            delays.borrow()[1..],
+            delays.borrow()[..],
             [delay] if delay <= command_timeout && delay > command_timeout / 2
         ));
         link.close();

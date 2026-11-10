@@ -3,12 +3,11 @@
 /// A native link's liveness is QUIC's: iroh keeps each path alive every 5 s
 /// and the connection closes after 30 s without a packet, as soon as a 10 s
 /// idle ping with its reply budget would have noticed. The ping only proves
-/// the host loop still answers, which a minute bounds while idle; a request
+/// the host loop still answers, which a minute bounds while idle; a command
 /// meanwhile has its own deadline, and a probe pings at once.
 pub const NATIVE_IDLE_MS: u64 = 60_000;
 pub const BROWSER_IDLE_MS: u64 = 15_000;
 pub const LIVENESS_REPLY_MS: u64 = 20_000;
-pub const QUERY_TIMEOUT_MS: u64 = 15_000;
 pub const COMMAND_TIMEOUT_MS: u64 = 30_000;
 
 pub struct Heartbeat {
