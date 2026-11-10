@@ -6,11 +6,13 @@ disable-model-invocation: true
 
 # Defender audit
 
-Much of Tcode's implementation was added by agents out of caution on the
-maintainer's behalf, not asked for by the maintainer. One run takes the area
-the maintainer describes, finds every **defence** in it (production code,
-tests, fixtures and the seams between them), removes the ones without grounds,
-and leaves each source speaking for itself.
+Much of Tcode's implementation was written by agents following the code
+they found, not anything the maintainer asked for. One run takes the area the
+maintainer describes, in the whole implementation (production code, tests,
+fixtures, CI and the seams between them), finds every **habit** in it that
+has no grounds, and removes it. The **defence** is the largest family of such
+habits and the one this skill defines closely; the families are an open list,
+and [Habit](#habit) says what to do with what fits none.
 
 The authority is the **Principles** section of
 [CONTRIBUTING.md](../../../CONTRIBUTING.md); read it first. This skill and
@@ -112,6 +114,20 @@ code and reaches for the same shape.
 - A habit the maintainer has ruled on goes into [PATTERNS.md](PATTERNS.md),
   so the next area starts from the ruling instead of the precedent.
 
+Defences are not the only family. Others the maintainer has named:
+
+- **waiting on the clock**: a test that sleeps for seconds, or waits out a
+  deadline, where it should wait for the state it is about;
+- **slow by construction**: a single test that takes minutes in CI;
+- **able to hang**: a race that, lost, never ends, held in check only by a
+  runner's kill timer.
+
+The list is open, and the worst of the codebase is not confined to it. In
+the inventory, report anything in the lane that the maintainer would not have
+asked for and that has no ground, whether or not it has a name here: say what
+it is, where else the same shape occurs, and what it costs. Fit it to a
+family afterwards, or name a new one.
+
 ## Steps
 
 Inventory and rewrite are separate rounds with the maintainer between them.
@@ -133,8 +149,9 @@ Inventory and rewrite are separate rounds with the maintainer between them.
    stand-in, and each test that asserts a defence. Their other faults go
    through the [`test-audit` skill](../test-audit/SKILL.md) in the same round.
    Done when every place in the lane where Tcode hides, alters, replaces, cuts
-   short, refuses, invents or stands in has been judged, and each report
-   states what was read and what was not.
+   short, refuses, invents or stands in has been judged, every other habit
+   the agent met is reported, and each report states what was read and what
+   was not.
 
 3. **Check the inventory.** Open the code at each proposed removal and confirm
    the report describes it. Move to "ask" whatever is a product or security
