@@ -3741,7 +3741,7 @@ fn parse_elicitation_url(
 
 /// Map an `item/tool/requestUserInput` params object into canonical
 /// [`UserInputQuestion`]s. A question without a non-empty `id` cannot be
-/// answered and is dropped, as are options with an empty label. Questions with
+/// answered and is dropped. Questions with
 /// zero options remain available for free-text answers. `multiSelect` is forced
 /// false.
 fn parse_codex_user_input(params: &Value) -> Vec<UserInputQuestion> {
@@ -3767,10 +3767,7 @@ fn parse_codex_user_input(params: &Value) -> Vec<UserInputQuestion> {
                 .map(|opts| {
                     opts.iter()
                         .filter_map(|opt| {
-                            let label = opt
-                                .get("label")
-                                .and_then(Value::as_str)
-                                .filter(|s| !s.is_empty())?;
+                            let label = opt.get("label").and_then(Value::as_str)?;
                             let description = opt
                                 .get("description")
                                 .and_then(Value::as_str)
@@ -6801,8 +6798,7 @@ mod tests {
     fn request_user_input_maps_questions_and_answer_wire_shape() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            // An option with an empty label is dropped; a question without
-            // options or a header is kept (options: []).
+            // A question without options or a header is kept (options: []).
             actor
                 .handle_line(
                     &json!({
@@ -6817,8 +6813,7 @@ mod tests {
                                     "header": "Target",
                                     "question": "macOS or Linux?",
                                     "options": [
-                                        {"label": "macOS", "description": "apple"},
-                                        {"label": "", "description": "skip me"}
+                                        {"label": "macOS", "description": "apple"}
                                     ],
                                     "isOther": true,
                                     "isSecret": false
@@ -6843,7 +6838,6 @@ mod tests {
                     assert_eq!(request_id, "55");
                     assert_eq!(questions.len(), 2);
                     assert_eq!(questions[0].id, "os");
-                    assert_eq!(questions[0].options.len(), 1, "empty-label option dropped");
                     assert_eq!(questions[0].options[0].label, "macOS");
                     assert!(!questions[0].multi_select);
                     // Free-text-only questions remain valid with empty options.
