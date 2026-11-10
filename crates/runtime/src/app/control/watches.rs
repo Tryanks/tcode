@@ -43,8 +43,14 @@ fn wire_name(value: impl Serialize) -> String {
         .unwrap_or_default()
 }
 
+/// A `[control]` message is one line: messages that race into one wake are joined with a
+/// blank line, which is where the notice is split again (`tcode_core::notice`).
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn one_line_head(text: &str, chars: usize) -> String {
-    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = one_line(text);
     if line.chars().count() <= chars {
         return line;
     }
@@ -269,7 +275,7 @@ impl AppState {
             WatchEvent::NeedsApproval => self
                 .approval_requests(&target.id)
                 .last()
-                .map(approval_request_summary),
+                .map(|request| one_line(&approval_request_summary(request))),
             WatchEvent::Settled => target.settled_at.map(|at| format!("at {at}")),
             WatchEvent::PrChanged => {
                 let states: Vec<String> = tcode_core::pull_request::watched(&target.pull_requests)

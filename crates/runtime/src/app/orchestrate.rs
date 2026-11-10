@@ -1037,7 +1037,7 @@ fn trailing_error(timeline: &Timeline) -> Option<&str> {
 }
 
 pub(super) fn approval_request_summary(request: &agent::ApprovalRequest) -> String {
-    let detail = match &request.kind {
+    match &request.kind {
         agent::ApprovalKind::ExecCommand { command, .. } => format!("command `{command}`"),
         agent::ApprovalKind::FileRead { detail } => format!("file read `{detail}`"),
         agent::ApprovalKind::FileChange { changes, .. } => match changes.as_slice() {
@@ -1046,13 +1046,6 @@ pub(super) fn approval_request_summary(request: &agent::ApprovalRequest) -> Stri
         },
         agent::ApprovalKind::ToolUse { name, .. } => format!("tool `{name}`"),
         agent::ApprovalKind::Plan { markdown, .. } => format!("plan: {markdown}"),
-    };
-    let one_line = detail.split_whitespace().collect::<Vec<_>>().join(" ");
-    let truncated: String = one_line.chars().take(180).collect();
-    if one_line.chars().count() > 180 {
-        format!("{truncated}…")
-    } else {
-        truncated
     }
 }
 
