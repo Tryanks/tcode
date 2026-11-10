@@ -790,7 +790,7 @@ struct Package {
 
 fn recognized_package(provider: ProviderKind, name: &str) -> bool {
     name == npm_package(provider)
-        || (provider == ProviderKind::OpenCode && name == "@opencode/cli")
+        || (provider == ProviderKind::OpenCode && name == "opencode-ai")
         || (provider == ProviderKind::Pi && name == "@mariozechner/pi-coding-agent")
 }
 
@@ -1190,7 +1190,7 @@ fn native(context: &Context<'_>) -> Option<Installation> {
             Some(context.installation(
                 InstallSource::Native,
                 Some(context.at(context.binary.clone(), &["upgrade", "--method", "curl"])),
-                LatestQuery::Registry("opencode-ai".into()),
+                LatestQuery::Registry(npm_package(ProviderKind::OpenCode).into()),
                 Vec::new(),
             ))
         }

@@ -62,7 +62,7 @@ pub fn npm_package(provider: ProviderKind) -> &'static str {
         ProviderKind::ClaudeCode => "@anthropic-ai/claude-code",
         ProviderKind::Codex => "@openai/codex",
         ProviderKind::Pi => "@earendil-works/pi-coding-agent",
-        ProviderKind::OpenCode => "opencode-ai",
+        ProviderKind::OpenCode => "@opencode/cli",
         ProviderKind::Grok => "@xai-official/grok",
         // Cursor's CLI is not published to npm.
         ProviderKind::Cursor | ProviderKind::Acp => "",
