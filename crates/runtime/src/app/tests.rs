@@ -3863,10 +3863,11 @@ fn completed_turn(turn_id: &str) -> AgentEvent {
     }
 }
 
-/// Recorded from a dispatched Claude Code child (thread 660c1acb…, October
-/// 2026): its brief ran a background script, the Monitor tool woke it nine
-/// times with one-line progress messages (turns 2–10), and it reported once,
-/// in turn 12. Its lead received twelve "completed" callbacks. The contract is
+/// The log Tcode stored for a dispatched Claude Code child, in the order a
+/// real one ran (October 2026) and with its content made up: its brief ran a
+/// background script, the Monitor tool woke it nine times with one-line
+/// progress messages (turns 2–10), and it reported once, in turn 12. Its lead
+/// received twelve "completed" callbacks. The contract is
 /// one: the report. `BackgroundTasksChanged` is not persisted, so the Monitor's
 /// liveness is replayed the way the CLI publishes it — set when the monitor
 /// starts, cleared with the result of the turn in which it ended.
@@ -3894,7 +3895,7 @@ fn a_child_waking_itself_reports_to_its_lead_once() {
             .insert(parent.meta.id.clone(), parent);
         let mut child = live_session(ProviderKind::ClaudeCode, child_commands);
         child.meta.id = "child".into();
-        child.meta.title = "测试注解改成人话（10 条样例）".into();
+        child.meta.title = "改写样例说明（10 条）".into();
         child.meta.parent_session_id = Some("parent".into());
         child.meta.expectation = Some(ChildExpectation::opened(1));
         state.sessions.push(child.meta.clone());
@@ -3948,7 +3949,7 @@ fn a_child_waking_itself_reports_to_its_lead_once() {
     );
     assert!(
         callbacks[0].starts_with(
-            "[orchestrate] thread child (\"测试注解改成人话（10 条样例）\") reported."
+            "[orchestrate] thread child (\"改写样例说明（10 条）\") reported."
         )
     );
     assert!(callbacks[0].ends_with("\n<report>"));
