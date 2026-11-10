@@ -361,9 +361,7 @@ async fn host_loop(
                 Err(_) => break,
             },
         }
-        state.sync_terminal_handles();
-        state.reap_terminal_projections();
-        domain_diff.emit_changes(&mut state, &mut cx);
+        after_input(&mut state, &mut domain_diff, &mut cx);
     }
     // Reject late completions and release their captured results.
     mailbox.close();
@@ -371,6 +369,15 @@ async fn host_loop(
         drop(operation);
     }
     state
+}
+
+/// What the host does after each input it handles: the terminal registry and
+/// projections follow the terminals threads now hold, and clients receive what
+/// the input changed.
+pub(crate) fn after_input(state: &mut AppState, domain_diff: &mut DomainDiff, cx: &mut HostCx) {
+    state.sync_terminal_handles();
+    state.reap_terminal_projections();
+    domain_diff.emit_changes(state, cx);
 }
 
 fn malformed_message_id(line: &str) -> Option<u64> {
