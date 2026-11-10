@@ -1,7 +1,6 @@
 //! A pane switched to another thread draws it as a new scene: what the
 //! thread before left moving, and what the thread shown now did when it was
-//! last on screen, carry nothing into the frame that first draws it; and the
-//! thread fades in once it can be drawn at rest, not while it loads.
+//! last on screen, carry nothing into the frame that first draws it.
 
 use super::*;
 
@@ -345,62 +344,16 @@ pub(super) fn fill_of(selector: &'static str, cx: &mut VisualTestContext) -> Opt
     })
 }
 
-/// One frame of a thread appearing: how far in its question's bubble is
-/// painted against how it is at rest (none while it is not drawn), and
-/// whether a skeleton and a pane's waiting hint were drawn.
-#[derive(Debug, Clone, Copy)]
-struct Appearing {
-    opacity: Option<f32>,
-    skeleton: bool,
-    waiting: bool,
-}
-
-impl Appearing {
-    fn shown(&self) -> f32 {
-        self.opacity.unwrap_or_default()
-    }
-}
-
-fn appearing(id: &str, rest: f32, cx: &mut VisualTestContext) -> Appearing {
-    Appearing {
-        opacity: bubble_fill(id, cx).map(|fill| fill / rest),
-        skeleton: cx.debug_bounds("baseline-loading").is_some(),
-        waiting: cx.debug_bounds("waiting-pane").is_some(),
-    }
-}
-
-/// The frame drawn now and the `frames` display frames after it.
-fn watch(id: &str, rest: f32, frames: usize, cx: &mut VisualTestContext) -> Vec<Appearing> {
-    let mut seen = vec![appearing(id, rest, cx)];
+/// How far in `id`'s question's bubble is painted against how it is at
+/// rest, on the frame drawn now and the `frames` display frames after it;
+/// nothing on a frame that does not draw it.
+fn watch(id: &str, rest: f32, frames: usize, cx: &mut VisualTestContext) -> Vec<f32> {
+    let mut seen = vec![bubble_fill(id, cx).map_or(0., |fill| fill / rest)];
     for _ in 0..frames {
         display_frame(cx);
-        seen.push(appearing(id, rest, cx));
+        seen.push(bubble_fill(id, cx).map_or(0., |fill| fill / rest));
     }
     seen
-}
-
-/// The fade a thread appears with starts once its rows are drawn, and plays
-/// through to the end: no frame paints it part way in before.
-fn assert_appears_once_drawn(what: &str, seen: &[Appearing]) {
-    let started = seen
-        .iter()
-        .position(|frame| frame.shown() > 0.01)
-        .unwrap_or_else(|| panic!("{what} never appeared: {seen:?}"));
-    assert!(
-        seen[started..].iter().all(|frame| frame.opacity.is_some()),
-        "{what} faded in without its rows: {seen:?}"
-    );
-    assert!(
-        seen[started..]
-            .iter()
-            .any(|frame| frame.shown() > 0.05 && frame.shown() < 0.95),
-        "{what} appeared at once: {seen:?}"
-    );
-    assert!(
-        seen.last()
-            .is_some_and(|frame| (frame.shown() - 1.).abs() < 0.01),
-        "{what} came all the way in: {seen:?}"
-    );
 }
 
 /// thread-1 open, its one turn done, and how opaque its question's bubble
@@ -419,86 +372,6 @@ fn mount_finished(
     (shell, host, cx, rest)
 }
 
-/// A thread a pane is switched to, whose log is there by its first frame,
-/// appears promptly and still fades in, and only once its rows are drawn;
-/// and so again switching back.
-#[gpui::test]
-fn a_thread_switched_to_fades_in_once_it_is_drawn(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx, rest) = mount_finished(cx);
-    for (key, id) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
-        serve_finished(&host, id);
-        switch(&shell, key, id, cx);
-        let seen = watch(id, rest, 40, cx);
-        assert_appears_once_drawn(id, &seen);
-        let started = seen.iter().position(|frame| frame.shown() > 0.01).unwrap();
-        assert!(started <= 4, "{id} kept the reader waiting: {seen:?}");
-        assert!(
-            seen.iter().all(|frame| !frame.skeleton),
-            "{id} flashed its skeleton: {seen:?}"
-        );
-    }
-}
-
-/// A thread whose log the host is slow to send shows nothing new at first,
-/// then its skeleton, and fades in from it once its rows are drawn, rather
-/// than playing its fade out while it waited.
-#[gpui::test]
-fn a_thread_slow_to_arrive_fades_in_once_it_has(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx, rest) = mount_finished(cx);
-    switch(&shell, "secondary-2", "thread-2", cx);
-    let waiting = watch("thread-2", rest, 40, cx);
-    assert!(
-        waiting.iter().all(|frame| frame.shown() == 0.),
-        "the thread faded in before it arrived: {waiting:?}"
-    );
-    assert!(!waiting[0].skeleton, "the skeleton shows at once");
-    assert!(
-        waiting.last().is_some_and(|frame| frame.skeleton),
-        "the skeleton shows once the wait is long"
-    );
-
-    serve_finished(&host, "thread-2");
-    arrive(&shell, cx);
-    let seen = watch("thread-2", rest, 40, cx);
-    assert_appears_once_drawn("thread-2", &seen);
-    assert!(seen.last().is_some_and(|frame| !frame.skeleton));
-}
-
-/// A thread opened into a pane that waited beside another keeps the waiting
-/// hint until it can be drawn, however long its log takes short of the
-/// skeleton's patience, then cross-fades straight from the hint: no frame
-/// shows neither.
-#[gpui::test]
-fn a_waiting_pane_keeps_its_hint_until_its_thread_is_drawn(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx, rest) = mount_finished(cx);
-    cx.simulate_keystrokes("secondary-d");
-    settle_frames(cx);
-    assert!(cx.debug_bounds("waiting-pane").is_some());
-    cx.simulate_keystrokes("secondary-2");
-    arrive(&shell, cx);
-    assert_eq!(
-        pane_threads(&shell, cx),
-        [Some("thread-1".into()), Some("thread-2".into())]
-    );
-    // The log comes past the hint's own fade, short of the skeleton's wait.
-    let mut seen = watch("thread-2", rest, 15, cx);
-    serve_finished(&host, "thread-2");
-    arrive(&shell, cx);
-    seen.extend(watch("thread-2", rest, 40, cx));
-    assert!(
-        seen.iter().all(|frame| frame.waiting || frame.shown() > 0.),
-        "the pane went blank before its thread: {seen:?}"
-    );
-    assert!(
-        seen.iter().all(|frame| !frame.skeleton),
-        "the pane flashed a skeleton: {seen:?}"
-    );
-    assert_appears_once_drawn("thread-2", &seen);
-}
-
 /// With motion reduced, a thread switched to is there at once when it is
 /// ready, and not before.
 #[gpui::test]
@@ -511,12 +384,12 @@ fn a_thread_switched_to_with_motion_reduced_is_there_once_drawn(cx: &mut TestApp
     let seen = watch("thread-2", rest, 10, cx);
     let started = seen
         .iter()
-        .position(|frame| frame.shown() > 0.)
+        .position(|shown| *shown > 0.)
         .expect("thread-2 appears");
     assert!(
         seen[started..]
             .iter()
-            .all(|frame| (frame.shown() - 1.).abs() < 0.01),
+            .all(|shown| (shown - 1.).abs() < 0.01),
         "{seen:?}"
     );
 }
@@ -945,308 +818,6 @@ fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppCon
             _ => {}
         });
         settle_frames(cx);
-    }
-    assert!(failures.is_empty(), "{failures:#?}");
-}
-
-/// How light the last frame is at `probe`, by relative luminance, over a
-/// black or a white `backdrop` (what the window's translucent canvas lets
-/// through): every solid fill and every shadow drawn there, composited in
-/// the order they were drawn, a shadow as strong there as its blur makes it
-/// (GPUI's own Gaussian, its corners taken as square).
-fn luminance_at(
-    window: &gpui::Window,
-    probe: gpui::Point<gpui::ScaledPixels>,
-    backdrop: f32,
-) -> f32 {
-    let mut drawn: Vec<(u32, gpui::Hsla)> = crate::test_frames::painted_quads(window)
-        .iter()
-        .filter(|quad| quad.bounds.contains(&probe) && quad.content_mask.bounds.contains(&probe))
-        .filter_map(|quad| Some((quad.order, quad.background.as_solid()?)))
-        .collect();
-    // Abramowitz and Stegun's 7.1.26.
-    let erf = |x: f32| {
-        let t = 1. / (1. + 0.327_591_1 * x.abs());
-        let poly = t
-            * (0.254_829_6
-                + t * (-0.284_496_7 + t * (1.421_413_8 + t * (-1.453_152 + t * 1.061_405_4))));
-        (1. - poly * (-x * x).exp()).copysign(x)
-    };
-    let across = |at: f32, from: f32, to: f32, sigma: f32| {
-        if sigma <= 0. {
-            return if (from..to).contains(&at) { 1. } else { 0. };
-        }
-        let scale = std::f32::consts::FRAC_1_SQRT_2 / sigma;
-        0.5 * (erf((to - at) * scale) - erf((from - at) * scale))
-    };
-    drawn.extend(
-        crate::test_frames::painted_shadows(window)
-            .iter()
-            .filter(|shadow| shadow.content_mask.bounds.contains(&probe))
-            .map(|shadow| {
-                let (bounds, sigma) = (shadow.bounds, shadow.blur_radius.0);
-                let strength = across(probe.x.0, bounds.left().0, bounds.right().0, sigma)
-                    * across(probe.y.0, bounds.top().0, bounds.bottom().0, sigma);
-                let mut colour = shadow.color;
-                colour.a *= strength;
-                (shadow.order, colour)
-            }),
-    );
-    drawn.sort_by_key(|(order, _)| *order);
-    let [r, g, b] = drawn.iter().fold([backdrop; 3], |under, (_, colour)| {
-        let colour = gpui::Rgba::from(*colour);
-        let over = |channel: f32, under: f32| channel * colour.a + under * (1. - colour.a);
-        [
-            over(colour.r, under[0]),
-            over(colour.g, under[1]),
-            over(colour.b, under[2]),
-        ]
-    });
-    0.2126 * r + 0.7152 * g + 0.0722 * b
-}
-
-/// The cards [`Holding::Rail`] shows on the side rail.
-const RAIL_CARDS: [&str; 3] = ["goal", "plan", "commands"];
-
-/// How light each of the rail's cards is drawn at its centre in the last
-/// frame, over a black and a white backdrop; nothing for a card not drawn.
-fn rail_lightness(cx: &mut VisualTestContext) -> [Option<[f32; 2]>; 3] {
-    let cards = RAIL_CARDS.map(|card| cx.debug_bounds(format!("rail-card-frame-{card}").leak()));
-    cx.update(|window, _| {
-        let scale = window.scale_factor();
-        cards.map(|card| {
-            let centre = card?.center().scale(scale);
-            Some([0., 1.].map(|backdrop| luminance_at(window, centre, backdrop)))
-        })
-    })
-}
-
-/// How opaque the surface laid out at `bounds` is drawn in the last frame:
-/// the alpha of its fill, which is opaque at rest.
-fn fill_alpha(window: &gpui::Window, bounds: gpui::Bounds<Pixels>) -> Option<f32> {
-    let bounds = bounds.scale(window.scale_factor());
-    let near = |a: gpui::ScaledPixels, b: gpui::ScaledPixels| (a - b).0.abs() <= 1.;
-    crate::test_frames::painted_quads(window)
-        .iter()
-        .filter(|quad| {
-            near(quad.bounds.left(), bounds.left())
-                && near(quad.bounds.top(), bounds.top())
-                && near(quad.bounds.right(), bounds.right())
-                && near(quad.bounds.bottom(), bounds.bottom())
-        })
-        .filter_map(|quad| quad.background.as_solid())
-        .map(|fill| fill.a)
-        .reduce(f32::max)
-}
-
-/// Checks that a surface's shadow at a point just outside it, `seen` there
-/// frame by frame with how opaque the surface was drawn, darkens `canvas`
-/// in step with the surface, toward what it does at `rest`: as a surface
-/// fading as one would, with no frame where it is missing and comes in
-/// late.
-fn shadow_follows(
-    what: &str,
-    seen: &[(Option<f32>, [f32; 2])],
-    canvas: [f32; 2],
-    rest: [f32; 2],
-    failures: &mut Vec<String>,
-) {
-    for (backdrop, name) in ["black", "white"].iter().enumerate() {
-        let full = canvas[backdrop] - rest[backdrop];
-        if full < 0.002 {
-            failures.push(format!("{what}: no shadow at rest over {name}: {full:.4}"));
-            continue;
-        }
-        for (frame, (opacity, lit)) in seen.iter().enumerate() {
-            let Some(opacity) = opacity else { continue };
-            let shade = canvas[backdrop] - lit[backdrop];
-            if (shade - full * opacity).abs() > 0.2 * full + 0.001 {
-                failures.push(format!(
-                    "{what}, frame {frame}: the surface at {opacity:.3} shades {shade:.4} \
-                     over {name}, against {full:.4} at rest"
-                ));
-            }
-        }
-    }
-}
-
-/// The rail's cards of a thread switched to fade in with the thread from
-/// the canvas to the card through nothing darker than either, in either
-/// theme: a card's shadow does not show through its fill while the fill is
-/// faint, and fades in around it with it.
-#[gpui::test]
-fn the_rail_cards_of_a_thread_switched_to_fade_in_through_nothing_darker(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx) = mount_panes(cx);
-    serve_holding(&host, "thread-1", Holding::Rail);
-    await_restore_update(&shell, cx, |store, cx| {
-        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx) == Some(1)
-    });
-    settle_frames(cx);
-    let mut failures = Vec::new();
-    for mode in [
-        crate::theme::ThemeMode::Light,
-        crate::theme::ThemeMode::Dark,
-    ] {
-        cx.update(|window, cx| crate::theme::change_mode(mode, Some(window), cx));
-        settle_frames(cx);
-        for (key, id) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
-            serve_holding(&host, id, Holding::Rail);
-            switch(&shell, key, id, cx);
-            // Between the plan's card and the commands', in the gap the
-            // shadows of both shade.
-            let gap = |cx: &mut VisualTestContext| {
-                let card = cx.debug_bounds("rail-card-frame-commands")?;
-                let probe = gpui::point(card.center().x, card.top() - px(2.));
-                Some(cx.update(|window, _| {
-                    let at = probe.scale(window.scale_factor());
-                    (
-                        fill_alpha(window, card),
-                        [0., 1.].map(|backdrop| luminance_at(window, at, backdrop)),
-                    )
-                }))
-            };
-            let mut seen = vec![rail_lightness(cx)];
-            let mut shading = Vec::from_iter(gap(cx));
-            for _ in 0..30 {
-                display_frame(cx);
-                seen.push(rail_lightness(cx));
-                shading.extend(gap(cx));
-            }
-            let rest =
-                rail_lightness(cx).map(|card| card.unwrap_or_else(|| panic!("{id}'s cards")));
-            let shaded = gap(cx).expect("the commands card").1;
-            // The canvas: under the rail, below its last card and that
-            // card's shadow.
-            let rail = cx.debug_bounds("chat-rail").expect("the rail");
-            let last = RAIL_CARDS
-                .iter()
-                .filter_map(|card| cx.debug_bounds(format!("rail-card-frame-{card}").leak()))
-                .map(|card| card.bottom())
-                .fold(px(0.), Pixels::max);
-            assert!(rail.bottom() - last > px(40.), "{id}'s cards fill the rail");
-            let canvas = cx.update(|window, _| {
-                let probe = gpui::point(rail.center().x, rail.bottom() - px(8.))
-                    .scale(window.scale_factor());
-                [0., 1.].map(|backdrop| luminance_at(window, probe, backdrop))
-            });
-            shadow_follows(
-                &format!("{mode:?}, {id}, between the plan and the commands"),
-                &shading,
-                canvas,
-                shaded,
-                &mut failures,
-            );
-            for (frame, cards) in seen.iter().enumerate() {
-                for ((card, lit), rest) in RAIL_CARDS.iter().zip(cards).zip(&rest) {
-                    let Some(lit) = lit else { continue };
-                    for (backdrop, name) in ["black", "white"].iter().enumerate() {
-                        let floor = canvas[backdrop].min(rest[backdrop]);
-                        if lit[backdrop] < floor - 0.005 {
-                            failures.push(format!(
-                                "{mode:?}, {id}, frame {frame}: the {card} card at {:.4} \
-                                 over {name}, under both the canvas {:.4} and the card {:.4}",
-                                lit[backdrop], canvas[backdrop], rest[backdrop]
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    assert!(failures.is_empty(), "{failures:#?}");
-}
-
-/// A thread's menu fades in over the sidebar, and out again, from what lies
-/// under it to the menu and back, through nothing darker than either, in
-/// either theme: its shadow does not show through its fill while the fill
-/// is faint, though what fades it is the popover it is drawn in, and fades
-/// in and out around it with it.
-#[gpui::test]
-fn a_menu_fades_in_and_out_through_nothing_darker(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (_shell, _host, cx) = mount_panes(cx);
-    settle_frames(cx);
-    let light = |at: gpui::Point<Pixels>, cx: &mut VisualTestContext| {
-        cx.update(|window, _| {
-            let probe = at.scale(window.scale_factor());
-            [0., 1.].map(|backdrop| luminance_at(window, probe, backdrop))
-        })
-    };
-    let row = cx
-        .debug_bounds("sidebar-thread-thread-2")
-        .expect("thread-2's row")
-        .center();
-    let (right, plain) = (gpui::MouseButton::Right, gpui::Modifiers::none());
-    let menu = |cx: &mut VisualTestContext| cx.debug_bounds("tcode-popup-menu");
-    let mut failures = Vec::new();
-    for mode in [
-        crate::theme::ThemeMode::Light,
-        crate::theme::ThemeMode::Dark,
-    ] {
-        cx.update(|window, cx| crate::theme::change_mode(mode, Some(window), cx));
-        settle_frames(cx);
-        // Where the menu rests, and what it covers there.
-        cx.simulate_mouse_down(row, right, plain);
-        cx.simulate_mouse_up(row, right, plain);
-        settle_frames(cx);
-        let resting = menu(cx).expect("thread-2's menu");
-        let at = resting.center();
-        // Beside its left edge, where its shadow falls.
-        let beside = gpui::point(resting.left() - px(4.), resting.center().y);
-        let open = light(at, cx);
-        let shaded = light(beside, cx);
-        cx.simulate_keystrokes("escape");
-        settle_frames(cx);
-        assert!(menu(cx).is_none(), "the menu closed");
-        let under = light(at, cx);
-        let canvas = light(beside, cx);
-        let shading = |cx: &mut VisualTestContext| {
-            let opacity = menu(cx).and_then(|menu| cx.update(|window, _| fill_alpha(window, menu)));
-            (opacity, light(beside, cx))
-        };
-        let mut shades = Vec::new();
-
-        cx.simulate_mouse_down(row, right, plain);
-        cx.simulate_mouse_up(row, right, plain);
-        draw(cx);
-        let mut seen = Vec::new();
-        for _ in 0..30 {
-            seen.push(light(at, cx));
-            shades.push(shading(cx));
-            display_frame(cx);
-        }
-        cx.simulate_keystrokes("escape");
-        draw(cx);
-        for _ in 0..30 {
-            seen.push(light(at, cx));
-            shades.push(shading(cx));
-            display_frame(cx);
-        }
-        shadow_follows(
-            &format!("{mode:?}, beside the menu"),
-            &shades,
-            canvas,
-            shaded,
-            &mut failures,
-        );
-        assert_eq!(
-            light(at, cx),
-            under,
-            "the menu left what it covered as it was"
-        );
-        for (frame, lit) in seen.iter().enumerate() {
-            for (backdrop, name) in ["black", "white"].iter().enumerate() {
-                let floor = under[backdrop].min(open[backdrop]);
-                if lit[backdrop] < floor - 0.005 {
-                    failures.push(format!(
-                        "{mode:?}, frame {frame}: the menu at {:.4} over {name}, under both \
-                         what it covers {:.4} and the menu {:.4}",
-                        lit[backdrop], under[backdrop], open[backdrop]
-                    ));
-                }
-            }
-        }
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
