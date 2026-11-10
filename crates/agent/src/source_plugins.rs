@@ -143,8 +143,23 @@ fn done(stdout: String) -> PluginOpOutcome {
     }
 }
 
+/// pi reads a source as a local path unless it names a registry or a remote.
+fn pi_source_is_local(source: &str) -> bool {
+    ![
+        "npm:", "git:", "github:", "http:", "https:", "ssh:", "builtin:",
+    ]
+    .iter()
+    .any(|prefix| source.starts_with(prefix))
+}
+
 /// A package `pi list` printed: its source, the scope of the heading above
 /// it, and the path on the line below it.
+///
+/// pi stores a local source relative to its scope's settings directory but
+/// resolves the source given to `pi remove` or `pi update` against the
+/// working directory, so a local package goes by the path pi resolved it to.
+/// A package whose settings entry filters its resources is marked
+/// ` (filtered)`, which is not part of its source.
 fn parse_pi_list(stdout: &str) -> Vec<(String, PluginScope, Option<PathBuf>)> {
     let mut packages = Vec::new();
     let mut scope = None;
@@ -158,11 +173,15 @@ fn parse_pi_list(stdout: &str) -> Vec<(String, PluginScope, Option<PathBuf>)> {
             (0, _) => scope = None,
             (2, source) => {
                 if let Some(scope) = scope {
+                    let source = source.strip_suffix(" (filtered)").unwrap_or(source);
                     packages.push((source.to_string(), scope, None));
                 }
             }
             (_, path) => {
                 if let Some(package) = packages.last_mut().filter(|package| package.2.is_none()) {
+                    if pi_source_is_local(&package.0) {
+                        package.0 = path.to_string();
+                    }
                     package.2 = Some(PathBuf::from(path));
                 }
             }
@@ -177,10 +196,19 @@ pub(crate) async fn list_pi(context: &PluginContext) -> Result<PluginListing, Ag
         list_args.push("--approve".to_string());
     }
     let stdout = run_cli(ProviderKind::Pi, "pi", context, &list_args, LIST_TIMEOUT).await?;
+    Ok(PluginListing {
+        entries: pi_entries(&stdout, context.project),
+        marketplaces: Vec::new(),
+        marketplace_actions: Vec::new(),
+        errors: Vec::new(),
+    })
+}
+
+fn pi_entries(stdout: &str, project: bool) -> Vec<ProviderPluginEntry> {
     let mut entries: Vec<ProviderPluginEntry> = Vec::new();
-    for (source, scope, location) in parse_pi_list(&stdout) {
+    for (source, scope, location) in parse_pi_list(stdout) {
         // A listing away from a project addresses no project package.
-        if scope == PluginScope::Project && !context.project {
+        if scope == PluginScope::Project && !project {
             continue;
         }
         let installation = PluginInstallation {
@@ -199,15 +227,19 @@ pub(crate) async fn list_pi(context: &PluginContext) -> Result<PluginListing, Ag
                 listed.installations.push(installation);
                 listed.actions.extend(actions);
             }
-            None => entries.push(entry(&source, installation, actions)),
+            None => {
+                let mut listed = entry(&source, installation, actions);
+                if pi_source_is_local(&source) {
+                    listed.source.kind = PluginSourceKind::LocalPath;
+                    if let Some(name) = Path::new(&source).file_name() {
+                        listed.name = name.to_string_lossy().into_owned();
+                    }
+                }
+                entries.push(listed);
+            }
         }
     }
-    Ok(PluginListing {
-        entries,
-        marketplaces: Vec::new(),
-        marketplace_actions: Vec::new(),
-        errors: Vec::new(),
-    })
+    entries
 }
 
 pub(crate) async fn run_pi(
@@ -461,6 +493,51 @@ mod tests {
             ]
         );
         assert_eq!(parse_pi_list("No packages installed.\n"), []);
+    }
+
+    /// pi 1.5.1 prints a package whose settings entry is an object (one that
+    /// filters its resources) as `<source> (filtered)`, and a local source as
+    /// stored: relative to the scope's settings directory, here the agent
+    /// directory (`dist/package-manager-cli.js`'s `list` case,
+    /// `dist/core/package-manager.js`'s `listConfiguredPackages` and
+    /// `normalizePackageSourceForSettings`). `pi remove` and `pi update`
+    /// resolve a local source against the working directory
+    /// (`getSourceMatchKeyForInput`, `getPackageIdentity` without a scope).
+    #[test]
+    fn pi_packages_go_by_the_source_pi_matches_from_any_directory() {
+        let listed = pi_entries(
+            "User packages:\n  npm:pi-extmgr (filtered)\n    /home/me/.pi/agent/npm/node_modules/pi-extmgr\n  ../tools/my-ext\n    /home/me/.pi/tools/my-ext\n\nProject packages:\n  npm:pi-extmgr\n    /work/proj/.pi/npm/node_modules/pi-extmgr\n",
+            true,
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .map(|entry| (
+                    entry.id.as_str(),
+                    entry.name.as_str(),
+                    entry.source.kind,
+                    entry
+                        .installations
+                        .iter()
+                        .map(|installation| installation.scope)
+                        .collect::<Vec<_>>()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "npm:pi-extmgr",
+                    "pi-extmgr",
+                    PluginSourceKind::Npm,
+                    vec![PluginScope::User, PluginScope::Project]
+                ),
+                (
+                    "/home/me/.pi/tools/my-ext",
+                    "my-ext",
+                    PluginSourceKind::LocalPath,
+                    vec![PluginScope::User]
+                ),
+            ]
+        );
     }
 
     /// `opencode debug config --standalone` prints the server's configuration
