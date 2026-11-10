@@ -6695,8 +6695,10 @@ pub(crate) mod tests {
             &self,
             _: tcode_client::pairing::PairInvite,
             _: Option<std::net::IpAddr>,
-        ) -> tcode_client::host::HostFuture<'_, Result<tcode_client::pairing::PairedHost, String>>
-        {
+        ) -> tcode_client::host::HostFuture<
+            '_,
+            Result<tcode_client::pairing::PairedHost, tcode_client::pairing::PairError>,
+        > {
             panic!("a cold start must reuse the saved pairing")
         }
 
@@ -6878,8 +6880,10 @@ pub(crate) mod tests {
             &self,
             _: tcode_client::pairing::PairInvite,
             _: Option<std::net::IpAddr>,
-        ) -> tcode_client::host::HostFuture<'_, Result<tcode_client::pairing::PairedHost, String>>
-        {
+        ) -> tcode_client::host::HostFuture<
+            '_,
+            Result<tcode_client::pairing::PairedHost, tcode_client::pairing::PairError>,
+        > {
             let paired = self
                 .pairs
                 .borrow_mut()
@@ -15084,8 +15088,10 @@ pub(crate) mod tests {
                 &self,
                 _: tcode_client::pairing::PairInvite,
                 _: Option<std::net::IpAddr>,
-            ) -> tcode_client::host::HostFuture<'_, Result<tcode_client::pairing::PairedHost, String>>
-            {
+            ) -> tcode_client::host::HostFuture<
+                '_,
+                Result<tcode_client::pairing::PairedHost, tcode_client::pairing::PairError>,
+            > {
                 unreachable!("nothing is paired here")
             }
             fn connect(&self, _: &tcode_client::pairing::PairedHost) -> Transport {

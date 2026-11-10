@@ -321,9 +321,9 @@ pub trait ClientHost: 'static {
         &self,
         invite: PairInvite,
         address: Option<std::net::IpAddr>,
-    ) -> HostFuture<'_, Result<PairedHost, String>> {
+    ) -> HostFuture<'_, Result<PairedHost, crate::pairing::PairError>> {
         let _ = (invite, address);
-        Box::pin(async { Err("this client cannot add machines".into()) })
+        Box::pin(async { Err(crate::pairing::PairError::Unsupported) })
     }
 
     /// Open a reconnecting link. Dropping the returned channels ends it.

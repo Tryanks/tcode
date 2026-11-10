@@ -770,7 +770,7 @@ impl RemotePanel {
     fn finish_pair(
         &mut self,
         generation: u64,
-        result: Result<PairedHost, String>,
+        result: Result<PairedHost, tcode_client::pairing::PairError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2336,18 +2336,19 @@ mod tests {
                 &self,
                 invite: PairInvite,
                 address: Option<IpAddr>,
-            ) -> tcode_client::host::HostFuture<'_, Result<PairedHost, String>> {
+            ) -> tcode_client::host::HostFuture<
+                '_,
+                Result<PairedHost, tcode_client::pairing::PairError>,
+            > {
                 self.attempts.borrow_mut().push((invite.clone(), address));
                 Box::pin(async move {
                     let reached: Option<IpAddr> = "192.168.1.20".parse().ok();
                     if address == reached {
                         Ok(invite.paired("Studio".into()))
                     } else {
-                        Err(
-                            "could not connect to the machine: No addressing information \
-                             available"
-                                .into(),
-                        )
+                        Err(tcode_client::pairing::PairError::Unreachable(
+                            "No addressing information available".into(),
+                        ))
                     }
                 })
             }
@@ -2594,12 +2595,17 @@ mod tests {
             probe.0.update(cx, |panel, cx| {
                 let old = panel.form.restart();
                 let current = panel.form.restart();
-                panel.finish_pair(old, Err("invalid or expired invitation".into()), window, cx);
+                panel.finish_pair(
+                    old,
+                    Err(tcode_client::pairing::PairError::Invalid),
+                    window,
+                    cx,
+                );
                 assert!(panel.form.error.is_none());
                 assert!(client.load_hosts().is_empty());
                 panel.finish_pair(
                     current,
-                    Err("invalid or expired invitation".into()),
+                    Err(tcode_client::pairing::PairError::Invalid),
                     window,
                     cx,
                 );

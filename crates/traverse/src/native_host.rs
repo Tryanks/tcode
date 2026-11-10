@@ -392,21 +392,20 @@ impl ClientHost for NativeClientHost {
         &self,
         invite: PairInvite,
         address: Option<std::net::IpAddr>,
-    ) -> HostFuture<'_, Result<PairedHost, String>> {
+    ) -> HostFuture<'_, Result<PairedHost, crate::PairError>> {
         let device = self.device();
         Box::pin(async move {
-            let device = device?;
+            let device = device.map_err(crate::PairError::Device)?;
             let (done, result) = async_channel::bounded(1);
             crate::runtime().spawn(async move {
-                let paired = crate::pair(&invite, address, &device)
-                    .await
-                    .map_err(|error| error.to_string());
-                let _ = done.send(paired).await;
+                let _ = done
+                    .send(crate::pair(&invite, address, &device).await)
+                    .await;
             });
             result
                 .recv()
                 .await
-                .unwrap_or_else(|_| Err("pairing was interrupted".into()))
+                .unwrap_or_else(|error| Err(crate::PairError::Lost(error.to_string())))
         })
     }
 

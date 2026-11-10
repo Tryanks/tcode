@@ -482,39 +482,7 @@ impl ClientEndpoint {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PairError {
-    /// Wrong, expired or already used invitation.
-    Invalid,
-    Disabled,
-    Busy,
-    AlreadyMember,
-    SpaceUnavailable,
-    /// No path to the machine opened. The secret was never sent, so the
-    /// invitation is still valid.
-    Unreachable(String),
-    /// The connection to the machine ended during the exchange.
-    Lost(String),
-    /// The machine answered with something other than a pairing reply.
-    Protocol(String),
-}
-
-impl std::fmt::Display for PairError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Invalid => f.write_str("invalid or expired invitation"),
-            Self::Disabled => f.write_str("pairing_disabled"),
-            Self::AlreadyMember => f.write_str("already_member"),
-            Self::SpaceUnavailable => f.write_str("space_unavailable"),
-            Self::Busy => f.write_str("the machine could not record the pairing; try again"),
-            Self::Unreachable(error) => write!(f, "could not connect to the machine: {error}"),
-            Self::Lost(error) => write!(f, "lost the connection to the machine: {error}"),
-            Self::Protocol(error) => write!(f, "invalid pairing response: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for PairError {}
+pub use tcode_client::pairing::PairError;
 
 /// Where to dial a machine from what a device knows about it. Discovery
 /// services add addresses for the same id; nothing can change the id.

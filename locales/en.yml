@@ -1645,6 +1645,8 @@ hosts:
     connecting: "Connecting to the machine…"
     rejected: "The machine rejected this invitation; create a new one there and paste it here."
     unconfirmed: "The pairing could not be confirmed; try again with a new invitation."
+    busy: "The machine could not record the pairing; try again."
+    lost: "Lost the connection to the machine: %{reason}"
     disabled: "This machine is not accepting new devices; turn on Accept new devices there."
     address: "Machine's IP address"
     address_description: "Nothing found the machine on this network; enter the IP address from its network settings."

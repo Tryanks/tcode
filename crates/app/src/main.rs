@@ -164,7 +164,7 @@ fn pair_command(args: &[String], client_host: &NativeClientHost) -> Result<Strin
         return Err("usage: tcode --pair <tcode://pair?...>".into());
     };
     let invite = tcode_client::pairing::parse_pair_url(invite).ok_or("invalid invite link")?;
-    let host = smol::block_on(client_host.pair(invite, None))?;
+    let host = smol::block_on(client_host.pair(invite, None)).map_err(|error| error.to_string())?;
     let host_id = host.host_id.clone();
     client_host.remember_host(host);
     Ok(host_id)

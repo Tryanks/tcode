@@ -1638,6 +1638,8 @@ hosts:
     connecting: "正在连接主机…"
     rejected: "主机拒绝了这个邀请，请在主机上生成新邀请后粘贴到这里。"
     unconfirmed: "无法确认配对结果，请用新的邀请重试。"
+    busy: "机器未能记录这次配对，请重试。"
+    lost: "与机器的连接中断：%{reason}"
     disabled: "这台主机未接受新设备，请在主机上开启“接受新设备配对”。"
     address: "主机的 IP 地址"
     address_description: "在当前网络中找不到这台主机，请输入它网络设置中显示的 IP 地址。"
