@@ -53,7 +53,7 @@ impl AppState {
     pub(crate) fn git_branch_name(&self, target_id: &str) -> Option<String> {
         self.git_status
             .get(target_id)
-            .and_then(|s| s.branch.clone())
+            .and_then(|status| status.as_ref().ok()?.branch.clone())
     }
 
     /// Generate a commit message with the current provider (Claude, headless
@@ -69,15 +69,15 @@ impl AppState {
             return HostCx::spawn_background(cx, async { Err("no active session".to_string()) });
         };
         let binary = self.settings.provider(ProviderKind::ClaudeCode).binary_path;
-        HostCx::spawn_background(cx, async move {
-            let (stat, patch) = commit_diff_context(&cwd, included.as_deref());
+        cx.unblock(move || {
+            let (stat, patch) = commit_diff_context(&cwd, included.as_deref())?;
             let prompt = build_commit_prompt(&stat, &patch);
             let raw = run_claude_headless(binary.as_deref(), &cwd, &prompt)?;
-            let message = sanitize_commit_message(&raw);
+            let message = raw.trim();
             if message.is_empty() {
                 Err("model returned an empty commit message".to_string())
             } else {
-                Ok(message)
+                Ok(message.to_string())
             }
         })
     }

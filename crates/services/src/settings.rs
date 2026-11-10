@@ -152,60 +152,37 @@ impl SettingsStore {
         self.path.with_file_name(name)
     }
 
-    /// Fails on an unreadable file so a write never replaces secrets it could not read.
+    /// Every saved secret; none when there is no file. A file that cannot be
+    /// read or parsed is an error, so no secret is taken to be missing and no
+    /// write replaces secrets it could not read.
     fn read_secrets(&self) -> std::io::Result<Secrets> {
-        match fs::read(&self.secrets_path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Secrets::new()),
-            Err(error) => Err(error),
-        }
+        read_own(&self.secrets_path).map(Option::unwrap_or_default)
     }
 
-    /// Every stored provider secret, keyed by profile id then variable name.
-    pub fn load_secrets(&self) -> BTreeMap<String, BTreeMap<String, String>> {
-        self.try_load_secrets().unwrap_or_default()
-    }
-
-    fn try_load_secrets(&self) -> std::io::Result<Secrets> {
-        let mut all = self.read_secrets()?;
-        for kind in HostKind::ALL {
-            all.remove(token_secrets(kind));
-        }
-        all.remove(EMAIL_SECRETS);
-        all.remove(VERIFIED_SECRETS);
-        Ok(all)
+    /// Why the saved secrets cannot be read, when they cannot.
+    pub(crate) fn secrets_unreadable(&self) -> Option<String> {
+        self.read_secrets().err().map(|error| error.to_string())
     }
 
     /// The sensitive env values for one profile id: a built-in profile's
     /// [`Settings::builtin_profile_id`] or a user profile's slug.
-    pub fn profile_secrets(&self, profile_id: &str) -> BTreeMap<String, String> {
-        self.try_profile_secrets(profile_id).unwrap_or_default()
+    pub fn profile_secrets(&self, profile_id: &str) -> std::io::Result<BTreeMap<String, String>> {
+        Ok(self.read_secrets()?.remove(profile_id).unwrap_or_default())
     }
 
-    pub fn try_profile_secrets(
-        &self,
-        profile_id: &str,
-    ) -> std::io::Result<BTreeMap<String, String>> {
+    pub(crate) fn token(&self, kind: HostKind, host: &str) -> std::io::Result<Option<String>> {
         Ok(self
-            .try_load_secrets()?
-            .remove(profile_id)
-            .unwrap_or_default())
-    }
-
-    pub(crate) fn token(&self, kind: HostKind, host: &str) -> Option<String> {
-        self.read_secrets()
-            .ok()?
-            .remove(token_secrets(kind))?
-            .remove(host)
+            .read_secrets()?
+            .remove(token_secrets(kind))
+            .and_then(|mut tokens| tokens.remove(host)))
     }
 
     pub(crate) fn saved_credential(
         &self,
         kind: HostKind,
         host: &str,
-    ) -> Option<(String, Option<String>)> {
-        saved_credential(&self.read_secrets().ok()?, kind, host)
+    ) -> std::io::Result<Option<(String, Option<String>)>> {
+        Ok(saved_credential(&self.read_secrets()?, kind, host))
     }
 
     /// What the host last answered the credential with `fingerprint`; nothing once the
@@ -215,13 +192,14 @@ impl SettingsStore {
         kind: HostKind,
         host: &str,
         fingerprint: &str,
-    ) -> Option<Verdict> {
-        let all = self.read_secrets().ok()?;
-        let check = Check::read(
-            all.get(VERIFIED_SECRETS)?
-                .get(&verification_key(kind, host))?,
-        )?;
-        (check.fingerprint == fingerprint).then_some(check.verdict)
+    ) -> std::io::Result<Option<Verdict>> {
+        let all = self.read_secrets()?;
+        Ok(all
+            .get(VERIFIED_SECRETS)
+            .and_then(|checks| checks.get(&verification_key(kind, host)))
+            .and_then(|value| Check::read(value))
+            .filter(|check| check.fingerprint == fingerprint)
+            .map(|check| check.verdict))
     }
 
     /// Records what the host answered the credential with `fingerprint`, saved or from the
@@ -427,8 +405,8 @@ impl SettingsStore {
         restrict_permissions(&self.secrets_path)
     }
 
-    /// The recorded conversation reviews, oldest first; unreadable records read as none.
-    pub fn load_review_records(&self) -> Vec<ReviewRecord> {
+    /// The recorded conversation reviews, oldest first.
+    pub fn load_review_records(&self) -> std::io::Result<Vec<ReviewRecord>> {
         self.load_list(REVIEWS_FILE)
     }
 
@@ -436,8 +414,8 @@ impl SettingsStore {
         self.save_list(REVIEWS_FILE, records)
     }
 
-    /// The recent `tcode_control` writes, newest first; an unreadable file reads as none.
-    pub fn load_control_activity(&self) -> Vec<ControlActivityEntry> {
+    /// The recent `tcode_control` writes, newest first.
+    pub fn load_control_activity(&self) -> std::io::Result<Vec<ControlActivityEntry>> {
         self.load_list(CONTROL_ACTIVITY_FILE)
     }
 
@@ -445,14 +423,10 @@ impl SettingsStore {
         self.save_list(CONTROL_ACTIVITY_FILE, entries)
     }
 
-    fn load_list<T: DeserializeOwned>(&self, name: &str) -> Vec<T> {
-        let Ok(bytes) = fs::read(self.data_file(name)) else {
-            return Vec::new();
-        };
-        serde_json::from_slice(&bytes).unwrap_or_else(|err| {
-            log::warn!("failed to parse {name}: {err}");
-            Vec::new()
-        })
+    /// None when there is no file; a file that cannot be read or parsed is an
+    /// error, so a later save never replaces records it could not read.
+    fn load_list<T: DeserializeOwned>(&self, name: &str) -> std::io::Result<Vec<T>> {
+        read_own(&self.data_file(name)).map(Option::unwrap_or_default)
     }
 
     fn save_list<T: Serialize>(&self, name: &str, items: &[T]) -> std::io::Result<()> {
@@ -470,6 +444,21 @@ impl SettingsStore {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         fs::write(&tmp, data)?;
         fs::rename(tmp, &self.path)
+    }
+}
+
+/// A JSON file of the host's own: `None` when it does not exist, an error
+/// naming it when it cannot be read or parsed.
+fn read_own<T: DeserializeOwned>(path: &Path) -> std::io::Result<Option<T>> {
+    let unreadable = |kind, error: &dyn std::fmt::Display| {
+        std::io::Error::new(kind, format!("{} is unreadable: {error}", path.display()))
+    };
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| unreadable(std::io::ErrorKind::InvalidData, &error)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(unreadable(error.kind(), &error)),
     }
 }
 
@@ -540,6 +529,40 @@ mod tests {
             std::io::ErrorKind::InvalidData
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Files of the host's own that are missing read as empty; ones that do not
+    /// parse are errors, never empty, so nothing saved later replaces them and
+    /// no saved credential is taken to be absent.
+    #[test]
+    fn own_files_that_do_not_parse_are_errors_and_missing_ones_are_empty() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-settings-own-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let store = SettingsStore::new(root.clone());
+        assert!(store.load_review_records().unwrap().is_empty());
+        assert!(store.load_control_activity().unwrap().is_empty());
+        assert!(store.profile_secrets("claude").unwrap().is_empty());
+        assert_eq!(store.token(HostKind::Github, "github.com").unwrap(), None);
+
+        for name in [REVIEWS_FILE, CONTROL_ACTIVITY_FILE, "secrets.json"] {
+            fs::write(store.data_file(name), b"{torn").unwrap();
+        }
+        assert!(store.load_review_records().is_err());
+        assert!(store.load_control_activity().is_err());
+        assert!(store.profile_secrets("claude").is_err());
+        assert!(store.token(HostKind::Github, "github.com").is_err());
+        assert!(
+            store
+                .saved_credential(HostKind::Bitbucket, "bitbucket.org")
+                .is_err()
+        );
+        assert!(
+            store
+                .credential_check(HostKind::Github, "github.com", "fingerprint")
+                .is_err()
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -707,12 +730,12 @@ mod tests {
         assert!(env[0].value.is_empty());
 
         // The value is only reachable through the secrets store, which is 0600.
-        let secrets = store.profile_secrets("claude");
+        let secrets = store.profile_secrets("claude").unwrap();
         assert_eq!(
             secrets.get("ANTHROPIC_API_KEY").map(String::as_str),
             Some("sk-live")
         );
-        assert!(store.profile_secrets("codex").is_empty());
+        assert!(store.profile_secrets("codex").unwrap().is_empty());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -731,7 +754,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert!(store.profile_secrets("claude").is_empty());
+        assert!(store.profile_secrets("claude").unwrap().is_empty());
         // A user profile "klaude-kode" stores its own key, isolated from the
         // built-in "claude" profile.
         store
@@ -748,6 +771,7 @@ mod tests {
         assert_eq!(
             store
                 .profile_secrets("klaude-kode")
+                .unwrap()
                 .get("ANTHROPIC_API_KEY")
                 .map(String::as_str),
             Some("sk-kimi-xyz")
@@ -756,6 +780,7 @@ mod tests {
         assert_eq!(
             store
                 .profile_secrets("claude")
+                .unwrap()
                 .get("ANTHROPIC_API_KEY")
                 .map(String::as_str),
             Some("sk-official")
@@ -763,10 +788,11 @@ mod tests {
 
         // Deleting a profile drops only its bucket.
         store.clear_profile_secrets("klaude-kode").unwrap();
-        assert!(store.profile_secrets("klaude-kode").is_empty());
+        assert!(store.profile_secrets("klaude-kode").unwrap().is_empty());
         assert_eq!(
             store
                 .profile_secrets("claude")
+                .unwrap()
                 .get("ANTHROPIC_API_KEY")
                 .map(String::as_str),
             Some("sk-official")

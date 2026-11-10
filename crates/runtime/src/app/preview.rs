@@ -80,8 +80,7 @@ impl AppState {
     pub(crate) fn route_preview(&mut self, broker: preview_mcp::BrokerRequest, cx: &mut HostCx) {
         let session_id = broker.session_id;
         // The agent's thread need not be on anyone's screen. Without a
-        // client that can render it, waiting out the timeout only delays the
-        // same answer.
+        // client that can render it, nothing would answer.
         let renderer = match self.previews.renderer_of(&session_id).cloned() {
             Some(renderer) => renderer,
             None => match self.previews.latest_client() {
@@ -99,6 +98,7 @@ impl AppState {
         };
         self.previews.next_request += 1;
         let request_id = self.previews.next_request;
+        let caller = broker.reply.clone();
         let kind = match broker.op {
             PreviewRequest::Status => RequestKind::Status,
             PreviewRequest::Snapshot => RequestKind::Snapshot,
@@ -115,27 +115,20 @@ impl AppState {
         );
         cx.emit(HostEvent::Domain(EventEnvelope {
             request_id: None,
-            topic: Topic::Preview {
-                client: renderer.clone(),
-            },
+            topic: Topic::Preview { client: renderer },
             event: ServerEvent::PreviewRequest {
                 request_id,
                 session_id,
                 request: broker.op,
             },
         }));
+        // The call that asked may end before the client answers; its request
+        // goes with it.
         let host = cx.clone();
         cx.spawn_detached(async move {
-            smol::Timer::after(Duration::from_secs(60)).await;
-            host.enqueue(move |state, cx| {
-                state.resolve_preview(
-                    request_id,
-                    Err(format!(
-                        "preview operation timed out: {} did not answer",
-                        renderer.name
-                    )),
-                    cx,
-                )
+            caller.closed().await;
+            host.enqueue(move |state, _| {
+                state.previews.pending.remove(&request_id);
             });
         });
     }
@@ -210,7 +203,7 @@ impl AppState {
     }
 
     /// A client's preview channel closed: it renders nothing any more, and
-    /// requests waiting on it fail now rather than at their timeout.
+    /// requests waiting on it fail now.
     pub(super) fn preview_client_unsubscribed(&mut self, client: &PreviewClient, cx: &mut HostCx) {
         // A renamed client subscribed under its new name first.
         if self

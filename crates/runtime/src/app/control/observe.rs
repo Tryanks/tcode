@@ -18,10 +18,6 @@ const SEARCH_CAP: u32 = 50;
 const PER_TURN_CAP: usize = 200;
 /// How many collapsed threads, and how many left-out thread ids, a review lists by name.
 const REVIEW_LIST_CAP: usize = 100;
-/// What one response may carry, about the size of one large file.
-const RESPONSE_BUDGET: usize = 60 * 1024;
-const TERMINAL_TAIL_BYTES: usize = 32 * 1024;
-const ASSISTANT_HEAD_CHARS: usize = 300;
 /// A thread active this recently is still in progress for a review, whatever its run state.
 const JUST_ACTIVE_MS: u64 = 10 * 60 * 1000;
 const REVIEW_WINDOW_MS: u64 = 7 * DAY_MS;
@@ -45,6 +41,9 @@ struct WorktreeFacts {
     base: Option<String>,
     /// Uncommitted changes right now; `None` outside a git repository or when not read.
     dirty: Option<bool>,
+    /// git's own error when it could not read whether there are any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -249,7 +248,6 @@ struct RewindFacts {
     first_turn_conversation: bool,
     steer_targets: bool,
     later_history: agent::LaterHistory,
-    running_turn: agent::RunningTurnPolicy,
 }
 
 #[derive(Debug, Serialize)]
@@ -322,8 +320,8 @@ struct TerminalAnswer {
 #[derive(Debug, Clone, Serialize)]
 struct LastTurn {
     status: Option<TurnStatus>,
-    /// The head of the latest assistant message, redacted and fenced as data.
-    assistant_head: Option<String>,
+    /// The latest assistant message, redacted and fenced as data.
+    assistant_message: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -417,16 +415,29 @@ fn worktree_facts(meta: &SessionMeta) -> WorktreeFacts {
         branch: meta.worktree.as_ref().map(|w| w.branch.clone()),
         base: meta.worktree.as_ref().map(|w| w.base.clone()),
         dirty: None,
+        git_error: None,
     }
 }
 
 /// Live uncommitted changes in `cwd`, from the owner of the GitStatus topic.
-fn dirty_state(cwd: &Path) -> Option<bool> {
-    let status = tcode_services::git::read_status(cwd);
-    status.is_repo.then_some(status.has_working_tree_changes)
+fn dirty_state(cwd: &Path) -> Result<Option<bool>, String> {
+    let status = tcode_services::git::read_status(cwd)?;
+    Ok(status.is_repo.then_some(status.has_working_tree_changes))
 }
 
-fn dirty_states(cwds: impl IntoIterator<Item = PathBuf>) -> HashMap<PathBuf, Option<bool>> {
+impl WorktreeFacts {
+    fn read_dirty(&mut self, states: &HashMap<PathBuf, Result<Option<bool>, String>>) {
+        match states.get(&self.cwd) {
+            Some(Ok(dirty)) => self.dirty = *dirty,
+            Some(Err(error)) => self.git_error = Some(error.clone()),
+            None => {}
+        }
+    }
+}
+
+fn dirty_states(
+    cwds: impl IntoIterator<Item = PathBuf>,
+) -> HashMap<PathBuf, Result<Option<bool>, String>> {
     let mut states = HashMap::new();
     for cwd in cwds {
         if let std::collections::hash_map::Entry::Vacant(entry) = states.entry(cwd) {
@@ -460,14 +471,6 @@ fn tail(text: &str, max: usize) -> (&str, bool) {
     (&text[start..], true)
 }
 
-fn head_chars(text: &str, max: usize) -> String {
-    let mut head: String = text.chars().take(max).collect();
-    if head.len() < text.len() {
-        head.push('…');
-    }
-    head
-}
-
 fn approval_kind(kind: &agent::ApprovalKind) -> &'static str {
     match kind {
         agent::ApprovalKind::ExecCommand { .. } => "exec_command",
@@ -488,12 +491,11 @@ fn last_turn(thread_id: &str, timeline: &Timeline) -> (LastTurn, usize) {
             EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => Some(text.as_str()),
             _ => None,
         });
-    let (assistant_head, redacted) = match message {
+    let (assistant_message, redacted) = match message {
         Some(text) => {
             let (text, redacted) = redact(text);
-            let head = head_chars(&text, ASSISTANT_HEAD_CHARS);
             (
-                Some(fence(&format!("{thread_id} last assistant message"), &head)),
+                Some(fence(&format!("{thread_id} last assistant message"), &text)),
                 redacted,
             )
         }
@@ -502,7 +504,7 @@ fn last_turn(thread_id: &str, timeline: &Timeline) -> (LastTurn, usize) {
     (
         LastTurn {
             status: timeline.last_turn_status,
-            assistant_head,
+            assistant_message,
         },
         redacted,
     )
@@ -803,7 +805,7 @@ impl AppState {
                     .filter_map(|row| row.worktree.as_ref().map(|w| w.cwd.clone())),
             );
             for worktree in threads.iter_mut().filter_map(|row| row.worktree.as_mut()) {
-                worktree.dirty = dirty.get(&worktree.cwd).copied().flatten();
+                worktree.read_dirty(&dirty);
             }
             to_value(&ThreadPage {
                 threads,
@@ -970,6 +972,12 @@ impl AppState {
         let search = self.session_search.clone();
         Answer::Later(cx.unblock(move || {
             let results = search.search_filtered(&sessions, &query, &filter);
+            omitted.extend(
+                results
+                    .unreadable
+                    .iter()
+                    .map(|thread| format!("a thread that could not be searched: {thread}")),
+            );
             let mut redacted = 0;
             let hits: Vec<SearchHitRow> = results
                 .hits
@@ -1062,14 +1070,11 @@ impl AppState {
         Answer::Later(cx.unblock(move || {
             let cwd = answer.cwd.clone();
             match params.what {
-                GitWhat::Status => {
-                    let status = tcode_services::git::read_status(&cwd);
-                    if status.is_repo {
-                        answer.status = Some(status);
-                    } else {
-                        answer.error = Some("not a git repository".into());
-                    }
-                }
+                GitWhat::Status => match tcode_services::git::read_status(&cwd) {
+                    Ok(status) if status.is_repo => answer.status = Some(status),
+                    Ok(_) => answer.error = Some("not a git repository".into()),
+                    Err(error) => answer.error = Some(error),
+                },
                 GitWhat::Branches => {
                     answer.branches = Some(tcode_services::git::list_git_branches(&cwd));
                     answer.current_branch = tcode_services::git::read_git_branch(&cwd);
@@ -1094,7 +1099,7 @@ impl AppState {
                         .iter()
                         .filter_map(|change| change.diff.as_ref())
                     {
-                        if text.len() + patch.len() > RESPONSE_BUDGET {
+                        if text.len() + patch.len() > RESPONSE_CAP {
                             left_out += 1;
                             continue;
                         }
@@ -1175,7 +1180,6 @@ impl AppState {
                             first_turn_conversation: rewind.first_turn_conversation,
                             steer_targets: rewind.steer_targets,
                             later_history: rewind.later_history,
-                            running_turn: rewind.running_turn,
                         }),
                         manual_compaction: caps.manual_compaction,
                         goals: caps.goals.map(|goals| GoalFacts {
@@ -1311,12 +1315,12 @@ impl AppState {
             .ok_or_else(|| format!("terminal {id} is not running"))?;
         let snapshot = terminal.peek_snapshot();
         let screen = snapshot.text();
-        let (shown, cut) = tail(&screen, TERMINAL_TAIL_BYTES);
+        let (shown, cut) = tail(&screen, RESPONSE_CAP);
         let (text, redacted) = redact(shown);
         let mut omitted = vec!["scrollback above the visible screen is not included".to_owned()];
         if cut {
             omitted.push(format!(
-                "the screen was cut to its last {TERMINAL_TAIL_BYTES} bytes"
+                "the screen was cut to its last {RESPONSE_CAP} bytes"
             ));
         }
         to_value(&TerminalAnswer {
@@ -1459,12 +1463,12 @@ impl AppState {
                 .iter_mut()
                 .filter_map(|candidate| candidate.thread.worktree.as_mut())
             {
-                worktree.dirty = dirty.get(&worktree.cwd).copied().flatten();
+                worktree.read_dirty(&dirty);
             }
             let unattributed_dirty_worktrees = projects
                 .iter()
                 .filter(|(_, root)| {
-                    dirty.get(root).copied().flatten() == Some(true) && !thread_cwds.contains(root)
+                    matches!(dirty.get(root), Some(Ok(Some(true)))) && !thread_cwds.contains(root)
                 })
                 .map(|(project_id, root)| UnattributedWorktree {
                     project_id: project_id.clone(),
@@ -1475,7 +1479,7 @@ impl AppState {
             let mut left_out = Vec::new();
             candidates.retain(|candidate| {
                 let size = serde_json::to_vec(candidate).map_or(0, |bytes| bytes.len());
-                if used + size > RESPONSE_BUDGET {
+                if used + size > RESPONSE_CAP {
                     left_out.push(candidate.thread.id.clone());
                     return false;
                 }

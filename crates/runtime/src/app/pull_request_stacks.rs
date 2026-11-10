@@ -36,6 +36,16 @@ fn poll_schedule() -> Vec<u64> {
     at
 }
 
+/// The asks still due `elapsed` seconds after submission: what is left of the schedule, or one
+/// now when a restarted host finds it already past.
+fn due_asks(elapsed: u64) -> Vec<u64> {
+    let due: Vec<_> = poll_schedule()
+        .into_iter()
+        .filter(|offset| *offset >= elapsed)
+        .collect();
+    if due.is_empty() { vec![elapsed] } else { due }
+}
+
 /// A native stack, by host, repository and number.
 pub(super) type StackKey = (String, String, u64);
 
@@ -273,16 +283,8 @@ impl AppState {
         let forge = self.pull_requests.forge.clone();
         let host = cx.clone();
         let task = cx.spawn_background(async move {
-            let elapsed = now_secs().saturating_sub(started_at);
-            let mut due: Vec<_> = poll_schedule()
-                .into_iter()
-                .filter(|offset| *offset >= elapsed)
-                .collect();
-            if due.is_empty() {
-                due.push(elapsed);
-            }
             let mut ended = None;
-            for offset in due {
+            for offset in due_asks(now_secs().saturating_sub(started_at)) {
                 let wait = (started_at + offset).saturating_sub(now_secs());
                 smol::Timer::after(Duration::from_secs(wait)).await;
                 let (forge, key, id) = (forge.clone(), key.clone(), id.clone());
@@ -570,5 +572,22 @@ impl AppState {
                 PullRequestState::Open => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A merge the host finished while Tcode was down is asked about once before it is called
+    /// unconfirmed; a restart within the schedule asks nothing already past.
+    #[test]
+    fn a_restarted_host_asks_what_is_left_of_the_merge_schedule() {
+        let late = MERGE_DEADLINE_SECS + 3600;
+        assert_eq!(due_asks(late), [late]);
+        let midway = MERGE_DEADLINE_SECS / 2;
+        let due = due_asks(midway);
+        assert!(!due.is_empty() && due.iter().all(|offset| *offset >= midway));
+        assert_eq!(due.last(), poll_schedule().last());
     }
 }

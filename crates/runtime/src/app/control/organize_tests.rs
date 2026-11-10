@@ -326,6 +326,64 @@ fn follow_up_parked_and_the_suggest_tier_hold_automatic_settlement() {
     assert_eq!(settled(&state), [true, true, true]);
 }
 
+/// A reviews.json, an activity log and a secrets.json this build cannot read do not stop the
+/// host: a review is still recorded, the first record refused saving says why, and no file is
+/// written over.
+#[test]
+fn unreadable_own_files_do_not_stop_the_host_and_are_never_written_over() {
+    let store = TestStore::new("tcode-control-unreadable");
+    std::fs::create_dir_all(store.root()).unwrap();
+    let torn = "[{\"id\":";
+    let files = ["reviews.json", "control_activity.json", "secrets.json"];
+    for name in files {
+        std::fs::write(store.root().join(name), torn).unwrap();
+    }
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, _| {
+        state.sessions.push(thread("caller", store.root()));
+        state.sessions.push(thread("old", store.root()));
+    });
+    for request in ["review-1", "review-2"] {
+        let review = ControlOp::RecordReview(RecordReviewParams {
+            items: vec![ReviewItemInput {
+                thread_id: "old".into(),
+                group: "can_settle".into(),
+                confidence: "clear_evidence".into(),
+                evidence: vec!["old#12: PR merged".into()],
+                suggestion: None,
+            }],
+            coverage: "1 project, 2 threads".into(),
+            request_id: Some(request.into()),
+        });
+        assert_eq!(
+            call(&state, cx, "caller", review).unwrap()["status"],
+            "recorded"
+        );
+    }
+    let refusals = cx
+        .drain_outgoing()
+        .into_iter()
+        .filter(|message| {
+            matches!(
+                message,
+                HostMessage::Event(envelope) if matches!(
+                    &envelope.event,
+                    ServerEvent::Runtime(RuntimeEvent::Error(RuntimeError::FileUnreadable { .. }))
+                )
+            )
+        })
+        .count();
+    assert_eq!(refusals, 2, "one for each file written");
+    state.update(cx, |state, _| state.close_store().unwrap());
+    for name in files {
+        assert_eq!(
+            std::fs::read_to_string(store.root().join(name)).unwrap(),
+            torn
+        );
+    }
+}
+
 /// A review is stored and announced without touching any thread, and survives a restart.
 #[test]
 fn a_recorded_review_changes_no_thread_and_is_read_back_after_a_restart() {

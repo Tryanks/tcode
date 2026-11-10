@@ -49,7 +49,7 @@ fn query(
 }
 
 fn repository_variables(key: &PullRequestKey) -> Result<BTreeMap<String, Value>, GitHubError> {
-    let repository = Repository::from_key(key).ok_or(GitHubError::Request)?;
+    let repository = Repository::from_key(key).ok_or(GitHubError::InvalidInput)?;
     Ok(BTreeMap::from([
         ("owner".into(), json!(repository.owner)),
         ("name".into(), json!(repository.name)),
@@ -108,7 +108,7 @@ fn read_fingerprints<'a>(
             })
         })
         .collect();
-    let items = items.ok_or(GitHubError::Request)?;
+    let items = items.ok_or(GitHubError::InvalidInput)?;
     let selection = if items.len() > 1 {
         "...WatchFingerprint"
     } else {
@@ -128,7 +128,7 @@ fn read_fingerprints<'a>(
         },
         |fields| fields,
     )
-    .ok_or(GitHubError::Request)?;
+    .ok_or(GitHubError::InvalidInput)?;
     if items.len() > 1 {
         document.query.push_str(&format!(
             "\nfragment WatchFingerprint on PullRequest {{ {FINGERPRINT_SELECTION} }}"
@@ -215,21 +215,17 @@ pub fn detail(api: &GitHubApi, key: &PullRequestKey) -> Result<PullRequestWatchR
         ("", "")
     };
     let document = format!(
-        "query PullRequestWatchDetail($owner: String!, $name: String!, $number: Int!, $checksAfter: String) {{ viewer {{ login }} repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ number state mergedAt mergeable headRefOid baseRefName author {{ login }}{rules} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100, after: $checksAfter) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ __typename ... on StatusContext {{ context state targetUrl createdAt{required} }} ... on CheckRun {{ name status conclusion startedAt completedAt detailsUrl{required} checkSuite {{ workflowRun {{ runNumber workflow {{ databaseId name }} }} }} }} }} }} }} }} }} }} }} }} }}"
+        "query PullRequestWatchDetail($owner: String!, $name: String!, $number: Int!, $checksAfter: String) {{ viewer {{ login }} repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ state mergedAt mergeable headRefOid baseRefName author {{ login }}{rules} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100, after: $checksAfter) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ __typename ... on StatusContext {{ context state targetUrl createdAt{required} }} ... on CheckRun {{ name status conclusion startedAt completedAt detailsUrl{required} checkSuite {{ workflowRun {{ runNumber workflow {{ databaseId name }} }} }} }} }} }} }} }} }} }} }} }} }}"
     );
     let mut variables = repository_variables(key)?;
     let mut contexts = Vec::new();
     let mut first: Option<Value> = None;
-    let mut seen = HashSet::new();
     let mut complete = false;
     for _ in 0..MAX_PAGES {
         let response = query(api, key, &options, document.clone(), variables.clone())?;
         let pr = &response["data"]["repository"]["pullRequest"];
         if pr.is_null() {
             return Err(GitHubError::NotFound);
-        }
-        if pr["number"].as_u64() != Some(key.number) {
-            return Err(GitHubError::InvalidResponse);
         }
         // A page of a newer head would mix two commits' checks.
         if let Some(first) = &first
@@ -239,16 +235,11 @@ pub fn detail(api: &GitHubApi, key: &PullRequestKey) -> Result<PullRequestWatchR
         }
         let page = &pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"];
         contexts.extend(page["nodes"].as_array().into_iter().flatten().cloned());
-        let next = page["pageInfo"]["endCursor"]
-            .as_str()
-            .filter(|_| page["pageInfo"]["hasNextPage"].as_bool() == Some(true))
-            .map(str::to_owned);
         first.get_or_insert_with(|| response["data"].clone());
-        match next {
-            Some(cursor) if seen.insert(cursor.clone()) => {
+        match next_cursor(page) {
+            Some(cursor) => {
                 variables.insert("checksAfter".into(), json!(cursor));
             }
-            Some(_) => break,
             None => {
                 complete = true;
                 break;
@@ -313,7 +304,7 @@ fn unreported_required(
     base_ref: &Value,
     contexts: &[Value],
 ) -> Result<Vec<PullRequestCheck>, GitHubError> {
-    let repository = Repository::from_key(key).ok_or(GitHubError::Request)?;
+    let repository = Repository::from_key(key).ok_or(GitHubError::InvalidInput)?;
     let path = format!(
         "/repos/{}/{}/branches/{}",
         repository.owner,
@@ -526,7 +517,7 @@ fn next_cursor(connection: &Value) -> Option<String> {
 }
 
 /// Every remark on the pull request, or `Ok(None)` when one could be missing: a list longer
-/// than ten pages, or a review thread whose replies could not all be read. Such a read never
+/// than ten pages, or a review thread whose replies fall short of its count. Such a read never
 /// advances the watermark.
 pub fn activity(
     api: &GitHubApi,
@@ -643,7 +634,7 @@ pub fn activity(
         let cached = tails.get(id).filter(|tail| tail.count == count);
         let tail = match cached {
             Some(tail) => tail.comments.clone(),
-            None => match read_tail(api, key, &options, id, cursor, path) {
+            None => match read_tail(api, key, &options, id, cursor, path)? {
                 Some(comments) if first_page.len() + comments.len() >= count as usize => {
                     tails.insert(
                         id.to_owned(),
@@ -667,8 +658,7 @@ pub fn activity(
     Ok(complete.then_some(remarks))
 }
 
-/// A thread's replies after its first page, deduplicated by id; `None` when they could not all
-/// be read.
+/// A thread's replies after its first page; `None` past the page bound.
 fn read_tail(
     api: &GitHubApi,
     key: &PullRequestKey,
@@ -676,14 +666,14 @@ fn read_tail(
     thread: &str,
     cursor: String,
     path: Option<&str>,
-) -> Option<Vec<PullRequestRemark>> {
+) -> Result<Option<Vec<PullRequestRemark>>, GitHubError> {
     let mut comments: Vec<PullRequestRemark> = Vec::new();
-    let mut ids = HashSet::new();
-    let mut cursors = HashSet::new();
     let mut cursor = Some(cursor);
+    let mut pages = 0;
     while let Some(after) = cursor.take() {
-        if !cursors.insert(after.clone()) || cursors.len() > MAX_PAGES {
-            return None;
+        pages += 1;
+        if pages > MAX_PAGES {
+            return Ok(None);
         }
         let response = query(
             api,
@@ -696,23 +686,77 @@ fn read_tail(
                 ("thread".into(), json!(thread)),
                 ("cursor".into(), json!(after)),
             ]),
-        );
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                log::warn!("pull request watch comment pagination failed: {error}");
-                return None;
-            }
-        };
+        )?;
         let page = &response["data"]["node"]["comments"];
-        for comment in page["nodes"].as_array().into_iter().flatten() {
-            if let Some(comment) = remark(comment, path)
-                && ids.insert(comment.id.clone())
-            {
-                comments.push(comment);
-            }
-        }
+        comments.extend(
+            page["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|comment| remark(comment, path)),
+        );
         cursor = next_cursor(page);
     }
-    Some(comments)
+    Ok(Some(comments))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Status check rollup contexts as GitHub's GraphQL API returns them for the detail
+    /// selection. Shape: the `CheckRun` and `StatusContext` objects and the `CheckStatusState`,
+    /// `CheckConclusionState` and `StatusState` enums of docs.github.com/en/graphql/reference
+    /// (/checks and /commits). Content is invented.
+    fn run(name: &str, run_number: i64, status: &str, conclusion: Option<&str>) -> Value {
+        json!({
+            "__typename": "CheckRun",
+            "name": name,
+            "status": status,
+            "conclusion": conclusion,
+            "startedAt": "2026-01-02T03:00:00Z",
+            "completedAt": conclusion.map(|_| "2026-01-02T03:05:00Z"),
+            "detailsUrl": format!("https://ci.example.test/runs/{run_number}"),
+            "isRequired": true,
+            "checkSuite": { "workflowRun": {
+                "runNumber": run_number,
+                "workflow": { "databaseId": 77, "name": "CI" }
+            } }
+        })
+    }
+
+    #[test]
+    fn checks_read_each_runs_status_and_a_rerun_speaks_for_its_workflow() {
+        let contexts = [
+            // The first run of the workflow, superseded by the second.
+            run("test", 1, "COMPLETED", Some("FAILURE")),
+            run("lint", 1, "COMPLETED", Some("SUCCESS")),
+            run("test", 2, "IN_PROGRESS", None),
+            run("lint", 2, "COMPLETED", Some("STARTUP_FAILURE")),
+            json!({
+                "__typename": "StatusContext",
+                "context": "deploy/preview",
+                "state": "EXPECTED",
+                "targetUrl": null,
+                "createdAt": "2026-01-02T03:00:00Z",
+                "isRequired": false
+            }),
+        ];
+        let checks: Vec<_> = checks(&contexts)
+            .into_iter()
+            .map(|check| (check.name, check.status, check.required))
+            .collect();
+        assert_eq!(
+            checks,
+            [
+                ("test".to_owned(), CheckStatus::Pending, Some(true)),
+                ("lint".to_owned(), CheckStatus::Failure, Some(true)),
+                (
+                    "deploy/preview".to_owned(),
+                    CheckStatus::Pending,
+                    Some(false)
+                ),
+            ]
+        );
+    }
 }

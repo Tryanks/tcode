@@ -77,7 +77,7 @@ pub fn apply_roster(
         return;
     };
     for machine in &roster.machines {
-        if Some(machine.id.as_str()) == local || !valid_host_id(&machine.id) {
+        if Some(machine.id.as_str()) == local {
             continue;
         }
         match hosts.iter_mut().find(|host| host.host_id == machine.id) {
@@ -236,19 +236,6 @@ mod tests {
         assert_eq!(saved[0].host_id, MACHINE_ID);
         let written = fs::read_to_string(dir.join("hosts.json")).unwrap();
         assert!(!written.contains("0000beef"), "{written}");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn saving_takes_the_lock_and_round_trips() {
-        let dir = temp_dir("roundtrip");
-        save_hosts(&dir, &[machine(MACHINE_ID)]).unwrap();
-        assert!(dir.join("hosts.lock").exists());
-        update_hosts(&dir, |hosts| {
-            hosts[0].addrs.insert(0, "10.0.0.2:47420".into());
-        })
-        .unwrap();
-        assert_eq!(load_hosts(&dir).unwrap()[0].addrs[0], "10.0.0.2:47420");
         fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -481,6 +481,14 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
             request_id: "request".into(),
             approve: true,
         },
+        // Read marks are the host owner's: a member's reading leaves them as they are.
+        Command::MarkSessionUnread {
+            session_id: "a".into(),
+        },
+        Command::MarkSessionRead {
+            session_id: "a".into(),
+            through: u64::MAX,
+        },
         // Preview is a full device's: a member may not render even its own thread's.
         Command::ShowPreviewHere {
             session_id: "a".into(),
@@ -751,7 +759,7 @@ fn space_drafts_are_bound_to_workspace_and_device_and_search_filters_before_limi
     ) else {
         panic!("owner search")
     };
-    assert_eq!(owner_hits[0].session_id, "b");
+    assert_eq!(owner_hits.hits[0].session_id, "b");
     let QueryResponse::SessionContentHits(hits) = host.query(
         one.clone(),
         Query::SearchSessionContent {
@@ -761,8 +769,8 @@ fn space_drafts_are_bound_to_workspace_and_device_and_search_filters_before_limi
     ) else {
         panic!("space search")
     };
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].session_id, "a");
+    assert_eq!(hits.hits.len(), 1);
+    assert_eq!(hits.hits[0].session_id, "a");
     let QueryResponse::ArchivedSessions(archived) =
         host.query(one.clone(), Query::ArchivedSessions)
     else {
@@ -776,30 +784,6 @@ fn space_drafts_are_bound_to_workspace_and_device_and_search_filters_before_limi
             .collect::<Vec<_>>(),
         ["archived-a"]
     );
-    assert_eq!(
-        host.command(
-            one.clone(),
-            Command::MarkSessionUnread {
-                session_id: "a".into()
-            }
-        ),
-        CommandResponse::Unit
-    );
-    host.command(
-        one.clone(),
-        Command::MarkSessionRead {
-            session_id: "a".into(),
-            through: u64::MAX,
-        },
-    );
-    host.subscribe(Principal::Full, Topic::Settings);
-    let ServerEvent::SettingsSnapshot(settings) = host
-        .event(|event| event.topic == Topic::Settings && event.request_id.is_some())
-        .event
-    else {
-        panic!("settings snapshot")
-    };
-    assert!(!settings.last_visited.contains_key("a"));
     let CommandResponse::SessionId(Some(fork)) = host.command(
         one.clone(),
         Command::ForkThread {

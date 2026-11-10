@@ -253,4 +253,64 @@ mod tests {
             );
         }
     }
+
+    /// An iteration's change entries as Azure lists them (shape: Azure DevOps REST 7.1, "Pull
+    /// Request Iteration Changes - Get": `changeEntries` of GitPullRequestChange with
+    /// `changeTrackingId`, `changeType`, `item.objectId`, `item.path` from the root, and
+    /// `originalPath` for a renamed item; content invented).
+    #[test]
+    fn change_entries_read_as_azure_lists_them() {
+        let page = serde_json::json!({ "changeEntries": [
+            { "changeTrackingId": 1, "changeId": 1, "changeType": "add",
+              "item": { "objectId": "ab12", "path": "/src/new.rs" } },
+            { "changeTrackingId": 2, "changeId": 2, "changeType": "edit",
+              "item": { "objectId": "cd34", "originalObjectId": "ef56", "path": "/README.md" } },
+            { "changeTrackingId": 3, "changeId": 3, "changeType": "rename",
+              "originalPath": "/docs/old.md",
+              "item": { "objectId": "0a0b", "path": "/docs/new.md" } },
+            { "changeTrackingId": 4, "changeId": 4, "changeType": "delete",
+              "item": { "objectId": "9f9f", "path": "/gone.txt" } },
+        ]});
+        let changes: Vec<_> = page["changeEntries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(change)
+            .collect();
+        let change =
+            |path: &str, previous: Option<&str>, kind, object: Option<&str>, tracking| Change {
+                path: path.into(),
+                previous_path: previous.map(str::to_owned),
+                kind,
+                object: object.map(str::to_owned),
+                tracking: Some(tracking),
+            };
+        assert_eq!(
+            changes,
+            [
+                change(
+                    "src/new.rs",
+                    None,
+                    agent::FileChangeKind::Create,
+                    Some("ab12"),
+                    1
+                ),
+                change(
+                    "README.md",
+                    None,
+                    agent::FileChangeKind::Modify,
+                    Some("cd34"),
+                    2
+                ),
+                change(
+                    "docs/new.md",
+                    Some("docs/old.md"),
+                    agent::FileChangeKind::Rename,
+                    Some("0a0b"),
+                    3
+                ),
+                change("gone.txt", None, agent::FileChangeKind::Delete, None, 4),
+            ]
+        );
+    }
 }

@@ -221,7 +221,7 @@ fn start_thread_makes_one_ordinary_thread_across_retries_and_restarts() {
 /// `subagent: true` makes the thread the caller's child: it works in the caller's directory,
 /// runs with the permission the child-approval setting chooses rather than the project's
 /// default, carries the report contract and owes the caller a report. A worktree is only for a
-/// subagent, and one that cannot be made falls back to the plain directory with a warning.
+/// subagent, and one that cannot be made starts no subagent at all.
 #[test]
 fn a_subagent_is_a_child_that_owes_its_caller_a_report() {
     use tcode_core::settings::ChildApprovalMode;

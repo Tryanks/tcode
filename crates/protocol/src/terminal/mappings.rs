@@ -216,25 +216,28 @@ fn kitty_functional_key(key: &str) -> Option<(String, char)> {
     {
         return Some(((57_363 + number).to_string(), 'u'));
     }
+    // The names GPUI gives these keys: the DOM key value lowercased on the
+    // web, the xkb keysym name lowercased on Linux, and `menu` for the
+    // application key on Windows and Linux.
     let code = match key {
         // Kitty deliberately differs from traditional terminfo for F3.
         "f3" => return Some(("13".to_string(), '~')),
-        "scrolllock" => 57_359,
-        "printscreen" => 57_361,
+        "scrolllock" | "scroll_lock" => 57_359,
+        "printscreen" | "print" => 57_361,
         "pause" => 57_362,
-        "contextmenu" => 57_363,
-        "mediaplay" => 57_428,
-        "mediapause" => 57_429,
+        "contextmenu" | "menu" => 57_363,
+        "mediaplay" | "xf86audioplay" => 57_428,
+        "mediapause" | "xf86audiopause" => 57_429,
         "mediaplaypause" => 57_430,
-        "mediastop" => 57_432,
-        "mediafastforward" => 57_433,
-        "mediarewind" => 57_434,
-        "medianext" => 57_435,
-        "mediaprevious" => 57_436,
-        "mediarecord" => 57_437,
-        "volumedown" => 57_438,
-        "volumeup" => 57_439,
-        "volumemute" => 57_440,
+        "mediastop" | "xf86audiostop" => 57_432,
+        "mediafastforward" | "xf86audioforward" => 57_433,
+        "mediarewind" | "xf86audiorewind" => 57_434,
+        "mediatracknext" | "xf86audionext" => 57_435,
+        "mediatrackprevious" | "xf86audioprev" => 57_436,
+        "mediarecord" | "xf86audiorecord" => 57_437,
+        "audiovolumedown" | "xf86audiolowervolume" => 57_438,
+        "audiovolumeup" | "xf86audioraisevolume" => 57_439,
+        "audiovolumemute" | "xf86audiomute" => 57_440,
         _ => return None,
     };
     Some((code.to_string(), 'u'))
@@ -275,7 +278,7 @@ fn kitty_control_key(key: &str) -> Option<(String, char)> {
         "enter" => 13,
         "escape" => 27,
         "space" => 32,
-        "backspace" | "back" => 127,
+        "backspace" => 127,
         _ => return None,
     };
     Some((code.to_string(), 'u'))
@@ -285,17 +288,14 @@ fn kitty_all_key(key: &str, mode: KeyboardModes) -> Option<(String, char)> {
     if !mode.contains(KeyboardModes::REPORT_ALL_KEYS_AS_ESC) {
         return None;
     }
-    // GPUI does not expose left/right key location here, so generic modifier
-    // names use kitty's left-side codes.
+    // Every platform reports Shift, Control, Alt, Command and Caps Lock as a
+    // modifier change, never as a key; these are the lock and modifier keys
+    // the web reports as keys. GPUI does not expose left/right key location,
+    // so they use kitty's left-side codes.
     let code = match key {
-        "capslock" => 57_358,
         "numlock" => 57_360,
-        "shift" => 57_441,
-        "control" | "ctrl" => 57_442,
-        "alt" => 57_443,
-        "super" | "command" => 57_444,
+        "super" => 57_444,
         "hyper" => 57_445,
-        "meta" => 57_446,
         _ => return None,
     };
     Some((code.to_string(), 'u'))
@@ -374,7 +374,7 @@ fn modify_other_keys_bytes(key: &str, modifiers: Modifiers, level: Option<u8>) -
     let codepoint = match key {
         "enter" => 13,
         "tab" => 9,
-        "backspace" | "back" => 127,
+        "backspace" => 127,
         "escape" => 27,
         "space" => 32,
         _ => u32::from(shifted_key(single_printable_char(key)?, modifiers.shift).0),
@@ -441,7 +441,6 @@ fn legacy_key_bytes(
         } else {
             "\x1b[D"
         }),
-        "back" if none => Some("\x7f"),
         "insert" if none => Some("\x1b[2~"),
         "delete" if none => Some("\x1b[3~"),
         "pageup" if none => Some("\x1b[5~"),
@@ -517,18 +516,17 @@ fn legacy_key_bytes(
                     && !modifiers.control
                     && !modifiers.platform
                     && (cfg!(not(target_os = "macos")) || option_as_meta);
-                if alt_meta && key.is_ascii() {
-                    return Some(
-                        format!(
-                            "\x1b{}",
-                            if modifiers.shift {
-                                key.to_ascii_uppercase()
-                            } else {
-                                key.to_string()
-                            }
-                        )
-                        .into_bytes(),
-                    );
+                let ch = match key {
+                    "space" => ' ',
+                    key => single_printable_char(key).filter(char::is_ascii)?,
+                };
+                if alt_meta {
+                    let ch = if modifiers.shift {
+                        ch.to_ascii_uppercase()
+                    } else {
+                        ch
+                    };
+                    return Some(format!("\x1b{ch}").into_bytes());
                 }
                 return None;
             }
@@ -768,6 +766,14 @@ mod tests {
             ("a", plain, Mode::empty(), legacy, Some(2), None),
             ("a", ctrl, Mode::empty(), kitty, Some(2), Some("\x1b[97;5u")),
             ("ab", plain, Mode::empty(), kitty, None, None),
+            // GPUI's "back" is the browser Back key, not Backspace.
+            ("back", plain, Mode::empty(), legacy, None, None),
+            ("back", plain, Mode::empty(), kitty, None, None),
+            ("back", ctrl, Mode::empty(), legacy, Some(2), None),
+            // Alt as Meta prefixes the key's character, never its name.
+            ("space", alt, Mode::empty(), legacy, None, Some("\x1b ")),
+            ("forward", alt, Mode::empty(), legacy, None, None),
+            ("f21", alt, Mode::empty(), legacy, None, None),
         ] {
             assert_eq!(
                 key_bytes(key, modifiers, mode, keyboard, other_keys, true),

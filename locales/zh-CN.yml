@@ -6,7 +6,7 @@ chat:
   waiting_connection: "等待连接…"
   retry_delivery: "重试"
   discard_delivery: "丢弃"
-  history_record_too_large: 一条历史记录超过了 8 MiB 的响应大小限制。
+  history_record_too_large: 一条历史记录超过了发往此设备的单个应答能承载的大小。
   relayed: "已从 %{from} 接力至 %{to}"
   moved: "已从 %{from} 移入此目录，%{to} 以新会话继续"
   session_moved: "已从 %{from} 移至 %{to}，原会话在那里继续"
@@ -158,7 +158,6 @@ rewind:
   blocked:
     in_progress: "正在回退。"
     delivering: "有消息正在发送给 %{harness}。"
-    turn_running: "%{harness} 不会为回退停止正在运行的轮次，请等它结束。"
   mode:
     files_and_conversation: "对话和代码"
     conversation: "仅对话"
@@ -366,11 +365,13 @@ sidebar:
   path_required: "请输入目录路径。"
   path_rejected: "主机拒绝了该路径：%{reason}"
   recent_failed: "无法从主机读取最近活动：%{reason}"
+  recent_unreadable: "主机上有部分代理历史无法读取：%{reason}"
   import_failed: "无法开始导入：%{reason}"
   import_refused: "主机拒绝了本次导入"
   importing: "正在导入线程…"
   import_progress: "%{done} / %{total} · %{tool}"
   import_summary: "已导入 %{imported} 条，跳过 %{skipped} 条"
+  import_failures: "有 %{count} 条无法导入："
   import_ok: "确定"
   create_thread: "新建线程"
   create_thread_on: "在 %{host} 上新建线程"
@@ -454,7 +455,6 @@ migration:
   relocating_copy: "正在把数据目录复制到 %{path}：%{bytes}/%{total_bytes}"
   scanning: "正在查找线程…"
   importing: "正在复制线程：%{done}/%{total} · %{bytes}/%{total_bytes}"
-  verifying: "正在校验副本：%{done}/%{total} · %{bytes}/%{total_bytes}"
   publishing: "即将完成…"
   archiving: "正在删除原始文件…"
   quitting: "正在停止。数据不会丢失，下次启动 Tcode 时会继续升级。"
@@ -1027,6 +1027,7 @@ palette:
   threads_on: "%{host} 上的线程"
   messages: "消息"
   messages_on: "%{host} 上的消息"
+  messages_unreadable: "有些线程无法搜索：%{reason}"
   no_matches: "没有匹配项"
   navigate: "↑↓ 导航"
   select: "Enter 选择"
@@ -1368,6 +1369,8 @@ errors:
   persist_project: "保存项目失败：%{error}"
   persist_settings: "保存设置失败：%{error}"
   settings_unreadable: "Tcode 读不了 settings.json（%{error}），现在使用默认设置，也不会把任何设置写进这个文件。它可能是更新版本的 Tcode 写的，请改用那个版本打开。"
+  file_unreadable: "Tcode 读不了自己的一个文件（%{error}），现在不使用其中的内容运行，也不会把任何内容写进这个文件。它可能是更新版本的 Tcode 写的，请改用那个版本打开。"
+  mcp_unavailable: "本次运行无法向代理提供 Tcode 的工具（%{error}），线程将在没有这些工具的情况下启动。"
   delete_session: "删除线程失败：%{error}"
   delete_project: "删除项目失败：%{error}"
   persist_session: "保存线程失败：%{error}"
@@ -1404,7 +1407,6 @@ editor:
 notice:
   switched_branch: "已切换到 %{branch}"
   worktree_seeded: "worktree 已填充：复制了 %{copied} 个文件，跳过了 %{skipped} 个"
-  worktree_seeded_limit: "worktree 填充已达到大小上限（已复制 %{copied} 个文件）；已跳过：%{skipped}"
   worktree_merged_fast_forward: "已通过快进将 worktree 分支合并回项目目录"
   worktree_merged_commit: "已通过合并提交将 worktree 分支合并回项目目录"
   worktree_merge_missing: "此线程的 worktree 已不存在"
@@ -1895,6 +1897,8 @@ member:
 
 source_control:
   unverified: "已保存，尚未验证"
+  credentials_unreadable: "无法读取保存的访问令牌（%{error}），修复该文件之前不会发送任何请求"
+  cli_failed: "无法向 %{tool} 询问登录信息（%{error}）"
   token_label: "%{host} 的访问令牌"
   description: "Tcode 通过这些代码平台读取和写入拉取请求与合并请求。访问令牌只保存在运行 Tcode 的主机上，保存后不会再显示。"
   detection_note: "gh、glab、tea、az 的登录和环境变量指向的代码平台会自动出现。自托管的 GitHub Enterprise、GitLab、Forgejo、Gitea 请自行添加。"
@@ -2117,7 +2121,6 @@ pull_requests:
     refresh_unloaded: "刷新"
     refreshing: "正在刷新%{pr}"
     updated: "%{ago}更新"
-    created: "创建于%{ago}"
     merging_into: "将 %{head} 合并到 %{base}"
     files: "文件"
     files_count: "文件 %{count}"

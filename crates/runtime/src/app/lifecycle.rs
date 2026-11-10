@@ -69,6 +69,9 @@ impl AppState {
             .zip(meta.resume_cursor.clone())
             .map(|(home, cursor)| (self.prepare_profile_env(home, cx), cursor));
         let preview_registration = if meta.provider.caps().mcp_servers {
+            if let Some(error) = self.mcp.unavailable.take() {
+                self.report_error(RuntimeError::McpUnavailable { error }, cx);
+            }
             self.preview_registration_for(&meta)
         } else {
             None

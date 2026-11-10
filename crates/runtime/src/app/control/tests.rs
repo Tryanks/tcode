@@ -518,7 +518,7 @@ fn activity_filters_by_thread_or_kind_and_offers_the_whole_log() {
     let store = TestStore::new("tcode-control-activity-filter");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(cx, |state, _| {
-        state.control = ControlState::new(Vec::new(), log);
+        state.control = ControlState::new(Vec::new(), None, log, None);
     });
     state.read(|app| {
         let filter = |thread: Option<&str>, action: Option<&str>| ControlActivityFilter {

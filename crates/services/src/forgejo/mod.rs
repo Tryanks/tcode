@@ -44,8 +44,6 @@ const READ_TTL: Duration = Duration::from_secs(60);
 /// Text at a commit never changes; the bound is only on how long it holds memory.
 const TEXT_TTL: Duration = Duration::from_secs(600);
 const FILE_BYTES: usize = 1024 * 1024;
-/// Issue comments whose reactions a conversation read asks for, one request each.
-const REACTION_READS: usize = 100;
 const ANONYMOUS: &str = "anonymous";
 
 type Slot = (Instant, PullRequestReadResponse);
@@ -186,7 +184,7 @@ impl Forgejo {
                             .filter(|path| !path.is_empty()),
                         kind: match status {
                             "added" => agent::FileChangeKind::Create,
-                            "deleted" | "removed" => agent::FileChangeKind::Delete,
+                            "deleted" => agent::FileChangeKind::Delete,
                             "renamed" => agent::FileChangeKind::Rename,
                             _ => agent::FileChangeKind::Modify,
                         },
@@ -281,7 +279,7 @@ impl Forgejo {
             || permissions["admin"].as_bool() == Some(true);
         let archived = repository["archived"].as_bool() == Some(true);
         let signed_in = viewing.is_some() && !archived;
-        // Reactions are one read per comment here; the newest comments are the ones read.
+        // Reactions are one read per comment here.
         let reacted = |path: String| -> Result<Vec<Value>, ForgeError> {
             Ok(pull
                 .get(&path, "Reactions")?
@@ -292,8 +290,6 @@ impl Forgejo {
         let pr_reactions = reacted(format!("issues/{}/reactions", key.number))?;
         let reaction_ids: Vec<u64> = issue_comments
             .iter()
-            .rev()
-            .take(REACTION_READS)
             .filter_map(|comment| comment["id"].as_u64())
             .collect();
         let comment_reactions: HashMap<u64, Vec<Value>> = std::thread::scope(|scope| {
@@ -312,7 +308,7 @@ impl Forgejo {
                 .collect();
             let mut all = HashMap::new();
             for chunk in chunks {
-                all.extend(chunk.join().unwrap_or_else(|_| Ok(Vec::new()))?);
+                all.extend(chunk.join().unwrap()?);
             }
             Ok::<_, ForgeError>(all)
         })?;
@@ -503,9 +499,7 @@ impl Forgejo {
         let behind_by = if text(&pr, "merge_base").as_deref() == Some(base.as_str()) {
             Some(0)
         } else {
-            pull.get(&format!("compare/{head}...{base}"), "Compare")
-                .ok()
-                .and_then(|compare| compare["total_commits"].as_u64())
+            pull.get(&format!("compare/{head}...{base}"), "Compare")?["total_commits"].as_u64()
         };
         let permissions = &repository["permissions"];
         let writes = viewer.is_some()
@@ -689,11 +683,11 @@ impl Forge for Forgejo {
             .iter()
             .map(|(host, choice)| (host.clone(), (choice.kind, true)))
             .collect();
-        let detected = self
-            .api
-            .tea_logins()
-            .into_iter()
-            .chain(self.api.environment_host());
+        let (logins, listing) = match self.api.tea_logins() {
+            Ok(logins) => (logins, None),
+            Err(error) => (Vec::new(), error.cli_problem()),
+        };
+        let detected = logins.into_iter().chain(self.api.environment_host());
         for host in detected {
             // tea is Gitea's CLI; a server named for Forgejo, or Codeberg, says otherwise.
             let kind = HostKind::detect(&host)
@@ -714,7 +708,14 @@ impl Forge for Forgejo {
             .into_iter()
             .map(|(host, (kind, added))| {
                 let enabled = configured.get(&host).is_none_or(|choice| choice.enabled);
-                let credential = self.api.credential(&host).ok().flatten();
+                let read = self.api.credential(&host);
+                // Without a login of its own, tea failing to list them leaves it unknown.
+                let failed = read
+                    .as_ref()
+                    .err()
+                    .and_then(ForgeError::cli_problem)
+                    .or_else(|| listing.clone());
+                let credential = read.ok().flatten();
                 let (assessed, login) = credential
                     .as_ref()
                     .map(|credential| self.api.assessed(&host, credential))
@@ -722,6 +723,7 @@ impl Forge for Forgejo {
                 let source = credential.map(|credential| credential.source);
                 let problem = match &source {
                     _ if !enabled => None,
+                    None if failed.is_some() => failed,
                     None if tea => Some(HostProblem::NotSignedIn {
                         tool: "tea".into(),
                         command: Some(format!("tea login add --url https://{host}")),

@@ -141,23 +141,17 @@ fn a_saved_address_further_down_the_list_reaches_the_machine() {
         reached[0].live.as_ref().is_some_and(|path| path.direct),
         "the machine sees a direct path: {reached:?}"
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let saved = tcode_traverse::hosts::load_hosts(&device_dir.0).unwrap();
-        if saved[0]
+    // The link saves the addresses that reached the machine before it
+    // reports Syncing.
+    let saved = tcode_traverse::hosts::load_hosts(&device_dir.0).unwrap();
+    assert!(
+        saved[0]
             .addrs
             .first()
-            .is_some_and(|addr| addr.ends_with(&format!(":{port}")))
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "working address was not saved: {:?}",
-            saved[0].addrs
-        );
-        std::thread::yield_now();
-    }
+            .is_some_and(|addr| addr.ends_with(&format!(":{port}"))),
+        "working address was not saved first: {:?}",
+        saved[0].addrs
+    );
     client.to_host.close();
     host.shutdown();
 }

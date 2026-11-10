@@ -566,7 +566,7 @@ mod tests {
                     head_branch: format!("change-{number}"),
                     base_branch: "main".into(),
                     is_draft: false,
-                    updated_at: "2026-10-08T00:00:00Z".into(),
+                    updated_at: Some("2026-10-08T00:00:00Z".into()),
                     synced_at: 1,
                     closed_at: at.clone(),
                     merged_at: (state == PullRequestState::Merged).then_some(at).flatten(),

@@ -62,42 +62,6 @@ impl ToolOutput {
         }
         output
     }
-
-    /// An `output` string recorded in an earlier provider shape, as
-    /// canonical text and images: a Codex MCP result or `contentItems` JSON, a
-    /// Codex rollout content array, or Claude text with image blocks inlined
-    /// as JSON lines. `None` when the text is in none of those shapes.
-    pub fn split(output: &str) -> Option<Self> {
-        let trimmed = output.trim();
-        if trimmed.starts_with(['{', '['])
-            && let Ok(value) = serde_json::from_str::<Value>(trimmed)
-        {
-            let blocks = match &value {
-                Value::Object(result) => result.get("content").and_then(Value::as_array),
-                Value::Array(blocks) => Some(blocks),
-                _ => None,
-            };
-            if blocks.is_some_and(|blocks| !blocks.is_empty() && blocks.iter().all(is_block)) {
-                return Some(Self::from_content(&value));
-            }
-        }
-        if !output.contains("{\"type\":\"image\"") {
-            return None;
-        }
-        let mut split = Self::default();
-        let mut lines = Vec::new();
-        for line in output.split('\n') {
-            match serde_json::from_str::<Value>(line).map(|block| block_part(&block)) {
-                Ok(Part::Image(image)) => split.images.push(image),
-                _ => lines.push(line),
-            }
-        }
-        if split.images.is_empty() {
-            return None;
-        }
-        split.text = lines.join("\n");
-        Some(split)
-    }
 }
 
 enum Part {
@@ -133,24 +97,6 @@ fn block_part(block: &Value) -> Part {
         _ => block.as_str().map(|text| Part::Text(text.to_owned())),
     };
     part.unwrap_or_else(|| Part::Text(block.to_string()))
-}
-
-fn is_block(block: &Value) -> bool {
-    matches!(
-        block.get("type").and_then(Value::as_str),
-        Some(
-            "text"
-                | "input_text"
-                | "inputText"
-                | "output_text"
-                | "image"
-                | "input_image"
-                | "inputImage"
-                | "audio"
-                | "resource"
-                | "resource_link"
-        )
-    )
 }
 
 pub(crate) fn data_url(url: &str) -> Option<Attachment> {

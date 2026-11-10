@@ -48,9 +48,7 @@ fn main() {
                 )
                 .expect("open local host");
                 let mut services = tcode_runtime::pipe::HostServices::default();
-                if let Err(error) = services.start_mcp_servers(true) {
-                    eprintln!("phone: MCP servers unavailable: {error}");
-                }
+                services.start_mcp_servers(true);
                 let host =
                     tcode_runtime::pipe::spawn_host(store, services).expect("start local host");
                 let mux = tcode_traverse::HostMux::new(host.attachments, host.from_host);

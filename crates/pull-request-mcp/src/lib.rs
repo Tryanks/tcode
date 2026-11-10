@@ -8,10 +8,8 @@ use rmcp::{
     },
 };
 use serde::Deserialize;
-use std::{
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::sync::{Arc, RwLock};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -70,11 +68,9 @@ pub fn start(host: &mut mcp_host::Host) -> PullRequestMcpServer {
     let (sender, requests) = async_channel::unbounded();
     let broker = Broker::new(
         sender,
-        Duration::from_secs(35),
         mcp_host::BrokerErrors {
             unavailable: "pull request host is unavailable",
             dropped: "pull request host dropped the request",
-            timed_out: "pull request operation timed out",
         },
     );
     let hosts = HostNames::default();
@@ -119,16 +115,17 @@ impl PullRequestTools {
             tool_router: named_router(hosts),
         }
     }
-    async fn invoke(&self, operation: Operation) -> CallToolResult {
-        match self
-            .broker
-            .invoke(|reply| BrokerRequest {
-                session_id: self.session_id.clone(),
-                operation,
-                reply,
-            })
-            .await
-        {
+    /// A call the harness cancels drops its request.
+    async fn invoke(&self, ct: &CancellationToken, operation: Operation) -> CallToolResult {
+        let reply = ct.run_until_cancelled(self.broker.invoke(|reply| BrokerRequest {
+            session_id: self.session_id.clone(),
+            operation,
+            reply,
+        }));
+        let Some(reply) = reply.await else {
+            return CallToolResult::error(vec![ContentBlock::text("cancelled")]);
+        };
+        match reply {
             Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
             Err(error) => CallToolResult::error(vec![ContentBlock::text(error)]),
         }
@@ -136,32 +133,48 @@ impl PullRequestTools {
     #[tool(
         description = "Register every PR you create or work on for this thread, including every layer of a stack, immediately. Pass a URL or repository plus number. An existing link is preserved and succeeds with alreadyLinked=true."
     )]
-    async fn link_pull_request(&self, Parameters(target): Parameters<Target>) -> CallToolResult {
-        self.invoke(Operation::Link(target)).await
+    async fn link_pull_request(
+        &self,
+        ct: CancellationToken,
+        Parameters(target): Parameters<Target>,
+    ) -> CallToolResult {
+        self.invoke(&ct, Operation::Link(target)).await
     }
     #[tool(
         description = "Unlink a PR from this thread. A layer of a stack stays unlinked, even when found in the stack again, until explicitly linked again. Pass a URL or repository plus number."
     )]
-    async fn unlink_pull_request(&self, Parameters(target): Parameters<Target>) -> CallToolResult {
-        self.invoke(Operation::Unlink(target)).await
+    async fn unlink_pull_request(
+        &self,
+        ct: CancellationToken,
+        Parameters(target): Parameters<Target>,
+    ) -> CallToolResult {
+        self.invoke(&ct, Operation::Unlink(target)).await
     }
     #[tool(
         description = "List this thread's visible linked PRs, their source, last known state and stack position. This reads stored state without asking {hosts}. Before finishing PR work, list and link anything missing."
     )]
-    async fn list_thread_pull_requests(&self) -> CallToolResult {
-        self.invoke(Operation::List).await
+    async fn list_thread_pull_requests(&self, ct: CancellationToken) -> CallToolResult {
+        self.invoke(&ct, Operation::List).await
     }
     #[tool(
         description = "Have Tcode watch an open pull request for this thread, linking it first if needed. Tcode checks it every two minutes and wakes you with a message when a check fails, the required checks pass, someone else comments or reviews, or the branch starts to conflict with its base. Tcode also wakes you once when the pull request merges or closes, then the watch ends. Use this to monitor or babysit a pull request instead of polling, sleeping, or running a watcher. Only comments posted after this call wake you, so handle the existing ones first, then end your turn. A wake is news, not a merge decision: check readiness yourself before merging. When you hand the work back to the user, call unwatch_pull_request first. Watching ends when the pull request merges or closes, when its thread settles or is archived, when Tcode fails to read it 8 times in a row (a host rate limit only delays it), or when you call unwatch_pull_request. When the user stops this thread or pauses its monitoring, monitoring pauses with its notification baseline retained and resumes with an immediate catch-up when the user resumes it or the next turn starts. Calls made while paused are accepted and remain paused until then. Unsettle the thread before starting a new watch. A subagent cannot watch: its parent thread owns the pull request."
     )]
-    async fn watch_pull_request(&self, Parameters(target): Parameters<Target>) -> CallToolResult {
-        self.invoke(Operation::Watch(target)).await
+    async fn watch_pull_request(
+        &self,
+        ct: CancellationToken,
+        Parameters(target): Parameters<Target>,
+    ) -> CallToolResult {
+        self.invoke(&ct, Operation::Watch(target)).await
     }
     #[tool(
         description = "Stop Tcode from watching a pull request for this thread. The pull request stays linked. Pass the URL, or repository plus number."
     )]
-    async fn unwatch_pull_request(&self, Parameters(target): Parameters<Target>) -> CallToolResult {
-        self.invoke(Operation::Unwatch(target)).await
+    async fn unwatch_pull_request(
+        &self,
+        ct: CancellationToken,
+        Parameters(target): Parameters<Target>,
+    ) -> CallToolResult {
+        self.invoke(&ct, Operation::Unwatch(target)).await
     }
 }
 

@@ -51,7 +51,7 @@ pub(super) fn load_codec(db: &Db) -> io::Result<Codec> {
                 Ok(())
             },
         )?;
-        Codec::new(stored)
+        Ok(Codec::new(stored))
     })
 }
 
@@ -426,8 +426,6 @@ impl SessionStore {
                     if existing > 0 {
                         return Ok(false);
                     }
-                    let mut codec = Codec::default();
-                    codec.add(1, &dictionary)?;
                     st.execute(
                         connection,
                         "INSERT INTO codec_dicts (id, dict) VALUES (1, ?1)",

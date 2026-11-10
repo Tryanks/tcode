@@ -464,19 +464,15 @@ impl SessionActor for PiActor {
             }
             SessionCommand::Interrupt => {
                 self.mapper.interrupt_pending = true;
-                self.cancel_pending_ui()?;
+                self.cancel_pending_ui().await?;
                 send_json(&mut self.stdin, &json!({"type":"abort"})).map_err(|err| err.to_string())
             }
             SessionCommand::RespondApproval {
                 request_id,
                 decision,
             } => {
-                let confirmed = match &decision {
-                    ApprovalDecision::Option(id) if id == "confirm" => true,
-                    ApprovalDecision::Option(id) if id == "decline" => false,
-                    ApprovalDecision::Cancel | ApprovalDecision::Feedback(_) => false,
-                    ApprovalDecision::Option(_) => return Ok(()),
-                };
+                let confirmed =
+                    matches!(&decision, ApprovalDecision::Option(id) if id == "confirm");
                 if !self.pending_approvals.remove(&request_id) {
                     return Ok(());
                 }
@@ -487,7 +483,7 @@ impl SessionActor for PiActor {
                 .map_err(|err| err.to_string())?;
                 if decision == ApprovalDecision::Cancel {
                     self.mapper.interrupt_pending = true;
-                    self.cancel_pending_ui()?;
+                    self.cancel_pending_ui().await?;
                     send_json(&mut self.stdin, &json!({"type":"abort"}))
                         .map_err(|err| err.to_string())?;
                 }
@@ -514,14 +510,16 @@ impl SessionActor for PiActor {
                 request_id,
                 answers,
             } => {
-                let Some(response) = take_extension_dialog_response(
+                let answered = answer_dialog(
+                    &mut self.stdin,
                     &mut self.pending_dialogs,
-                    &request_id,
-                    &answers,
-                ) else {
-                    return Ok(());
-                };
-                send_json(&mut self.stdin, &response).map_err(|err| err.to_string())?;
+                    request_id,
+                    answers,
+                )
+                .map_err(|err| err.to_string())?;
+                if let Some(event) = answered {
+                    self.events.emit(event).await;
+                }
                 Ok(())
             }
             SessionCommand::Rewind {
@@ -951,7 +949,7 @@ impl PiActor {
             return;
         }
         self.mapper.interrupt_pending = true;
-        let _ = self.cancel_pending_ui();
+        let _ = self.cancel_pending_ui().await;
         for event in self.mapper.complete_turn() {
             self.events.emit(event).await;
         }
@@ -1016,7 +1014,6 @@ impl PiActor {
             self.events.emit(event).await;
         }
         if let Some(turn_id) = turn_completed {
-            let _ = self.cancel_pending_ui();
             // Its prompt is now an entry: a point a fork can go back before.
             if let Err(err) = self.read_entries(Some(turn_id)) {
                 log::warn!("pi get_entries not sent: {err}");
@@ -1090,7 +1087,7 @@ impl PiActor {
                     name: message
                         .get("title")
                         .and_then(Value::as_str)
-                        .unwrap_or("Confirmation")
+                        .unwrap_or_default()
                         .to_owned(),
                     input: Value::Null,
                     detail: message
@@ -1189,16 +1186,18 @@ impl PiActor {
         id
     }
 
-    fn cancel_pending_ui(&mut self) -> Result<(), String> {
-        for id in self.pending_approvals.drain() {
-            send_json(
-                &mut self.stdin,
-                &json!({"type":"extension_ui_response","id":id,"confirmed":false}),
-            )
-            .map_err(|err| err.to_string())?;
+    /// Dismiss every open extension prompt, as stopping the turn does.
+    async fn cancel_pending_ui(&mut self) -> Result<(), String> {
+        let dismissed = dismiss_prompts(
+            &mut self.stdin,
+            &mut self.pending_approvals,
+            &mut self.pending_dialogs,
+        )
+        .map_err(|err| err.to_string())?;
+        for event in dismissed {
+            self.events.emit(event).await;
         }
-        cancel_pending_dialogs(&mut self.stdin, &mut self.pending_dialogs)
-            .map_err(|err| err.to_string())
+        Ok(())
     }
 
     fn stop(&mut self) {
@@ -1315,12 +1314,13 @@ impl PiMapper {
                         .unwrap_or("transient provider error")
                 ),
             }],
-            "auto_retry_end"
-                if !message
-                    .get("success")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false) =>
-            {
+            // pi ends a retry with success once a retried request answers;
+            // the failures it retried are behind the turn then.
+            "auto_retry_end" if message.get("success").and_then(Value::as_bool) == Some(true) => {
+                self.failed = false;
+                Vec::new()
+            }
+            "auto_retry_end" => {
                 self.failed = true;
                 vec![AgentEvent::Warning {
                     message: format!(
@@ -1746,31 +1746,57 @@ fn extension_dialog_question(message: &Value) -> Option<(String, UserInputQuesti
     ))
 }
 
-fn take_extension_dialog_response(
-    pending_dialogs: &mut HashSet<String>,
-    request_id: &str,
-    answers: &serde_json::Map<String, Value>,
-) -> Option<Value> {
-    if !pending_dialogs.remove(request_id) {
-        return None;
-    }
-    Some(match answers.get(request_id).and_then(Value::as_str) {
-        Some(value) => json!({"type":"extension_ui_response","id":request_id,"value":value}),
-        None => json!({"type":"extension_ui_response","id":request_id,"cancelled":true}),
-    })
-}
-
-fn cancel_pending_dialogs(
+/// Answer an open extension dialog with the user's value, or dismiss it when
+/// the answer holds none; `None` when `request_id` is not an open dialog.
+fn answer_dialog(
     writer: &mut impl Write,
     pending_dialogs: &mut HashSet<String>,
-) -> Result<(), AgentError> {
-    for id in pending_dialogs.drain() {
+    request_id: String,
+    answers: serde_json::Map<String, Value>,
+) -> Result<Option<AgentEvent>, AgentError> {
+    if !pending_dialogs.remove(&request_id) {
+        return Ok(None);
+    }
+    let response = match answers.get(&request_id).and_then(Value::as_str) {
+        Some(value) => json!({"type":"extension_ui_response","id":request_id,"value":value}),
+        None => json!({"type":"extension_ui_response","id":request_id,"cancelled":true}),
+    };
+    send_json(writer, &response)?;
+    Ok(Some(AgentEvent::UserInputResolved {
+        request_id,
+        answers,
+    }))
+}
+
+/// Decline every open confirmation and dismiss every open dialog, reporting
+/// each one resolved.
+fn dismiss_prompts(
+    writer: &mut impl Write,
+    pending_approvals: &mut HashSet<String>,
+    pending_dialogs: &mut HashSet<String>,
+) -> Result<Vec<AgentEvent>, AgentError> {
+    let mut dismissed = Vec::new();
+    for request_id in pending_approvals.drain() {
         send_json(
             writer,
-            &json!({"type":"extension_ui_response","id":id,"cancelled":true}),
+            &json!({"type":"extension_ui_response","id":request_id,"confirmed":false}),
         )?;
+        dismissed.push(AgentEvent::ApprovalResolved {
+            request_id,
+            decision: ApprovalDecision::Cancel,
+        });
     }
-    Ok(())
+    for request_id in pending_dialogs.drain() {
+        send_json(
+            writer,
+            &json!({"type":"extension_ui_response","id":request_id,"cancelled":true}),
+        )?;
+        dismissed.push(AgentEvent::UserInputResolved {
+            request_id,
+            answers: serde_json::Map::new(),
+        });
+    }
+    Ok(dismissed)
 }
 
 fn custom_message_id(message: &Value) -> String {
@@ -1922,47 +1948,70 @@ mod tests {
 
     #[test]
     fn responds_to_pending_extension_dialog_with_value_or_cancellation() {
-        let mut pending = HashSet::from(["dialog".to_owned()]);
+        let mut approvals = HashSet::from(["confirm".to_owned()]);
+        let mut dialogs = HashSet::from(["dialog".to_owned()]);
         let mut output = Vec::new();
-        cancel_pending_dialogs(&mut output, &mut pending).unwrap();
-        assert!(pending.is_empty());
-        let response: Value = serde_json::from_slice(&output).unwrap();
+        let dismissed = dismiss_prompts(&mut output, &mut approvals, &mut dialogs).unwrap();
+        assert!(approvals.is_empty() && dialogs.is_empty());
+        let responses: Vec<Value> = serde_json::Deserializer::from_slice(&output)
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
         assert_eq!(
-            response,
-            json!({
-                "type":"extension_ui_response",
-                "id":"dialog",
-                "cancelled":true
-            })
+            responses,
+            [
+                json!({"type":"extension_ui_response","id":"confirm","confirmed":false}),
+                json!({"type":"extension_ui_response","id":"dialog","cancelled":true}),
+            ]
+        );
+        assert!(
+            matches!(dismissed.as_slice(), [
+                AgentEvent::ApprovalResolved { request_id: approval, decision: ApprovalDecision::Cancel },
+                AgentEvent::UserInputResolved { request_id: dialog, answers },
+            ] if approval == "confirm" && dialog == "dialog" && answers.is_empty()),
+            "{dismissed:?}"
         );
 
-        let mut pending = HashSet::from(["dialog".to_owned()]);
-        let answers = serde_json::Map::from_iter([("dialog".into(), json!("custom answer"))]);
-        assert_eq!(
-            take_extension_dialog_response(&mut pending, "dialog", &answers),
-            Some(json!({
-                "type":"extension_ui_response",
-                "id":"dialog",
-                "value":"custom answer"
-            }))
-        );
-        assert!(pending.is_empty());
-
-        for answers in [
-            serde_json::Map::new(),
-            serde_json::Map::from_iter([("dialog".into(), json!(["not", "a string"]))]),
+        for (answer, response) in [
+            (
+                Some(json!("custom answer")),
+                json!({"type":"extension_ui_response","id":"dialog","value":"custom answer"}),
+            ),
+            (
+                None,
+                json!({"type":"extension_ui_response","id":"dialog","cancelled":true}),
+            ),
+            (
+                Some(json!(["not", "a string"])),
+                json!({"type":"extension_ui_response","id":"dialog","cancelled":true}),
+            ),
         ] {
-            pending.insert("dialog".into());
-            assert_eq!(
-                take_extension_dialog_response(&mut pending, "dialog", &answers),
-                Some(json!({
-                    "type":"extension_ui_response",
-                    "id":"dialog",
-                    "cancelled":true
-                }))
+            let mut pending = HashSet::from(["dialog".to_owned()]);
+            let answers =
+                serde_json::Map::from_iter(answer.map(|answer| ("dialog".into(), answer)));
+            let mut output = Vec::new();
+            let resolved =
+                answer_dialog(&mut output, &mut pending, "dialog".into(), answers.clone()).unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&output).unwrap(), response);
+            assert!(
+                matches!(resolved, Some(AgentEvent::UserInputResolved { ref request_id, answers: ref resolved })
+                    if request_id == "dialog" && *resolved == answers),
+                "{resolved:?}"
             );
             assert!(pending.is_empty());
         }
+        let mut output = Vec::new();
+        assert!(
+            answer_dialog(
+                &mut output,
+                &mut HashSet::new(),
+                "dialog".into(),
+                serde_json::Map::new()
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(output.is_empty());
     }
 
     /// The `notify` request of pi 1.5.1's `docs/rpc-extension-ui.md`, whose
@@ -2210,6 +2259,54 @@ mod tests {
             events.last(),
             Some(AgentEvent::TurnCompleted {
                 status: TurnStatus::Failed,
+                ..
+            })
+        ));
+    }
+
+    /// A failed request pi retried and then got an answer for, as pi 1.5.2
+    /// reports it (`dist/core/agent-session.js`): the failed attempt's
+    /// `message_end`, `auto_retry_start` before it continues the run, and
+    /// `auto_retry_end` with `success: true` once an assistant message ends
+    /// without an error. The turn completed.
+    #[test]
+    fn a_request_that_succeeds_on_retry_completes_its_turn() {
+        let mut mapper = PiMapper::new();
+        let usage = json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,
+                           "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}});
+        let failed = json!({
+            "role":"assistant","content":[],"api":"openai-responses","provider":"openai",
+            "model":"gpt-test","usage":usage,"stopReason":"error",
+            "errorMessage":"429 rate limit reached for gpt-test","timestamp":1785400000000_u64
+        });
+        let answered = json!({
+            "role":"assistant","content":[{"type":"text","text":"Done."}],
+            "api":"openai-responses","provider":"openai","model":"gpt-test","usage":usage,
+            "stopReason":"stop","timestamp":1785400002000_u64
+        });
+        let mut events = Vec::new();
+        for line in [
+            json!({"type":"agent_start"}),
+            json!({"type":"message_start","message":failed}),
+            json!({"type":"message_end","message":failed}),
+            json!({"type":"turn_end","message":failed,"toolResults":[]}),
+            json!({"type":"agent_end","messages":[failed]}),
+            json!({"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":2000,
+                   "errorMessage":"429 rate limit reached for gpt-test"}),
+            json!({"type":"agent_start"}),
+            json!({"type":"message_start","message":answered}),
+            json!({"type":"message_end","message":answered}),
+            json!({"type":"auto_retry_end","success":true,"attempt":1}),
+            json!({"type":"turn_end","message":answered,"toolResults":[]}),
+            json!({"type":"agent_end","messages":[answered]}),
+            json!({"type":"agent_settled","aborted":false}),
+        ] {
+            events.extend(mapper.on_message(&line));
+        }
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted {
+                status: TurnStatus::Completed,
                 ..
             })
         ));

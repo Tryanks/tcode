@@ -73,7 +73,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
 
 fn print_usage() {
     println!(
-        "Usage:\n  tcode-headless serve [--name NAME] [--data-dir DIR] [--traverse official|off|URL]... [--port PORT] [--browser-listen ADDR:PORT] [--password PASSWORD]\n  tcode-headless set-password [--data-dir DIR] [--password PASSWORD] [--revoke-tokens]\n  tcode-headless pair [--data-dir DIR]\n\nserve starts this machine on Traverse for native devices and, for browsers,\na plain HTTP listener on {DEFAULT_BROWSER_LISTEN} (--browser-listen binds it\nelsewhere; --listen is accepted as an alias). The browser signs in with a\npassword, set on first open or with --password / TCODE_PASSWORD; a bind\nbeyond loopback is refused until one exists. --traverse names a relay and\ndiscovery service to publish to: official (the default) or the base URL of a\nself-hosted instance; repeat it to publish to several, or give off alone for\nnone (devices then find it on the LAN, or at an address typed on the device). The machine binds UDP port\n{DEFAULT_PORT} for devices (--port binds another) and advertises it on the\nLAN as _tcode._udp, so paired devices on the same network find it again\nwithout Traverse.\n\npair prints the current invitation link and QR: serve keeps {INVITATION_FILE}\ncurrent, whether the invitation was minted at startup or from a paired\ndevice, and removes it once it is used or expires. Scanning or pasting the\nlink is the whole pairing; an invitation lasts five minutes and admits one\ndevice. A new one comes from the logged-in browser's Settings → Remote or a\nrestart.\n\nOptions:\n  -h, --help    Print this help"
+        "Usage:\n  tcode-headless serve [--name NAME] [--data-dir DIR] [--traverse official|off|URL]... [--port PORT] [--browser-listen ADDR:PORT] [--password PASSWORD]\n  tcode-headless set-password [--data-dir DIR] [--password PASSWORD] [--revoke-tokens]\n  tcode-headless pair [--data-dir DIR]\n\nserve starts this machine on Traverse for native devices and, for browsers,\na plain HTTP listener on {DEFAULT_BROWSER_LISTEN} (--browser-listen binds it\nelsewhere). The browser signs in with a\npassword, set on first open or with --password / TCODE_PASSWORD; a bind\nbeyond loopback is refused until one exists. --traverse names a relay and\ndiscovery service to publish to: official (the default) or the base URL of a\nself-hosted instance; repeat it to publish to several, or give off alone for\nnone (devices then find it on the LAN, or at an address typed on the device). The machine binds UDP port\n{DEFAULT_PORT} for devices (--port binds another) and advertises it on the\nLAN as _tcode._udp, so paired devices on the same network find it again\nwithout Traverse.\n\npair prints the current invitation link and QR: serve keeps {INVITATION_FILE}\ncurrent, whether the invitation was minted at startup or from a paired\ndevice, and removes it once it is used or expires. Scanning or pasting the\nlink is the whole pairing; an invitation lasts five minutes and admits one\ndevice. A new one comes from the logged-in browser's Settings → Remote or a\nrestart.\n\nOptions:\n  -h, --help    Print this help"
     );
 }
 
@@ -108,7 +108,6 @@ fn parse_traverse(values: Vec<String>) -> Result<Vec<ManifestSource>, String> {
 
 fn serve_command(args: &[String]) -> Result<(), String> {
     let browser_listen = option_value(args, "--browser-listen")
-        .or_else(|| option_value(args, "--listen"))
         .unwrap_or_else(|| DEFAULT_BROWSER_LISTEN.to_owned())
         .parse::<SocketAddr>()
         .map_err(|error| format!("invalid --browser-listen address: {error}"))?;
@@ -126,7 +125,6 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     reject_unknown_options(
         args,
         &[
-            "--listen",
             "--browser-listen",
             "--name",
             "--data-dir",
@@ -168,7 +166,8 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         ai_title_generation: true,
         ..HostServices::default()
     };
-    if let Err(error) = services.start_mcp_servers(false) {
+    services.start_mcp_servers(false);
+    if let Some(error) = &services.mcp_unavailable {
         eprintln!("tcode-headless: MCP servers unavailable: {error}");
     }
     let host =
@@ -313,8 +312,7 @@ fn migrate_store(store: &SessionStore) -> Result<Migration, String> {
             store.root().display()
         ),
         None => println!(
-            "Migrating threads into {}; each copy is verified before the original files are \
-             removed. Ctrl-C cancels.",
+            "Migrating threads into {}. Ctrl-C cancels.",
             store.root().join("tcode.db").display()
         ),
     }
@@ -347,7 +345,6 @@ fn migration_line(progress: &MigrationProgress) -> String {
         MigrationPhase::Relocating => ("moving", "entries"),
         MigrationPhase::Scanning => ("scanning", "threads"),
         MigrationPhase::Importing => ("importing", "threads"),
-        MigrationPhase::Verifying => ("verifying", "threads"),
         MigrationPhase::Publishing => ("publishing", "threads"),
         MigrationPhase::Archiving => ("archiving", "threads"),
     };
@@ -561,9 +558,14 @@ fn pair_command(args: &[String]) -> Result<(), String> {
     let store = SessionStore::open_host(option_value(args, "--data-dir").map(PathBuf::from))
         .map_err(|error| error.to_string())?;
     let path = store.root().join(INVITATION_FILE);
-    let file: Option<InvitationFile> = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let file: Option<InvitationFile> = match std::fs::read(&path) {
+        Ok(bytes) => Some(
+            serde_json::from_slice(&bytes)
+                .map_err(|error| format!("could not read {}: {error}", path.display()))?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("could not read {}: {error}", path.display())),
+    };
     let valid = file.filter(|file| file.expires_unix > now_unix());
     let Some(file) = valid else {
         return Err("no valid invitation; the logged-in browser can create one from Settings → Remote, or restart serve".into());

@@ -886,14 +886,11 @@ impl AppState {
         if self.pull_requests.syncing || self.pull_requests.sync_scheduled {
             return;
         }
+        // Every request the current step makes is read by the one sweep.
         self.pull_requests.sync_scheduled = true;
-        let host = cx.clone();
-        cx.spawn_detached(async move {
-            smol::Timer::after(Duration::from_millis(10)).await;
-            host.enqueue(move |state, cx| {
-                state.pull_requests.sync_scheduled = false;
-                state.sweep_pull_requests(true, cx).detach();
-            });
+        cx.enqueue(|state, cx| {
+            state.pull_requests.sync_scheduled = false;
+            state.sweep_pull_requests(true, cx).detach();
         });
     }
     pub(super) fn stop_pull_request_workers(&mut self) {

@@ -3,10 +3,10 @@
 use serde::Deserialize;
 use tcode_core::provider_status::{AuthStatus, ProviderAuth};
 
-/// The subset of `claude auth status --json` we consume. Verified against
-/// claude 2.1.x, which prints:
-/// `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty",
-///   "email":"…","orgId":"…","orgName":"…","subscriptionType":"max"}`
+/// The subset of `claude auth status --json` we consume: Claude Code
+/// 2.1.322's `auth status` handler writes `loggedIn`, `authMethod` (`none`,
+/// `third_party`, `claude.ai`, `api_key_helper`, `oauth_token` or `api_key`)
+/// and, for a claude.ai login, `email` and `subscriptionType`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeAuthStatus {
@@ -22,9 +22,8 @@ pub struct ClaudeAuthStatus {
 
 /// Map `claude auth status --json` onto the card's auth line.
 ///
-/// Labels are `Claude API Key` or `Claude <plan> Subscription`, with the plan
-/// normalized to Claude's plan names: Free / Pro / Max / Ultra / Team /
-/// Enterprise.
+/// Labels are `Claude API Key` or `Claude <plan> Subscription`, the plan
+/// named by `plan_name` when the account file has one.
 pub fn parse_claude_auth(json: &str, plan_name: Option<&str>) -> Option<ProviderAuth> {
     let status: ClaudeAuthStatus = serde_json::from_str(json).ok()?;
     if !status.logged_in {
@@ -34,14 +33,10 @@ pub fn parse_claude_auth(json: &str, plan_name: Option<&str>) -> Option<Provider
             email: None,
         });
     }
-    let is_api_key = status
-        .auth_method
-        .as_deref()
-        .map(|m| {
-            let m = m.to_ascii_lowercase();
-            m.contains("apikey") || m.contains("api_key") || m.contains("api key")
-        })
-        .unwrap_or(false);
+    let is_api_key = matches!(
+        status.auth_method.as_deref(),
+        Some("api_key" | "api_key_helper")
+    );
     let label = if is_api_key {
         Some("Claude API Key".to_string())
     } else {
@@ -81,22 +76,15 @@ pub fn claude_account_plan_name(launch_env: &agent::LaunchEnv) -> Option<String>
     claude_plan_name(&std::fs::read_to_string(path).ok()?)
 }
 
-/// Normalize Claude's `subscriptionType` to its display plan name. Claude
-/// Code reports `max` for both the 5x and the 20x tier, which claude.com now
-/// sells as Max and Ultra; only the 20x tier's own id can name Ultra.
+/// Claude's `subscriptionType` (`pro`, `max`, `team` or `enterprise`, as
+/// Claude Code 2.1.322 describes it) by its display plan name. `max` stands
+/// for both Max and Ultra; only [`claude_plan_name`] tells them apart.
 fn normalize_claude_plan(raw: &str) -> Option<&'static str> {
-    match raw
-        .trim()
-        .to_ascii_lowercase()
-        .replace(['-', ' '], "_")
-        .as_str()
-    {
-        "max" | "max_5x" | "max5x" => Some("Max"),
-        "ultra" | "max_20x" | "max20x" => Some("Ultra"),
+    match raw {
+        "max" => Some("Max"),
         "pro" => Some("Pro"),
         "team" => Some("Team"),
         "enterprise" => Some("Enterprise"),
-        "free" => Some("Free"),
         _ => None,
     }
 }
@@ -254,4 +242,46 @@ fn upstream_providers_auth(mut providers: Vec<&str>) -> Option<ProviderAuth> {
         label: Some(label),
         email: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Shapes of `claude auth status --json` as Claude Code 2.1.322's
+    /// `auth status` handler builds them; the account values are invented.
+    #[test]
+    fn claude_auth_status_names_the_login() {
+        let subscription = r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty",
+            "email":"dev@example.com","orgId":"00000000-0000-4000-8000-000000000000",
+            "orgName":"Example Org","subscriptionType":"max","storedClaudeAiLogin":true,
+            "planTier":"max_20x"}"#;
+        let auth = parse_claude_auth(subscription, None).unwrap();
+        assert_eq!(auth.status, AuthStatus::Authenticated);
+        assert_eq!(auth.label.as_deref(), Some("Claude Max Subscription"));
+        assert_eq!(auth.email.as_deref(), Some("dev@example.com"));
+        assert_eq!(
+            parse_claude_auth(subscription, Some("Ultra"))
+                .unwrap()
+                .label
+                .as_deref(),
+            Some("Claude Ultra Subscription")
+        );
+
+        for method in ["api_key", "api_key_helper"] {
+            let key = format!(
+                r#"{{"loggedIn":true,"authMethod":"{method}","apiProvider":"firstParty",
+                "apiKeySource":"ANTHROPIC_API_KEY"}}"#
+            );
+            let auth = parse_claude_auth(&key, None).unwrap();
+            assert_eq!(auth.label.as_deref(), Some("Claude API Key"), "{method}");
+            assert_eq!(auth.email, None);
+        }
+
+        let signed_out = r#"{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}"#;
+        assert_eq!(
+            parse_claude_auth(signed_out, None).unwrap().status,
+            AuthStatus::Unauthenticated
+        );
+    }
 }

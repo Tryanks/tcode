@@ -794,9 +794,8 @@ mod tests {
                 cx,
             )
         });
-        let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            link.pump_with_timer(|delay| executor.timer(delay)).await;
+            link.pump().await;
         });
         let requested_folder = folder.clone();
         let _host = cx.background_executor.spawn(async move {

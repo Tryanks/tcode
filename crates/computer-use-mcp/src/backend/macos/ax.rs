@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::fmt;
-use std::os::raw::{c_char, c_int};
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -29,27 +28,18 @@ type AXError = i32;
 type AXValueType = u32;
 
 const AX_SUCCESS: AXError = 0;
+const AX_ERROR_ATTRIBUTE_UNSUPPORTED: AXError = -25205;
 const AX_ERROR_API_DISABLED: AXError = -25211;
+const AX_ERROR_NO_VALUE: AXError = -25212;
 const AX_VALUE_CGPOINT: AXValueType = 1;
 const AX_VALUE_CGSIZE: AXValueType = 2;
 const AX_VALUE_CGRECT: AXValueType = 3;
-const MAX_DEPTH: usize = 18;
 const MAX_NODES: usize = 3_000;
 const MAX_CHILDREN_PER_NODE: usize = 500;
-
-type AddNotificationAndCheckRemote =
-    unsafe extern "C" fn(AXObserverRef, AXUIElementRef, CFStringRef, *mut c_void) -> AXError;
 
 static ACTIVATED_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 static WEB_SPARSE_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 static AX_OBSERVERS: OnceLock<Mutex<HashMap<u32, usize>>> = OnceLock::new();
-
-const RTLD_LAZY: c_int = 1;
-
-unsafe extern "C" {
-    fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-}
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
@@ -197,17 +187,9 @@ impl Target {
     }
 }
 
-pub(super) fn application_identifier(pid: u32) -> String {
-    if let Some(identifier) = running_application_identifier(pid) {
-        return identifier;
-    }
-    let Some(application) = create_application(pid) else {
-        return String::new();
-    };
-    attribute_string(application.as_ax(), "AXIdentifier").unwrap_or_default()
-}
-
-fn running_application_identifier(pid: u32) -> Option<String> {
+/// The bundle identifier of the application running as `pid`; `None` for a
+/// process without one.
+pub(super) fn bundle_identifier(pid: u32) -> Option<String> {
     // SAFETY: all selectors and return types below are stable Foundation/AppKit
     // APIs. The autorelease pool bounds temporary Objective-C objects created
     // on the MCP runtime thread.
@@ -368,7 +350,7 @@ fn register_chromium_observer(pid: u32, application: AXUIElementRef) {
         let notification = CFString::new(notification_name);
         let code =
             add_chromium_notification(observer, application, notification.as_concrete_TypeRef());
-        if code != AX_SUCCESS && code != -25210 {
+        if code != AX_SUCCESS {
             log::debug!(
                 "Chromium AX notification {notification_name} was rejected for pid {pid}: {}",
                 ax_error_name(code)
@@ -423,54 +405,9 @@ fn add_chromium_notification(
     application: AXUIElementRef,
     notification: CFStringRef,
 ) -> AXError {
-    if let Some(add_remote) = remote_notification_adder() {
-        // SAFETY: the function pointer was resolved with the verified private
-        // AX observer ABI and all supplied AX/CF references are live.
-        return unsafe { add_remote(observer, application, notification, ptr::null_mut()) };
-    }
     // SAFETY: observer, application, and notification are live values using
     // the public AXObserverAddNotification ABI; null refcon is permitted.
     unsafe { AXObserverAddNotification(observer, application, notification, ptr::null_mut()) }
-}
-
-fn remote_notification_adder() -> Option<AddNotificationAndCheckRemote> {
-    static ADDER: OnceLock<Option<AddNotificationAndCheckRemote>> = OnceLock::new();
-    *ADDER.get_or_init(|| {
-        // SAFETY: the framework path and flags are valid C inputs; null means
-        // the optional private helper is unavailable.
-        let handle = unsafe {
-            dlopen(
-                c"/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices".as_ptr(),
-                RTLD_LAZY,
-            )
-        };
-        if handle.is_null() {
-            log::debug!(
-                "HIServices private AX helpers are unavailable; using public observer registration"
-            );
-            return None;
-        }
-        // SAFETY: RTLD_DEFAULT is the verified macOS sentinel and the private
-        // symbol name is a static NUL-terminated C string.
-        let symbol = unsafe {
-            dlsym(
-                (-2_isize) as *mut c_void,
-                c"_AXObserverAddNotificationAndCheckRemote".as_ptr(),
-            )
-        };
-        if symbol.is_null() {
-            log::debug!(
-                "remote AX observer registration helper is unavailable; using public API"
-            );
-            None
-        } else {
-            // SAFETY: the symbol uses the verified private AX observer
-            // registration ABI represented by AddNotificationAndCheckRemote.
-            Some(unsafe {
-                std::mem::transmute::<*mut c_void, AddNotificationAndCheckRemote>(symbol)
-            })
-        }
-    })
 }
 
 struct ObserverRunLoop {
@@ -568,7 +505,7 @@ pub(super) fn observe_tree(root: &RootInfo) -> Result<UiNode, BackendError> {
         visited: VisitedElements::default(),
         root_frame: root.frame,
     };
-    let mut tree = walk_element(window.as_ax(), 0, &mut context).ok_or_else(|| {
+    let mut tree = walk_tree(window.as_ax(), &mut context).ok_or_else(|| {
         BackendError::new(
             BackendErrorCode::ObservationFailed,
             format!("the accessibility tree for {} was empty", root.title),
@@ -594,7 +531,15 @@ pub(super) fn locate_target(
 ) -> Result<Target, BackendError> {
     let (application, mut element) = locate_window(root)?;
     for &index in path {
-        let children = copy_children(element.as_ax(), index.saturating_add(1));
+        let children = copy_children(element.as_ax(), index.saturating_add(1)).map_err(|code| {
+            BackendError::new(
+                BackendErrorCode::OperationFailed,
+                format!(
+                    "could not read the children along the target's accessibility path: {}",
+                    ax_error_text(code)
+                ),
+            )
+        })?;
         let Some(child) = children.into_iter().nth(index) else {
             return Err(BackendError::new(
                 BackendErrorCode::OperationFailed,
@@ -653,6 +598,17 @@ fn locate_window_in_application(
     application: AXUIElementRef,
     root: &RootInfo,
 ) -> Result<OwnedCf, BackendError> {
+    // The best-scoring window of the process would otherwise stand in for
+    // a closed one under the closed one's identity.
+    if !super::window_exists(root) {
+        return Err(BackendError::new(
+            BackendErrorCode::RootNotFound,
+            format!(
+                "the window of root {} is no longer open; call find_roots again",
+                root.ref_id
+            ),
+        ));
+    }
     let windows = try_copy_attribute_elements(application, "AXWindows", 200).map_err(|code| {
         let message = if code == AX_ERROR_API_DISABLED {
             format!(
@@ -735,11 +691,46 @@ impl VisitedElements {
     }
 }
 
-fn walk_element(
+/// The subtree under `root`, depth first, ending once [`MAX_NODES`] nodes are
+/// read. The walk keeps its own stack: a web area's tree can be deeper than
+/// the thread's stack would allow one frame per level.
+fn walk_tree(root: AXUIElementRef, context: &mut WalkContext) -> Option<UiNode> {
+    let mut stack = vec![read_element(root, context)?];
+    loop {
+        let (_, children) = stack.last_mut()?;
+        let child = if context.count < MAX_NODES {
+            children.next()
+        } else {
+            None
+        };
+        if let Some(child) = child {
+            if let Some(entry) = read_element(child.as_ax(), context) {
+                stack.push(entry);
+            }
+            continue;
+        }
+        let (node, _) = stack.pop()?;
+        let Some((parent, _)) = stack.last_mut() else {
+            return Some(node);
+        };
+        let invisible_leaf = node.children.is_empty()
+            && node.children_error.is_none()
+            && !node.is_interactive()
+            && node.title.is_empty()
+            && node.value.is_empty()
+            && (!node.frame.has_area()
+                || (context.root_frame.has_area() && !node.frame.intersects(context.root_frame)));
+        if !invisible_leaf {
+            parent.children.push(node);
+        }
+    }
+}
+
+/// One element's node, without its children yet, and the children to walk.
+fn read_element(
     element: AXUIElementRef,
-    depth: usize,
     context: &mut WalkContext,
-) -> Option<UiNode> {
+) -> Option<(UiNode, std::vec::IntoIter<OwnedCf>)> {
     if context.count >= MAX_NODES || !context.visited.insert(element) {
         return None;
     }
@@ -758,7 +749,13 @@ fn walk_element(
     let actions = action_names(element);
     let enabled = attribute_bool(element, "AXEnabled").unwrap_or(true);
     let focused = attribute_bool(element, "AXFocused").unwrap_or(false);
-    let mut node = UiNode {
+    let remaining = MAX_NODES - context.count;
+    let (children, children_error) =
+        match copy_children(element, remaining.min(MAX_CHILDREN_PER_NODE)) {
+            Ok(children) => (children, None),
+            Err(code) => (Vec::new(), Some(ax_error_text(code))),
+        };
+    let node = UiNode {
         ref_id: String::new(),
         role: canonical_role(&role),
         title,
@@ -769,46 +766,20 @@ fn walk_element(
         enabled,
         focused,
         children: Vec::new(),
+        children_error,
     };
+    Some((node, children.into_iter()))
+}
 
-    if depth < MAX_DEPTH && context.count < MAX_NODES {
-        let remaining = MAX_NODES - context.count;
-        for child in copy_children(element, remaining.min(MAX_CHILDREN_PER_NODE)) {
-            let Some(child) = walk_element(child.as_ax(), depth + 1, context) else {
-                continue;
-            };
-            let invisible_leaf = child.children.is_empty()
-                && !child.is_interactive()
-                && child.title.is_empty()
-                && child.value.is_empty()
-                && (!child.frame.has_area()
-                    || (context.root_frame.has_area()
-                        && !child.frame.intersects(context.root_frame)));
-            if !invisible_leaf {
-                node.children.push(child);
-            }
-            if context.count >= MAX_NODES {
-                break;
-            }
-        }
+/// An element that has no children attribute, or no value for it, has none.
+fn copy_children(element: AXUIElementRef, maximum: usize) -> Result<Vec<OwnedCf>, AXError> {
+    match try_copy_attribute_elements(element, "AXChildren", maximum) {
+        Err(AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE) => Ok(Vec::new()),
+        result => result,
     }
-    Some(node)
 }
 
-fn copy_children(element: AXUIElementRef, maximum: usize) -> Vec<OwnedCf> {
-    copy_attribute_elements(element, "AXChildren", maximum)
-}
-
-fn copy_attribute_elements(
-    element: AXUIElementRef,
-    attribute_name: &str,
-    maximum: usize,
-) -> Vec<OwnedCf> {
-    try_copy_attribute_elements(element, attribute_name, maximum).unwrap_or_default()
-}
-
-/// Like [`copy_attribute_elements`], but reports the AX error code of a failed
-/// copy so callers can tell a refused API from an empty attribute.
+/// The elements of an attribute, or the AX error code of a failed copy.
 fn try_copy_attribute_elements(
     element: AXUIElementRef,
     attribute_name: &str,
@@ -1020,24 +991,28 @@ fn ax_result(operation: &'static str, code: AXError) -> Result<(), AxFailure> {
     }
 }
 
+fn ax_error_text(code: AXError) -> String {
+    format!("AX error {code} ({})", ax_error_name(code))
+}
+
 fn ax_error_name(code: AXError) -> &'static str {
     match code {
         0 => "success",
-        -25201 => "failure",
-        -25202 => "illegal argument",
-        -25203 => "invalid UI element",
-        -25204 => "invalid observer",
-        -25205 => "cannot complete",
-        -25206 => "attribute unsupported",
-        -25207 => "action unsupported",
-        -25208 => "notification unsupported",
-        -25209 => "not implemented",
-        -25210 => "notification already registered",
-        -25211 => "notification not registered",
-        -25212 => "API disabled",
-        -25213 => "no value",
-        -25214 => "parameterized attribute unsupported",
-        -25215 => "not enough precision",
+        -25200 => "failure",
+        -25201 => "illegal argument",
+        -25202 => "invalid UI element",
+        -25203 => "invalid observer",
+        -25204 => "cannot complete",
+        -25205 => "attribute unsupported",
+        -25206 => "action unsupported",
+        -25207 => "notification unsupported",
+        -25208 => "not implemented",
+        -25209 => "notification already registered",
+        -25210 => "notification not registered",
+        -25211 => "API disabled",
+        -25212 => "no value",
+        -25213 => "parameterized attribute unsupported",
+        -25214 => "not enough precision",
         _ => "unknown",
     }
 }

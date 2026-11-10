@@ -21,16 +21,43 @@ fn storage() -> Option<web_sys::Storage> {
     window().local_storage().ok().flatten()
 }
 
+/// Site data this build cannot read. `ClientHost` gives reads no way to
+/// report it, so it goes to the console, and the data is neither used nor
+/// replaced.
+fn unreadable(key: &str, error: serde_json::Error) {
+    web_sys::console::error_1(&format!("could not read {key}: {error}").into());
+}
+
 /// `tcode.hosts` as the login page writes it: one record per machine with
 /// the bearer token the browser presents in hello and the origin that
 /// issued it, which the login page checks before skipping the form. The
 /// shared [`PairedHost`] carries neither, so the raw records are kept here
-/// and merged back on every save.
-fn raw_hosts() -> Vec<serde_json::Value> {
-    storage()
-        .and_then(|storage| storage.get_item("tcode.hosts").ok().flatten())
-        .and_then(|json| serde_json::from_str::<Vec<serde_json::Value>>(&json).ok())
-        .unwrap_or_default()
+/// and merged back on every save. Nothing stored is no machines.
+fn raw_hosts() -> Result<Vec<serde_json::Value>, ()> {
+    let Some(json) = storage().and_then(|storage| storage.get_item("tcode.hosts").ok().flatten())
+    else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(&json).map_err(|error| unreadable("tcode.hosts", error))
+}
+
+/// The saved machines, if every record of `tcode.hosts` is one.
+fn paired_hosts() -> Result<Vec<PairedHost>, ()> {
+    raw_hosts()?
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<_, _>>()
+        .map_err(|error| unreadable("tcode.hosts", error))
+}
+
+/// The saved preferences; nothing stored is the defaults.
+fn preferences() -> Result<ClientPreferences, ()> {
+    let Some(json) =
+        storage().and_then(|storage| storage.get_item("tcode.preferences").ok().flatten())
+    else {
+        return Ok(ClientPreferences::default());
+    };
+    serde_json::from_str(&json).map_err(|error| unreadable("tcode.preferences", error))
 }
 
 fn write_raw_hosts(hosts: &[serde_json::Value]) {
@@ -42,6 +69,7 @@ fn write_raw_hosts(hosts: &[serde_json::Value]) {
 /// The token the browser holds for `host_id`, if it logged in there.
 pub(crate) fn token_for(host_id: &str) -> Option<String> {
     raw_hosts()
+        .ok()?
         .iter()
         .find(|record| record["host_id"].as_str() == Some(host_id))
         .and_then(|record| record["token"].as_str())
@@ -108,13 +136,13 @@ impl ClientHost for WebHost {
     }
 
     fn load_preferences(&self) -> ClientPreferences {
-        storage()
-            .and_then(|storage| storage.get_item("tcode.preferences").ok().flatten())
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default()
+        preferences().unwrap_or_default()
     }
 
     fn save_preferences(&self, preferences: &ClientPreferences) {
+        if self::preferences().is_err() {
+            return;
+        }
         if let (Some(storage), Ok(json)) = (storage(), serde_json::to_string(preferences)) {
             let _ = storage.set_item("tcode.preferences", &json);
         }
@@ -130,14 +158,16 @@ impl ClientHost for WebHost {
     }
 
     fn load_hosts(&self) -> Vec<PairedHost> {
-        raw_hosts()
-            .into_iter()
-            .filter_map(|record| serde_json::from_value(record).ok())
-            .collect()
+        paired_hosts().unwrap_or_default()
     }
 
     fn save_hosts(&self, hosts: &[PairedHost]) {
-        let existing = raw_hosts();
+        if paired_hosts().is_err() {
+            return;
+        }
+        let Ok(existing) = raw_hosts() else {
+            return;
+        };
         let records: Vec<serde_json::Value> = hosts
             .iter()
             .filter_map(|host| {

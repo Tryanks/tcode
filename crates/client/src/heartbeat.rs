@@ -1,18 +1,11 @@
-//! Application heartbeat policy for transports whose platform hides WebSocket Pong.
+//! Application heartbeat for the browser transport, whose platform hides
+//! WebSocket Pong: after [`BROWSER_IDLE_MS`] without a host line it pings,
+//! and a ping unanswered for [`LIVENESS_REPLY_MS`] drops the socket.
 
-/// A native link's liveness is QUIC's: iroh keeps each path alive every 5 s
-/// and the connection closes after 30 s without a packet, as soon as a 10 s
-/// idle ping with its reply budget would have noticed. The ping only proves
-/// the host loop still answers, which a minute bounds while idle; a request
-/// meanwhile has its own deadline, and a probe pings at once.
-pub const NATIVE_IDLE_MS: u64 = 60_000;
 pub const BROWSER_IDLE_MS: u64 = 15_000;
 pub const LIVENESS_REPLY_MS: u64 = 20_000;
-pub const QUERY_TIMEOUT_MS: u64 = 15_000;
-pub const COMMAND_TIMEOUT_MS: u64 = 30_000;
 
 pub struct Heartbeat {
-    idle_ms: u64,
     deadline_ms: u64,
     awaiting_reply: bool,
 }
@@ -26,30 +19,14 @@ pub enum Tick {
 
 impl Heartbeat {
     pub fn new(now_ms: u64) -> Self {
-        Self::with_idle(now_ms, BROWSER_IDLE_MS)
-    }
-
-    /// A heartbeat that probes after `idle_ms` of silence instead of the
-    /// browser default.
-    pub fn with_idle(now_ms: u64, idle_ms: u64) -> Self {
         Self {
-            idle_ms,
-            deadline_ms: now_ms.saturating_add(idle_ms),
+            deadline_ms: now_ms.saturating_add(BROWSER_IDLE_MS),
             awaiting_reply: false,
         }
     }
 
     pub fn received(&mut self, now_ms: u64) {
-        *self = Self::with_idle(now_ms, self.idle_ms);
-    }
-
-    /// Ping at the next tick instead of after the idle window.
-    pub fn probe(&mut self, now_ms: u64) {
-        *self = Self {
-            idle_ms: self.idle_ms,
-            deadline_ms: now_ms,
-            awaiting_reply: false,
-        };
+        *self = Self::new(now_ms);
     }
 
     pub fn tick(&mut self, now_ms: u64) -> Tick {

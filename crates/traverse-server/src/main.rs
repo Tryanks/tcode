@@ -7,7 +7,7 @@ const DEV_HTTP_BIND: &str = "127.0.0.1:8080";
 
 fn print_usage() {
     println!(
-        "Usage:\n  tcode-traverse --config PATH\n  tcode-traverse --dev [--data-dir DIR] [--http-bind ADDR:PORT]\n  tcode-traverse --print-default-config\n\n--config runs the instance described by a TOML file (--print-default-config\nwrites a commented template). --dev serves plain HTTP on {DEV_HTTP_BIND} with\nthe store in ./tcode-traverse-dev, no TLS, no QUIC address discovery and no\nmetrics listener. Logging follows RUST_LOG.\n\nOptions:\n  -h, --help    Print this help"
+        "Usage:\n  tcode-traverse --config PATH\n  tcode-traverse --dev [--data-dir DIR] [--http-bind ADDR:PORT]\n  tcode-traverse --print-default-config\n\n--config runs the instance described by a TOML file (--print-default-config\nwrites a commented template). --dev serves plain HTTP on {DEV_HTTP_BIND} with\nthe store in ./tcode-traverse-dev, no TLS, no QUIC address discovery and no\nmetrics listener. Its manifest names http URLs, which Tcode machines and\ndevices refuse: it is for testing this server, not for connecting Tcode.\nLogging follows RUST_LOG.\n\nOptions:\n  -h, --help    Print this help"
     );
 }
 

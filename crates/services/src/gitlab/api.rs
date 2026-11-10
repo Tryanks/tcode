@@ -106,6 +106,9 @@ impl<'a> Request<'a> {
     }
 }
 
+/// A server's credential, none to read anonymously, or the CLI's failure.
+type CredentialRead = Result<Option<Credential>, ForgeError>;
+
 struct Cached<V> {
     value: V,
     expires: Instant,
@@ -116,7 +119,7 @@ pub(super) struct Api {
     environment: BTreeMap<String, String>,
     hosts: RwLock<BTreeMap<String, HostSettings>>,
     agent: ureq::Agent,
-    tokens: Mutex<HashMap<String, Cached<Option<Credential>>>>,
+    tokens: Mutex<HashMap<String, Cached<CredentialRead>>>,
     rate_limits: Mutex<crate::forge::RateLimits>,
 }
 
@@ -168,6 +171,7 @@ impl Api {
         if let Some(token) = self
             .store
             .token(HostKind::Gitlab, authority)
+            .map_err(ForgeError::credentials_unreadable)?
             .and_then(nonempty)
         {
             return Ok(Some(Credential {
@@ -188,16 +192,22 @@ impl Api {
         let mut tokens = self.tokens.lock().unwrap();
         tokens.retain(|_, cached| cached.expires > Instant::now());
         if let Some(cached) = tokens.get(authority) {
-            return Ok(cached.value.clone());
+            return cached.value.clone();
         }
         let found = self.glab_token(authority);
-        let ttl = if found.is_some() { 300 } else { 10 };
-        let value = found.map(|token| Credential {
-            verification: crate::settings::credential_fingerprint(&token, None),
-            token,
-            source: CredentialSource::Cli {
-                tool: "glab".into(),
-            },
+        let ttl = if matches!(found, Ok(Some(_))) {
+            300
+        } else {
+            10
+        };
+        let value = found.map(|found| {
+            found.map(|token| Credential {
+                verification: crate::settings::credential_fingerprint(&token, None),
+                token,
+                source: CredentialSource::Cli {
+                    tool: "glab".into(),
+                },
+            })
         });
         tokens.insert(
             authority.to_owned(),
@@ -206,7 +216,7 @@ impl Api {
                 expires: Instant::now() + Duration::from_secs(ttl),
             },
         );
-        Ok(value)
+        value
     }
 
     pub(super) fn forget(&self, authority: &str) {
@@ -216,8 +226,7 @@ impl Api {
     pub(super) fn token_saved(&self, authority: &str) -> bool {
         self.store
             .token(HostKind::Gitlab, authority)
-            .and_then(nonempty)
-            .is_some()
+            .is_ok_and(|token| token.and_then(nonempty).is_some())
     }
 
     /// What the server's last answer to `credential` says: its account, and any problem.
@@ -305,40 +314,68 @@ impl Api {
     }
 
     /// glab's git credential helper answers with the stored token of the server named by
-    /// host; `glab auth status` prints one only to a terminal reader.
-    fn glab_token(&self, authority: &str) -> Option<String> {
+    /// host; `glab auth status` prints one only to a terminal reader. Without a login it exits
+    /// unsuccessfully saying nothing (`cmdutils.SilentError` in
+    /// `internal/commands/auth/login/helper.go`), which is none; anything it says is a failure.
+    fn glab_token(&self, authority: &str) -> Result<Option<String>, ForgeError> {
+        let Some(program) = self.glab_program() else {
+            return Ok(None);
+        };
         let input = format!("protocol=https\nhost={authority}\n\n");
-        let output = self.run_glab(&["auth", "git-credential", "get"], Some(&input), true)?;
-        output
+        let output = match self.run_glab(
+            program,
+            &["auth", "git-credential", "get"],
+            Some(&input),
+            true,
+        ) {
+            Ok(output) => output,
+            Err(failure) if failure.exited && failure.said.is_empty() => return Ok(None),
+            Err(failure) => return Err(failure.error("glab")),
+        };
+        Ok(output
             .lines()
             .find_map(|line| line.strip_prefix("password="))
             .map(str::to_owned)
-            .and_then(nonempty)
+            .and_then(nonempty))
     }
 
-    /// The servers glab has logins for. glab exits with a failure when any of them refuses its
-    /// token, and still lists them all.
-    pub(super) fn glab_logins(&self) -> Vec<String> {
-        let Some(output) = self.run_glab(
-            &["auth", "status", "--all", "--output", "json"],
-            None,
-            false,
-        ) else {
-            return Vec::new();
+    /// The servers glab has logins for; none without glab. glab exits with a failure when any
+    /// of them refuses its token, and still lists them all.
+    pub(super) fn glab_logins(&self) -> Result<Vec<String>, ForgeError> {
+        let Some(program) = self.glab_program() else {
+            return Ok(Vec::new());
         };
-        let status: Value = serde_json::from_str(&output).unwrap_or_default();
-        status["hosts"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|host| host["host"].as_str())
-            .filter_map(|host| HostKind::Gitlab.authority(host).ok())
-            .collect()
+        let output = self
+            .run_glab(
+                program,
+                &["auth", "status", "--all", "--output", "json"],
+                None,
+                false,
+            )
+            .map_err(|failure| failure.error("glab"))?;
+        // With no login glab prints nothing and says so on stderr
+        // (`internal/commands/auth/status/status.go`).
+        if output.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        logins(&output).map_err(|error| {
+            crate::forge::CliFailure {
+                exited: false,
+                said: format!("glab auth status answered with what is not its JSON: {error}"),
+            }
+            .error("glab")
+        })
     }
 
-    fn run_glab(&self, args: &[&str], input: Option<&str>, success: bool) -> Option<String> {
+    fn run_glab(
+        &self,
+        program: PathBuf,
+        args: &[&str],
+        input: Option<&str>,
+        success: bool,
+    ) -> Result<String, crate::forge::CliFailure> {
         crate::forge::run_cli(
-            self.glab_program()?,
+            program,
             args,
             input,
             &self.environment,
@@ -615,21 +652,30 @@ impl Api {
 }
 
 /// GitLab's words for a refusal: `message` as text, as a field → messages map, or `error`.
+/// In the map, `error` is no field: `render_api_error!` is handed `{ error: … }` for a refusal
+/// that names none (`lib/api/merge_requests.rb`, a cancelled query), and its words stand alone.
 pub(super) fn messages(body: &[u8]) -> Vec<String> {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return Vec::new();
+    };
+    let said = |field: &str, item: &str| {
+        if field == "error" {
+            item.to_owned()
+        } else {
+            format!("{field} {item}")
+        }
     };
     match &value["message"] {
         Value::String(message) => vec![message.clone()],
         Value::Object(fields) => fields
             .iter()
-            .flat_map(|(field, said)| match said {
+            .flat_map(|(field, items)| match items {
                 Value::Array(items) => items
                     .iter()
                     .filter_map(|item| item.as_str())
-                    .map(|item| format!("{field} {item}"))
+                    .map(|item| said(field, item))
                     .collect(),
-                Value::String(item) => vec![format!("{field} {item}")],
+                Value::String(item) => vec![said(field, item)],
                 _ => Vec::new(),
             })
             .collect(),
@@ -643,6 +689,18 @@ pub(super) fn messages(body: &[u8]) -> Vec<String> {
             .into_iter()
             .collect(),
     }
+}
+
+/// The servers `glab auth status --all --output json` lists.
+fn logins(output: &str) -> serde_json::Result<Vec<String>> {
+    let status: Value = serde_json::from_str(output)?;
+    Ok(status["hosts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|host| host["host"].as_str())
+        .filter_map(|host| HostKind::Gitlab.authority(host).ok())
+        .collect())
 }
 
 /// The page size asked for.
@@ -702,5 +760,44 @@ mod tests {
         assert_eq!(source(&named, "gitlab.com"), None);
         assert_eq!(source(&named, "gitlab.corp.example"), None);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A refusal carries GitLab's own words in the error shapes its REST API documents (shape:
+    /// GitLab REST API troubleshooting, "Data validation and error reporting": `message` as
+    /// text, or as a property to messages map; GitLab's `lib/api/merge_requests.rb`, a map
+    /// whose only key is `error`; content invented).
+    #[test]
+    fn a_refusal_carries_gitlabs_words() {
+        use super::messages;
+        assert_eq!(
+            messages(br#"{"message":"400 (Bad request) \"title\" not given"}"#),
+            ["400 (Bad request) \"title\" not given"]
+        );
+        assert_eq!(
+            messages(br#"{"message":{"title":["is too long","is invalid"]}}"#),
+            ["title is too long", "title is invalid"]
+        );
+        assert_eq!(
+            messages(br#"{"message":{"error":"The request took too long"}}"#),
+            ["The request took too long"]
+        );
+    }
+
+    /// glab's login listing names each server it holds a login for, a failing one included
+    /// (shape: glab's `internal/commands/auth/status/status.go`, `--output json`: a `hosts`
+    /// array of host statuses whose `host`, `state`, `api_endpoint` and `graphql_endpoint` are
+    /// always present; content invented).
+    #[test]
+    fn glabs_logins_name_their_servers() {
+        let output = r#"{"hosts":[
+            {"host":"gitlab.com","state":"success","user":"ada",
+             "api_endpoint":"https://gitlab.com/api/v4/","graphql_endpoint":"https://gitlab.com/api/graphql/"},
+            {"host":"code.acme.test:8443","state":"error","error":"401 Unauthorized",
+             "api_endpoint":"https://code.acme.test:8443/api/v4/","graphql_endpoint":"https://code.acme.test:8443/api/graphql/"}
+        ]}"#;
+        assert_eq!(
+            super::logins(output).unwrap(),
+            ["gitlab.com", "code.acme.test:8443"]
+        );
     }
 }

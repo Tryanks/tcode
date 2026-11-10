@@ -415,54 +415,6 @@ pub(super) fn get(
     Ok(found)
 }
 
-/// The first row at or after `from` whose event type is `kind`, wherever it
-/// is: `tag` is how an older build's row spells that type.
-pub(super) fn find(
-    st: &Storage,
-    connection: &Connection,
-    thread: &Thread,
-    from: u64,
-    kind: u8,
-    tag: &[u8],
-) -> io::Result<Option<(u64, Stored)>> {
-    let (lo, hi) = thread.keys(from..POSITIONS);
-    let mut found = None;
-    st.query(
-        connection,
-        "SELECT key, line FROM events WHERE key >= ?1 AND key < ?2 \
-         AND substr(line, 3, 1) = ?3 ORDER BY key LIMIT 1",
-        (lo, hi, vec![kind]),
-        |row| {
-            found = Some((
-                (integer(row, 0)? - thread.base()) as u64,
-                Stored::New(blob(row, 1)?),
-            ));
-            Ok(())
-        },
-    )?;
-    let unmoved = thread.unmoved();
-    if let (Some(source), Some(old_id)) = (&thread.source, thread.old_id.as_deref())
-        && !unmoved.is_empty()
-        && from < unmoved.end
-        && let Some((position, bytes)) = source.find(
-            old_id,
-            from.max(unmoved.start)
-                ..found
-                    .as_ref()
-                    .map_or(unmoved.end, |(p, _)| *p)
-                    .min(unmoved.end),
-            tag,
-        )?
-    {
-        // A newer row at that position replaced the source's.
-        return Ok(Some(match get(st, connection, thread, position)? {
-            Some(row) => (position, row),
-            None => (position, Stored::Old(bytes)),
-        }));
-    }
-    Ok(found)
-}
-
 /// Store `encoded` at the key, replacing a row already there when `replace`
 /// is set; returns whether it was written.
 pub(super) fn insert(

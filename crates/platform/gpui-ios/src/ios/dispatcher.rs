@@ -81,12 +81,10 @@ impl PlatformDispatcher for IosDispatcher {
     }
 
     fn spawn_realtime(&self, task: Box<dyn FnOnce() + Send>) {
-        if let Err(error) = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("gpui-ios-realtime".into())
             .spawn(task)
-        {
-            log::error!("failed to spawn iOS realtime worker: {error}");
-        }
+            .expect("failed to spawn iOS realtime worker");
     }
 }
 

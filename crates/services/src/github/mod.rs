@@ -18,7 +18,7 @@ pub mod stack_actions;
 pub mod stack_rebase;
 
 pub use api::{GitHubApi, GitHubError, RequestOptions, Response, RestRequest};
-pub use credentials::{Credential, CredentialError, Credentials, Identity};
+pub use credentials::{Credential, CredentialError, Credentials};
 pub use forge::GitHub;
 pub use read_cache::Fresh;
 

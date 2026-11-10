@@ -341,3 +341,119 @@ fn a_changed_root_waits_for_a_live_provider() {
         ));
     });
 }
+
+/// A thread the importer cannot read is reported with its file and its reason, not counted
+/// among the threads skipped as already imported or empty.
+#[test]
+fn an_import_that_fails_names_the_thread_and_why() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-import-failed");
+    let project = Project::from_root(store.root().join("project"));
+    std::fs::create_dir_all(&project.root).unwrap();
+    store.upsert_project(&project).unwrap();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.deliver(
+        cx,
+        100,
+        ClientPayload::Subscribe(Subscription {
+            known_index: None,
+            topic: Topic::ExternalImport {
+                project_id: project.id.clone(),
+            },
+            after: None,
+        }),
+    );
+    let missing = store.root().join("history/gone.jsonl");
+    let thread = tcode_protocol::ExternalThread {
+        source: tcode_protocol::SourceTool::ClaudeCode,
+        file: missing.clone(),
+        external_id: "gone".into(),
+        title_hint: None,
+        last_active_ms: 1,
+    };
+    state.dispatch_command(
+        cx,
+        1,
+        Command::StartExternalImport {
+            project_id: project.id.clone(),
+            threads: vec![thread],
+        },
+    );
+    let (finished, _) = cx.run_until_sent(|message| match message {
+        HostMessage::Event(EventEnvelope {
+            event:
+                ServerEvent::ExternalImportStatusReplaced {
+                    status: Some(status),
+                    ..
+                },
+            ..
+        }) => match &status.state {
+            tcode_protocol::ExternalImportState::Finished {
+                imported,
+                skipped,
+                failed,
+            } => Some((*imported, *skipped, failed.clone())),
+            _ => None,
+        },
+        _ => None,
+    });
+    let (imported, skipped, failed) = finished;
+    assert_eq!((imported, skipped), (0, 0));
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].file, missing);
+    assert!(!failed[0].error.is_empty());
+}
+
+/// A host whose MCP servers did not start says so once, when the first thread that would have
+/// had Tcode's tools starts, with the reason.
+#[test]
+fn a_host_without_its_mcp_servers_says_so_when_the_first_thread_starts() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-mcp-unavailable");
+    let projects = ["one", "two"].map(|name| {
+        let project = Project::from_root(store.root().join(name));
+        std::fs::create_dir_all(&project.root).unwrap();
+        store.upsert_project(&project).unwrap();
+        project
+    });
+    let scripted = scripted_provider(ProviderKind::ClaudeCode);
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*store).clone());
+        state.set_provider_launcher_for_test(scripted.launcher);
+        state
+    });
+    state.update(cx, |state, _| {
+        state.mcp_unavailable(Some("address in use".into()))
+    });
+    for (id, project) in (1..).zip(&projects) {
+        state.dispatch_command(
+            cx,
+            id,
+            Command::StartDraft {
+                project_id: project.id.clone(),
+                cwd: project.root.clone(),
+            },
+        );
+    }
+    let drafts: Vec<String> = state.read(|state| state.residents.live.keys().cloned().collect());
+    assert_eq!(drafts.len(), 2);
+    for id in &drafts {
+        state.update(cx, |state, cx| state.ensure_session_started(id, cx));
+    }
+    cx.run_until_parked();
+    let told: Vec<_> = cx
+        .drain_outgoing()
+        .into_iter()
+        .filter_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                event:
+                    ServerEvent::Runtime(RuntimeNotification::Error(RuntimeError::McpUnavailable {
+                        error,
+                    })),
+                ..
+            }) => Some(error),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(told, ["address in use"]);
+}

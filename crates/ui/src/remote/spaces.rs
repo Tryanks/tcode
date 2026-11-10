@@ -176,7 +176,7 @@ impl Spaces {
         Self {
             host,
             state,
-            read_at: Instant::now(),
+            read_at: cx.background_executor().now(),
             generation: 0,
             refreshing: false,
             #[cfg(feature = "remote-hosting")]
@@ -250,11 +250,13 @@ impl Spaces {
     /// The machine's invitation link and the seconds it has left, or `None`
     /// once it has expired.
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-    pub(crate) fn invitation(&self) -> Option<(String, u64)> {
+    pub(crate) fn invitation(&self, cx: &App) -> Option<(String, u64)> {
         let state = self.state.as_ref()?;
-        let remaining = state
-            .expires_in_secs
-            .saturating_sub(self.read_at.elapsed().as_secs());
+        let read_for = cx
+            .background_executor()
+            .now()
+            .saturating_duration_since(self.read_at);
+        let remaining = state.expires_in_secs.saturating_sub(read_for.as_secs());
         let link = state.invite.clone()?;
         (remaining > 0).then_some((link, remaining))
     }
@@ -403,7 +405,7 @@ impl Spaces {
         };
         let changed = shown(&self.state) != shown(&state);
         self.state = state;
-        self.read_at = Instant::now();
+        self.read_at = cx.background_executor().now();
         if changed {
             cx.notify();
         }

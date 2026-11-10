@@ -4,9 +4,7 @@
 use std::{
     io,
     pin::Pin,
-    sync::Mutex,
     task::{Context, Poll, ready},
-    time::{Duration, Instant},
 };
 
 use iroh::endpoint::{Connection, RecvStream, SendStream};
@@ -15,12 +13,12 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::wire::{self, ClientLine, HostLine, LineReader};
 
-/// Stream error code for a tunnel that ended because its TCP side failed or
-/// idled, as opposed to a clean end of stream.
+/// Stream error code for a tunnel that ended because its TCP side failed,
+/// as opposed to a clean end of stream.
 const RESET_BROKEN: u32 = 1;
 
 /// Dial `host:port`, answer, then copy bytes until both directions have
-/// ended, one side fails, or the tunnel idles for [`wire::TUNNEL_IDLE`].
+/// ended or one side fails.
 pub(crate) async fn serve(
     mut send: SendStream,
     mut reader: LineReader,
@@ -34,20 +32,19 @@ pub(crate) async fn serve(
     .await;
     let socket = match dialed {
         Ok(Ok(socket)) => socket,
-        Ok(Err(error)) => return connect_failed(send, &dial_failure(&error)).await,
+        Ok(Err(error)) => return connect_failed(send, &error.to_string()).await,
         Err(_) => return connect_failed(send, "timed out").await,
     };
     let _ = socket.set_nodelay(true);
     log::info!("preview tunnel {host}:{port}");
     wire::write_line(&mut send, &HostLine::Connected).await?;
     let (mut tcp_read, mut tcp_write) = socket.into_split();
-    let activity = Mutex::new(Instant::now());
     let upload = async {
-        pump(&mut reader, &mut tcp_write, &activity).await?;
+        pump(&mut reader, &mut tcp_write).await?;
         tcp_write.shutdown().await
     };
     let download = async {
-        match pump(&mut tcp_read, &mut send, &activity).await {
+        match pump(&mut tcp_read, &mut send).await {
             Ok(()) => send.finish().map_err(io::Error::other),
             Err(error) => {
                 let _ = send.reset(RESET_BROKEN.into());
@@ -55,18 +52,7 @@ pub(crate) async fn serve(
             }
         }
     };
-    let idle = async {
-        loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            if activity.lock().unwrap().elapsed() >= wire::TUNNEL_IDLE {
-                return;
-            }
-        }
-    };
-    tokio::select! {
-        result = async { tokio::try_join!(upload, download) } => result.map(|_| ()),
-        _ = idle => Err(io::Error::new(io::ErrorKind::TimedOut, "tunnel idle")),
-    }
+    tokio::try_join!(upload, download).map(|_| ())
 }
 
 async fn connect_failed(mut send: SendStream, reason: &str) -> io::Result<()> {
@@ -80,31 +66,9 @@ async fn connect_failed(mut send: SendStream, reason: &str) -> io::Result<()> {
     send.finish().map_err(io::Error::other)
 }
 
-/// A short reason the device can show; the OS message may name interfaces
-/// or addresses the device has no use for.
-fn dial_failure(error: &io::Error) -> String {
-    match error.kind() {
-        io::ErrorKind::ConnectionRefused => "connection refused".into(),
-        io::ErrorKind::TimedOut => "timed out".into(),
-        io::ErrorKind::NotFound | io::ErrorKind::InvalidInput => "unknown host".into(),
-        io::ErrorKind::HostUnreachable | io::ErrorKind::NetworkUnreachable => "unreachable".into(),
-        _ => {
-            let message = error.to_string();
-            message
-                .split(" (os error")
-                .next()
-                .unwrap_or(&message)
-                .chars()
-                .take(80)
-                .collect()
-        }
-    }
-}
-
 async fn pump<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     reader: &mut R,
     writer: &mut W,
-    activity: &Mutex<Instant>,
 ) -> io::Result<()> {
     let mut bytes = [0_u8; 16 * 1024];
     loop {
@@ -112,9 +76,7 @@ async fn pump<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         if count == 0 {
             return Ok(());
         }
-        *activity.lock().unwrap() = Instant::now();
         writer.write_all(&bytes[..count]).await?;
-        *activity.lock().unwrap() = Instant::now();
     }
 }
 

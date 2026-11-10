@@ -16,10 +16,6 @@ use tcode_core::project::ChildExpectation;
 use tcode_core::pull_request::{PullRequestKey, PullRequestSource};
 use tcode_protocol::{Command, CommandResponse, PullRequestAction, PullRequestActionResult};
 
-/// How long a `git` or `pull_request` call waits for its work before answering that it is
-/// still running; below the broker's own timeout, which would report a failure instead.
-const ACTION_WAIT: Duration = Duration::from_secs(45);
-
 type ActionWork = Pin<Box<dyn Future<Output = Result<Option<serde_json::Value>, String>> + Send>>;
 
 /// What `start_thread` found before making a thread.
@@ -61,34 +57,20 @@ fn action_now(thread_id: &str, outcome: Outcome, reason: impl Into<String>) -> A
     }))
 }
 
-/// Answer once `work` finishes, or after [`ACTION_WAIT`] with a note that it still runs.
+/// Answer once `work` finishes.
 fn action_later(thread_id: String, work: ActionWork, cx: &HostCx) -> Answer {
     Answer::Later(cx.spawn_background(async move {
-        let finished = async { Some(work.await) };
-        let waited = async {
-            smol::Timer::after(ACTION_WAIT).await;
-            None
-        };
-        let response = match smol::future::or(finished, waited).await {
-            Some(Ok(output)) => ActionResponse {
+        let response = match work.await {
+            Ok(output) => ActionResponse {
                 thread_id,
                 outcome: Outcome::Applied,
                 reason: None,
                 output,
             },
-            Some(Err(reason)) => ActionResponse {
+            Err(reason) => ActionResponse {
                 thread_id,
                 outcome: Outcome::Failed,
                 reason: Some(reason),
-                output: None,
-            },
-            None => ActionResponse {
-                thread_id,
-                outcome: Outcome::Applied,
-                reason: Some(format!(
-                    "started; still running after {}s, its result shows in the thread",
-                    ACTION_WAIT.as_secs()
-                )),
                 output: None,
             },
         };

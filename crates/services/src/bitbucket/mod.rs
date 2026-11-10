@@ -23,7 +23,7 @@ use std::{
 };
 use tcode_core::{
     pull_request::{
-        BITBUCKET, HostKind, HostTerms, Mergeability, PullRequestKey, PullRequestMergeMethod,
+        BITBUCKET, HostKind, HostTerms, Mergeability, PullRequestKey,
         PullRequestReviewDraftComment, PullRequestStackState,
     },
     pull_request_watch::{CheckStatus, PullRequestRemark, PullRequestWatchRead},
@@ -147,20 +147,7 @@ impl Bitbucket {
         if reads::state(pr) != Some(tcode_core::pull_request::PullRequestState::Open) {
             return Ok(Mergeability::Unknown);
         }
-        // `/conflicts` is not in Bitbucket's published API (it is what its own page reads), so
-        // an answer it stops giving leaves mergeability unknown rather than failing the read; a
-        // rate limit, a refused credential or a host turned off still say so.
-        match self.pr(key).conflicts() {
-            Ok(read) => Ok(read),
-            Err(ForgeError {
-                kind:
-                    ForgeErrorKind::NotFound
-                    | ForgeErrorKind::Refused { .. }
-                    | ForgeErrorKind::Uncertain,
-                ..
-            }) => Ok(Mergeability::Unknown),
-            Err(failure) => Err(failure),
-        }
+        self.pr(key).conflicts()
     }
 
     /// The whole diff at the pull request's head, `None` past the read limit.
@@ -433,13 +420,7 @@ impl Bitbucket {
             // Bitbucket says nothing of how far the destination has moved on.
             behind_by: None,
             merge_queue: false,
-            // Bitbucket publishes no repository's allowed strategies; it refuses one it
-            // does not allow.
-            merge_methods: vec![
-                PullRequestMergeMethod::Merge,
-                PullRequestMergeMethod::Squash,
-                PullRequestMergeMethod::Rebase,
-            ],
+            merge_methods: reads::merge_methods(&read),
             auto_merge_allowed: false,
             auto_merge: None,
             queued: false,

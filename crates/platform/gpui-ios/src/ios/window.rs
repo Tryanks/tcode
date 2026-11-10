@@ -30,8 +30,6 @@ type InputCallback = Box<dyn FnMut(PlatformInput) -> DispatchEventResult>;
 type BoolCallback = Box<dyn FnMut(bool)>;
 type ResizeCallback = Box<dyn FnMut(Size<Pixels>, f32)>;
 type UnitCallback = Box<dyn FnMut()>;
-type ShouldCloseCallback = Box<dyn FnMut() -> bool>;
-type HitTestCallback = Box<dyn FnMut() -> Option<WindowControlArea>>;
 type InsetsCallback = Box<dyn FnMut(WindowInsets)>;
 type VisibilityCallback = Box<dyn FnMut(WindowVisibility)>;
 
@@ -58,11 +56,7 @@ pub(crate) struct IosWindow {
     request_frame_callback: RefCell<Option<RequestFrameCallback>>,
     input_callback: RefCell<Option<InputCallback>>,
     active_callback: RefCell<Option<BoolCallback>>,
-    hover_callback: RefCell<Option<BoolCallback>>,
     resize_callback: RefCell<Option<ResizeCallback>>,
-    moved_callback: RefCell<Option<UnitCallback>>,
-    should_close_callback: RefCell<Option<ShouldCloseCallback>>,
-    hit_test_callback: RefCell<Option<HitTestCallback>>,
     close_callback: RefCell<Option<Box<dyn FnOnce()>>>,
     appearance_callback: RefCell<Option<UnitCallback>>,
     insets_callback: RefCell<Option<InsetsCallback>>,
@@ -104,7 +98,7 @@ impl IosWindow {
         } else {
             params.bounds.size
         };
-        let scale_factor = metrics.scale.max(1.0);
+        let scale_factor = metrics.scale;
         let raw_handles = Self::raw_handles(view);
 
         let descriptor = wgpu::InstanceDescriptor {
@@ -130,38 +124,10 @@ impl IosWindow {
             preferred_present_mode: Some(wgpu::PresentMode::Fifo),
         };
         let context = WgpuContext::new(instance, &bootstrap_surface, &surface_config, None)?;
-        let surface_capabilities = bootstrap_surface.get_capabilities(&context.adapter);
-        let surface_format = [
-            wgpu::TextureFormat::Bgra8Unorm,
-            wgpu::TextureFormat::Rgba8Unorm,
-        ]
-        .into_iter()
-        .find(|format| surface_capabilities.formats.contains(format))
-        .or_else(|| {
-            surface_capabilities
-                .formats
-                .iter()
-                .find(|format| !format.is_srgb())
-                .copied()
-        })
-        .or_else(|| surface_capabilities.formats.first().copied())
-        .ok_or_else(|| anyhow::anyhow!("iOS Metal surface reports no supported formats"))?;
-        let format_features = context.adapter.get_texture_format_features(surface_format);
-        let glass_usages = wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC
-            | wgpu::TextureUsages::COPY_DST;
-        let glass_enabled = format_features.allowed_usages.contains(glass_usages)
-            && format_features
-                .flags
-                .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE);
         drop(bootstrap_surface);
         let gpu_context = Rc::new(RefCell::new(Some(context)));
         let renderer = WgpuRenderer::new(gpu_context.clone(), &raw_handles, surface_config, None)?;
-        log::info!(
-            "GPUI iOS Metal surface format selected: {surface_format:?}; scale factor: \
-             {scale_factor:.2}; glass enabled: {glass_enabled}"
-        );
+        log::info!("GPUI iOS Metal surface created at scale factor {scale_factor:.2}");
 
         Ok(Self {
             view: Cell::new(view),
@@ -184,11 +150,7 @@ impl IosWindow {
             request_frame_callback: RefCell::new(None),
             input_callback: RefCell::new(None),
             active_callback: RefCell::new(None),
-            hover_callback: RefCell::new(None),
             resize_callback: RefCell::new(None),
-            moved_callback: RefCell::new(None),
-            should_close_callback: RefCell::new(None),
-            hit_test_callback: RefCell::new(None),
             close_callback: RefCell::new(None),
             appearance_callback: RefCell::new(None),
             insets_callback: RefCell::new(None),
@@ -229,7 +191,6 @@ impl IosWindow {
         height: f32,
         scale_factor: f32,
     ) -> anyhow::Result<()> {
-        let scale_factor = scale_factor.max(1.0);
         let raw_handles = Self::raw_handles(view);
         let instance = self
             .gpu_context
@@ -415,7 +376,6 @@ impl IosWindow {
 
     pub(crate) fn resize_from_host(&self, width: f32, height: f32, scale_factor: f32) {
         let size = size(px(width.max(1.0)), px(height.max(1.0)));
-        let scale_factor = scale_factor.max(1.0);
         if self.bounds.get().size == size
             && (self.scale_factor.get() - scale_factor).abs() < f32::EPSILON
         {
@@ -516,10 +476,6 @@ impl IosWindow {
         }
         self.using_input_handler.set(false);
         result
-    }
-
-    pub(crate) fn text_input_active(&self) -> bool {
-        self.text_input_active.get()
     }
 
     pub(crate) fn delete_backward(&self) {
@@ -711,9 +667,7 @@ impl PlatformWindow for IosWindow {
         *self.visibility_callback.borrow_mut() = Some(callback);
     }
 
-    fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>) {
-        *self.hover_callback.borrow_mut() = Some(callback);
-    }
+    fn on_hover_status_change(&self, _callback: Box<dyn FnMut(bool)>) {}
 
     fn on_resize(&self, callback: Box<dyn FnMut(Size<Pixels>, f32)>) {
         *self.resize_callback.borrow_mut() = Some(callback);
@@ -723,16 +677,11 @@ impl PlatformWindow for IosWindow {
         *self.display_callback.borrow_mut() = Some(callback);
     }
 
-    fn on_moved(&self, callback: Box<dyn FnMut()>) {
-        *self.moved_callback.borrow_mut() = Some(callback);
-    }
+    fn on_moved(&self, _callback: Box<dyn FnMut()>) {}
 
-    fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>) {
-        *self.should_close_callback.borrow_mut() = Some(callback);
-    }
+    fn on_should_close(&self, _callback: Box<dyn FnMut() -> bool>) {}
 
-    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
-        *self.hit_test_callback.borrow_mut() = Some(callback);
+    fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
     }
 
     fn on_close(&self, callback: Box<dyn FnOnce()>) {

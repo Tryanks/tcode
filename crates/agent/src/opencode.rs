@@ -945,14 +945,11 @@ impl OpenCodeActor {
         decision: ApprovalDecision,
     ) -> Result<(), String> {
         let (reply, message) = match &decision {
-            ApprovalDecision::Option(id) if matches!(id.as_str(), "once" | "always" | "reject") => {
-                (id.as_str(), None)
-            }
+            ApprovalDecision::Option(id) => (id.as_str(), None),
             // A rejection with a message is OpenCode's correction: the model
             // continues from the user's words instead of stopping.
             ApprovalDecision::Feedback(text) => ("reject", Some(text.as_str())),
             ApprovalDecision::Cancel => ("reject", None),
-            ApprovalDecision::Option(_) => return Ok(()),
         };
         let Some(session_id) = self.permissions.remove(&request_id) else {
             return Ok(());

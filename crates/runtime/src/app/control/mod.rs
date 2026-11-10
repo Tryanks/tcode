@@ -26,27 +26,33 @@ mod watches;
 /// How many writes Settings → Control lists.
 const CONTROL_ACTIVITY_LIMIT: usize = 200;
 
+/// What one answer may hold, whatever the caller asks for: about 16k tokens, under the
+/// 25 000-token MCP tool result Claude Code accepts by default (`MAX_MCP_OUTPUT_TOKENS`).
+const RESPONSE_CAP: usize = 64 * 1024;
+
 pub(super) struct ControlState {
     activity: VecDeque<ControlActivityEntry>,
     review_records: Vec<tcode_core::control::ReviewRecord>,
+    reviews_unreadable: Option<UnreadableFile>,
+    activity_unreadable: Option<UnreadableFile>,
     /// Answers to recent calls that carried a `request_id`, so a retry does not act twice.
     answered: VecDeque<(String, serde_json::Value)>,
-    /// Bytes each caller has read from each thread since the host started, for the hint to
-    /// narrow the query.
-    content_read: HashMap<(String, String), usize>,
 }
 
 impl ControlState {
     pub(super) fn new(
         review_records: Vec<tcode_core::control::ReviewRecord>,
+        reviews_unreadable: Option<UnreadableFile>,
         mut activity: Vec<ControlActivityEntry>,
+        activity_unreadable: Option<UnreadableFile>,
     ) -> Self {
         activity.truncate(CONTROL_ACTIVITY_LIMIT);
         Self {
             activity: activity.into(),
             review_records,
+            reviews_unreadable,
+            activity_unreadable,
             answered: VecDeque::new(),
-            content_read: HashMap::new(),
         }
     }
 }
@@ -352,24 +358,7 @@ impl AppState {
             Some(meta) if meta.archived_at.is_none() => {
                 let caller = self.caller_of(&meta);
                 match self.authorize_control(&caller, &op) {
-                    // A tool call must never take the host down: a panic in one
-                    // handler answers that call and leaves every other thread served.
-                    Ok(()) => {
-                        let name = op.tool_name();
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            self.dispatch_control_op(&caller, op, cx)
-                        })) {
-                            Ok(answer) => answer,
-                            Err(_) => {
-                                log::error!(
-                                    "tcode_control: {name} panicked for thread {thread_id}"
-                                );
-                                Answer::Now(Err(format!(
-                                    "{name} failed inside tcode; see the host log"
-                                )))
-                            }
-                        }
-                    }
+                    Ok(()) => self.dispatch_control_op(&caller, op, cx),
                     Err(refusal) => Answer::Now(Err(refusal)),
                 }
             }
@@ -464,7 +453,7 @@ impl AppState {
                 return Err(format!(
                     "refused: `patch_settings` never changes {key}: an agent may change only \
                      display preferences (language, theme, diff word wrap, panels, sidebar \
-                     provider marks, frame throttling, the fallback review advisor)"
+                     provider marks, frame throttling, scrolling to the latest on send)"
                 ));
             }
         }
@@ -602,6 +591,12 @@ impl AppState {
             action,
         });
         self.control.activity.truncate(CONTROL_ACTIVITY_LIMIT);
+        if let Some(unreadable) = &mut self.control.activity_unreadable {
+            if let Some(error) = unreadable.first_refusal() {
+                self.report_error(RuntimeError::FileUnreadable { error }, cx);
+            }
+            return;
+        }
         let entries = self.control.activity.iter().cloned().collect();
         self.enqueue_store_write(StoreWrite::WriteControlActivity(entries), cx);
     }

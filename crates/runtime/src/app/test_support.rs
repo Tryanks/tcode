@@ -6,13 +6,6 @@ use std::rc::{Rc, Weak};
 use crate::host::HostFn;
 use tcode_protocol::{ClientMessage, ClientPayload, Command, HostMessage, decode_host_line};
 
-#[path = "../../../services/tests/support/github.rs"]
-#[allow(
-    dead_code,
-    reason = "The same HTTP fixture also supplies exchange helpers to services tests."
-)]
-pub(super) mod github_fixture;
-
 /// How long a test waits on the host before giving up. It only bounds a hang:
 /// a test that drives real git processes takes several seconds on a loaded
 /// Windows runner.
@@ -140,15 +133,15 @@ impl TestAppContext {
         self.after_input(&mut state.borrow_mut());
     }
 
-    /// What `pipe.rs::host_loop` does after each input it handles.
     fn after_input(&mut self, state: &mut TestClientState) {
         let mut host_cx = self.host_cx();
-        state.sync_terminal_handles();
-        state.reap_terminal_projections();
-        self.domain_diff
-            .as_mut()
-            .expect("test domain diff must be initialized")
-            .emit_changes(state, &mut host_cx);
+        crate::pipe::after_input(
+            state,
+            self.domain_diff
+                .as_mut()
+                .expect("test domain diff must be initialized"),
+            &mut host_cx,
+        );
     }
 
     /// Park repeatedly until `done` observes the state a background chain

@@ -3,7 +3,7 @@
 
 use super::{
     api::{Request, Response},
-    reads::{PULL_REQUEST, Pull, reaction_name, text},
+    reads::{MAX_PAGES, PULL_REQUEST, Pull, reaction_name, text},
 };
 use crate::forge::{ForgeError, ForgeErrorKind, Step, answered, in_order};
 use serde_json::{Value, json};
@@ -66,10 +66,16 @@ impl Pull<'_> {
     /// A review comment id among this pull request's line comments.
     fn own_line_comment(&self, id: &str) -> Result<u64, Rejection> {
         let id: u64 = id.parse().map_err(|_| Rejection::Invalid)?;
-        let reviews = self
-            .get(&format!("pulls/{}/reviews", self.key.number), "Reviews")
+        let (reviews, _) = self
+            .api
+            .list(
+                self.authority(),
+                &self.path(&format!("pulls/{}/reviews", self.key.number)),
+                "Reviews",
+                MAX_PAGES,
+            )
             .map_err(ForgeError::rejection)?;
-        for review in reviews.as_array().into_iter().flatten() {
+        for review in &reviews {
             let Some(review) = review["id"].as_u64() else {
                 continue;
             };
@@ -98,8 +104,8 @@ impl Pull<'_> {
             PullRequestMergeMethod::Squash => "squash",
             PullRequestMergeMethod::Rebase => "rebase",
         };
-        // Gitea 1.26 renamed the body's fields to snake case; older Gitea and Forgejo take `Do`.
-        let field = if self.api.server(self.authority()).snake_case_merge() {
+        // Gitea's merge body names the style `do`, Forgejo's `Do`.
+        let field = if self.api.server(self.authority()).gitea {
             "do"
         } else {
             "Do"

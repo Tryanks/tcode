@@ -12,12 +12,10 @@
 //! bytes are never included; recorded messages and tool summaries are not
 //! redacted.
 
-use std::fs;
 use std::io;
-use std::path::Path;
 
 use agent::{ItemContent, PlanStepStatus};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tcode_core::project::SessionMeta;
 use tcode_core::relay::render_relay_transcript;
 use tcode_core::session::{EntryContent, StoredEvent, Timeline};
@@ -27,7 +25,7 @@ use crate::store::{SessionStore, parse_stored_line};
 
 const EXPORT_VERSION: u32 = 1;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct TcodeThreadHeader {
     #[serde(rename = "type")]
     kind: String,
@@ -35,19 +33,6 @@ struct TcodeThreadHeader {
     meta: SessionMeta,
     attachments: String,
     redaction: String,
-}
-
-#[derive(Debug)]
-pub(crate) struct TcodeThreadExport {
-    pub meta: SessionMeta,
-    pub event_log: Vec<u8>,
-    pub events: Vec<StoredEvent>,
-}
-
-#[derive(Debug)]
-pub(crate) enum ReadExportError {
-    NotTcode,
-    Invalid(String),
 }
 
 /// Render `meta` and its persisted event log into export bytes. Nothing is
@@ -61,7 +46,7 @@ pub fn render_thread(
     match format {
         ThreadExportFormat::Jsonl => render_jsonl(meta, &event_log),
         ThreadExportFormat::Markdown => {
-            let events = parse_event_log(&event_log, meta.provider).map_err(invalid_data)?;
+            let events = parse_event_log(&event_log).map_err(invalid_data)?;
             Ok(render_markdown(meta, &Timeline::fold_events(events)).into_bytes())
         }
     }
@@ -117,50 +102,12 @@ fn render_jsonl(meta: &SessionMeta, event_log: &[u8]) -> io::Result<Vec<u8>> {
     Ok(output)
 }
 
-/// Read and validate a tcode JSONL export. `NotTcode` lets the external-history
-/// importer retain support for older T3-authored Claude transcripts.
-pub(crate) fn read_tcode_export(path: &Path) -> Result<TcodeThreadExport, ReadExportError> {
-    let bytes = fs::read(path).map_err(|error| ReadExportError::Invalid(error.to_string()))?;
-    let (header, event_log) = match bytes.iter().position(|byte| *byte == b'\n') {
-        Some(index) => (&bytes[..index], bytes[index + 1..].to_vec()),
-        None => (bytes.as_slice(), Vec::new()),
-    };
-    let value: serde_json::Value =
-        serde_json::from_slice(header).map_err(|_| ReadExportError::NotTcode)?;
-    if value.get("type").and_then(serde_json::Value::as_str) != Some("tcode_thread") {
-        return Err(ReadExportError::NotTcode);
-    }
-    let header: TcodeThreadHeader = serde_json::from_value(value)
-        .map_err(|error| ReadExportError::Invalid(error.to_string()))?;
-    if header.version != EXPORT_VERSION {
-        return Err(ReadExportError::Invalid(format!(
-            "unsupported Tcode export version {}",
-            header.version
-        )));
-    }
-    let events =
-        parse_event_log(&event_log, header.meta.provider).map_err(ReadExportError::Invalid)?;
-    Ok(TcodeThreadExport {
-        meta: header.meta,
-        event_log,
-        events,
-    })
-}
-
-fn parse_event_log(
-    bytes: &[u8],
-    current_provider: agent::ProviderKind,
-) -> Result<Vec<StoredEvent>, String> {
+fn parse_event_log(bytes: &[u8]) -> Result<Vec<StoredEvent>, String> {
     let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
-    let mut provider = current_provider;
-    let mut events = Vec::new();
-    for line in text.lines().filter(|line| !line.trim().is_empty()).rev() {
-        let record = parse_stored_line(line).map_err(|error| error.to_string())?;
-        provider = record.previous_provider().unwrap_or(provider);
-        events.push(record.into_stored(Some(provider)));
-    }
-    events.reverse();
-    Ok(events)
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| parse_stored_line(line).map_err(|error| error.to_string()))
+        .collect()
 }
 
 /// Render a complete folded timeline without the relay renderer's handoff size
@@ -280,18 +227,15 @@ fn invalid_data(error: impl ToString) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::fs;
     use std::path::PathBuf;
 
     use agent::{
         AgentEvent, ItemContent, ItemStatus, PlanStep, PlanStepStatus, ProviderKind, ThreadItem,
         TurnStatus,
     };
-    use tcode_core::project::Project;
-    use tcode_protocol::{ExternalThread, SourceTool};
 
     use super::*;
-    use crate::import::{ImportOutcome, import_thread};
 
     fn temp_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("tcode-export-{label}-{}", uuid::Uuid::new_v4()))
@@ -452,27 +396,18 @@ mod tests {
         let (_, exported_log) =
             export.split_at(export.iter().position(|byte| *byte == b'\n').unwrap() + 1);
         assert_eq!(exported_log, log);
-        let path = root.join("export.jsonl");
-        fs::write(&path, export).unwrap();
-        assert_eq!(read_tcode_export(&path).unwrap().events.len(), 8);
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn jsonl_export_import_round_trips_folded_timeline() {
-        let source_root = temp_root("source");
-        let destination_root = temp_root("destination");
-        let source = SessionStore::open_at(source_root.clone()).unwrap();
-        let destination = SessionStore::open_at(destination_root.clone()).unwrap();
+    fn jsonl_export_is_its_header_and_then_the_event_log() {
+        let root = temp_root("source");
+        let source = SessionStore::open_at(root.clone()).unwrap();
         let meta = fixture(&source);
-        let export_path = source_root.join("thread.jsonl");
-        fs::write(
-            &export_path,
-            render_thread(&source, &meta, ThreadExportFormat::Jsonl).unwrap(),
-        )
-        .unwrap();
-        let exported = fs::read_to_string(&export_path).unwrap();
+        let exported =
+            String::from_utf8(render_thread(&source, &meta, ThreadExportFormat::Jsonl).unwrap())
+                .unwrap();
         let header: serde_json::Value =
             serde_json::from_str(exported.lines().next().unwrap()).unwrap();
         assert_eq!(header["type"], "tcode_thread");
@@ -483,53 +418,8 @@ mod tests {
             exported.split_once('\n').unwrap().1.as_bytes(),
             source.read_event_log(&meta.id).unwrap()
         );
-
-        let project = Project::from_root(PathBuf::from("/restored/project"));
-        destination.upsert_project(&project).unwrap();
-        let thread = ExternalThread {
-            source: SourceTool::T3Code,
-            file: export_path,
-            external_id: "tcode:session-export-1".into(),
-            title_hint: None,
-            last_active_ms: 0,
-        };
-        assert_eq!(
-            import_thread(&destination, &project, &thread, &mut HashSet::new()),
-            ImportOutcome::Imported
-        );
-
-        let restored = destination.load_index().unwrap().pop().unwrap();
-        assert_ne!(restored.id, meta.id);
-        assert_eq!(restored.cwd, project.root);
-        assert_eq!(restored.project_id.as_deref(), Some(project.id.as_str()));
-        assert_eq!(
-            restored.imported_from.as_deref(),
-            Some("tcode:session-export-1")
-        );
-        assert_eq!(
-            destination.read_event_log(&restored.id).unwrap(),
-            source.read_event_log(&meta.id).unwrap()
-        );
-        let source_timeline = Timeline::fold_events(source.read_events(&meta.id).unwrap());
-        let restored_timeline =
-            Timeline::fold_events(destination.read_events(&restored.id).unwrap());
-        let summarize = |timeline: &Timeline| {
-            timeline
-                .entries
-                .iter()
-                .map(|entry| (entry.turn, format!("{:?}", entry.content)))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(summarize(&source_timeline), summarize(&restored_timeline));
-        assert_eq!(source_timeline.plan_steps, restored_timeline.plan_steps);
-        assert_eq!(
-            source_timeline.plan_explanation,
-            restored_timeline.plan_explanation
-        );
-        assert_eq!(source_timeline.turns.len(), restored_timeline.turns.len());
-
-        let _ = fs::remove_dir_all(source_root);
-        let _ = fs::remove_dir_all(destination_root);
+        drop(source);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

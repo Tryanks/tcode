@@ -73,12 +73,10 @@ pub enum ScrollCaptureRequest {
 
 pub(super) static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
 static EVENTS: Mutex<VecDeque<HostEvent>> = Mutex::new(VecDeque::new());
-/// Whether frames run. On the Java path the activity reposts its
-/// Choreographer callback on every vsync while it is set, so only starting
-/// and stopping frames hop to the UI thread.
+/// Whether frames run: a vsync while it is set draws one.
 static FRAMES_WANTED: AtomicBool = AtomicBool::new(false);
 
-/// Must run on the GPUI thread, which owns the NDK frame source.
+/// Must run on the GPUI thread, which owns the frame source.
 pub(crate) fn initialize(app: &AndroidApp) {
     *APP.lock() = Some(app.clone());
     vsync::initialize();
@@ -95,14 +93,7 @@ pub(crate) fn drain() -> Vec<HostEvent> {
     EVENTS.lock().drain(..).collect()
 }
 
-/// The Java path's vsync. Returns whether the activity should post the next
-/// vsync's callback.
-pub fn frame() -> bool {
-    enqueue(HostEvent::Frame);
-    FRAMES_WANTED.load(Ordering::Acquire)
-}
-
-/// The NDK path's vsync, called inside the GPUI thread's looper poll, which
+/// A vsync, called inside the GPUI thread's looper poll, which
 /// returns to the run loop afterwards, so the frame needs no wake.
 pub(super) fn vsync() {
     if FRAMES_WANTED.load(Ordering::Acquire) {
@@ -111,9 +102,7 @@ pub(super) fn vsync() {
 }
 
 pub fn refresh_rate(rate: f32) {
-    if rate.is_finite() && rate > 0.0 {
-        enqueue(HostEvent::RefreshRate(rate));
-    }
+    enqueue(HostEvent::RefreshRate(rate));
 }
 
 pub fn thermal_status(status: i32) {
@@ -126,26 +115,20 @@ pub fn power_save_mode(enabled: bool) {
 
 /// Called from the GPUI thread only, like everything below that drives frames.
 pub(crate) fn request_frame() {
-    let starting = !FRAMES_WANTED.swap(true, Ordering::AcqRel);
-    if !vsync::with(Vsync::start) && starting {
-        with_activity(jni_str!("gpuiRequestFrame"), jni_sig!(() -> void), vec![]);
-    }
+    FRAMES_WANTED.store(true, Ordering::Release);
+    vsync::with(Vsync::start);
 }
 
 pub(crate) fn pause_frames() {
-    if FRAMES_WANTED.swap(false, Ordering::AcqRel) && !vsync::with(Vsync::stop) {
-        with_activity(jni_str!("gpuiPauseFrames"), jni_sig!(() -> void), vec![]);
+    if FRAMES_WANTED.swap(false, Ordering::AcqRel) {
+        vsync::with(Vsync::stop);
     }
 }
 
 /// The window renders to `surface` from now on; the next request starts
 /// frames on it.
 pub(crate) fn attach_surface(surface: &NativeWindow) {
-    if !vsync::with(|vsync| vsync.attach(surface.clone())) {
-        // The activity drops a start that arrives while it has no surface,
-        // so the next request must reach it again.
-        FRAMES_WANTED.store(false, Ordering::Release);
-    }
+    vsync::with(|vsync| vsync.attach(surface.clone()));
 }
 
 /// Must run before `TerminateWindow` returns, while the surface is valid.
@@ -417,6 +400,32 @@ pub fn scroll_capture_rendered(request: u64, scrolled: Option<i32>) {
             OwnedArgument::Int(scrolled.unwrap_or_default()),
         ],
     );
+}
+
+/// How long a touch must be held to count as a long press: the user's
+/// "Touch & hold delay" accessibility setting, as
+/// `ViewConfiguration.getLongPressTimeout()` reports it.
+pub(crate) fn long_press_timeout() -> anyhow::Result<std::time::Duration> {
+    let app = APP
+        .lock()
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Android host not initialized"))?;
+    // SAFETY: Android owns this VM for the duration of the process.
+    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    vm.attach_current_thread(|env| -> anyhow::Result<std::time::Duration> {
+        let timeout = env
+            .call_static_method(
+                jni_str!("android/view/ViewConfiguration"),
+                jni_str!("getLongPressTimeout"),
+                jni_sig!("()I"),
+                &[],
+            )
+            .and_then(|value| value.i());
+        if timeout.is_err() {
+            env.exception_clear();
+        }
+        Ok(std::time::Duration::from_millis(u64::try_from(timeout?)?))
+    })
 }
 
 /// Rasterize on the calling render thread; a software Canvas needs no UI-thread hop.

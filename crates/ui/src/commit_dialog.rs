@@ -21,6 +21,7 @@ use gpui_base::{h_flex, v_flex};
 
 use tcode_core::git::{GitAction, GitFileEntry, feature_branch_name, included_paths};
 
+use crate::overlay::{Notification, OverlayExt as _};
 use crate::store::WorkspaceStore;
 
 pub struct CommitDialog {
@@ -33,6 +34,8 @@ pub struct CommitDialog {
     excluded: HashSet<String>,
     branch: Option<String>,
     on_default_branch: bool,
+    /// git's own error when it could not read the status.
+    status_error: Option<String>,
     /// Safeguard: create a `tcode/<slug>` feature branch and commit there.
     create_feature_branch: bool,
     action: GitAction,
@@ -54,6 +57,7 @@ impl CommitDialog {
         let files = state.files;
         let branch = state.branch;
         let on_default_branch = state.on_default_branch;
+        let status_error = state.error;
         let message = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 10)
@@ -67,6 +71,7 @@ impl CommitDialog {
             excluded: HashSet::new(),
             branch,
             on_default_branch,
+            status_error,
             create_feature_branch: false,
             action,
             generating: false,
@@ -110,7 +115,7 @@ impl CommitDialog {
                     Ok(text) => {
                         message.update(cx, |state, cx| state.set_value(text, window, cx));
                     }
-                    Err(err) => log::warn!("commit message generation failed: {err}"),
+                    Err(error) => window.push_notification(Notification::error(error), cx),
                 }
                 cx.notify();
             });
@@ -288,7 +293,9 @@ impl Render for CommitDialog {
                     "git.commit.files_count",
                     count = self.files.len()
                 )));
-        let file_list = if self.files.is_empty() {
+        let file_list = if let Some(error) = &self.status_error {
+            crate::material::empty_row(error.clone(), cx).into_any_element()
+        } else if self.files.is_empty() {
             crate::material::empty_row(crate::tr!("git.commit.no_changes"), cx).into_any_element()
         } else {
             crate::scroll::VirtualList::uniform(
@@ -411,6 +418,7 @@ mod tests {
                     },
                     event: ServerEvent::GitStatusReplaced(GitStatusStatus {
                         status: Some(status),
+                        error: None,
                         busy: false,
                     }),
                 }))
@@ -420,11 +428,8 @@ mod tests {
         let deferred: Vec<String> = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
-        let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            pump_link
-                .pump_with_timer(|delay| executor.timer(delay))
-                .await;
+            pump_link.pump().await;
         });
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(

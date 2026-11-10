@@ -23,8 +23,8 @@ use tcode_protocol::{
     ArchivedSessions, Command, CommandResponse, DiskUsageState, EventEnvelope,
     ExternalImportStatus, ExternalThread, GitDiffResult, GitDiffScope, GitStatusStatus,
     IndexSummary, PathEntry, ProtocolError, ProviderVersionStatus, ProvidersStatus, Query,
-    QueryResponse, RecentDir, Scope, ScopedProviderChoice, ServerEvent, SessionPlan,
-    SessionSearchHit, SessionStatus, StorageMigration, Subscription, Topic,
+    QueryResponse, Scope, ScopedProviderChoice, ServerEvent, SessionContentHits, SessionPlan,
+    SessionStatus, StorageMigration, Subscription, Topic,
 };
 pub(crate) mod terminal;
 pub(crate) use terminal::ClientTerminal;
@@ -407,6 +407,8 @@ pub(crate) struct CommitDialogState {
     pub files: Vec<GitFileEntry>,
     pub branch: Option<String>,
     pub on_default_branch: bool,
+    /// git's own error when it could not read the status.
+    pub error: Option<String>,
 }
 
 fn protocol_io_error(message: impl Into<String>) -> std::io::Error {
@@ -3063,7 +3065,10 @@ impl WorkspaceStore {
     /// Scan the *host's* external-agent histories. A failure is returned rather
     /// than logged away: an empty list and a broken host look identical to the
     /// user otherwise.
-    pub fn scan_external_history(&self, cx: &mut App) -> Task<Result<Vec<RecentDir>, String>> {
+    pub fn scan_external_history(
+        &self,
+        cx: &mut App,
+    ) -> Task<Result<tcode_protocol::ExternalHistory, String>> {
         if !self.can_manage_host() {
             return cx.spawn(async |_| Err(crate::tr!("member.unavailable").into_owned()));
         }
@@ -3149,28 +3154,28 @@ impl WorkspaceStore {
     }
 
     /// Ask the host to search its own stored sessions. The index, cache and
-    /// session order live there; this client keeps only the answer.
+    /// session order live there; this client keeps only the answer. A search
+    /// that failed whole answers with its failure as what could not be
+    /// searched.
     pub fn search_session_content(
         &self,
         query: String,
         limit: u32,
         cx: &mut App,
-    ) -> Task<Vec<SessionSearchHit>> {
+    ) -> Task<SessionContentHits> {
         let host = self.host.clone();
         cx.spawn(async move |_| {
+            let failed = |reason: String| SessionContentHits {
+                hits: Vec::new(),
+                unreadable: vec![reason],
+            };
             match host
                 .query(Query::SearchSessionContent { query, limit })
                 .await
             {
-                Ok(QueryResponse::SessionContentHits(hits)) => hits,
-                Ok(other) => {
-                    log::error!("unexpected session-content response: {other:?}");
-                    Vec::new()
-                }
-                Err(error) => {
-                    log::error!("session-content query failed: {}", error.message);
-                    Vec::new()
-                }
+                Ok(QueryResponse::SessionContentHits(found)) => found,
+                Ok(other) => failed(format!("unexpected session-content response: {other:?}")),
+                Err(error) => failed(error.message),
             }
         })
     }
@@ -3180,15 +3185,15 @@ impl WorkspaceStore {
         session_id: Option<&str>,
         cx: &App,
     ) -> CommitDialogState {
-        let status = self
-            .thread_git(session_id, cx)
-            .and_then(|git| git.status.as_ref());
+        let git = self.thread_git(session_id, cx);
+        let status = git.and_then(|git| git.status.as_ref());
         CommitDialogState {
             files: status
                 .map(|status| status.changed_files.clone())
                 .unwrap_or_default(),
             branch: status.and_then(|status| status.branch.clone()),
             on_default_branch: status.is_some_and(|status| status.is_default_branch),
+            error: git.and_then(|git| git.error.clone()),
         }
     }
 
@@ -4223,6 +4228,11 @@ impl WorkspaceStore {
         })
     }
 
+    /// git's own error when it could not read the thread's status.
+    pub fn chat_git_error_for(&self, session_id: Option<&str>, cx: &App) -> Option<String> {
+        self.thread_git(session_id, cx)?.error.clone()
+    }
+
     pub fn generate_commit_message_for(
         &self,
         session_id: Option<&str>,
@@ -4391,12 +4401,10 @@ pub(crate) mod tests {
     use gpui::{App, AppContext as _, TestAppContext};
     use tcode_core::{
         project::{Project, SessionMeta},
-        session::{EntryContent, ReviewComment, ReviewSide},
+        session::{EntryContent, ReviewComment, ReviewSide, StoredEvent},
         settings::Settings,
     };
-    use tcode_protocol::{
-        Command, EventEnvelope, ServerEvent, SessionEventRecord, Subscription, Topic,
-    };
+    use tcode_protocol::{Command, EventEnvelope, ServerEvent, Subscription, Topic};
     use tcode_runtime::host::HostEvent;
     use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
     use tcode_services::store::SessionStore;
@@ -4769,11 +4777,8 @@ pub(crate) mod tests {
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
-        let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            pump_link
-                .pump_with_timer(|delay| executor.timer(delay))
-                .await;
+            pump_link.pump().await;
         });
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, cx)
@@ -5304,7 +5309,7 @@ pub(crate) mod tests {
         );
         let accepted_key = retry.key.unwrap();
         let same_text_record = |id: String| {
-            SessionEventRecord::from(AgentEvent::ItemCompleted(ThreadItem {
+            StoredEvent::from(AgentEvent::ItemCompleted(ThreadItem {
                 id,
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
@@ -5820,7 +5825,7 @@ pub(crate) mod tests {
                 workspace.update(cx, |store, cx| {
                     let topic = Topic::SessionEvents { session_id: "a".into() };
                     store.show_alone("a".into(), cx);
-                    let record = |text: &str| SessionEventRecord::from(AgentEvent::Delta {
+                    let record = |text: &str| StoredEvent::from(AgentEvent::Delta {
                         item_id: "answer".into(), kind: agent::DeltaKind::AssistantText, text: text.into(),
                     });
                     let baseline_id = host.subscription_request_id(&topic).unwrap();
@@ -6308,11 +6313,8 @@ pub(crate) mod tests {
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
-        let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            pump_link
-                .pump_with_timer(|delay| executor.timer(delay))
-                .await;
+            pump_link.pump().await;
         });
         let workspace = cx.new(|cx| {
             WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, cx)
@@ -6471,11 +6473,15 @@ pub(crate) mod tests {
                     .unwrap(),
                 )
                 .unwrap();
-            wait_until(cx, &workspace, "prefetched page applied", |cx| {
+            cx.run_until_parked();
+            workspace.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
+            assert!(
                 workspace.read_with(cx, |store, _| {
                     held_window(store, "large").is_some_and(|held| held.from == before - 200)
-                })
-            });
+                }),
+                "the prefetched page is applied"
+            );
             assert!(
                 outgoing.try_recv().is_err(),
                 "yield between automatic pages"
@@ -6493,9 +6499,6 @@ pub(crate) mod tests {
             });
             cx.run_until_parked();
             if page < 3 {
-                wait_until(cx, &workspace, "next prefetch request", |_| {
-                    !outgoing.is_empty()
-                });
                 request =
                     tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
             }
@@ -6553,8 +6556,8 @@ pub(crate) mod tests {
         }
     }
 
-    fn recorded(ts: u64, event: AgentEvent) -> SessionEventRecord {
-        SessionEventRecord {
+    fn recorded(ts: u64, event: AgentEvent) -> StoredEvent {
+        StoredEvent {
             origin: None,
             author: None,
             ts: Some(ts),
@@ -6562,7 +6565,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn reply(ts: u64) -> SessionEventRecord {
+    fn reply(ts: u64) -> StoredEvent {
         recorded(
             ts,
             AgentEvent::ItemCompleted(ThreadItem {
@@ -6576,11 +6579,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn session_snapshot(
-        session_id: &str,
-        from: u64,
-        records: Vec<SessionEventRecord>,
-    ) -> EventEnvelope {
+    fn session_snapshot(session_id: &str, from: u64, records: Vec<StoredEvent>) -> EventEnvelope {
         let end = from + records.len() as u64;
         EventEnvelope {
             request_id: None,
@@ -6915,21 +6914,26 @@ pub(crate) mod tests {
         });
     }
 
-    /// How long a test waits on a real host. The host answers from its own
-    /// threads, which a loaded machine can keep off the CPU for seconds, and
-    /// a test has no way to tell that from silence but time: so this is far
-    /// beyond any load, there to end a hang with the name of what it waited
-    /// for, not to measure the host.
-    const HOST_PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
+    /// Wakes the test's thread from [`std::thread::park`]: a host answers from
+    /// threads of its own, and a future polled with this goes on once it has.
+    /// GPUI's test scheduler unparks the same thread when another thread wakes
+    /// one of its tasks.
+    struct Unpark(std::thread::Thread);
 
-    /// When a test waiting on a real host from now gives up.
-    pub(crate) fn host_deadline() -> std::time::Instant {
-        std::time::Instant::now() + HOST_PATIENCE
+    impl std::task::Wake for Unpark {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
     }
 
+    /// A client of a real host whose replies the test's thread decodes, so
+    /// what they wake runs on GPUI's test scheduler. Between turns it waits
+    /// for the host as the app does: until the host sends something.
     pub(crate) struct LocalHostDriver {
         pub(crate) link: tcode_client::HostLink,
-        pump: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>,
+        /// Gone once the host has closed its side of the link.
+        pump: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>>,
+        waker: std::task::Waker,
     }
 
     impl LocalHostDriver {
@@ -6942,7 +6946,8 @@ pub(crate) mod tests {
             let pump_link = link.clone();
             Self {
                 link,
-                pump: Box::pin(async move { pump_link.pump().await }),
+                pump: Some(Box::pin(async move { pump_link.pump().await })),
+                waker: std::sync::Arc::new(Unpark(std::thread::current())).into(),
             }
         }
 
@@ -6970,9 +6975,10 @@ pub(crate) mod tests {
             future: impl std::future::Future<Output = T>,
         ) -> T {
             let mut future = std::pin::pin!(future);
+            let waker = self.waker.clone();
             let mut answer = None;
             self.wait_until(cx, store, "host reply", |_| {
-                let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+                let mut task_cx = std::task::Context::from_waker(&waker);
                 if let std::task::Poll::Ready(value) =
                     std::future::Future::poll(future.as_mut(), &mut task_cx)
                 {
@@ -6985,37 +6991,77 @@ pub(crate) mod tests {
             answer.expect("reply observed")
         }
 
+        /// What `receiver` hears next, the host turned until it has: a
+        /// scripted provider hears from the host's threads, not the link.
+        pub(crate) fn recv<T>(
+            &mut self,
+            cx: &mut TestAppContext,
+            store: &gpui::Entity<WorkspaceStore>,
+            receiver: &async_channel::Receiver<T>,
+        ) -> T {
+            self.await_with_events(cx, store, receiver.recv())
+                .expect("the sender is open")
+        }
+
+        /// Decodes what the host has sent, hands it to `store`, and runs what
+        /// that woke.
         pub(crate) fn step(
             &mut self,
             cx: &mut TestAppContext,
             store: &gpui::Entity<WorkspaceStore>,
         ) {
-            // The real host sends from an OS thread. Route replies here so
-            // asset and command futures wake on GPUI's test scheduler thread.
-            let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
-            let _ = self.pump.as_mut().poll(&mut task_cx);
+            if let Some(pump) = &mut self.pump {
+                let mut task_cx = std::task::Context::from_waker(&self.waker);
+                if pump.as_mut().poll(&mut task_cx).is_ready() {
+                    self.pump = None;
+                }
+            }
             store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
             cx.run_until_parked();
+        }
+
+        /// Waits until the host sends something or another thread wakes a
+        /// task of the test's. The test fails if the host has closed the link
+        /// while it still waits for `what`.
+        pub(crate) fn wait_for_host(&self, what: &str) {
+            assert!(
+                self.pump.is_some(),
+                "the host closed the link while the test waited for {what}"
+            );
+            std::thread::park();
         }
 
         pub(crate) fn wait_until(
             &mut self,
             cx: &mut TestAppContext,
             store: &gpui::Entity<WorkspaceStore>,
-            description: &str,
+            what: &str,
             mut ready: impl FnMut(&TestAppContext) -> bool,
         ) {
-            let deadline = crate::store::tests::host_deadline();
             loop {
                 self.step(cx, store);
                 if ready(cx) {
                     return;
                 }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "waiting for {description}"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                self.wait_for_host(what);
+            }
+        }
+
+        /// [`Self::wait_until`] for a window, drawn at rest after each turn.
+        pub(crate) fn settle_until(
+            &mut self,
+            cx: &mut gpui::VisualTestContext,
+            store: &gpui::Entity<WorkspaceStore>,
+            what: &str,
+            mut ready: impl FnMut(&mut gpui::VisualTestContext) -> bool,
+        ) {
+            loop {
+                self.step(cx, store);
+                crate::test_frames::draw_settled(cx);
+                if ready(cx) {
+                    return;
+                }
+                self.wait_for_host(what);
             }
         }
 
@@ -7041,61 +7087,6 @@ pub(crate) mod tests {
                 .expect("stop host");
             host.stopped.recv_blocking().expect("host stopped");
         }
-    }
-
-    pub(crate) fn await_with_events<T>(
-        cx: &mut TestAppContext,
-        workspace: &gpui::Entity<WorkspaceStore>,
-        future: impl std::future::Future<Output = T>,
-    ) -> T {
-        let mut future = std::pin::pin!(future);
-        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
-        let deadline = crate::store::tests::host_deadline();
-        loop {
-            workspace.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-            if let std::task::Poll::Ready(result) =
-                std::future::Future::poll(future.as_mut(), &mut task_cx)
-            {
-                workspace.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-                return result;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "host request did not finish while consuming events"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-    }
-
-    pub(crate) fn shutdown_test_host(
-        cx: &mut TestAppContext,
-        workspace: &gpui::Entity<WorkspaceStore>,
-        host: &SpawnedHost,
-    ) {
-        let link = host.link();
-        await_with_events(cx, workspace, link.shutdown()).expect("drain test store and stop host");
-        host.stopped.recv_blocking().expect("host stopped");
-    }
-
-    /// Drain the host's events into `workspace` until `ready`. A host
-    /// delivers from its own threads, so a test waits on the condition, never
-    /// unbounded: past [`HOST_PATIENCE`] it fails naming what it waited for.
-    pub(crate) fn wait_until(
-        cx: &mut TestAppContext,
-        workspace: &gpui::Entity<WorkspaceStore>,
-        description: &str,
-        ready: impl Fn(&TestAppContext) -> bool,
-    ) {
-        let deadline = crate::store::tests::host_deadline();
-        while std::time::Instant::now() < deadline {
-            workspace.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-            cx.run_until_parked();
-            if ready(cx) {
-                return;
-            }
-            smol::block_on(smol::Timer::after(std::time::Duration::from_millis(1)));
-        }
-        panic!("timed out waiting for {description}");
     }
 
     #[gpui::test]
@@ -7130,7 +7121,7 @@ pub(crate) mod tests {
             }
         };
         let mut driver = LocalHostDriver::from_link(link);
-        let pump = driver.pump;
+        let pump = driver.pump.take().unwrap();
         // A busy transport may not read until the whole recovery flight is queued.
         let forwards = async move {
             while let Ok(line) = requests.recv().await {
@@ -7142,10 +7133,10 @@ pub(crate) mod tests {
                 }
             }
         };
-        driver.pump = Box::pin(smol::future::race(
+        driver.pump = Some(Box::pin(smol::future::race(
             pump,
             smol::future::race(forwards, replies),
-        ));
+        )));
         let workspace = cx.new(|cx| {
             WorkspaceStore::new_attached(
                 driver.link.clone(),
@@ -7176,19 +7167,9 @@ pub(crate) mod tests {
         driver
             .link
             .set_connection_state(ConnectionState::Syncing { path: None });
-        let deadline = crate::store::tests::host_deadline();
-        loop {
-            driver.step(cx, &workspace);
-            if workspace.read_with(cx, |store, _| store.baseline_ready()) {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "reconnect baseline stalled: {:?}",
-                workspace.read_with(cx, |store, _| store.baseline_topics.clone())
-            );
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        driver.wait_until(cx, &workspace, "the reconnect baseline", |cx| {
+            workspace.read_with(cx, |store, _| store.baseline_ready())
+        });
         let link = driver.link.clone();
         driver
             .await_with_events(cx, &workspace, link.command(Command::ShutdownAllAndFlush))
@@ -7253,15 +7234,14 @@ pub(crate) mod tests {
              laptop_cx: &mut TestAppContext,
              what: &str,
              ready: &mut dyn FnMut(&mut TestAppContext, &mut TestAppContext) -> bool| {
-                let deadline = host_deadline();
                 loop {
                     desk_driver.step(desk_cx, &desk);
                     laptop_driver.step(laptop_cx, &laptop);
                     if ready(desk_cx, laptop_cx) {
                         return;
                     }
-                    assert!(std::time::Instant::now() < deadline, "timed out: {what}");
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    // Both clients share one host, on this thread.
+                    desk_driver.wait_for_host(what);
                 }
             };
 
@@ -7423,41 +7403,35 @@ pub(crate) mod tests {
         driver.link.set_connection_state(syncing.clone());
         let events = driver.link.events();
         let mut deferred_events = Vec::new();
-        let scope = smol::block_on(smol::future::race(
-            async {
-                let mut scope = None;
-                let mut unchanged = false;
-                loop {
-                    if unchanged && let Some(scope) = scope.take() {
-                        break scope;
-                    }
-                    let mut next = std::pin::pin!(events.recv());
-                    let event = std::future::poll_fn(|task_cx| {
-                        let _ = driver.pump.as_mut().poll(task_cx);
-                        next.as_mut().poll(task_cx)
-                    })
-                    .await
-                    .unwrap();
-                    if matches!(event.event, ServerEvent::ScopeSnapshot(_)) {
-                        scope = Some(event);
-                    } else {
-                        if let ServerEvent::IndexUnchanged {
-                            fingerprint: received,
-                            ..
-                        } = &event.event
-                        {
-                            assert_eq!(received, &fingerprint);
-                            unchanged = true;
-                        }
-                        deferred_events.push(event);
-                    }
+        let scope = smol::block_on(async {
+            let mut scope = None;
+            let mut unchanged = false;
+            loop {
+                if unchanged && let Some(scope) = scope.take() {
+                    break scope;
                 }
-            },
-            async {
-                smol::Timer::after(HOST_PATIENCE).await;
-                panic!("recovery Scope and IndexUnchanged were not delivered");
-            },
-        ));
+                let mut next = std::pin::pin!(events.recv());
+                let event = std::future::poll_fn(|task_cx| {
+                    let _ = driver.pump.as_mut().unwrap().as_mut().poll(task_cx);
+                    next.as_mut().poll(task_cx)
+                })
+                .await
+                .unwrap();
+                if matches!(event.event, ServerEvent::ScopeSnapshot(_)) {
+                    scope = Some(event);
+                } else {
+                    if let ServerEvent::IndexUnchanged {
+                        fingerprint: received,
+                        ..
+                    } = &event.event
+                    {
+                        assert_eq!(received, &fingerprint);
+                        unchanged = true;
+                    }
+                    deferred_events.push(event);
+                }
+            }
+        });
         assert!(matches!(scope.event, ServerEvent::ScopeSnapshot(_)));
         workspace.update(cx, |store, cx| {
             store.receive(scope, cx);
@@ -7757,15 +7731,9 @@ pub(crate) mod tests {
                 bytes: b"exit\r".to_vec(),
             },
         );
-        let deadline = crate::store::tests::host_deadline();
-        while !terminals(cx)[0].exited {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the shell did not exit"
-            );
-            driver.step(cx, &workspace);
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        driver.wait_until(cx, &workspace, "the shell to exit", |cx| {
+            terminals(cx)[0].exited
+        });
         assert!(drawer_open(cx), "the drawer stays while its output is read");
 
         workspace.update(cx, |store, cx| store.show_alone("two".into(), cx));

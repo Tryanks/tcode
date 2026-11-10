@@ -1,11 +1,11 @@
 use super::{
-    Credential, CredentialError, Credentials, Identity,
+    Credential, CredentialError, Credentials,
     graphql::Document,
     normalize_host,
     quota::{Ledger, number},
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     io::Read as _,
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant, SystemTime},
@@ -161,33 +161,25 @@ impl Drop for Permit<'_> {
     }
 }
 
-struct CachedIdentity {
-    identity: Identity,
-    expires: Instant,
-}
-
 pub struct GitHubApi {
     credentials: Arc<Credentials>,
     pub(super) agent: ureq::Agent,
     pub(super) gate: Gate,
     ledger: Mutex<Ledger>,
-    identities: Mutex<HashMap<String, CachedIdentity>>,
 }
 
 impl GitHubApi {
+    /// Pooling is disabled because ureq retries an idempotent request without a body on a
+    /// stale pooled socket, and a label's DELETE is one.
     pub fn host(credentials: Arc<Credentials>) -> Arc<Self> {
-        Self::new(credentials, ureq::AgentBuilder::new())
-    }
-
-    /// Tests route the builder's resolver and TLS to a loopback fixture. Pooling is disabled
-    /// because ureq retries stale pooled sockets; GitHub writes must never retry here.
-    pub fn new(credentials: Arc<Credentials>, builder: ureq::AgentBuilder) -> Arc<Self> {
         Arc::new(Self {
             credentials,
-            agent: builder.redirects(0).max_idle_connections(0).build(),
+            agent: ureq::AgentBuilder::new()
+                .redirects(0)
+                .max_idle_connections(0)
+                .build(),
             gate: Gate::default(),
             ledger: Mutex::new(Ledger::default()),
-            identities: Mutex::new(HashMap::new()),
         })
     }
 
@@ -201,13 +193,36 @@ impl GitHubApi {
         request: RestRequest<'_>,
         options: &RequestOptions,
     ) -> Result<Response, GitHubError> {
-        self.execute(host, request, None, options)
+        self.execute(host, request, None, false, options)
     }
 
     pub fn graphql(
         &self,
         host: &str,
         document: &Document,
+        options: &RequestOptions,
+    ) -> Result<Response, GitHubError> {
+        self.graphql_answer(host, document, false, options)
+    }
+
+    /// A GraphQL answer whose `data` stands beside its `errors`, for the caller to read field by
+    /// field: the GraphQL specification ("Response", "Errors") lets a field fail on its own,
+    /// with an error naming its `path` and the rest of `data` still answered. An answer
+    /// without `data` fails as [`Self::graphql`] does.
+    pub fn graphql_partial(
+        &self,
+        host: &str,
+        document: &Document,
+        options: &RequestOptions,
+    ) -> Result<Response, GitHubError> {
+        self.graphql_answer(host, document, true, options)
+    }
+
+    fn graphql_answer(
+        &self,
+        host: &str,
+        document: &Document,
+        partial: bool,
         options: &RequestOptions,
     ) -> Result<Response, GitHubError> {
         let body = serde_json::json!({"query": document.query, "variables": document.variables});
@@ -222,40 +237,9 @@ impl GitHubApi {
                 answers: &[],
             },
             Some(&document.query),
+            partial,
             options,
         )
-    }
-
-    /// Capture and verify once before a multi-request operation to prevent account changes mid-page.
-    pub fn verified_credential(&self, host: &str) -> Result<(Credential, Identity), GitHubError> {
-        let credential = self.credentials.get(host)?;
-        {
-            let mut cache = self.identities.lock().unwrap();
-            cache.retain(|_, value| value.expires > Instant::now());
-            if let Some(cached) = cache.get(&credential.fingerprint) {
-                return Ok((credential, cached.identity.clone()));
-            }
-        }
-        let response = self.rest(
-            host,
-            RestRequest::get("/user"),
-            &RequestOptions {
-                authentication: Authentication::Pinned(credential.clone()),
-                interactive: true,
-                operation: "Identity",
-                ..Default::default()
-            },
-        )?;
-        let identity: Identity = response.json()?;
-        self.credentials.recognized(&credential, &identity.login);
-        self.identities.lock().unwrap().insert(
-            credential.fingerprint.clone(),
-            CachedIdentity {
-                identity: identity.clone(),
-                expires: Instant::now() + Duration::from_secs(600),
-            },
-        );
-        Ok((credential, identity))
     }
 
     /// Whose `token` is on the host, and which of the scopes Tcode needs a classic token
@@ -309,6 +293,7 @@ impl GitHubApi {
         raw_host: &str,
         input: RestRequest<'_>,
         graphql: Option<&str>,
+        partial: bool,
         options: &RequestOptions,
     ) -> Result<Response, GitHubError> {
         let host = normalize_host(raw_host)?;
@@ -429,9 +414,6 @@ impl GitHubApi {
                     }
                 })?;
         }
-        if started.elapsed() >= timeout {
-            return Err(GitHubError::Deadline);
-        }
         let truncated = body.len() > cap;
         body.truncate(cap);
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
@@ -487,16 +469,18 @@ impl GitHubApi {
             self.credentials.invalidate(host);
             return Err(GitHubError::Unauthorized);
         }
+        let partial = partial && parsed.get("data").is_some_and(|data| data.is_object());
         if status == 404
-            || errors.is_some_and(|errors| {
-                errors.iter().all(|error| {
-                    error.get("type").and_then(|value| value.as_str()) == Some("NOT_FOUND")
+            || !partial
+                && errors.is_some_and(|errors| {
+                    errors.iter().all(|error| {
+                        error.get("type").and_then(|value| value.as_str()) == Some("NOT_FOUND")
+                    })
                 })
-            })
         {
             return Err(GitHubError::NotFound);
         }
-        if errors.is_some() {
+        if errors.is_some() && !partial {
             return Err(GitHubError::Response { status, messages });
         }
         if (200..300).contains(&status)

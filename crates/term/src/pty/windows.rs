@@ -13,7 +13,9 @@ pub(super) fn spawn(
     shared: Arc<Mutex<Shared>>,
     notifications: async_channel::Sender<PtyEvent>,
 ) -> io::Result<PtyCommandSender> {
-    // PtyHandle retains this cwd for later splits; don't silently start elsewhere.
+    // portable-pty 0.9 starts the child in the home directory when the cwd is
+    // not a directory (CommandBuilder::current_directory); fail as the Unix
+    // spawn does instead of starting elsewhere.
     if !cwd.metadata()?.is_dir() {
         return Err(io::Error::new(
             ErrorKind::NotADirectory,

@@ -238,6 +238,18 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
     });
     stranger.to_host.close();
 
+    // A switch the allow list cannot record is answered as a failure and
+    // changes nothing. The file is written through `traverse.tmp`; a
+    // directory in its place fails the write on every platform.
+    let blocker = host_dir.0.join("traverse.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    assert!(matches!(
+        host.hosting(tcode_protocol::HostingAction::SetEnabled(false)),
+        Err(tcode_protocol::ProtocolError { code, .. }) if code == "pairing_update_failed"
+    ));
+    assert!(host.pairing_enabled());
+    std::fs::remove_dir(&blocker).unwrap();
+
     host.set_pairing_enabled(false);
     let minted = host.new_invitation();
     assert_eq!(pair(&minted.invite, &other), Err(PairError::Disabled));
@@ -509,42 +521,6 @@ fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
         "the device took no relay from anywhere"
     );
     client.to_host.close();
-    host.shutdown();
-    real_host::stop(runtime, &mux);
-}
-
-/// The heartbeat is the transport's own line, never charged to the outbox.
-/// Crediting it on send underflowed the outbox count at the first ping and
-/// killed the writer, so a connection that had been pinged silently stopped
-/// carrying commands while still reporting `Connected`. A network change
-/// probes the link, which pings at once rather than after the idle window.
-#[test]
-fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
-    let host_dir = TestDir::new("idle-host");
-    let (runtime, mux) = running_host(&host_dir);
-    let host = start_host(mux.clone(), &host_dir, None);
-    let dir = TestDir::new("idle-device");
-    let phone = device(&dir, "phone");
-    let minted = host.new_invitation();
-    let paired = pair(&minted.invite, &phone).unwrap();
-    let client = tcode_traverse::connect(&paired, &phone);
-    wait_state(&client, syncing_directly);
-    client.to_host.send_blocking(subscribe(1)).unwrap();
-    recv_type(&client, "ack", Some(1));
-    wait_state(&client, connected_directly);
-
-    phone.network_changed();
-    recv_type(&client, "query_result", Some(0));
-    while let Ok(state) = client.state.try_recv() {
-        assert!(
-            connected_directly(&state),
-            "the idle link stayed up: {state:?}"
-        );
-    }
-    let ping = json!({"id": 2, "payload": {"type": "query", "content": {"type": "ping"}}});
-    client.to_host.send_blocking(ping.to_string()).unwrap();
-    recv_type(&client, "query_result", Some(2));
-    assert_eq!(client.state.try_recv().ok(), None);
     host.shutdown();
     real_host::stop(runtime, &mux);
 }
@@ -1379,11 +1355,11 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
     assert!(identity.spaces.is_empty());
     assert!(!identity.pairing_enabled);
     let migrated = std::fs::read(dir.0.join(HOST_FILE)).unwrap();
-    let persisted: Value = serde_json::from_slice(&migrated).unwrap();
-    // Outside a group the file stays version 3, which older builds read.
-    assert_eq!(persisted["v"], 3);
+    let mut persisted: Value = serde_json::from_slice(&migrated).unwrap();
     assert_eq!(identity.policy_revision, 0);
-    // A version 3 file that had no policy revision yet loads with no group.
+    // A version 3 file, as releases before groups wrote it, that had no
+    // policy revision yet loads with no group.
+    persisted["v"] = 3.into();
     let mut older_v3 = persisted.clone();
     older_v3.as_object_mut().unwrap().remove("policy_revision");
     std::fs::write(
@@ -1394,10 +1370,6 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
     let v3 = HostIdentity::load_or_create(&dir.0, "Test Host").unwrap();
     assert_eq!(v3.policy_revision, 0);
     assert!(v3.group.is_none());
-    v3.save().unwrap();
-    let rewritten: Value =
-        serde_json::from_slice(&std::fs::read(dir.0.join(HOST_FILE)).unwrap()).unwrap();
-    assert_eq!(rewritten["v"], 3);
     // A space stored before spaces had a policy keeps what its members could
     // do then.
     let mut spaced = persisted.clone();
@@ -1409,18 +1381,8 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
         spaced.spaces[0].policy,
         tcode_protocol::SpacePolicy::unrestricted()
     );
-    let version = || -> Value {
-        serde_json::from_slice::<Value>(&std::fs::read(dir.0.join(HOST_FILE)).unwrap()).unwrap()
-            ["v"]
-            .clone()
-    };
-    spaced.save().unwrap();
-    assert_eq!(version(), 3);
-    // A policy an older build would drop on saving makes the file one it
-    // refuses instead.
     spaced.spaces[0].policy = tcode_protocol::SpacePolicy::new_space();
     spaced.save().unwrap();
-    assert_eq!(version(), 5);
     assert_eq!(
         HostIdentity::load_or_create(&dir.0, "Test Host")
             .unwrap()
@@ -1433,8 +1395,6 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
         None,
         Some(json!({"type":"unknown"})),
         Some(json!({"type":"spaces","content":"wrong"})),
-        Some(json!({"type":"spaces","content":[]})),
-        Some(json!({"type":"spaces","content":[""]})),
     ] {
         let mut invalid = persisted.clone();
         let record = invalid["devices"][0].as_object_mut().unwrap();

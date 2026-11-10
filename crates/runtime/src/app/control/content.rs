@@ -8,20 +8,12 @@ use serde::Serialize;
 use tcode_services::store::EventLog;
 use tcode_services::thread_index::{self, IndexedLog, OutlineLevel, ReadSelection};
 
-/// What one response may hold, whatever the caller asks for.
-const RESPONSE_CAP: usize = 64 * 1024;
-const OUTLINE_BUDGET: usize = 48 * 1024;
 const READ_DEFAULT_BYTES: usize = 32 * 1024;
-const FILE_HISTORY_BUDGET: usize = 48 * 1024;
-const SEARCH_BUDGET: usize = 48 * 1024;
 const CONTEXT_LINES_DEFAULT: usize = 2;
+/// The first hit is shown whatever its size, so its context and lines are bounded: minified
+/// output would otherwise put a megabyte line into one answer.
 const CONTEXT_LINES_MAX: usize = 10;
-const MAX_HITS: usize = 50;
-/// A matched line longer than this is cut: minified output would otherwise spend the
-/// budget on one hit.
 const HIT_LINE_BYTES: usize = 1024;
-/// After this much read from one thread, reads suggest narrowing instead of paging on.
-const NARROW_HINT_BYTES: usize = 256 * 1024;
 
 fn anchor(thread_id: &str, position: u64) -> String {
     format!("{thread_id}#{position}")
@@ -100,8 +92,6 @@ struct ReadAnswer {
     redacted: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     omitted: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hint: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -477,7 +467,7 @@ impl AppState {
                     })
                 })
                 .collect();
-                fit(RESPONSE_CAP, OUTLINE_BUDGET, |budget| {
+                fit(RESPONSE_CAP, RESPONSE_CAP, |budget| {
                     let mut answer = to_json(&ThreadOutline {
                         thread_id: &meta.id,
                         title: &meta.title,
@@ -500,7 +490,7 @@ impl AppState {
 
     pub(super) fn op_read(
         &mut self,
-        caller: &Caller,
+        _caller: &Caller,
         params: ReadParams,
         cx: &mut HostCx,
     ) -> Answer {
@@ -523,64 +513,9 @@ impl AppState {
             .iter()
             .map(|selection| selection.thread_id.as_str())
             .collect();
-        match self.indexed_logs(&thread_ids, cx) {
-            Logs::Ready(logs) => {
-                let answer = read_answer(&selections, &logs, max_bytes);
-                Answer::Now(self.count_read(&caller.thread_id, &selections, answer))
-            }
-            Logs::Reading(task) => {
-                let caller = caller.thread_id.clone();
-                let host_cx = cx.clone();
-                Answer::Later(cx.spawn_background(async move {
-                    let logs = task.await?;
-                    let answer = read_answer(&selections, &logs, max_bytes);
-                    finish_on_host(host_cx, move |state, _| {
-                        state.count_read(&caller, &selections, answer)
-                    })
-                    .await
-                }))
-            }
-        }
-    }
-
-    /// Add what `answer` shows to what `caller` has read of each thread, and suggest
-    /// narrowing once a thread has been read heavily.
-    fn count_read(
-        &mut self,
-        caller: &str,
-        selections: &[ThreadSelection],
-        mut answer: ReadAnswer,
-    ) -> Result<serde_json::Value, String> {
-        let mut heavy: Vec<&str> = Vec::new();
-        for selection in selections {
-            let read: usize = answer
-                .entries
-                .iter()
-                .filter(|entry| {
-                    parse_anchor(&entry.anchor)
-                        .is_some_and(|(thread_id, _)| thread_id == selection.thread_id)
-                })
-                .map(|entry| entry.text.len())
-                .sum();
-            let total = self
-                .control
-                .content_read
-                .entry((caller.to_owned(), selection.thread_id.clone()))
-                .or_default();
-            *total += read;
-            if *total >= NARROW_HINT_BYTES {
-                heavy.push(&selection.thread_id);
-            }
-        }
-        if !heavy.is_empty() {
-            answer.hint = Some(format!(
-                "You have read over {} KiB of {}; narrow with search or search_in_item \
-                 instead of re-reading history, which refills your context.",
-                NARROW_HINT_BYTES / 1024,
-                heavy.join(", ")
-            ));
-        }
-        to_json(&answer)
+        self.indexed_logs(&thread_ids, cx).answer(cx, move |logs| {
+            to_json(&read_answer(&selections, logs, max_bytes))
+        })
     }
 
     pub(super) fn op_search_in_item(
@@ -635,7 +570,6 @@ fn read_answer(
             entries: Vec::new(),
             redacted: 0,
             omitted: None,
-            hint: None,
         };
         let mut notes = Vec::new();
         let mut remaining = budget;
@@ -699,16 +633,11 @@ fn search_in_item(
         .context_lines
         .map_or(CONTEXT_LINES_DEFAULT, |lines| lines as usize)
         .min(CONTEXT_LINES_MAX);
-    let found = thread_index::search_in_item(&output, &params.query, context, MAX_HITS + 1);
+    let found = thread_index::search_in_item(&output, &params.query, context, usize::MAX);
     let mut notes = Vec::new();
-    if found.len() > MAX_HITS {
-        notes.push(format!(
-            "more than {MAX_HITS} matching lines; showing the first {MAX_HITS}, narrow the query"
-        ));
-    }
     let mut hits = Vec::new();
     let mut used = 0;
-    for (index, hit) in found.iter().take(MAX_HITS).enumerate() {
+    for (index, hit) in found.iter().enumerate() {
         let first = hit.line_no - hit.before.len();
         let last = hit.line_no + hit.after.len();
         let body = hit
@@ -721,19 +650,20 @@ fn search_in_item(
             .join("\n");
         let excerpt =
             thread_index::fence(&format!("{} lines {first}-{last}", params.anchor), &body);
-        used += excerpt.len();
-        if used > SEARCH_BUDGET && index > 0 {
+        let hit = LineHit {
+            line_no: hit.line_no,
+            excerpt,
+        };
+        used += json_len(&hit);
+        if used > RESPONSE_CAP && index > 0 {
             notes.push(format!(
                 "{} matches omitted for the byte budget, from line {}",
-                found.len().min(MAX_HITS) - index,
+                found.len() - index,
                 hit.line_no
             ));
             break;
         }
-        hits.push(LineHit {
-            line_no: hit.line_no,
-            excerpt,
-        });
+        hits.push(hit);
     }
     to_json(&SearchInItemAnswer {
         anchor: params.anchor.clone(),
@@ -774,7 +704,7 @@ fn file_history(
     let mut size: usize = edits.iter().map(|edit| json_len(edit) + 1).sum();
     let (mut dropped_diffs, mut dropped_edits) = (0, 0);
     for edit in &mut edits {
-        if size <= FILE_HISTORY_BUDGET {
+        if size <= RESPONSE_CAP {
             break;
         }
         if let Some(diff) = edit.diff_head.take() {
@@ -782,7 +712,7 @@ fn file_history(
             dropped_diffs += 1;
         }
     }
-    while size > FILE_HISTORY_BUDGET && !edits.is_empty() {
+    while size > RESPONSE_CAP && !edits.is_empty() {
         size -= json_len(&edits.remove(0)) + 1;
         dropped_edits += 1;
     }

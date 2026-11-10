@@ -408,9 +408,9 @@ pub extern "C" fn gpui_ios_attach_view(
         let mut host = host.borrow_mut();
         let previous = (host.view, host.metrics);
         host.view = Some(view);
-        host.metrics.width = width.max(0.0);
-        host.metrics.height = height.max(0.0);
-        host.metrics.scale = scale.max(1.0);
+        host.metrics.width = width;
+        host.metrics.height = height;
+        host.metrics.scale = scale;
         host.metrics.appearance = if dark != 0 {
             WindowAppearance::Dark
         } else {
@@ -471,9 +471,6 @@ pub extern "C" fn gpui_ios_request_frame() -> u8 {
 /// Updates the attached screen's capability, independently of its current system clamp.
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_display_changed(refresh_rate: f64) {
-    if !refresh_rate.is_finite() || refresh_rate <= 0.0 {
-        return;
-    }
     let changed = HOST.with(|host| {
         let mut host = host.borrow_mut();
         let changed = host.metrics.refresh_rate != refresh_rate;
@@ -510,9 +507,9 @@ pub extern "C" fn gpui_ios_touches_cancelled(touches: *const GpuiIosTouch, count
 pub extern "C" fn gpui_ios_resize(width: f32, height: f32, scale: f32) {
     HOST.with(|host| {
         let mut host = host.borrow_mut();
-        host.metrics.width = width.max(0.0);
-        host.metrics.height = height.max(0.0);
-        host.metrics.scale = scale.max(1.0);
+        host.metrics.width = width;
+        host.metrics.height = height;
+        host.metrics.scale = scale;
     });
     with_window(|window| window.resize_from_host(width, height, scale));
     super::with_platform(super::IosPlatform::notify_displays_changed);
@@ -522,7 +519,7 @@ pub extern "C" fn gpui_ios_resize(width: f32, height: f32, scale: f32) {
 pub extern "C" fn gpui_ios_scale_factor_changed(scale: f32) {
     let metrics = HOST.with(|host| {
         let mut host = host.borrow_mut();
-        host.metrics.scale = scale.max(1.0);
+        host.metrics.scale = scale;
         host.metrics
     });
     with_window(|window| window.resize_from_host(metrics.width, metrics.height, metrics.scale));
@@ -533,10 +530,10 @@ pub extern "C" fn gpui_ios_scale_factor_changed(scale: f32) {
 pub extern "C" fn gpui_ios_safe_area_changed(top: f32, right: f32, bottom: f32, left: f32) {
     let insets = HOST.with(|host| {
         let mut host = host.borrow_mut();
-        host.metrics.safe_top = top.max(0.0);
-        host.metrics.safe_right = right.max(0.0);
-        host.metrics.safe_bottom = bottom.max(0.0);
-        host.metrics.safe_left = left.max(0.0);
+        host.metrics.safe_top = top;
+        host.metrics.safe_right = right;
+        host.metrics.safe_bottom = bottom;
+        host.metrics.safe_left = left;
         host.metrics.insets()
     });
     with_window(|window| window.update_insets(insets));
@@ -546,7 +543,7 @@ pub extern "C" fn gpui_ios_safe_area_changed(top: f32, right: f32, bottom: f32, 
 pub extern "C" fn gpui_ios_keyboard_frame_changed(height: f32) {
     let insets = HOST.with(|host| {
         let mut host = host.borrow_mut();
-        host.metrics.keyboard_height = height.max(0.0);
+        host.metrics.keyboard_height = height;
         host.metrics.insets()
     });
     with_window(|window| window.update_insets(insets));
@@ -629,9 +626,6 @@ pub extern "C" fn gpui_ios_low_power_mode_changed(enabled: u8) {
 pub extern "C" fn gpui_ios_text_range(kind: u32) -> TextRange {
     let mut result = None;
     with_window(|window| {
-        if !window.text_input_active() {
-            return;
-        }
         result = window
             .with_input_handler(|handler| match kind {
                 0 => handler
@@ -645,8 +639,17 @@ pub extern "C" fn gpui_ios_text_range(kind: u32) -> TextRange {
     result.into()
 }
 
+/// The UTF-8 length of the text in `range`, copied into `bytes` when it fits.
+///
+/// # Safety
+///
+/// `bytes` is null or addresses `capacity` writable bytes for the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn gpui_ios_read_text(range: TextRange, bytes: *mut u8, capacity: usize) -> usize {
+pub unsafe extern "C" fn gpui_ios_read_text(
+    range: TextRange,
+    bytes: *mut u8,
+    capacity: usize,
+) -> usize {
     let Some(range) = range.range() else {
         return NOT_FOUND;
     };
@@ -660,7 +663,7 @@ pub extern "C" fn gpui_ios_read_text(range: TextRange, bytes: *mut u8, capacity:
         return NOT_FOUND;
     };
     if !bytes.is_null() && capacity >= text.len() {
-        // SAFETY: Swift supplies a writable buffer of `capacity` bytes.
+        // SAFETY: the caller supplies a writable buffer of `capacity` bytes.
         unsafe {
             std::ptr::copy_nonoverlapping(text.as_ptr(), bytes, text.len());
         }

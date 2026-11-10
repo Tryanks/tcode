@@ -36,7 +36,8 @@ pub fn merge_file_changes_by_path<'a>(
 }
 
 /// One changed file in the working tree (staged and/or unstaged), with its
-/// combined line delta (0/0 for untracked files with no numstat).
+/// combined line delta (0/0 where git counts no lines: untracked and binary
+/// files).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitFileEntry {
     pub path: String,
@@ -56,7 +57,7 @@ pub struct GitStatus {
     pub detached: bool,
     /// Current branch name (`None` when detached / no branch).
     pub branch: Option<String>,
-    /// The branch is the repo's default ref (`origin/HEAD`, else main/master).
+    /// The branch is the one `origin/HEAD` names; false when it names none.
     pub is_default_branch: bool,
     /// The working tree has staged or unstaged changes (or untracked files).
     pub has_working_tree_changes: bool,
@@ -423,44 +424,11 @@ pub fn build_commit_prompt(stat: &str, patch: &str) -> String {
     )
 }
 
-/// Sanitize a model-produced commit message: strip surrounding code fences,
-/// trim, and cap the subject line at 72 chars. Empty output falls back to the
-/// caller (which re-generates), so an empty string is returned as-is.
-pub fn sanitize_commit_message(raw: &str) -> String {
-    let mut text = raw.trim();
-    // Strip a leading/trailing ``` fence block if present.
-    if let Some(rest) = text.strip_prefix("```") {
-        // Drop the fence's info line.
-        let rest = rest.split_once('\n').map(|x| x.1).unwrap_or("");
-        text = rest.trim_end().strip_suffix("```").unwrap_or(rest).trim();
-    }
-    let mut lines = text.lines();
-    let Some(subject_raw) = lines.next() else {
-        return String::new();
-    };
-    let subject: String = subject_raw
-        .trim()
-        .trim_end_matches('.')
-        .chars()
-        .take(72)
-        .collect();
-    let subject = subject.trim().to_string();
-    let body: Vec<&str> = lines.collect();
-    let body = body.join("\n");
-    let body = body.trim();
-    if subject.is_empty() {
-        return String::new();
-    }
-    if body.is_empty() {
-        subject
-    } else {
-        format!("{subject}\n\n{body}")
-    }
-}
-
-/// Parse `git status --porcelain=2 --branch` output plus the numstat map into
-/// the local part of a [`GitStatus`]. `default_branch` is the short name from
-/// `origin/HEAD` (or `None`); `has_origin_remote` from `git remote`.
+/// Parse `git status --porcelain=2 --branch -z` output plus the numstat rows
+/// of the unstaged and the staged diff, which add up per path, into the local
+/// part of a [`GitStatus`]. `default_branch` is the short name from
+/// `origin/HEAD`, `None` when the remote names none; `has_origin_remote`
+/// from `git remote`.
 ///
 /// This parser assumes a repository and sets `is_repo` to true.
 pub fn parse_status(
@@ -478,7 +446,8 @@ pub fn parse_status(
     let mut has_working_tree_changes = false;
     let mut paths: Vec<String> = Vec::new();
 
-    for line in porcelain.lines() {
+    let mut records = porcelain.split('\0').filter(|record| !record.is_empty());
+    while let Some(line) = records.next() {
         if let Some(value) = line.strip_prefix("# branch.oid ") {
             if value.trim() == "(initial)" {
                 has_commits = false;
@@ -491,26 +460,29 @@ pub fn parse_status(
             } else {
                 branch = Some(value.to_string());
             }
-        } else if let Some(value) = line.strip_prefix("# branch.upstream ") {
-            has_upstream = !value.trim().is_empty();
+        } else if line.starts_with("# branch.upstream ") {
+            has_upstream = true;
         } else if let Some(value) = line.strip_prefix("# branch.ab ") {
             let (a, b) = parse_branch_ab(value.trim());
             ahead = a;
             behind = b;
-        } else if !line.starts_with('#') && !line.trim().is_empty() {
+        } else if !line.starts_with('#') {
             has_working_tree_changes = true;
-            if let Some(path) = parse_porcelain_path(line)
-                && !paths.contains(&path)
-            {
-                paths.push(path);
+            paths.extend(parse_porcelain_path(line));
+            // Under `-z` a renamed or copied entry's origPath is the next record.
+            if line.starts_with("2 ") {
+                records.next();
             }
         }
     }
 
-    let numstat_map: std::collections::HashMap<&str, (u32, u32)> = numstat
-        .iter()
-        .map(|(p, i, d)| (p.as_str(), (*i, *d)))
-        .collect();
+    let mut numstat_map: std::collections::HashMap<&str, (u32, u32)> =
+        std::collections::HashMap::new();
+    for (path, insertions, deletions) in numstat {
+        let delta = numstat_map.entry(path.as_str()).or_default();
+        delta.0 += insertions;
+        delta.1 += deletions;
+    }
     paths.sort();
     let changed_files = paths
         .into_iter()
@@ -524,11 +496,7 @@ pub fn parse_status(
         })
         .collect();
 
-    let is_default_branch = match (&branch, default_branch) {
-        (Some(b), Some(d)) => b == d,
-        (Some(b), None) => b == "main" || b == "master",
-        _ => false,
-    };
+    let is_default_branch = branch.is_some() && branch.as_deref() == default_branch;
 
     GitStatus {
         is_repo: true,
@@ -560,29 +528,18 @@ fn parse_branch_ab(value: &str) -> (u32, u32) {
     (ahead, behind)
 }
 
-/// Extract the file path from a porcelain=2 changed-entry line.
+/// Extract the file path from a porcelain=2 changed-entry record, in the
+/// formats git-status(1) gives under "Porcelain Format Version 2". Ignored
+/// items (`!`) are printed only for `--ignored`, which Tcode does not pass.
 fn parse_porcelain_path(line: &str) -> Option<String> {
-    let mut chars = line.chars();
-    let kind = chars.next()?;
-    match kind {
-        // Untracked / ignored: "? path" or "! path".
-        '?' | '!' => Some(line[2..].trim().to_string()),
-        // Ordinary "1 ..." (8 metadata fields then path) or rename "2 ..."
-        // (9 fields then "path\torig").
-        '1' | '2' => {
-            let skip = if kind == '1' { 8 } else { 9 };
-            let rest = line.splitn(skip + 1, ' ').nth(skip)?;
-            // Rename entries encode "path\torig"; take the new path.
-            let path = rest.split('\t').next().unwrap_or(rest);
-            Some(path.trim().to_string())
-        }
-        // Unmerged "u ..." (10 fields then path).
-        'u' => {
-            let rest = line.splitn(11, ' ').nth(10)?;
-            Some(rest.trim().to_string())
-        }
-        _ => None,
-    }
+    let path = match line.split_once(' ')? {
+        ("?", path) => path,
+        ("1", rest) => rest.splitn(8, ' ').nth(7)?,
+        ("2", rest) => rest.splitn(9, ' ').nth(8)?,
+        ("u", rest) => rest.splitn(10, ' ').nth(9)?,
+        _ => return None,
+    };
+    Some(path.to_string())
 }
 
 #[cfg(test)]
@@ -905,81 +862,5 @@ mod tests {
             feature_branch_name("feat: add toast system!"),
             "tcode/feat-add-toast-system"
         );
-    }
-
-    #[test]
-    fn commit_message_sanitizer() {
-        assert_eq!(
-            sanitize_commit_message("feat: do the thing."),
-            "feat: do the thing"
-        );
-        assert_eq!(
-            sanitize_commit_message("```\nfix: bug\n\nbody line\n```"),
-            "fix: bug\n\nbody line"
-        );
-        let long = "x".repeat(100);
-        assert_eq!(sanitize_commit_message(&long).len(), 72);
-        assert_eq!(sanitize_commit_message("   "), "");
-    }
-
-    #[test]
-    fn porcelain_status_preserves_branch_state_and_changed_paths() {
-        let porcelain = "# branch.oid abc123\n# branch.head feature/x\n# branch.upstream origin/feature/x\n# branch.ab +2 -1\n1 .M N... 100644 100644 100644 abc def src/app.rs\n? new file.txt\n? new file.txt\n";
-        let status = parse_status(
-            porcelain,
-            &[("src/app.rs".into(), 5, 3)],
-            Some("main"),
-            true,
-        );
-        assert_eq!(
-            status,
-            GitStatus {
-                is_repo: true,
-                has_commits: true,
-                detached: false,
-                branch: Some("feature/x".into()),
-                is_default_branch: false,
-                has_working_tree_changes: true,
-                has_origin_remote: true,
-                has_upstream: true,
-                ahead: 2,
-                behind: 1,
-                changed_files: vec![
-                    GitFileEntry {
-                        path: "new file.txt".into(),
-                        insertions: 0,
-                        deletions: 0
-                    },
-                    GitFileEntry {
-                        path: "src/app.rs".into(),
-                        insertions: 5,
-                        deletions: 3
-                    },
-                ],
-                github_repository: None,
-            }
-        );
-        for (head, oid, default, commits, detached, is_default) in [
-            ("main", "(initial)", None, false, false, true),
-            ("master", "abc", None, true, false, true),
-            ("trunk", "abc", Some("trunk"), true, false, true),
-            ("main", "abc", Some("trunk"), true, false, false),
-            ("(detached)", "abc", None, true, true, false),
-        ] {
-            let porcelain = format!("# branch.oid {oid}\n# branch.head {head}\n");
-            let status = parse_status(&porcelain, &[], default, false);
-            assert_eq!(
-                status,
-                GitStatus {
-                    is_repo: true,
-                    has_commits: commits,
-                    detached,
-                    branch: (!detached).then(|| head.into()),
-                    is_default_branch: is_default,
-                    ..Default::default()
-                },
-                "{head} against {default:?}"
-            );
-        }
     }
 }

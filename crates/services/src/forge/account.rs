@@ -160,11 +160,13 @@ pub(crate) fn identify(
     if matches!(source, CredentialSource::Cli { .. }) {
         return;
     }
-    if matches!(
-        store.credential_check(kind, host, fingerprint),
-        Some(Verdict::Accepted { login: Some(_) } | Verdict::Rejected { .. })
-    ) {
-        return;
+    match store.credential_check(kind, host, fingerprint) {
+        Ok(Some(Verdict::Accepted { login: Some(_) } | Verdict::Rejected { .. })) => return,
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!("cannot learn whose the token for {host} is: {error}");
+            return;
+        }
     }
     let verdict = match whose() {
         Ok((account, _)) => Verdict::Accepted {
@@ -191,11 +193,15 @@ pub(crate) fn assessed(
         return (None, None);
     }
     match store.credential_check(kind, host, fingerprint) {
-        Some(Verdict::Accepted { login }) => (None, login),
-        Some(Verdict::Rejected { status, at }) => {
+        Ok(Some(Verdict::Accepted { login })) => (None, login),
+        Ok(Some(Verdict::Rejected { status, at })) => {
             (Some(HostProblem::Rejected { status, at }), None)
         }
-        None if matches!(source, CredentialSource::Env { .. }) => (None, None),
-        None => (Some(HostProblem::Unverified), None),
+        Ok(None) if matches!(source, CredentialSource::Env { .. }) => (None, None),
+        Ok(None) => (Some(HostProblem::Unverified), None),
+        Err(error) => {
+            log::warn!("cannot read what {host} last answered its token with: {error}");
+            (Some(HostProblem::Unverified), None)
+        }
     }
 }

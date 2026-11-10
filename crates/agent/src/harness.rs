@@ -183,9 +183,9 @@ impl ProviderKind {
             ProviderKind::OpenCode => HarnessFacts {
                 binary_name: "opencode",
                 install_command: Some(if windows {
-                    "npm install -g opencode-ai"
+                    "npm install -g @opencode/cli"
                 } else {
-                    "curl -fsSL https://opencode.ai/install | bash"
+                    "curl -fsSL https://opencode.ai/v2/install | bash"
                 }),
                 sign_in_command: Some("opencode auth login"),
                 native_mcp: Some(NativeMcpConfig::OpenCodeResolved),

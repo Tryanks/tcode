@@ -362,44 +362,23 @@ fn legacy_bare_array_index_migrates_with_one_derived_project_per_root() {
     );
 }
 
+/// An index that parses as no schema stops the migration before anything is
+/// written, so its threads' metadata is never migrated away.
 #[test]
-fn an_unparseable_index_does_not_stop_the_logs_migrating() {
+fn an_unparseable_index_stops_the_migration_and_changes_nothing() {
     let dir = DataDir::new();
     let corrupt = b"not valid session json";
     fs::write(dir.path().join("sessions.json"), corrupt).unwrap();
     fs::write(dir.path().join("orphan.jsonl"), ORPHAN_LOG).unwrap();
-    let store = dir.migrated();
+    let store = dir.store();
+    let mut before = snapshot(dir.path());
 
-    let file = store.read_file().unwrap();
-    assert!(file.projects.is_empty() && file.sessions.is_empty());
-    assert_eq!(store.read_event_log("orphan").unwrap(), ORPHAN_LOG);
-    assert!(!dir.path().join("sessions.json").exists());
-}
-
-#[test]
-fn duplicate_index_ids_fail_the_migration_and_leave_the_sources_alone() {
-    let dir = DataDir::new();
-    let session = serde_json::json!({
-        "id": "twice", "title": "One", "provider": "codex",
-        "cwd": "/work", "created_at": 1, "updated_at": 1
-    });
-    let index = serde_json::json!({"projects": [], "sessions": [session, session]}).to_string();
-    fs::write(dir.path().join("sessions.json"), &index).unwrap();
-    fs::write(dir.path().join("twice.jsonl"), ORPHAN_LOG).unwrap();
-
-    let error = migrate(&dir.store()).unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert!(error.to_string().contains("twice"), "{error}");
-    assert!(!dir.path().join(DB_FILE).exists());
-    assert!(!dir.path().join(LEGACY_DIR_NAME).exists());
-    assert_eq!(
-        fs::read(dir.path().join("sessions.json")).unwrap(),
-        index.as_bytes()
-    );
-    assert_eq!(
-        fs::read(dir.path().join("twice.jsonl")).unwrap(),
-        ORPHAN_LOG
-    );
+    let error = migrate(&store).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+    let mut after = snapshot(dir.path());
+    before.remove(LOCK_FILE);
+    after.remove(LOCK_FILE);
+    assert_eq!(after, before);
 }
 
 const LEGACY_DIR_NAME: &str = "legacy";
@@ -477,7 +456,7 @@ fn a_cancelled_migration_changes_no_source_and_the_next_one_completes() {
     sources.remove(LOCK_FILE);
 
     type Stop = fn(&MigrationProgress) -> bool;
-    let stops: [(&str, Stop); 4] = [
+    let stops: [(&str, Stop); 3] = [
         ("scanning", |progress| {
             progress.phase == MigrationPhase::Scanning
         }),
@@ -488,9 +467,6 @@ fn a_cancelled_migration_changes_no_source_and_the_next_one_completes() {
         }),
         ("between logs", |progress| {
             progress.phase == MigrationPhase::Importing && progress.threads_done == 2
-        }),
-        ("verifying", |progress| {
-            progress.phase == MigrationPhase::Verifying && progress.threads_done == 1
         }),
     ];
     for (point, stop) in stops {
@@ -530,28 +506,24 @@ fn a_cancelled_migration_changes_no_source_and_the_next_one_completes() {
         [
             MigrationPhase::Scanning,
             MigrationPhase::Importing,
-            MigrationPhase::Verifying,
             MigrationPhase::Publishing,
             MigrationPhase::Archiving
         ]
     );
     let log_bytes = (MIXED_LOG.len() + ORPHAN_LOG.len() + bulk.len()) as u64;
-    for phase in [MigrationPhase::Importing, MigrationPhase::Verifying] {
-        let last = reports
-            .iter()
-            .rfind(|progress| progress.phase == phase)
-            .unwrap();
-        assert_eq!(
-            (
-                last.threads_done,
-                last.threads_total,
-                last.bytes_done,
-                last.bytes_total
-            ),
-            (4, 4, log_bytes, log_bytes),
-            "{phase:?}"
-        );
-    }
+    let last = reports
+        .iter()
+        .rfind(|progress| progress.phase == MigrationPhase::Importing)
+        .unwrap();
+    assert_eq!(
+        (
+            last.threads_done,
+            last.threads_total,
+            last.bytes_done,
+            last.bytes_total
+        ),
+        (4, 4, log_bytes, log_bytes)
+    );
     let last = reports.last().unwrap();
     assert_eq!(
         (last.threads_done, last.bytes_done),
@@ -1071,7 +1043,6 @@ fn a_start_moves_an_older_data_dir_in_then_migrates_it_and_leaves_nothing_behind
             MigrationPhase::Relocating,
             MigrationPhase::Scanning,
             MigrationPhase::Importing,
-            MigrationPhase::Verifying,
             MigrationPhase::Publishing,
             MigrationPhase::Archiving,
         ]
@@ -1172,7 +1143,6 @@ fn superseded_snapshots_lose_their_diffs_in_place_once() {
         .unwrap(),
     )
     .unwrap()
-    .stored
     .event;
     store.append_event("codex", 8, &snapshot).unwrap();
     let snapshots: Vec<_> = store
@@ -1249,7 +1219,7 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
     let mut fold = Timeline::default();
     let mut starts = tcode_core::session::TurnStarts::default();
     for (row, line) in LOG.lines().enumerate() {
-        let record = parse_stored_line(line).unwrap().stored;
+        let record = parse_stored_line(line).unwrap();
         starts.apply(&fold.apply_stored(&record), row as u64);
         let starts = starts.rows().to_vec();
         store
@@ -1332,236 +1302,71 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
     assert!(store.turn_index("thread").unwrap().is_none());
 }
 
+/// Item rows as builds before v0.4.0 recorded them, in the shape tcode.db
+/// holds them (invented content, 1x1 pictures): tool results in their
+/// provider's shape, Codex items recorded as `Other`, a Codex file creation
+/// whose diff is the whole file, and a Grok MCP call named `server__tool`.
+/// Every row is read as a record, enters the timeline and search, and is
+/// exported and read back.
 #[test]
-fn legacy_codex_file_contents_replay_as_patches_without_rewriting_history() {
-    use agent::ItemContent;
+fn item_rows_recorded_before_canonical_items_are_read() {
+    use std::collections::HashSet;
+    let legacy = [
+        include_str!("fixtures/legacy-tool-output.jsonl"),
+        include_str!("fixtures/legacy-codex-items.jsonl"),
+        "{\"ts\":1,\"event\":{\"type\":\"item_completed\",\"id\":\"add\",\"content\":{\"kind\":\"file_change\",\"status\":\"completed\",\"changes\":[{\"path\":\"a.md\",\"kind\":\"create\",\"diff\":\"- list\\n\"}]}}}\n",
+        "{\"ts\":1,\"event\":{\"type\":\"item_completed\",\"id\":\"call_37_0\",\"content\":{\"kind\":\"tool_call\",\"name\":\"tcode_probe__echo_upper\",\"input\":{\"tool_name\":\"tcode_probe__echo_upper\",\"tool_input\":{\"text\":\"hello mcp\"}},\"output\":\"HELLO MCP\",\"status\":\"completed\"}}}\n",
+    ]
+    .concat();
     let dir = DataDir::new();
     let store = dir.store();
-    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/w"), None);
-    meta.id = "diff-history".into();
-    let legacy = concat!(
-        "{\"ts\":1,\"event\":{\"type\":\"item_completed\",\"id\":\"add\",\"content\":{\"kind\":\"file_change\",\"status\":\"completed\",\"changes\":[{\"path\":\"a.md\",\"kind\":\"create\",\"diff\":\"- list\\n\"}]}}}\n",
-        "{\"type\":\"provider_relay\",\"from_provider\":\"codex\",\"from_model\":null,\"to_provider\":\"claude_code\",\"to_model\":null}\n",
-        "{\"type\":\"item_completed\",\"id\":\"claude\",\"content\":{\"kind\":\"file_change\",\"status\":\"completed\",\"changes\":[{\"path\":\"b.md\",\"kind\":\"create\",\"diff\":\"+hello\"}]}}\n"
-    );
+    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
+    meta.id = "legacy".into();
     store
         .apply(&[
             Mutation::upsert_meta(meta.clone()),
-            Mutation::replace_event_log("diff-history", legacy.as_bytes().to_vec()),
+            Mutation::replace_event_log("legacy", legacy.clone().into_bytes()),
         ])
         .unwrap();
-    let records = store.read_events("diff-history").unwrap();
-    let patch = |event: &AgentEvent| {
-        let AgentEvent::ItemCompleted(item) = event else {
-            panic!("completed")
-        };
-        let ItemContent::FileChange { changes, .. } = &item.content else {
-            panic!("file change")
-        };
-        changes[0].diff.clone().unwrap()
-    };
-    assert_eq!(patch(&records[0].event), "@@ -0,0 +1,1 @@\n+- list\n");
-    assert_eq!(patch(&records[2].event), "+hello");
-    assert_eq!(
-        store.read_rows("diff-history", 0..1).unwrap().records,
-        records[..1]
-    );
-    assert_eq!(
-        store.read_rows("diff-history", 2..3).unwrap().records,
-        records[2..]
-    );
-    assert_eq!(
-        store.read_event_log("diff-history").unwrap(),
-        legacy.as_bytes()
-    );
-    let exported =
-        crate::export::render_thread(&store, &meta, tcode_protocol::ThreadExportFormat::Jsonl)
-            .unwrap();
-    let export_path = dir.path().join("history.jsonl");
-    fs::write(&export_path, exported).unwrap();
-    let imported = crate::export::read_tcode_export(&export_path).unwrap();
-    assert_eq!(imported.event_log, legacy.as_bytes());
-    assert_eq!(imported.events, records);
-    let mut codex = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
-    codex.id = "new-diffs".into();
-    store.upsert_meta(&codex).unwrap();
-    store
-        .append_event("new-diffs", 4, &records[0].event)
-        .unwrap();
-    assert_eq!(
-        patch(&store.read_events("new-diffs").unwrap()[0].event),
-        patch(&records[0].event)
-    );
-}
+    let ids: Vec<String> = legacy
+        .lines()
+        .map(|line| {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            row["event"]["id"].as_str().unwrap().to_owned()
+        })
+        .collect();
 
-/// Tool calls recorded before every adapter kept results canonical, in the
-/// shape tcode.db holds them (invented content, 1x1 pictures): a Codex MCP
-/// result, a Claude image read whose image is also inlined in the text, a
-/// connector whose payload is only structured, and a Codex rollout import.
-/// They read back as text and images; text in no provider shape is left
-/// alone.
-#[test]
-fn tool_output_recorded_in_provider_shapes_reads_back_canonical() {
-    const LOG: &str = include_str!("fixtures/legacy-tool-output.jsonl");
-    let dir = DataDir::new();
-    let store = dir.store();
-    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
-    meta.id = "legacy".into();
-    store.upsert_meta(&meta).unwrap();
-    store
-        .apply(&[Mutation::replace_event_log("legacy", LOG.into())])
-        .unwrap();
-    let calls: Vec<_> = store
-        .read_log("legacy")
-        .unwrap()
+    let log = store.read_log("legacy").unwrap();
+    assert_eq!(log.undecodable, 0);
+    let read: Vec<&str> = log
         .records
-        .into_iter()
-        .map(|record| match record.event {
-            AgentEvent::ItemCompleted(agent::ThreadItem {
-                content:
-                    agent::ItemContent::ToolCall {
-                        output,
-                        image_reads,
-                        ..
-                    },
-                ..
-            }) => (
-                output.unwrap(),
-                image_reads
-                    .into_iter()
-                    .map(|image| image.media_type)
-                    .collect::<Vec<_>>(),
-            ),
+        .iter()
+        .map(|record| match &record.event {
+            AgentEvent::ItemCompleted(item) => item.id.as_str(),
             other => panic!("{other:?}"),
         })
         .collect();
-    let tree = "The following is a diff from the previous accessibility tree for Window: \"\" with ~ and + representing changed and added elements, respectively. Removed elements are summarized by ID range.\nRemoved element IDs: 1-30\n+41 window Secondary Actions: Raise\nThe focused UI element is 41 window Secondary Actions: Raise";
-    assert_eq!(
-        calls,
-        [
-            (tree.to_owned(), vec!["image/jpeg".to_owned()]),
-            (String::new(), vec!["image/png".to_owned()]),
-            (
-                "Action completed.\n{\"repositories\":[]}".to_owned(),
-                vec![]
-            ),
-            (
-                format!("Wall time: 0.4182 seconds\nOutput:\n{tree}"),
-                vec!["image/jpeg".to_owned()]
-            ),
-            (
-                "{\"type\":\"tool_reference\",\"tool_name\":\"Monitor\"}".to_owned(),
-                vec![]
-            ),
-        ]
-    );
-}
-
-/// A Codex sleep, image view and image generation recorded as `Other`
-/// before the adapter mapped them, in the shape tcode.db holds them (invented
-/// paths and ids, a 1x1 picture), read back as the items a new row holds.
-#[test]
-fn codex_items_recorded_as_other_read_back_as_their_items() {
-    const LOG: &str = include_str!("fixtures/legacy-codex-items.jsonl");
-    let dir = DataDir::new();
-    let store = dir.store();
-    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
-    meta.id = "legacy".into();
-    store.upsert_meta(&meta).unwrap();
-    store
-        .apply(&[Mutation::replace_event_log("legacy", LOG.into())])
-        .unwrap();
-    let contents: Vec<_> = store
-        .read_events("legacy")
-        .unwrap()
-        .into_iter()
-        .map(|record| match record.event {
-            AgentEvent::ItemCompleted(item) => item.content,
-            other => panic!("{other:?}"),
-        })
+    assert_eq!(read, ids);
+    let distinct: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let timeline = tcode_core::session::Timeline::fold_stored(&log.records);
+    let shown: HashSet<&str> = timeline
+        .entries
+        .iter()
+        .map(|entry| entry.id.as_str())
         .collect();
+    assert_eq!(shown, distinct);
+    let searched = crate::session_search::extract_searchable_entries(&log);
     assert_eq!(
-        contents,
-        [
-            agent::ItemContent::ToolCall {
-                image_reads: Vec::new(),
-                name: "sleep".into(),
-                input: serde_json::json!({"duration_ms": 20000}),
-                output: None,
-                status: agent::ItemStatus::Completed,
-            },
-            agent::ItemContent::ImageRead {
-                path: "/tmp/example-before.png".into(),
-                image: None,
-            },
-            agent::ItemContent::ToolCall {
-                image_reads: vec![agent::Attachment {
-                    media_type: "image/png".into(),
-                    data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==".into(),
-                    source_path: Some("/home/user/.codex/generated_images/00000075-0000-0000-0000-000000000075/exec-00000074-0000-0000-0000-000000000074.png".into()),
-                }],
-                name: "image_generation".into(),
-                input: serde_json::json!({
-                    "revised_prompt": "Edit the reference image: keep the subject, make the background transparent.",
-                    "input_images": ["/home/user/project/assets/reference.png"],
-                }),
-                output: None,
-                status: agent::ItemStatus::Completed,
-            },
-        ]
+        searched
+            .iter()
+            .map(|entry| entry.entry_id.as_str())
+            .collect::<HashSet<_>>(),
+        distinct
     );
-}
 
-/// Grok's MCP call as its adapter recorded it before naming it
-/// `server/tool` (the call in the recorded Grok fixture) reads back with the
-/// name a new row holds.
-#[test]
-fn a_grok_mcp_call_recorded_with_its_spelling_reads_back_as_server_and_tool() {
-    let dir = DataDir::new();
-    let store = dir.store();
-    let mut meta = SessionMeta::new(ProviderKind::Grok, PathBuf::from("/w"), None);
-    meta.id = "grok".into();
-    store.upsert_meta(&meta).unwrap();
-    let log = "{\"ts\":1,\"event\":{\"type\":\"item_completed\",\"id\":\"call_37_0\",\"content\":{\"kind\":\"tool_call\",\"name\":\"tcode_probe__echo_upper\",\"input\":{\"tool_name\":\"tcode_probe__echo_upper\",\"tool_input\":{\"text\":\"hello mcp\"}},\"output\":\"HELLO MCP\",\"status\":\"completed\"}}}\n";
-    store
-        .apply(&[Mutation::replace_event_log("grok", log.into())])
+    crate::export::render_thread(&store, &meta, tcode_protocol::ThreadExportFormat::Markdown)
         .unwrap();
-    let AgentEvent::ItemCompleted(item) = &store.read_events("grok").unwrap()[0].event else {
-        panic!("a completed item")
-    };
-    assert!(
-        matches!(&item.content, agent::ItemContent::ToolCall { name, .. } if name == "tcode_probe/echo_upper"),
-        "{item:?}"
-    );
-}
-
-/// A tool call recorded now is stamped as canonical and reads back as it
-/// was recorded, so a reopened thread shows what the live one did, even
-/// when the tool's text is itself in a provider's block shape.
-#[test]
-fn a_canonical_tool_call_reads_back_as_recorded() {
-    let dir = DataDir::new();
-    let store = dir.store();
-    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
-    meta.id = "canonical".into();
-    store.upsert_meta(&meta).unwrap();
-    let event = AgentEvent::ItemCompleted(agent::ThreadItem {
-        id: "call".into(),
-        parent_item_id: None,
-        content: agent::ItemContent::ToolCall {
-            image_reads: Vec::new(),
-            name: "tcode_control/read".into(),
-            input: serde_json::json!({}),
-            output: Some("[{\"type\":\"text\",\"text\":\"quoted\"}]".into()),
-            status: agent::ItemStatus::Completed,
-        },
-    });
-    store.append_event("canonical", 5, &event).unwrap();
-    assert_eq!(
-        String::from_utf8(store.read_event_log("canonical").unwrap()).unwrap(),
-        "{\"ts\":5,\"event\":{\"type\":\"item_completed\",\"id\":\"call\",\"content\":{\"kind\":\"tool_call\",\"name\":\"tcode_control/read\",\"input\":{},\"output\":\"[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"quoted\\\"}]\",\"status\":\"completed\"}},\"item_version\":1}\n"
-    );
-    assert_eq!(store.read_events("canonical").unwrap()[0].event, event);
+    crate::export::render_thread(&store, &meta, tcode_protocol::ThreadExportFormat::Jsonl).unwrap();
 }
 
 /// Every row of `id` as the store reads it: its position and canonical bytes,
@@ -1599,142 +1404,10 @@ fn fold_rows<'a>(rows: impl IntoIterator<Item = &'a [u8]>) -> tcode_core::sessio
     let mut fold = tcode_core::session::Timeline::default();
     for line in rows {
         if let Ok(Some(record)) = decode_row(line) {
-            fold.apply_stored(&record.into_stored(None));
+            fold.apply_stored(&record);
         }
     }
     fold
-}
-
-/// A copy of a real data dir after the storage pass (`TCODE_STORAGE_DATA`)
-/// against an untouched copy of the `tcode.db` it started from
-/// (`TCODE_STORAGE_BASE`): every row reads back byte for byte except the
-/// deltas a completion superseded (gone, or the one that created the entry
-/// emptied) and the snapshots a later one superseded (without diffs), and
-/// every thread folds exactly as before. With `TCODE_STORAGE_OTHER`, a second
-/// migrated copy (say, one interrupted over and over) must read back the same.
-#[test]
-#[ignore = "needs copies of a real data dir named by TCODE_STORAGE_BASE and TCODE_STORAGE_DATA; run deliberately"]
-fn a_real_data_dir_reads_back_as_its_original() {
-    let base = PathBuf::from(std::env::var_os("TCODE_STORAGE_BASE").unwrap());
-    let data = PathBuf::from(std::env::var_os("TCODE_STORAGE_DATA").unwrap());
-    let other = std::env::var_os("TCODE_STORAGE_OTHER").map(PathBuf::from);
-    let started = Instant::now();
-    let base = db::Db::open(&base.join(DB_FILE), None).unwrap();
-    let store = SessionStore::open_at(data).unwrap();
-    let other = other.map(|other| SessionStore::open_at(other).unwrap());
-    let mut ids = Vec::new();
-    let mut after = String::new();
-    base.read(|db, connection| {
-        loop {
-            let mut next = None;
-            db.query(
-                connection,
-                "SELECT session_id FROM events WHERE session_id > ?1 ORDER BY session_id LIMIT 1",
-                [after.as_str()],
-                |row| {
-                    next = Some(db::text(row, 0)?);
-                    Ok(())
-                },
-            )?;
-            let Some(next) = next else { return Ok(()) };
-            ids.push(next.clone());
-            after = next;
-        }
-    })
-    .unwrap();
-    let (mut rows_total, mut kept, mut deleted, mut emptied, mut dropped, mut missing) =
-        (0, 0, 0, 0, 0, 0);
-    let (mut bytes_before, mut bytes_after) = (0u64, 0u64);
-    for (index, id) in ids.iter().enumerate() {
-        let mut original = Vec::new();
-        base.read(|db, connection| {
-            db.query(
-                connection,
-                "SELECT position, line FROM events WHERE session_id = ?1 ORDER BY position",
-                [id.as_str()],
-                |row| {
-                    original.push((integer(row, 0)? as u64, blob(row, 1)?));
-                    Ok(())
-                },
-            )
-        })
-        .unwrap();
-        let (moved, gaps) = decoded_rows(&store, id);
-        missing += gaps;
-        let mut moved_at: HashMap<u64, &Vec<u8>> = moved
-            .iter()
-            .map(|(position, line)| (*position, line))
-            .collect();
-        for (position, line) in &original {
-            rows_total += 1;
-            bytes_before += line.len() as u64;
-            let Some(now) = moved_at.remove(position) else {
-                let record = decode_row(line).unwrap().unwrap().stored;
-                assert!(
-                    matches!(record.event, AgentEvent::Delta { .. }),
-                    "{id}: row {position} is gone and was not a delta"
-                );
-                deleted += 1;
-                continue;
-            };
-            bytes_after += now.len() as u64;
-            if now == line {
-                kept += 1;
-            } else if compact::rewrite(line, |event| match event {
-                AgentEvent::Delta { text, .. } => {
-                    text.clear();
-                    true
-                }
-                _ => false,
-            })
-            .unwrap()
-            .as_ref()
-                == Some(now)
-            {
-                emptied += 1;
-            } else {
-                assert_eq!(
-                    compact::rewrite(line, tcode_core::session::drop_turn_diffs)
-                        .unwrap()
-                        .as_ref(),
-                    Some(now),
-                    "{id}: row {position} differs"
-                );
-                dropped += 1;
-            }
-        }
-        assert!(moved_at.is_empty(), "{id}: rows the original lacks");
-        assert_eq!(
-            fold_rows(original.iter().map(|(_, line)| line.as_slice())),
-            fold_rows(moved.iter().map(|(_, line)| line.as_slice())),
-            "{id}: the fold changed"
-        );
-        assert_eq!(
-            store.read_event_log(id).unwrap(),
-            moved
-                .iter()
-                .flat_map(|(_, line)| line.clone())
-                .collect::<Vec<_>>(),
-            "{id}: the export differs from the rows"
-        );
-        if let Some(other) = &other {
-            assert!(
-                decoded_rows(other, id).0 == moved,
-                "{id}: the copies differ"
-            );
-        }
-        if index % 500 == 0 {
-            println!("{index}/{} threads in {:.0?}", ids.len(), started.elapsed());
-        }
-    }
-    println!(
-        "{} threads, {rows_total} rows ({bytes_before} bytes): {kept} identical, {deleted} \
-         deltas gone, {emptied} emptied, {dropped} without superseded diffs, {bytes_after} bytes \
-         read back; {missing} rows name a missing blob; checked in {:.0?}",
-        ids.len(),
-        started.elapsed()
-    );
-    assert_eq!(missing, 0);
 }
 
 /// Bytes standing in for an image: deterministic, and different per seed.
@@ -1932,8 +1605,7 @@ fn observe(store: &SessionStore, id: &str) -> Observed {
     let indexed = crate::thread_index::IndexedLog::build(&log);
     let read = store.snapshot_log(id).unwrap();
     let mut window = Vec::new();
-    // A row with a legacy Codex diff is only read whole, both times.
-    let _ = read.visit_projected_rows(
+    read.visit_projected_rows(
         0..read.end,
         true,
         "observe",
@@ -1949,7 +1621,8 @@ fn observe(store: &SessionStore, id: &str) -> Observed {
             }
             true
         },
-    );
+    )
+    .unwrap();
     Observed {
         fold: tcode_core::session::Timeline::fold_stored(&log.records),
         anchors: indexed

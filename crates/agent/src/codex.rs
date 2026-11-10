@@ -1384,7 +1384,6 @@ impl SessionActor for Actor {
 
     async fn settle_shutdown(&mut self) {
         self.clear_retry().await;
-        self.settle_pending_user_inputs_on_shutdown().await;
     }
 
     async fn teardown(mut self, reason: Option<String>) -> Option<String> {
@@ -2666,6 +2665,10 @@ impl Actor {
             self.handle_auto_review(params).await;
             return;
         }
+        if method == "serverRequest/resolved" {
+            self.on_server_request_resolved(params).await;
+            return;
+        }
         let thread_id = params.get("threadId").and_then(Value::as_str);
         let is_child = thread_id.is_some_and(|id| id != self.thread_id);
         if let Some(activity) = find_subagent_activity(params) {
@@ -2771,7 +2774,15 @@ impl Actor {
                     self.clear_retry().await;
                 }
                 self.active_turn = None;
-                self.async_questions = None;
+                // An answer can only steer the turn that asked.
+                if let Some((request_id, _)) = self.async_questions.take() {
+                    self.events
+                        .emit(AgentEvent::UserInputResolved {
+                            request_id,
+                            answers: serde_json::Map::new(),
+                        })
+                        .await;
+                }
                 if status == TurnStatus::Completed {
                     // The turn ended without waiting on a subagent still at
                     // work: it goes on in the background.
@@ -3236,25 +3247,30 @@ impl Actor {
             .await;
     }
 
-    /// Settle every outstanding native user-input request and MCP elicitation
-    /// on teardown, replying with the protocol's empty/cancel outcome.
-    async fn settle_pending_user_inputs_on_shutdown(&mut self) {
-        let pending = self
-            .user_inputs
-            .drain()
-            .map(|(request_id, rpc_id)| (request_id, rpc_id, json!({ "answers": {} })))
-            .chain(self.elicitations.drain().map(|(request_id, pending)| {
-                (request_id, pending.rpc_id, json!({ "action": "cancel" }))
-            }));
-        for (request_id, rpc_id, result) in pending {
-            let _ = send_json(&mut self.stdin, &json!({ "id": rpc_id, "result": result }));
-            self.events
-                .emit(AgentEvent::UserInputResolved {
-                    request_id,
-                    answers: serde_json::Map::new(),
-                })
-                .await;
-        }
+    /// `serverRequest/resolved`: Codex no longer waits on one of its requests.
+    /// One Tcode answered is already gone; one still here was settled by Codex
+    /// itself, as when the turn it belongs to ends or is interrupted.
+    async fn on_server_request_resolved(&mut self, params: &Value) {
+        let Some(id) = params.get("requestId") else {
+            return;
+        };
+        let request_id = request_id_string(id);
+        let event = if self.approvals.remove(&request_id).is_some() {
+            AgentEvent::ApprovalResolved {
+                request_id,
+                decision: ApprovalDecision::Cancel,
+            }
+        } else if self.user_inputs.remove(&request_id).is_some()
+            || self.elicitations.remove(&request_id).is_some()
+        {
+            AgentEvent::UserInputResolved {
+                request_id,
+                answers: serde_json::Map::new(),
+            }
+        } else {
+            return;
+        };
+        self.events.emit(event).await;
     }
 
     async fn emit_delta(&self, params: &Value, kind: DeltaKind) {
@@ -4154,40 +4170,6 @@ pub fn image_generation(item: &Value) -> ItemContent {
     }
 }
 
-/// An item the adapter recorded as `Other` before it mapped its kind, as it
-/// maps it now. Its summary is the item as the app-server sent it (the
-/// importer wrote an image generation in the same shape); `completed` when
-/// it was recorded as completed.
-pub fn normalize_legacy_item(item: &mut ThreadItem, completed: bool) {
-    let ItemContent::Other {
-        provider_kind,
-        summary,
-    } = &item.content
-    else {
-        return;
-    };
-    if !matches!(
-        provider_kind.as_str(),
-        "sleep" | "imageView" | "imageGeneration"
-    ) {
-        return;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(summary) else {
-        return;
-    };
-    if value.get("type").and_then(Value::as_str) != Some(provider_kind.as_str()) {
-        return;
-    }
-    let method = if completed {
-        "item/completed"
-    } else {
-        "item/updated"
-    };
-    if let Some(mapped) = lifecycle_item(method, &value) {
-        item.content = mapped.content;
-    }
-}
-
 fn collab_tool_input(item: &Value) -> Value {
     let mut input = serde_json::Map::new();
     for key in [
@@ -4376,31 +4358,6 @@ fn map_file_change(change: &Value) -> Option<FileChange> {
     };
     normalize_file_change_diff(&mut change);
     Some(change)
-}
-
-/// Decode file contents stored by the Codex adapter before it normalized add/delete diffs.
-/// Only call this for unversioned Codex records; turn-wide snapshots already contain patches.
-pub fn normalize_legacy_file_change_event(event: &mut AgentEvent) {
-    let changes = match event {
-        AgentEvent::ItemStarted(item)
-        | AgentEvent::ItemUpdated(item)
-        | AgentEvent::ItemCompleted(item) => {
-            let ItemContent::FileChange { changes, .. } = &mut item.content else {
-                return;
-            };
-            changes
-        }
-        AgentEvent::ApprovalRequested(request) => {
-            let ApprovalKind::FileChange { changes, .. } = &mut request.kind else {
-                return;
-            };
-            changes
-        }
-        _ => return,
-    };
-    for change in changes {
-        normalize_file_change_diff(change);
-    }
 }
 
 fn normalize_file_change_diff(change: &mut FileChange) {
@@ -4655,6 +4612,68 @@ mod tests {
                     Some("Inherited permission configuration")
                 );
             }
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    /// Codex 0.167.0 settles its own open requests when their turn ends or is
+    /// interrupted and says so with `serverRequest/resolved` (`v2/ServerRequestResolvedNotification.ts`;
+    /// `abort_pending_server_requests` and `resolve_server_request` in
+    /// `codex-rs/app-server` at `rust-v0.167.0`). It also follows an answer
+    /// Tcode gave, which is then already settled.
+    #[test]
+    fn requests_codex_settles_itself_are_reported_resolved() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor
+                .handle_line(&json!({"id":7,"method":"item/commandExecution/requestApproval","params":{
+                    "kind":"command","threadId":"thread-1","turnId":"turn-1","itemId":"cmd-1","startedAtMs":1,
+                    "environmentId":null,"command":"cargo test","cwd":"/workspace"
+                }}).to_string())
+                .await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::ApprovalRequested(ref request) if request.id == "7"
+            ));
+            actor
+                .handle_line(&json!({"id":"q-8","method":"item/tool/requestUserInput","params":{
+                    "threadId":"thread-1","turnId":"turn-1","itemId":"ask-1","isBlocking":true,"autoResolutionMs":null,
+                    "questions":[{"id":"db","header":"DB","question":"Which DB?","isOther":false,"isSecret":false,"options":null}]
+                }}).to_string())
+                .await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::UserInputRequested { ref request_id, .. } if request_id == "q-8"
+            ));
+            for request_id in [json!(7), json!("q-8")] {
+                actor
+                    .handle_line(
+                        &json!({"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":request_id}})
+                            .to_string(),
+                    )
+                    .await;
+            }
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::ApprovalResolved { ref request_id, decision: ApprovalDecision::Cancel }
+                    if request_id == "7"
+            ));
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::UserInputResolved { ref request_id, ref answers }
+                    if request_id == "q-8" && answers.is_empty()
+            ));
+            actor
+                .handle_line(
+                    r#"{"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":7}}"#,
+                )
+                .await;
+            assert!(events.try_recv().is_err());
+            assert!(
+                written(&mut actor).await.is_empty(),
+                "Codex is not answered"
+            );
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -5510,6 +5529,11 @@ mod tests {
             actor
                 .handle_line(&json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}).to_string())
                 .await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::UserInputResolved { ref request_id, ref answers }
+                    if request_id == "call_r" && answers.is_empty()
+            ));
             assert!(matches!(
                 events.try_recv().unwrap(),
                 AgentEvent::TurnCompleted { .. }
@@ -7325,72 +7349,6 @@ mod tests {
             assert!(response.get("result").is_some());
             assert!(response.get("error").is_none());
             assert!(!response.to_string().contains("-32601"));
-
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    /// A session that stops with questions open answers each the way its
-    /// protocol allows: an elicitation is cancelled, a `requestUserInput`
-    /// gets no answers, and the timeline closes both.
-    #[test]
-    fn shutdown_settles_every_open_question() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            for request in [
-                json!({
-                    "id": 86,
-                    "method": "mcpServer/elicitation/request",
-                    "params": {
-                        "serverName": "pending",
-                        "threadId": "thread-1",
-                        "mode": "form",
-                        "message": "Wait",
-                        "requestedSchema": {
-                            "type": "object",
-                            "properties": {"value": {"type": "string"}}
-                        }
-                    }
-                }),
-                json!({
-                    "id": 77,
-                    "method": "item/tool/requestUserInput",
-                    "params": {
-                        "threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1",
-                        "questions": [{"id": "ready", "header": "", "question": "Ready?"}]
-                    }
-                }),
-            ] {
-                actor.handle_line(&request.to_string()).await;
-                assert!(matches!(
-                    events.try_recv().unwrap(),
-                    AgentEvent::UserInputRequested { .. }
-                ));
-            }
-            assert!(written(&mut actor).await.is_empty());
-            actor.settle_shutdown().await;
-
-            let mut resolved: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
-                .map(|event| match event {
-                    AgentEvent::UserInputResolved {
-                        request_id,
-                        answers,
-                    } if answers.is_empty() => request_id,
-                    other => panic!("unexpected {other:?}"),
-                })
-                .collect();
-            resolved.sort();
-            assert_eq!(resolved, ["77", "86"]);
-            let mut replies = written(&mut actor).await;
-            replies.sort_by_key(|reply| reply["id"].as_i64());
-            assert_eq!(
-                replies,
-                [
-                    json!({"id": 77, "result": {"answers": {}}}),
-                    json!({"id": 86, "result": {"action": "cancel"}}),
-                ]
-            );
 
             let _ = actor.child.kill();
             let _ = actor.child.wait();

@@ -418,16 +418,29 @@ impl AppState {
             Command::RunGitAction { .. } if self.git_busy.contains(session_id) => {
                 return Err(error("git_busy", "A Git operation is already running."));
             }
-            Command::RespondApproval { request_id, .. }
-                if !self
+            Command::RespondApproval {
+                request_id,
+                decision,
+                ..
+            } => {
+                let Some(request) = self
                     .approval_requests(session_id)
                     .iter()
-                    .any(|request| &request.id == request_id) =>
-            {
-                return Err(error(
-                    "unknown_approval",
-                    "This approval is no longer pending.",
-                ));
+                    .find(|request| &request.id == request_id)
+                else {
+                    return Err(error(
+                        "unknown_approval",
+                        "This approval is no longer pending.",
+                    ));
+                };
+                if let ApprovalDecision::Option(option) = decision
+                    && !request.options.iter().any(|offered| &offered.id == option)
+                {
+                    return Err(error(
+                        "unknown_approval_option",
+                        "This approval does not offer that choice.",
+                    ));
+                }
             }
             Command::RespondUserInput { request_id, .. }
                 if active
@@ -749,7 +762,11 @@ mod tests {
                 turn_id: None,
                 reason: None,
                 blocked_path: None,
-                options: Vec::new(),
+                options: vec![agent::ApprovalOption {
+                    id: "accept".into(),
+                    label: "Allow".into(),
+                    kind: agent::ApprovalOptionKind::AllowOnce,
+                }],
                 kind: agent::ApprovalKind::ExecCommand {
                     command: "echo fixture".into(),
                     cwd: None,
@@ -794,5 +811,58 @@ mod tests {
             !state.approval_requests(&id).is_empty(),
             "failed delivery must leave the approval pending"
         );
+    }
+
+    /// A client answers an approval only with a choice the harness offered; anything else is
+    /// refused at the boundary and never reaches the provider.
+    #[test]
+    fn an_approval_answer_outside_the_offered_options_is_refused() {
+        let store = TestStore::new("approval-option-validation");
+        let mut state = AppState::new((*store).clone()).unwrap();
+        let mut context = TestAppContext::default();
+        let mut cx = context.host_cx();
+        let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);
+        let (commands, receiver) = smol::channel::unbounded();
+        state.resident_mut(&id).unwrap().runtime = Runtime::Live(commands);
+        state.record_approval_event(
+            &id,
+            &AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                id: "approval".into(),
+                parent_item_id: None,
+                turn_id: None,
+                reason: None,
+                blocked_path: None,
+                options: vec![agent::ApprovalOption {
+                    id: "allow-once".into(),
+                    label: "Allow".into(),
+                    kind: agent::ApprovalOptionKind::AllowOnce,
+                }],
+                kind: agent::ApprovalKind::ExecCommand {
+                    command: "echo fixture".into(),
+                    cwd: None,
+                    description: None,
+                },
+            }),
+        );
+        crate::pipe::handle_client_message(
+            &mut state,
+            &mut cx,
+            ClientMessage {
+                principal: None,
+                id: 42,
+                key: Some("answer".into()),
+                payload: ClientPayload::Command(Command::RespondApproval {
+                    session_id: id.clone(),
+                    request_id: "approval".into(),
+                    decision: ApprovalDecision::Option("allow-always".into()),
+                }),
+            },
+            tcode_client::attachment::AttachmentPolicy::LOCAL,
+        );
+        assert!(context.drain_outgoing().iter().any(|message| matches!(message,
+            HostMessage::Ack { id: 42, result: Err(error) } if error.code == "unknown_approval_option"
+        )));
+        assert!(receiver.try_recv().is_err(), "nothing reaches the provider");
+        assert_eq!(state.approval_requests(&id).len(), 1);
     }
 }

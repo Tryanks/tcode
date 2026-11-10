@@ -587,9 +587,7 @@ impl AppState {
         else {
             return;
         };
-        let Some(key_env) = endpoint.key_envs.first().copied() else {
-            return;
-        };
+        let key_env = endpoint.key_envs[0];
         let name = name.trim();
         let name = if name.is_empty() { "Third-party" } else { name };
         let model = model.map(str::trim).filter(|m| !m.is_empty());
@@ -1418,16 +1416,10 @@ impl AppState {
             .provider_versions
             .get(&provider)
             .and_then(|s| s.installation.clone());
-        let Some(installation) = installation.filter(|installation| {
-            installation
-                .update
-                .as_ref()
-                .is_some_and(|command| !command.requires_terminal)
-        }) else {
-            self.complete_provider_update(provider, false, cx);
-            return;
-        };
-        let Some(binary) = self.resolve_provider_binary(provider) else {
+        let Some(command) = installation
+            .and_then(|installation| installation.update)
+            .filter(|command| !command.requires_terminal)
+        else {
             self.complete_provider_update(provider, false, cx);
             return;
         };
@@ -1439,50 +1431,12 @@ impl AppState {
         status.updating = true;
         status.checking = false;
         status.revision += 1;
-        let revision = status.revision;
 
-        let settings = self.settings.clone();
-        let settings_store = self.settings_store.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let env = host_cx
-                .unblock(move || {
-                    let profile_id = Settings::builtin_profile_id(provider);
-                    launch_env_for_profile(
-                        &settings,
-                        profile_id,
-                        settings_store.profile_secrets(&Settings::harness_secret_id(provider)),
-                        settings_store.profile_secrets(profile_id),
-                    )
-                    .pairs(provider)
-                })
-                .await;
-            let current = provider_updates::resolve_installation(provider, &binary, &env).await;
+            let ok = command.run().await;
             host_cx.enqueue(move |state, cx| {
-                if state
-                    .providers
-                    .provider_versions
-                    .get(&provider)
-                    .map(|s| s.revision)
-                    != Some(revision)
-                    || state.resolve_provider_binary(provider).as_ref() != Some(&binary)
-                    || current != installation
-                {
-                    if let Some(status) = state.providers.provider_versions.get_mut(&provider) {
-                        status.updating = false;
-                        status.installation = None;
-                    }
-                    state.complete_provider_update(provider, false, cx);
-                    return;
-                }
-                let command = current.update.expect("validated automatic update plan");
-                let host_cx = cx.clone();
-                HostCx::spawn_detached(cx, async move {
-                    let ok = command.run().await;
-                    host_cx.enqueue(move |state, cx| {
-                        state.complete_provider_update(provider, ok, cx);
-                    });
-                });
+                state.complete_provider_update(provider, ok, cx);
             });
         });
     }
@@ -1574,7 +1528,7 @@ impl AppState {
             await_secret_writes(writes).await?;
             let secrets = if env.iter().any(|var| var.sensitive) {
                 host_cx
-                    .unblock(move || store.try_profile_secrets(&id))
+                    .unblock(move || store.profile_secrets(&id))
                     .await
                     .map_err(|error| error.to_string())?
             } else {
@@ -1642,9 +1596,7 @@ impl AppState {
                         if names.is_empty() {
                             return Ok(Default::default());
                         }
-                        store
-                            .try_profile_secrets(id)
-                            .map_err(|error| error.to_string())
+                        store.profile_secrets(id).map_err(|error| error.to_string())
                     };
                     let secrets = read(&profile_id, &own)?;
                     let shared_secrets = match &harness_id {
@@ -1778,11 +1730,14 @@ impl AppState {
                 .ok_or("unknown profile")?;
             let provider = profile.kind;
             let binary_path = profile.settings.binary_path;
+            let unreadable = |error: std::io::Error| error.to_string();
             let launch_env = launch_env_for_profile(
                 &settings,
                 &profile_id,
-                secrets.profile_secrets(&Settings::harness_secret_id(provider)),
-                secrets.profile_secrets(&profile_id),
+                secrets
+                    .profile_secrets(&Settings::harness_secret_id(provider))
+                    .map_err(unreadable)?,
+                secrets.profile_secrets(&profile_id).map_err(unreadable)?,
             );
             agent::native_mcp::servers(provider, binary_path, &launch_env)
                 .unwrap_or_else(|| Err("no MCP configuration to read".to_owned()))
@@ -1850,15 +1805,15 @@ fn endpoint_profile_snapshot(
 pub(super) fn provider_secret_names(
     settings: &Settings,
     settings_store: &SettingsStore,
-) -> HashMap<String, HashSet<String>> {
+) -> std::io::Result<HashMap<String, HashSet<String>>> {
     let names = |id: String, env: &[EnvVar]| {
-        let saved = settings_store.profile_secrets(&id);
+        let saved = settings_store.profile_secrets(&id)?;
         let names = env
             .iter()
             .filter(|var| var.sensitive && saved.contains_key(&var.name))
             .map(|var| var.name.clone())
             .collect();
-        (id, names)
+        Ok((id, names))
     };
     let profiles = ProviderKind::NATIVE
         .into_iter()

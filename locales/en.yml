@@ -6,7 +6,7 @@ chat:
   waiting_connection: "Waiting for connection…"
   retry_delivery: "Retry"
   discard_delivery: "Discard"
-  history_record_too_large: A history record exceeds the 8 MiB response limit.
+  history_record_too_large: A history record is larger than one reply to this device can carry.
   relayed: "Relayed from %{from} to %{to}"
   moved: "Moved here from %{from}; %{to} continues in a new session"
   session_moved: "Moved from %{from} to %{to}; the same session continues there"
@@ -158,7 +158,6 @@ rewind:
   blocked:
     in_progress: "A rewind is in progress."
     delivering: "A message is on its way to %{harness}."
-    turn_running: "%{harness} does not stop a running turn to rewind; wait for it to finish."
   mode:
     files_and_conversation: "Conversation and code"
     conversation: "Conversation only"
@@ -366,11 +365,13 @@ sidebar:
   path_required: "Enter a directory path."
   path_rejected: "The machine rejected this path: %{reason}"
   recent_failed: "Could not read recent activity from the machine: %{reason}"
+  recent_unreadable: "Some agent history on the machine could not be read: %{reason}"
   import_failed: "Could not start the import: %{reason}"
   import_refused: "the machine refused the import"
   importing: "Importing threads…"
   import_progress: "%{done} / %{total} · %{tool}"
   import_summary: "Imported %{imported}, skipped %{skipped}"
+  import_failures: "%{count} could not be imported:"
   import_ok: "OK"
   create_thread: "Create new thread"
   create_thread_on: "Create new thread on %{host}"
@@ -454,7 +455,6 @@ migration:
   relocating_copy: "Copying the data folder to %{path}: %{bytes} of %{total_bytes}"
   scanning: "Looking for threads…"
   importing: "Copying threads: %{done} of %{total} · %{bytes} of %{total_bytes}"
-  verifying: "Checking the copy: %{done} of %{total} · %{bytes} of %{total_bytes}"
   publishing: "Finishing…"
   archiving: "Removing the original files…"
   quitting: "Stopping. Nothing is lost; the upgrade continues the next time Tcode starts."
@@ -1034,6 +1034,7 @@ palette:
   threads_on: "Threads on %{host}"
   messages: "Messages"
   messages_on: "Messages on %{host}"
+  messages_unreadable: "Some threads could not be searched: %{reason}"
   no_matches: "No matches"
   navigate: "↑↓ Navigate"
   select: "Enter Select"
@@ -1375,6 +1376,8 @@ errors:
   persist_project: "Failed to persist project: %{error}"
   persist_settings: "Failed to persist settings: %{error}"
   settings_unreadable: "Tcode could not read settings.json (%{error}), so it is running on default settings and will not save any over the file. A newer version of Tcode may have written it: open that version instead."
+  file_unreadable: "Tcode could not read a file of its own (%{error}), so it is running without what the file holds and will not save any over it. A newer version of Tcode may have written it: open that version instead."
+  mcp_unavailable: "Tcode's tools could not be offered to agents this run (%{error}), so threads start without them."
   delete_session: "Failed to delete thread: %{error}"
   delete_project: "Failed to remove project: %{error}"
   persist_session: "Failed to save thread: %{error}"
@@ -1411,7 +1414,6 @@ editor:
 notice:
   switched_branch: "Switched to %{branch}"
   worktree_seeded: "Worktree seeded: %{copied} files copied, %{skipped} skipped"
-  worktree_seeded_limit: "Worktree seed limit reached after %{copied} files; skipped: %{skipped}"
   worktree_merged_fast_forward: "Merged the worktree branch back with a fast-forward"
   worktree_merged_commit: "Merged the worktree branch back with a merge commit"
   worktree_merge_missing: "This thread's worktree no longer exists"
@@ -1902,6 +1904,8 @@ member:
 
 source_control:
   unverified: "Saved, not yet verified"
+  credentials_unreadable: "Saved tokens could not be read (%{error}); nothing is sent until the file is fixed"
+  cli_failed: "%{tool} could not be asked for its login (%{error})"
   token_label: "Token for %{host}"
   description: "Tcode reads and writes pull requests and merge requests through these Git platforms. Tokens are kept on the machine running Tcode and never shown again."
   detection_note: "Platforms a gh, glab, tea or az login or an environment variable names appear on their own. Add self-hosted GitHub Enterprise, GitLab, Forgejo and Gitea servers yourself."
@@ -2124,7 +2128,6 @@ pull_requests:
     refresh_unloaded: "Refresh"
     refreshing: "Refreshing %{pr}"
     updated: "updated %{ago}"
-    created: "created %{ago}"
     merging_into: "Merging %{head} into %{base}"
     files: "Files"
     files_count: "Files %{count}"

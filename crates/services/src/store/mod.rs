@@ -69,7 +69,7 @@ use tcode_core::session::{Author, StoredEvent, SupersededStream};
 
 use codec::{Decoder, Encoder, Mode};
 use db::{Broken, Db, SCHEMA_VERSION, blob, integer, is_broken};
-use rows::{Storage, Stored, Thread};
+use rows::{Storage, Stored};
 
 const DATA_DIR_ENV: &str = "TCODE_DATA_DIR";
 const DB_FILE: &str = "tcode.db";
@@ -92,20 +92,11 @@ struct EventEnvelope {
     author: Option<Author>,
     ts: u64,
     event: AgentEvent,
-    #[serde(default)]
-    file_diff_version: Option<u8>,
-    #[serde(default)]
-    item_version: Option<u8>,
 }
 
-/// The version of what reading a row does beyond parsing it ([`legacy_item`],
-/// the Codex mappings it calls): anything extracted from read records, such
-/// as search entries, is extracted again when it changes.
-const READ_VERSION: u16 = 1;
-
-/// Stamped on every item row written since adapters record items
-/// canonically: a tool call's `output` is its text, with its images in
-/// `image_reads`. A row without it is read through [`legacy_item`].
+/// Stamped on every item row, as `file_diff_version` is on every file
+/// change: the releases from v0.2.1 to v0.4.0 open this database and convert
+/// a row without them from an older shape.
 const ITEM_VERSION: u8 = 1;
 
 #[derive(Serialize)]
@@ -246,10 +237,6 @@ struct Shared {
     /// change to that log; see [`SessionStore::event_generation`].
     generations: Mutex<HashMap<String, u64>>,
     next_generation: AtomicU64,
-    /// Full event-log parses, shared by every clone of this store so tests can
-    /// prove a caller served history from memory.
-    #[cfg(any(test, feature = "test-support"))]
-    event_reads: std::sync::atomic::AtomicUsize,
 }
 
 enum State {
@@ -479,8 +466,6 @@ impl SessionStore {
                     idle: Condvar::new(),
                     generations: Mutex::default(),
                     next_generation: AtomicU64::new(1),
-                    #[cfg(any(test, feature = "test-support"))]
-                    event_reads: Default::default(),
                 });
                 stores.insert(key, Arc::downgrade(&shared));
                 shared
@@ -491,15 +476,6 @@ impl SessionStore {
             previous: None,
             shared,
         })
-    }
-
-    /// How many times [`SessionStore::read_events`] parsed a log through this
-    /// store or any of its clones.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn event_reads(&self) -> usize {
-        self.shared
-            .event_reads
-            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn root(&self) -> &PathBuf {
@@ -1014,10 +990,6 @@ impl SessionStore {
     /// what the log held when [`SessionStore::next_row`] returned `end`, since
     /// rows are only ever appended.
     pub fn read_log_until(&self, id: &str, end: u64) -> io::Result<EventLog> {
-        #[cfg(any(test, feature = "test-support"))]
-        self.shared
-            .event_reads
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.read_rows(id, 0..end)
     }
 
@@ -1032,7 +1004,6 @@ impl SessionStore {
                 };
                 let codec = st.codec();
                 let mut decoder = codec.decoder();
-                let mut provider = None;
                 rows::visit(
                     st,
                     connection,
@@ -1044,16 +1015,7 @@ impl SessionStore {
                         let line = canonical(st, &mut decoder, &row, id, position)?;
                         match decode_row(&line) {
                             Ok(Some(record)) => {
-                                if record.legacy_file_diff && provider.is_none() {
-                                    provider =
-                                        stored_provider_at(st, connection, &thread, position)?;
-                                }
-                                let stored = record.into_stored(provider);
-                                if let AgentEvent::ProviderRelay { to_provider, .. } = &stored.event
-                                {
-                                    provider = Some(*to_provider);
-                                }
-                                log.records.push(stored);
+                                log.records.push(record);
                                 log.rows.push(position);
                             }
                             Ok(None) => {}
@@ -1259,7 +1221,7 @@ pub struct EventLog {
     pub undecodable: usize,
 }
 
-fn decode_row(line: &[u8]) -> Result<Option<ParsedRecord>, String> {
+fn decode_row(line: &[u8]) -> Result<Option<StoredEvent>, String> {
     let Ok(line) = std::str::from_utf8(line) else {
         return Err("not UTF-8".into());
     };
@@ -1553,157 +1515,25 @@ fn invalid_data(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> i
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
-/// Retains the on-disk diff version until the event's historical provider is known.
-pub(crate) struct ParsedRecord {
-    stored: StoredEvent,
-    legacy_file_diff: bool,
-}
-
-impl ParsedRecord {
-    pub(crate) fn into_stored(mut self, provider: Option<ProviderKind>) -> StoredEvent {
-        if self.legacy_file_diff && provider == Some(ProviderKind::Codex) {
-            agent::codex::normalize_legacy_file_change_event(&mut self.stored.event);
-        }
-        self.stored
-    }
-
-    pub(crate) fn previous_provider(&self) -> Option<ProviderKind> {
-        match self.stored.event {
-            AgentEvent::ProviderRelay { from_provider, .. } => Some(from_provider),
-            _ => None,
-        }
-    }
-}
-
-/// An item row written before [`ITEM_VERSION`], as a new row holds it. A
-/// Codex sleep, image view or image generation recorded as `Other` reads
-/// back as the item the adapter maps it to now. A Grok MCP call is named
-/// `server__tool`, read as `server/tool`. A tool call recorded before every
-/// adapter kept results canonical holds its provider's result shape in
-/// `output`; it reads back as text and images.
-fn legacy_item(event: &mut AgentEvent) {
-    let completed = matches!(event, AgentEvent::ItemCompleted(_));
-    let (AgentEvent::ItemStarted(item)
-    | AgentEvent::ItemUpdated(item)
-    | AgentEvent::ItemCompleted(item)) = event
-    else {
-        return;
-    };
-    agent::codex::normalize_legacy_item(item, completed);
-    let agent::ItemContent::ToolCall {
-        name,
-        output,
-        image_reads,
-        ..
-    } = &mut item.content
-    else {
-        return;
-    };
-    if let Some(slashed) = agent::ToolName::slashed(name) {
-        *name = slashed;
-    }
-    if let Some(output) = output
-        && let Some(split) = agent::ToolOutput::split(output)
-    {
-        *output = split.text;
-        // Claude rows already carry their images here, and in the text too.
-        if image_reads.is_empty() {
-            *image_reads = split.images;
-        }
-    }
-}
-
-pub(crate) fn parse_stored_line(line: &str) -> Result<ParsedRecord, serde_json::Error> {
-    let (mut stored, version, item_version) = match serde_json::from_str::<EventEnvelope>(line) {
-        Ok(envelope) => (
-            StoredEvent {
-                origin: envelope.origin,
-                author: envelope.author,
-                ts: Some(envelope.ts),
-                event: envelope.event,
-                elided: None,
-            },
-            envelope.file_diff_version,
-            envelope.item_version,
-        ),
-        Err(_) => (
-            StoredEvent {
-                origin: None,
-                author: None,
-                ts: None,
-                event: serde_json::from_str::<AgentEvent>(line)?,
-                elided: None,
-            },
-            None,
-            None,
-        ),
-    };
-    if item_version.is_none() {
-        legacy_item(&mut stored.event);
-    }
-    let legacy_file_diff = version.is_none()
-        && match &stored.event {
-            AgentEvent::ItemStarted(item)
-            | AgentEvent::ItemUpdated(item)
-            | AgentEvent::ItemCompleted(item) => {
-                matches!(&item.content, agent::ItemContent::FileChange { changes, .. } if changes.iter().any(|change| matches!(change.kind, agent::FileChangeKind::Create | agent::FileChangeKind::Delete) && change.diff.is_some()))
-            }
-            AgentEvent::ApprovalRequested(request) => {
-                matches!(&request.kind, agent::ApprovalKind::FileChange { changes, .. } if changes.iter().any(|change| matches!(change.kind, agent::FileChangeKind::Create | agent::FileChangeKind::Delete) && change.diff.is_some()))
-            }
-            _ => false,
-        };
-    Ok(ParsedRecord {
-        stored,
-        legacy_file_diff,
+/// One stored line: a timestamped envelope, or a bare event as builds before
+/// the envelope wrote it (with `ts == None`).
+pub(crate) fn parse_stored_line(line: &str) -> Result<StoredEvent, serde_json::Error> {
+    Ok(match serde_json::from_str::<EventEnvelope>(line) {
+        Ok(envelope) => StoredEvent {
+            origin: envelope.origin,
+            author: envelope.author,
+            ts: Some(envelope.ts),
+            event: envelope.event,
+            elided: None,
+        },
+        Err(_) => StoredEvent {
+            origin: None,
+            author: None,
+            ts: None,
+            event: serde_json::from_str::<AgentEvent>(line)?,
+            elided: None,
+        },
     })
-}
-
-fn stored_provider_at(
-    st: &Storage,
-    connection: &turso::Connection,
-    thread: &Thread,
-    position: u64,
-) -> io::Result<Option<ProviderKind>> {
-    // Metadata names the current provider. The next relay names the provider
-    // before it, including when a history page starts in the middle of a turn.
-    let mut provider = None;
-    let mut start = position;
-    let codec = st.codec();
-    let mut decoder = codec.decoder();
-    while let Some((position, row)) = rows::find(
-        st,
-        connection,
-        thread,
-        start,
-        codec::type_code("provider_relay"),
-        b"\"provider_relay\"",
-    )? {
-        if let Ok(Some(record)) = decode_row(&st.decode(&mut decoder, &row, Mode::Bare)?.bytes) {
-            provider = record.previous_provider();
-            if provider.is_some() {
-                break;
-            }
-        }
-        let Some(next) = position.checked_add(1) else {
-            break;
-        };
-        start = next;
-    }
-    if provider.is_none() {
-        st.query(
-            connection,
-            "SELECT body FROM sessions WHERE id = ?1",
-            [thread.id.as_str()],
-            |row| {
-                provider = serde_json::from_slice::<SessionMeta>(&blob(row, 0)?)
-                    .ok()
-                    .map(|meta| meta.provider);
-                Ok(())
-            },
-        )?;
-    }
-    Ok(provider)
 }
 
 pub use tcode_core::project::now_secs;

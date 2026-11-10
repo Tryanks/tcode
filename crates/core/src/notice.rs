@@ -23,8 +23,6 @@ pub const ORCHESTRATE_REPORT_LABEL: &str = "Result (reported via report_result):
 /// quiet twice without calling `report_result`.
 pub const ORCHESTRATE_FALLBACK_LABEL: &str =
     "Final message (the child ended without report_result; this is a fallback, not its report):\n";
-/// Opens the line before the tail of a final message too long to deliver whole.
-pub const ORCHESTRATE_OUTPUT_TAIL_LABEL: &str = "Final output tail (";
 
 /// Sent to a child that ended its turn owing a report, once per expectation.
 pub const CHILD_REPORT_REMINDER: &str = include_str!("../../../assets/subagents/reminder.md");
@@ -108,14 +106,11 @@ impl OrchestrateCallback {
         if let Some(report) = self.body.strip_prefix(ORCHESTRATE_REPORT_LABEL) {
             return Some(report);
         }
-        let body = self
-            .body
-            .strip_prefix(ORCHESTRATE_FALLBACK_LABEL)
-            .unwrap_or(&self.body);
-        if body.starts_with(ORCHESTRATE_OUTPUT_TAIL_LABEL) {
-            return Some(body.split_once('\n').map_or("", |(_, tail)| tail));
-        }
-        Some(body)
+        Some(
+            self.body
+                .strip_prefix(ORCHESTRATE_FALLBACK_LABEL)
+                .unwrap_or(&self.body),
+        )
     }
 }
 

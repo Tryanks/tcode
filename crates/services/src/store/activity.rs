@@ -87,9 +87,9 @@ fn fold(
         let mut decoder = codec.decoder();
         rows::visit(st, connection, thread, 0..u64::MAX, false, |_, row| {
             if let Ok(Some(record)) = decode_row(&st.decode(&mut decoder, &row, Mode::Bare)?.bytes)
-                && ThreadActivity::moves_clock(&record.stored.event)
+                && ThreadActivity::moves_clock(&record.event)
             {
-                records.push(record.stored);
+                records.push(record);
             }
             Ok(true)
         })?;
@@ -267,7 +267,7 @@ mod tests {
         let store = SessionStore::open_at(root.clone()).unwrap();
         let records: Vec<_> = LOG
             .lines()
-            .map(|line| super::super::parse_stored_line(line).unwrap().stored)
+            .map(|line| super::super::parse_stored_line(line).unwrap())
             .collect();
         for parent in [false, true] {
             let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);

@@ -1,19 +1,18 @@
-//! Creating `tcode.db`, once: from the JSON index (`sessions.json`) and the
-//! per-thread JSONL logs older builds wrote, or empty on a fresh install.
-//! The file is built in the layout of `user_version` 1, which the store then
-//! turns over to its own like any older build's ([`super::source`]).
+//! Creating `tcode.db`, once: empty in the current schema on a fresh install,
+//! or from the JSON index (`sessions.json`) and the per-thread JSONL logs
+//! older builds wrote. A migrated file is built in the layout of
+//! `user_version` 1, which the store then turns over to its own like any
+//! older build's ([`super::source`]).
 //!
-//! The database is built and verified under a staging name and published by
-//! a rename, so a file at the final name is always complete:
+//! The database is built under a staging name and published by a rename, so
+//! a file at the final name is always complete:
 //!
 //! 1. `tcode.db.migrating` is created with the schema and `user_version` 0,
 //!    and the index is imported.
 //! 2. Every `*.jsonl` in the data dir (orphans included) is imported in
 //!    bounded transactions.
-//! 3. Each log is read back and compared byte for byte with its file, then
-//!    the metadata field for field; `user_version` is set to 1, the WAL is
-//!    checkpointed and truncated, every handle is dropped, and a fresh open
-//!    re-counts what was committed.
+//! 3. `user_version` is set to 1 and the WAL is checkpointed into the main
+//!    file.
 //! 4. The staged file is synced, the list of sources to archive is written to
 //!    `tcode.db.archive`, and the staged file is renamed to `tcode.db`; the
 //!    directory is synced around both.
@@ -29,7 +28,6 @@
 //! untouched sources. Cancellation is honoured only up to the rename; after
 //! it the next start finishes step 5 from the list.
 
-use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -38,8 +36,8 @@ use std::time::Instant;
 
 use tcode_core::project::{IndexFile, SessionMeta, migrate_index};
 
-use super::db::{Db, V1_SCHEMA, V1_VERSION, blob, integer, wal_path};
-use super::{DB_FILE, read_index};
+use super::DB_FILE;
+use super::db::{Db, SCHEMA, SCHEMA_VERSION, V1_SCHEMA, V1_VERSION, wal_path};
 
 const STAGING_FILE: &str = "tcode.db.migrating";
 const ARCHIVE_LIST: &str = "tcode.db.archive";
@@ -49,12 +47,8 @@ const LEGACY_DIR: &str = "legacy";
 /// transaction for a multi-hundred-megabyte log holds every dirty page in
 /// memory and doubles the WAL.
 pub(super) use crate::fs_tree::CHUNK_BYTES;
-/// At most this many rows, and about [`CHUNK_BYTES`], are compared per read
-/// when verifying, so a reader never pins the WAL or memory for a whole log.
-const VERIFY_ROWS: i64 = 4096;
 
-/// Where a running migration is. Each of the importing and verifying phases
-/// goes through every log once, so their counts start again from zero;
+/// Where a running migration is. Importing goes through every log once;
 /// publishing and archiving report everything done. While relocating, the
 /// thread counts are the older data dir's entries and the byte counts what a
 /// copy across filesystems has written; a move by rename reports no bytes.
@@ -75,7 +69,6 @@ pub enum MigrationPhase {
     /// until it ends.
     Scanning,
     Importing,
-    Verifying,
     /// Past the last point a cancellation is honoured.
     Publishing,
     Archiving,
@@ -128,6 +121,10 @@ pub(super) fn run(
         return Ok(Migration::Completed);
     }
     remove_staging(root)?;
+    if legacy_sources(root)?.is_empty() {
+        create_empty(root)?;
+        return Ok(Migration::Completed);
+    }
     let started = Instant::now();
     let mut progress = Progress {
         report,
@@ -175,6 +172,23 @@ pub(super) fn run(
     progress.finish(MigrationPhase::Archiving);
     archive_sources(root)?;
     Ok(Migration::Completed)
+}
+
+/// A fresh install's `tcode.db`, in the current schema, staged and published
+/// like a migrated one.
+fn create_empty(root: &Path) -> io::Result<()> {
+    let staging = root.join(STAGING_FILE);
+    let db = Db::open(&staging, Some(SCHEMA))?;
+    db.write(|db, connection| {
+        db.execute(
+            connection,
+            &format!("PRAGMA user_version = {SCHEMA_VERSION}"),
+            (),
+        )
+        .map(drop)
+    })?;
+    seal(db, &staging)?;
+    publish(root, &[])
 }
 
 #[derive(Debug)]
@@ -340,7 +354,6 @@ fn build_staging(root: &Path, progress: &mut Progress) -> io::Result<Summary> {
     for session in &mut index.sessions {
         session.migrate_lifecycle();
     }
-    reject_duplicates(&index)?;
     let staging = root.join(STAGING_FILE);
     let db = Db::open(&staging, Some(V1_SCHEMA))?;
     db.write(|db, connection| {
@@ -373,30 +386,13 @@ fn build_staging(root: &Path, progress: &mut Progress) -> io::Result<Summary> {
         bytes: 0,
     };
     progress.start(MigrationPhase::Importing, logs.len(), bytes_total)?;
-    let mut tallies = Vec::new();
     for (id, path) in &logs {
         let tally = import_log(&db, id, path, progress)?;
         summary.logs += 1;
         summary.lines += tally.lines;
         summary.blank_lines += tally.blank_lines;
         summary.bytes += tally.bytes;
-        tallies.push(((*id).to_owned(), tally));
     }
-
-    progress.start(MigrationPhase::Verifying, logs.len(), bytes_total)?;
-    for ((id, path), (_, tally)) in logs.iter().zip(&tallies) {
-        verify_log(&db, id, path, tally, progress)?;
-        log::info!(
-            "migrated {}: {} line(s), {} blank, {} bytes, verified byte-identical",
-            path.display(),
-            tally.lines,
-            tally.blank_lines,
-            tally.bytes
-        );
-    }
-    let stored = db.read(read_index)?;
-    verify_index(&index, &stored)?;
-    progress.check()?;
     db.write(|db, connection| {
         db.execute(
             connection,
@@ -405,85 +401,26 @@ fn build_staging(root: &Path, progress: &mut Progress) -> io::Result<Summary> {
         )
         .map(drop)
     })?;
-    db.checkpoint()?;
-    drop(db);
-
-    progress.check()?;
-
-    // A fresh open sees only what reached the main file.
-    let reopened = Db::open(&staging, None)?;
-    if reopened.user_version()? != V1_VERSION {
-        return Err(io::Error::other(format!(
-            "{} lost its completion marker after the checkpoint",
-            staging.display()
-        )));
-    }
-    // Per thread, so each count is an index range scan rather than one sort
-    // over every row in the database.
-    let mut committed_total = 0;
-    for (id, tally) in &tallies {
-        let (lines, bytes) = reopened.read(|db, connection| {
-            let mut counts = (0, 0);
-            db.query(
-                connection,
-                "SELECT COUNT(*), COALESCE(SUM(length(line)), 0) FROM events WHERE session_id = ?1",
-                (id.as_str(),),
-                |row| {
-                    counts = (integer(row, 0)? as u64, integer(row, 1)? as u64);
-                    Ok(())
-                },
-            )?;
-            Ok(counts)
-        })?;
-        if (lines, bytes) != (tally.lines, tally.bytes) {
-            return Err(io::Error::other(format!(
-                "{}: thread {id} holds {lines} line(s) / {bytes} bytes after reopening, the \
-                 source {} / {}",
-                staging.display(),
-                tally.lines,
-                tally.bytes
-            )));
-        }
-        committed_total += lines;
-    }
-    let mut stored_total = 0;
-    reopened.read(|db, connection| {
-        db.query(connection, "SELECT COUNT(*) FROM events", (), |row| {
-            stored_total = integer(row, 0)? as u64;
-            Ok(())
-        })
-    })?;
-    if stored_total != committed_total {
-        return Err(io::Error::other(format!(
-            "{}: {stored_total} event rows after reopening, {committed_total} migrated",
-            staging.display()
-        )));
-    }
-    let stored = reopened.read(read_index)?;
-    verify_index(&index, &stored)?;
-    drop(reopened);
-    let wal = wal_path(&staging);
-    match fs::metadata(&wal) {
-        Ok(metadata) if metadata.len() > 0 => {
-            return Err(io::Error::other(format!(
-                "{} holds {} bytes after the staged database was closed",
-                wal.display(),
-                metadata.len()
-            )));
-        }
-        Ok(_) => fs::remove_file(&wal)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
     // The last point a cancellation is honoured: what follows publishes.
     progress.check()?;
-    sync_file(&staging)?;
+    seal(db, &staging)?;
     Ok(summary)
 }
 
-/// Today's tolerance: the object schema or the legacy bare array. An
-/// unparseable file is archived into `legacy/` as it is, with the logs, which
-/// still migrate.
+/// Checkpoint the staged database into its main file, close it and sync it,
+/// so the file alone is the database.
+fn seal(db: Db, staging: &Path) -> io::Result<()> {
+    db.checkpoint()?;
+    drop(db);
+    match fs::remove_file(wal_path(staging)) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    sync_file(staging)
+}
+
+/// The object schema or the bare array of the builds before it. A file that
+/// parses as neither stops the migration, which then changes nothing.
 fn read_legacy_index(root: &Path) -> io::Result<IndexFile> {
     let path = root.join(LEGACY_INDEX);
     let bytes = match fs::read(&path) {
@@ -491,66 +428,19 @@ fn read_legacy_index(root: &Path) -> io::Result<IndexFile> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(IndexFile::default()),
         Err(error) => return Err(error),
     };
-    let parsed = serde_json::from_slice::<IndexFile>(&bytes).or_else(|_| {
-        serde_json::from_slice::<Vec<SessionMeta>>(&bytes).map(|sessions| IndexFile {
-            projects: Vec::new(),
-            sessions,
+    serde_json::from_slice::<IndexFile>(&bytes)
+        .or_else(|_| {
+            serde_json::from_slice::<Vec<SessionMeta>>(&bytes).map(|sessions| IndexFile {
+                projects: Vec::new(),
+                sessions,
+            })
         })
-    });
-    Ok(parsed.unwrap_or_else(|error| {
-        log::warn!(
-            "failed to parse {LEGACY_INDEX}: {error}; migrating the event logs without it, and \
-             archiving it with them"
-        );
-        IndexFile::default()
-    }))
-}
-
-/// Upserting by id would silently keep only the last of two entries.
-fn reject_duplicates(index: &IndexFile) -> io::Result<()> {
-    let mut seen = HashSet::new();
-    for id in index.projects.iter().map(|project| &project.id) {
-        if !seen.insert(("project", id)) {
-            return Err(duplicate("project", id));
-        }
-    }
-    for id in index.sessions.iter().map(|session| &session.id) {
-        if !seen.insert(("session", id)) {
-            return Err(duplicate("session", id));
-        }
-    }
-    Ok(())
-}
-
-fn duplicate(kind: &str, id: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!(
-            "{LEGACY_INDEX} lists {kind} {id} more than once; nothing was migrated and the file \
-             is unchanged"
-        ),
-    )
-}
-
-fn verify_index(expected: &IndexFile, stored: &IndexFile) -> io::Result<()> {
-    if stored.projects != expected.projects {
-        return Err(io::Error::other(
-            "the migrated projects differ from sessions.json when read back",
-        ));
-    }
-    if stored.sessions != expected.sessions {
-        let id = expected
-            .sessions
-            .iter()
-            .zip(&stored.sessions)
-            .find(|(expected, stored)| expected != stored)
-            .map(|(expected, _)| expected.id.as_str())
-            .unwrap_or("(count)");
-        return Err(io::Error::other(format!(
-            "the migrated session {id} differs from sessions.json when read back"
-        )));
-    }
-    Ok(())
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is unreadable: {error}", path.display()),
+            )
+        })
 }
 
 #[derive(Default)]
@@ -607,96 +497,6 @@ fn import_log(db: &Db, id: &str, path: &Path, progress: &mut Progress) -> io::Re
     Ok(tally)
 }
 
-/// Compare the committed rows with the file again, segment for segment.
-fn verify_log(
-    db: &Db,
-    id: &str,
-    path: &Path,
-    tally: &Tally,
-    progress: &mut Progress,
-) -> io::Result<()> {
-    let mismatch = |position: i64| {
-        io::Error::other(format!(
-            "{}: line {} differs from the migrated copy",
-            path.display(),
-            position + 1
-        ))
-    };
-    let mut page: Vec<Vec<u8>> = Vec::new();
-    let mut page_start = 0_i64;
-    let mut position = 0_i64;
-    let mut compared = 0;
-    read_segments(path, |segment| {
-        if position - page_start == page.len() as i64 {
-            if compared > 0 {
-                progress.advance(0, compared)?;
-                compared = 0;
-            }
-            page_start = position;
-            page = db.read(|db, connection| {
-                // Sizes first, so a page holds about CHUNK_BYTES however long
-                // the lines are, and at least one line.
-                let mut last = position - 1;
-                let mut bytes = 0;
-                db.query(
-                    connection,
-                    "SELECT position, length(line) FROM events \
-                     WHERE session_id = ?1 AND position >= ?2 ORDER BY position LIMIT ?3",
-                    (id, position, VERIFY_ROWS),
-                    |row| {
-                        if last < position || bytes < CHUNK_BYTES as i64 {
-                            last = integer(row, 0)?;
-                            bytes += integer(row, 1)?;
-                        }
-                        Ok(())
-                    },
-                )?;
-                let mut rows = Vec::new();
-                db.query(
-                    connection,
-                    "SELECT position, line FROM events \
-                     WHERE session_id = ?1 AND position BETWEEN ?2 AND ?3 ORDER BY position",
-                    (id, position, last),
-                    |row| {
-                        let stored = integer(row, 0)?;
-                        if stored != position + rows.len() as i64 {
-                            return Err(mismatch(position + rows.len() as i64));
-                        }
-                        rows.push(blob(row, 1)?);
-                        Ok(())
-                    },
-                )?;
-                Ok(rows)
-            })?;
-        }
-        let stored = page
-            .get((position - page_start) as usize)
-            .ok_or_else(|| mismatch(position))?;
-        if *stored != segment {
-            return Err(mismatch(position));
-        }
-        compared += segment.len() as u64;
-        position += 1;
-        Ok(())
-    })?;
-    let mut extra = 0;
-    db.read(|db, connection| {
-        db.query(
-            connection,
-            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND position >= ?2",
-            (id, position),
-            |row| {
-                extra = integer(row, 0)?;
-                Ok(())
-            },
-        )
-    })?;
-    if extra != 0 || position as u64 != tally.lines {
-        return Err(mismatch(position));
-    }
-    progress.advance(1, compared)
-}
-
 fn publish(root: &Path, sources: &[String]) -> io::Result<()> {
     let list = root.join(ARCHIVE_LIST);
     if !sources.is_empty() {
@@ -732,11 +532,6 @@ fn archive_sources(root: &Path) -> io::Result<()> {
     fs::create_dir_all(&legacy)?;
     let mut moved = 0;
     for name in &names {
-        // The list is written by this module, but a name is still never
-        // allowed to leave the data dir.
-        if Path::new(name).file_name() != Some(std::ffi::OsStr::new(name)) {
-            continue;
-        }
         let source = root.join(name);
         let destination = legacy.join(name);
         if !source.exists() {

@@ -308,13 +308,22 @@ pub(crate) async fn opencode_global_config(
 }
 
 /// The plugins the documents name. An entry is a specifier or a
-/// `{"package", "options"}` object.
+/// `{"package", "options"}` object. An entry that switches plugins rather
+/// than naming one (one starting with `-` or `opencode.`, `*`, or one
+/// ending `.*`) is not a plugin: OpenCode 2.2.7's `cli.plugin.list` passes
+/// over the same entries.
 fn configured_plugins(documents: &[Value]) -> Vec<String> {
     documents
         .iter()
         .filter_map(|document| document.get("plugins")?.as_array())
         .flatten()
         .filter_map(|plugin| plugin.as_str().or_else(|| plugin.get("package")?.as_str()))
+        .filter(|target| {
+            !(target.starts_with('-')
+                || *target == "*"
+                || target.ends_with(".*")
+                || target.starts_with("opencode."))
+        })
         .map(str::to_string)
         .collect()
 }
@@ -544,12 +553,16 @@ mod tests {
     /// sources (OpenCode 2.2.6, `cli.debug.config`); a plugin entry is a
     /// specifier or a `{package, options}` object (the configuration schema's
     /// `plugins` union, read the same way by `cli.plugin.list`). Only the
-    /// global document's plugins count.
+    /// global document's plugins count, and the switches that entry list
+    /// also holds (`packages/cli/src/commands/handlers/plugin/list.ts` at
+    /// v2.2.7 skips a target starting with `-` or `opencode.`, `*`, and one
+    /// ending `.*`) are not plugins.
     #[test]
     fn opencode_lists_what_the_global_configuration_names() {
         let config = r#"[
             {"type":"document","path":"/home/me/.config/opencode/opencode.json",
-             "info":{"plugins":["opencode-wakatime",
+             "info":{"plugins":["*","-opencode-wakatime-legacy","opencode.builtin","acme.*",
+                                "opencode-wakatime",
                                 {"package":"opencode-notify@2.0.0","options":{"sound":false}}]}},
             {"type":"document","path":"/work/proj/opencode.json","info":{"plugins":["project-only"]}},
             {"type":"directory","path":"/home/me/.config/opencode"}

@@ -1801,13 +1801,9 @@ mod tests {
                 let position = turn * (DELTAS + 5) + 1;
                 store.show_thread_at_position(session_id.clone(), position, cx);
             });
-            let deadline = crate::store::tests::host_deadline();
-            while opened(cx).as_deref() != Some(expected.as_str()) {
-                assert!(Instant::now() < deadline, "waiting for {expected}");
-                driver.step(cx, &store);
-                draw_settled(cx);
-                std::thread::sleep(Duration::from_millis(1));
-            }
+            driver.settle_until(cx, &store, &expected, |cx| {
+                opened(cx).as_deref() == Some(expected.as_str())
+            });
         }
         driver.shutdown(cx, &store, &host);
     }
@@ -2411,7 +2407,7 @@ mod tests {
             "the thread scrolls"
         );
 
-        let streamed = |cx: &mut VisualTestContext| {
+        let streamed = |cx: &TestAppContext| {
             store.read_with(cx, |store, cx| {
                 store
                     .with_timeline_for(
@@ -2441,12 +2437,7 @@ mod tests {
                 kind: agent::DeltaKind::AssistantText,
                 text: format!("Paragraph {delta} of the streamed answer.\n\n"),
             }]);
-            let deadline = crate::store::tests::host_deadline();
-            while streamed(cx) == before {
-                assert!(Instant::now() < deadline, "waiting for delta {delta}");
-                driver.step(cx, &store);
-                std::thread::sleep(Duration::from_millis(1));
-            }
+            driver.wait_until(cx, &store, "the delta", |cx| streamed(cx) != before);
             draw_settled(cx);
         };
         let mut heights = Vec::new();
@@ -2647,19 +2638,7 @@ mod tests {
                 .clone()
         });
         cx.simulate_resize(gpui::size(px(393.), px(600.)));
-        let deadline = crate::store::tests::host_deadline();
-        loop {
-            driver.step(cx, &store);
-            draw_settled(cx);
-            if ready.get() {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "inline host image finishes loading"
-            );
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        driver.settle_until(cx, &store, "the inline host image to load", |_| ready.get());
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
         let row = cx.debug_bounds("timeline-row-89").unwrap_or_else(|| {
             panic!(
@@ -2685,20 +2664,9 @@ mod tests {
             draw_settled(cx);
         };
         click(point(pill.center().x, pill.top() - px(40.)), cx);
-        let deadline = crate::store::tests::host_deadline();
-        while cx.debug_bounds("image-viewer-image").is_none() {
-            driver.step(cx, &store);
-            draw_settled(cx);
-            assert!(
-                Instant::now() < deadline,
-                "exposed image finishes its explicit read"
-            );
-            std::thread::yield_now();
-        }
-        assert!(
-            cx.debug_bounds("image-viewer-image").is_some(),
-            "exposed image opens the lightbox"
-        );
+        driver.settle_until(cx, &store, "the exposed image's explicit read", |cx| {
+            cx.debug_bounds("image-viewer-image").is_some()
+        });
         cx.simulate_keystrokes("escape");
         draw_settled(cx);
         assert!(cx.debug_bounds("image-viewer-image").is_none());

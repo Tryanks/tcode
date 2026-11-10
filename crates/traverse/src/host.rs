@@ -30,7 +30,7 @@ use tcode_protocol::{
 use crate::{
     group::{
         ALPN_GROUP, GroupLine, GroupMachine, GroupRecord, GroupRejection, GroupState,
-        JoiningDevice, JoiningMachine, MAX_GROUP_LINE, MAX_GROUP_MACHINES, Membership, Roster,
+        JoiningDevice, JoiningMachine, MAX_GROUP_LINE, Membership, Roster,
     },
     identity::{DeviceGrant, DeviceRecord, HostIdentity, SpaceRecord, existing_device, now_unix},
     lan,
@@ -388,8 +388,13 @@ impl TraverseHost {
         self.shared.allow_pairing && self.shared.state.lock().unwrap().identity.pairing_enabled
     }
 
+    /// Turn pairing on or off. A switch the machine cannot write is
+    /// logged and left as it was; [`TraverseHost::hosting`] answers it as a
+    /// failure.
     pub fn set_pairing_enabled(&self, enabled: bool) {
-        self.shared.set_pairing_enabled(enabled);
+        if let Err(error) = self.shared.set_pairing_enabled(enabled) {
+            log::error!("could not persist the pairing switch: {error}");
+        }
     }
 
     /// Paired devices, oldest first, with how each connected one reaches us.
@@ -898,19 +903,19 @@ impl Shared {
         }
     }
 
-    fn set_pairing_enabled(&self, enabled: bool) {
+    fn set_pairing_enabled(&self, enabled: bool) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
         let previous = state.identity.clone();
         state.identity.pairing_enabled = enabled;
         self.revise(&mut state.identity);
         if let Err(error) = state.identity.save() {
             state.identity = previous;
-            log::error!("could not persist the pairing switch: {error}");
-            return;
+            return Err(error);
         }
         if !enabled && state.invitation.take().is_some() {
             self.notify(None);
         }
+        Ok(())
     }
 
     fn devices(&self) -> Vec<DeviceInfo> {
@@ -1228,7 +1233,11 @@ impl Shared {
             }
             HostingAction::State => {}
             HostingAction::SetEnabled(enabled) => {
-                self.set_pairing_enabled(enabled);
+                self.set_pairing_enabled(enabled)
+                    .map_err(|error| ProtocolError {
+                        code: "pairing_update_failed".into(),
+                        message: error.to_string(),
+                    })?;
                 if enabled && self.allow_pairing {
                     self.mint();
                 }
@@ -1627,7 +1636,6 @@ fn rejection_error(reason: GroupRejection) -> io::Error {
         GroupRejection::Disabled => "that machine is not accepting new devices",
         GroupRejection::Busy => "that machine could not record the change; try again",
         GroupRejection::NotMember => "that machine is not in this group",
-        GroupRejection::Full => "the group has as many machines as it can hold",
     };
     io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
@@ -1888,11 +1896,7 @@ impl Shared {
         let (reply, hints) =
             run_blocking(self.dial_group(&invite.host_id, invite.relay.as_deref(), &typed, &line))?;
         let joined = match reply {
-            GroupLine::Joined { state }
-                if state.is_valid() && state.id == group_id && state.is_member_machine(&id) =>
-            {
-                state
-            }
+            GroupLine::Joined { state } => state,
             GroupLine::Rejected { reason } => return Err(rejection_error(reason)),
             other => {
                 return Err(io::Error::new(
@@ -2052,7 +2056,7 @@ impl Shared {
         let Some(group) = &state.identity.group else {
             return Ok(());
         };
-        if theirs.id != group.state.id || !theirs.is_valid() {
+        if theirs.id != group.state.id {
             return Ok(());
         }
         let previous = state.identity.clone();
@@ -2139,11 +2143,6 @@ impl Shared {
         }
         if !self.allow_pairing || !state.identity.pairing_enabled {
             return rejected(GroupRejection::Disabled);
-        }
-        if !record.state.is_member_machine(remote)
-            && record.state.member_machines().count() >= MAX_GROUP_MACHINES
-        {
-            return rejected(GroupRejection::Full);
         }
         if !self.take_invitation(&mut state, secret) {
             return rejected(GroupRejection::Invalid);
@@ -2414,7 +2413,6 @@ impl ProtocolHandler for PairHandler {
                 device,
                 space,
             }) if device.is_valid()
-                && secret.len() <= wire::MAX_CONTROL_LINE
                 && space
                     .as_deref()
                     .is_none_or(tcode_client::pairing::valid_space_id) =>
@@ -2522,7 +2520,6 @@ impl ProtocolHandler for MainHandler {
         let policy = tcode_client::attachment::AttachmentPolicy::network();
         let hello_done = Arc::new(AtomicBool::new(false));
         let principal = Arc::new(Mutex::new(None));
-        let open_streams = Arc::new(AtomicUsize::new(0));
         let tunnels = Arc::new(AtomicUsize::new(0));
         // The hosting list shows how each device is carried.
         let mut paths = connection.path_events();
@@ -2538,24 +2535,16 @@ impl ProtocolHandler for MainHandler {
             let Ok((send, recv)) = accepted else {
                 break;
             };
-            if open_streams.fetch_add(1, Ordering::AcqRel) >= wire::MAX_STREAMS as usize {
-                open_streams.fetch_sub(1, Ordering::AcqRel);
-                drop((send, recv));
-                continue;
-            }
             let stream = StreamTask {
                 shared: shared.clone(),
                 connection: connection.clone(),
                 policy,
                 hello_done: hello_done.clone(),
                 principal: principal.clone(),
-                open_streams: open_streams.clone(),
                 tunnels: tunnels.clone(),
             };
             tokio::spawn(async move {
-                let result = stream.run(send, wire::reader(recv)).await;
-                stream.open_streams.fetch_sub(1, Ordering::AcqRel);
-                if let Err(error) = result {
+                if let Err(error) = stream.run(send, wire::reader(recv)).await {
                     log::debug!("main stream ended: {error}");
                 }
             });
@@ -2582,7 +2571,6 @@ struct StreamTask {
     connection: Connection,
     hello_done: Arc<AtomicBool>,
     principal: Arc<Mutex<Option<Principal>>>,
-    open_streams: Arc<AtomicUsize>,
     tunnels: Arc<AtomicUsize>,
 }
 
@@ -2623,12 +2611,7 @@ impl StreamTask {
     }
 
     async fn run(&self, mut send: SendStream, mut reader: LineReader) -> io::Result<()> {
-        let first = match wire::read_control::<ClientLine>(&mut reader).await {
-            Ok(first) => first,
-            Err(error) => {
-                return Err(error);
-            }
-        };
+        let first = wire::read_first::<ClientLine>(&mut reader, wire::MAX_CONTROL_LINE).await?;
         match first {
             ClientLine::Hello {
                 protocol_version,
@@ -2863,12 +2846,6 @@ impl StreamTask {
                     }
                 }
                 if let Some(key) = value.get("key").and_then(serde_json::Value::as_str) {
-                    if !valid_key(key) {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "client line carries an invalid key",
-                        ));
-                    }
                     value["key"] = format!("{scope}:{key}").into();
                 }
                 let mut line = value.to_string();
@@ -2942,18 +2919,6 @@ async fn refuse(mut send: SendStream, reason: &str) -> io::Result<()> {
     .await?;
     send.finish()?;
     Ok(())
-}
-
-/// A client-minted key is one UUID; the host adds the device scope itself.
-pub(crate) fn valid_key(key: &str) -> bool {
-    key.len() == 36
-        && key.bytes().enumerate().all(|(index, byte)| {
-            if matches!(index, 8 | 13 | 18 | 23) {
-                byte == b'-'
-            } else {
-                byte.is_ascii_hexdigit()
-            }
-        })
 }
 
 fn timed_out(what: &str) -> io::Error {

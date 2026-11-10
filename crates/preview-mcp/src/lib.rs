@@ -7,8 +7,6 @@
 //!
 //! [Model Context Protocol]: https://modelcontextprotocol.io
 
-use std::time::Duration;
-
 pub mod page;
 mod tools;
 
@@ -64,11 +62,9 @@ pub fn start(host: &mut mcp_host::Host) -> PreviewMcpServer {
     let (req_tx, req_rx) = async_channel::unbounded::<BrokerRequest>();
     let broker = Broker::new(
         req_tx,
-        Duration::from_secs(65),
         mcp_host::BrokerErrors {
             unavailable: "preview UI is not available",
             dropped: "preview UI dropped the request",
-            timed_out: "preview operation timed out",
         },
     );
     let tokens = TokenRegistry::new(move |session_id| tools::service(broker.clone(), session_id));

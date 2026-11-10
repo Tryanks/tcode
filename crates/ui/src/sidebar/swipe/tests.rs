@@ -19,22 +19,13 @@ use crate::test_frames::{draw, draw_settled};
 const FRAME: Duration = Duration::from_millis(16);
 const WIDTH: f32 = 393.;
 
-thread_local! {
-    /// When the test began, and how far the test clock has been advanced.
-    static PACE: std::cell::Cell<(std::time::Instant, Duration)> =
-        std::cell::Cell::new((std::time::Instant::now(), Duration::ZERO));
-}
-
-/// Lets `time` pass. gpui's touch recognizer reads the wall clock, Tcode's
-/// motion the test clock, and in the app they are one clock: a finger that
-/// paused has paused for both, or it would release into a fling no finger
-/// gave. Wall time is kept from falling behind, as `test_frames` keeps it.
+/// Lets `time` pass on the executor's clock, which a swipe reads. gpui's
+/// touch recognizer reads the wall clock, for which no time passes: a finger
+/// lifted after a pause is still moving to it, and its release a fling,
+/// which a row catches as it catches every released pan
+/// (`SessionsSidebar::catch_row_fling`).
 fn pass(cx: &mut VisualTestContext, time: Duration) {
     cx.executor().advance_clock(time);
-    let (started, elapsed) = PACE.get();
-    let elapsed = elapsed + time;
-    PACE.set((started, elapsed));
-    std::thread::sleep(elapsed.saturating_sub(started.elapsed()));
 }
 
 struct Phone {
@@ -125,22 +116,30 @@ impl Phone {
         })
     }
 
-    /// Display frames, the host answering between them, until `ready`.
+    /// Display frames, the host answering between them, until `ready`. Once
+    /// what the host said is drawn and the window asks for no frame, only
+    /// the host can move it on, so the test waits for the host.
     fn until(
         &mut self,
         cx: &mut VisualTestContext,
         what: &str,
         mut ready: impl FnMut(&Phone, &mut VisualTestContext) -> bool,
     ) {
-        for _ in 0..300 {
-            frame(cx);
+        loop {
             self.driver.step(cx, &self.store);
+            let asked = frame(cx);
             if ready(self, cx) {
                 draw(cx);
                 return;
             }
+            if !asked && !frame(cx) {
+                if ready(self, cx) {
+                    draw(cx);
+                    return;
+                }
+                self.driver.wait_for_host(what);
+            }
         }
-        panic!("waiting for {what}");
     }
 
     /// Everything sent so far has reached the host and come back.
@@ -235,10 +234,12 @@ impl Phone {
     }
 }
 
-fn frame(cx: &mut VisualTestContext) {
+/// A display frame, and whether the window had asked for it.
+fn frame(cx: &mut VisualTestContext) -> bool {
     pass(cx, FRAME);
-    cx.update(|window, cx| window.simulate_next_frame(cx));
+    let asked = cx.update(|window, cx| window.simulate_next_frame(cx)) > 0;
     draw(cx);
+    asked
 }
 
 #[derive(Clone, Copy)]

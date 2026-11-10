@@ -22,7 +22,7 @@ use gpui_base::{ElementExt as _, v_flex};
 use serde::Deserialize;
 use tcode_core::session::{EntryContent, TimelineEntry};
 use tcode_protocol::{
-    STORED_OUTPUT_COLS,
+    MAX_STORED_OUTPUT_COLS,
     terminal::{CellWidth, TerminalCell, TerminalFrame, TerminalRow, TerminalStyle},
 };
 use unicode_segmentation::UnicodeSegmentation as _;
@@ -513,7 +513,7 @@ const FRAME_ROWS: usize = MAX_ROWS + tcode_protocol::STORED_OUTPUT_HISTORY;
 pub(crate) type ColsChangeHandler = Box<dyn Fn(&u16, &mut Window, &mut App) + 'static>;
 
 pub(crate) fn clamp_cols(cols: u16) -> u16 {
-    cols.clamp(*STORED_OUTPUT_COLS.start(), *STORED_OUTPUT_COLS.end())
+    cols.min(MAX_STORED_OUTPUT_COLS)
 }
 
 /// The host's screen for one command, as far as the panel has it.

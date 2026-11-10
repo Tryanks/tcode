@@ -34,7 +34,7 @@ pub(super) fn write_ssh_config(data_dir: &Path, exe: &Path, machines: &[String])
         String::from("# Written by Tcode for Zed's remote development; Tcode rewrites it.\n");
     for machine in machines {
         text.push_str(&format!(
-            "\nHost {alias}\n    ProxyCommand {exe} ssh-proxy {machine} --data-dir {data_dir}\n    StrictHostKeyChecking no\n    UserKnownHostsFile {null}\n    LogLevel ERROR\n    ServerAliveInterval 15\n",
+            "\nHost {alias}\n    ProxyCommand {exe} ssh-proxy {machine} --data-dir {data_dir}\n    StrictHostKeyChecking no\n    UserKnownHostsFile {null}\n    LogLevel ERROR\n",
             alias = alias(machine),
             exe = quoted(exe),
             data_dir = quoted(data_dir),

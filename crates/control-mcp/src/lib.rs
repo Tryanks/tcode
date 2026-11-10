@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use tcode_core::control::{ControlCategory, ControlGrant, ControlTier};
 
@@ -401,11 +400,9 @@ pub fn start(host: &mut mcp_host::Host) -> ControlMcpServer {
     let (req_tx, req_rx) = async_channel::unbounded();
     let broker = Broker::new(
         req_tx,
-        Duration::from_secs(60),
         mcp_host::BrokerErrors {
             unavailable: "tcode control is not available",
             dropped: "tcode control dropped the request",
-            timed_out: "tcode control operation timed out",
         },
     );
     let grants = GrantSource::default();

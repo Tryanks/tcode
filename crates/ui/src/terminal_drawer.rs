@@ -1306,6 +1306,7 @@ impl TerminalDrawer {
             self.hovered_link = None;
             return;
         };
+        let now = cx.background_executor().now();
         let workspace_store = self.workspace_store.clone();
         workspace_store.read(cx).with_terminal_workspace_for(
             self.session_id.as_deref(),
@@ -1335,9 +1336,9 @@ impl TerminalDrawer {
                 if terminal_link_modifier(event.modifiers, cfg!(target_os = "macos")) {
                     if self
                         .last_link_hover
-                        .is_none_or(|last| last.elapsed() >= Duration::from_millis(16))
+                        .is_none_or(|last| now - last >= Duration::from_millis(16))
                     {
-                        self.last_link_hover = Some(Instant::now());
+                        self.last_link_hover = Some(now);
                         self.hovered_link = entry
                             .terminal
                             .hyperlink_at(point.0, point.1)
@@ -3534,9 +3535,8 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump = link.clone();
-        let executor = cx.background_executor.clone();
         let pump = cx.background_executor.spawn(async move {
-            pump.pump_with_timer(|delay| executor.timer(delay)).await;
+            pump.pump().await;
         });
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(

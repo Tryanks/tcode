@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_MODEL_BYTES: usize = 48 * 1024;
-pub const MAX_MODEL_LINES: usize = 2_000;
 pub const PREVIEW_BYTES: usize = 16 * 1024;
 pub const PAGE_BYTES: usize = 16 * 1024;
 pub const SEARCH_LIMIT: usize = 20;
@@ -55,6 +54,10 @@ pub struct UiNode {
     pub enabled: bool,
     pub focused: bool,
     pub children: Vec<UiNode>,
+    /// Why the platform could not list this element's children, which the
+    /// tree then lacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub children_error: Option<String>,
 }
 
 impl UiNode {
@@ -328,6 +331,12 @@ pub fn render_line(node: &UiNode, depth: usize) -> String {
     }
     if node.focused {
         line.push_str(" focused");
+    }
+    if let Some(error) = &node.children_error {
+        line.push_str(&format!(
+            " children_unreadable=\"{}\"",
+            display_string(error, 240)
+        ));
     }
     line
 }
@@ -657,26 +666,10 @@ fn walk_mut(root: &mut UiNode, callback: &mut impl FnMut(&mut UiNode, &Vec<usize
     recurse(root, &mut Vec::new(), callback);
 }
 
-pub fn output_exceeds_limit(text: &str) -> bool {
-    text.len() > MAX_MODEL_BYTES || text.lines().count() > MAX_MODEL_LINES
-}
-
-pub fn safe_prefix(text: &str, byte_limit: usize, line_limit: usize) -> (&str, usize) {
+pub fn safe_prefix(text: &str, byte_limit: usize) -> (&str, usize) {
     let mut end = text.len().min(byte_limit);
     while !text.is_char_boundary(end) {
         end -= 1;
-    }
-    if line_limit != usize::MAX {
-        let mut line_count = 0;
-        for (index, byte) in text[..end].bytes().enumerate() {
-            if byte == b'\n' {
-                line_count += 1;
-                if line_count >= line_limit {
-                    end = index + 1;
-                    break;
-                }
-            }
-        }
     }
     (&text[..end], end)
 }

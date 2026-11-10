@@ -299,14 +299,8 @@ pub struct TurnTiming {
 }
 
 impl TurnTiming {
-    /// Build a breakdown. Tool time is already intersected with the turn's
-    /// bounds by [`ToolClock`]; the clamp here is only a last-resort guard that
-    /// keeps `tool_ms <= total_ms` true for hand-built values.
     pub fn new(total_ms: u64, tool_ms: u64) -> Self {
-        Self {
-            total_ms,
-            tool_ms: tool_ms.min(total_ms),
-        }
+        Self { total_ms, tool_ms }
     }
 }
 
@@ -827,7 +821,7 @@ pub struct Timeline {
     pub goal: Option<agent::Goal>,
     /// The open user-input request (Claude `AskUserQuestion`, Codex
     /// `requestUserInput` / `request_user_input_async`), if any. Cleared when
-    /// it resolves or the turn ends.
+    /// the provider reports it resolved or the session closes.
     pub pending_user_input: Option<PendingUserInput>,
     pub usage: Option<TokenUsage>,
     pub resume: Option<ResumeCursor>,
@@ -1407,11 +1401,6 @@ impl Timeline {
                 if usage.is_some() {
                     self.usage = usage;
                 }
-                // A finished turn can no longer be waiting on approvals or input;
-                // a background subagent it spawned still can.
-                self.pending_approvals
-                    .retain(|request| request.parent_item_id.is_some());
-                self.pending_user_input = None;
             }
             AgentEvent::ItemStarted(item) => {
                 self.upsert_item(ts, item);
@@ -2712,7 +2701,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_user_input_blocks_until_resolution_or_turn_end() {
+    fn structured_user_input_blocks_until_resolution() {
         let request = AgentEvent::UserInputRequested {
             request_id: "que_1".into(),
             questions: vec![UserInputQuestion {
@@ -2740,17 +2729,6 @@ mod tests {
             &AgentEvent::UserInputResolved {
                 request_id: "que_1".into(),
                 answers: serde_json::Map::new(),
-            },
-        );
-        assert!(timeline.pending_user_input.is_none());
-
-        timeline.apply_at(None, &request);
-        timeline.apply_at(
-            None,
-            &AgentEvent::TurnCompleted {
-                turn_id: "opencode-1".into(),
-                status: TurnStatus::Interrupted,
-                usage: None,
             },
         );
         assert!(timeline.pending_user_input.is_none());

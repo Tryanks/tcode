@@ -21,17 +21,11 @@
       post(stringify(message));
     } catch (_) {}
   };
-  const MAX_TEXT = 2000;
-  const clip = (text, max) => {
-    const value = String(text == null ? "" : text);
-    return value.length > max ? value.slice(0, max) + "…" : value;
-  };
-
   // Console entries the page-world hooks see.
   const relay = (entry) => {
     if (!entry || entry.t !== "console") return;
-    const message = { t: "console", level: clip(entry.level, 16), text: clip(entry.text, MAX_TEXT) };
-    if (entry.location != null) message.location = clip(entry.location, MAX_TEXT);
+    const message = { t: "console", level: String(entry.level), text: String(entry.text) };
+    if (entry.location != null) message.location = String(entry.location);
     send(message);
   };
   if (hooks) {
@@ -309,9 +303,9 @@
     return details;
   };
 
-  const quote = (text, max) =>
+  const quote = (text) =>
     '"' +
-    clip(text, max)
+    String(text)
       .replace(/\\/g, "\\\\")
       .replace(/"/g, '\\"')
       .replace(/\n/g, "\\n")
@@ -321,25 +315,15 @@
 
   const line = (depth, el, role, name, value, details) => {
     let text = "  ".repeat(depth) + "@" + refOf(el) + " " + role;
-    if (name) text += " " + quote(name, 240);
-    if (value && value !== name) text += " value=" + quote(value, 320);
+    if (name) text += " " + quote(name);
+    if (value && value !== name) text += " value=" + quote(value);
     if (details && details.length) text += " " + details.join(" ");
     return text;
   };
 
-  const OUTLINE_BUDGET = 20000;
   const outline = (root) => {
     const lines = [];
-    let size = 0;
-    let omitted = 0;
-    const push = (text) => {
-      if (size + text.length + 1 > OUTLINE_BUDGET) {
-        omitted += 1;
-        return;
-      }
-      lines.push(text);
-      size += text.length + 1;
-    };
+    const push = (text) => lines.push(text);
     // The nodes a box's children render from: an open shadow root's, with
     // its slots' assigned nodes, else its light children.
     const childNodes = (node) => {
@@ -388,10 +372,7 @@
         for (const child of nodes) if (child.nodeType === 1 && visit(child, depth + 1)) any = true;
         const name = nameOf(el, role) || (any ? directText(nodes) : invisible ? "" : textOf(el));
         const text = line(depth, el, role, name, valueOf(el, role), detailsOf(el, role));
-        if (lines[at] === "") {
-          lines[at] = text;
-          size += text.length;
-        }
+        lines[at] = text;
         return true;
       }
       // A box with no role of its own: its children stand in its place,
@@ -405,19 +386,17 @@
       const text = any ? directText(nodes) : textOf(el);
       if (!text) return any;
       const entry = line(depth, el, "text", text, "", []);
-      if (any) {
-        lines.splice(at, 0, entry);
-        size += entry.length + 1;
-      } else push(entry);
+      if (any) lines.splice(at, 0, entry);
+      else push(entry);
       return true;
     };
     visit(root, 0);
-    return { text: lines.filter((text) => text !== "").join("\n"), lines: lines.length, omitted };
+    return { text: lines.join("\n"), lines: lines.length };
   };
 
   const describe = (el) => {
     const role = roleOf(el, getComputedStyle(el)) || el.localName;
-    return { ref: refOf(el), role, name: clip(nameOf(el, role), 240) };
+    return { ref: refOf(el), role, name: nameOf(el, role) };
   };
 
   // --- Synthetic input -------------------------------------------------------
@@ -452,7 +431,7 @@
       const result = outline(document.body || document.documentElement);
       snapshotGeneration = generation;
       reported = false;
-      const snapshot = {
+      return {
         url: location.href,
         title: document.title,
         loading: document.readyState !== "complete",
@@ -460,8 +439,6 @@
         elements: result.lines,
         outline: result.text,
       };
-      if (result.omitted) snapshot.omitted = result.omitted + " lines past the 20000-character budget";
-      return snapshot;
     },
 
     click: (args) => {

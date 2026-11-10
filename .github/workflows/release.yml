@@ -841,7 +841,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CARGO_TERM_COLOR: always
-      CARGO_NDK_PLATFORM: 26
+      CARGO_NDK_PLATFORM: 30
       VERSION: ${{ needs.setup.outputs.version }}
       TCODE_BUILD_VERSION: ${{ needs.setup.outputs.version }}
     steps:

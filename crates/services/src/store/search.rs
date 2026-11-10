@@ -6,9 +6,9 @@ use std::io;
 
 use turso::Connection;
 
+use super::SessionStore;
 use super::db::{Db, blob, integer, text};
 use super::rows::{self, Storage, Thread};
-use super::{READ_VERSION, SessionStore};
 
 pub(super) fn create_tables(db: &Db, connection: &Connection) -> io::Result<()> {
     db.execute(
@@ -42,12 +42,6 @@ pub(super) fn forget(st: &Storage, connection: &Connection, thread: &Thread) -> 
         [thread.key],
     )?;
     Ok(())
-}
-
-/// What entries extracted under `version` are kept under: the store's own
-/// read normalization is part of what they were extracted from.
-fn stored_version(version: u32) -> i64 {
-    (i64::from(version) << 16) | i64::from(READ_VERSION)
 }
 
 /// The identity of a thread's log: a replacement changes its revision, an
@@ -112,7 +106,7 @@ impl SessionStore {
                     connection,
                     "SELECT s.revision, s.end_row FROM search_sources s \
                      JOIN threads t ON t.key = s.thread WHERE t.id = ?1 AND s.version = ?2",
-                    (id, stored_version(version)),
+                    (id, i64::from(version)),
                     |row| {
                         indexed = Some(SearchSource {
                             revision: blob(row, 0)?,
@@ -169,7 +163,7 @@ impl SessionStore {
                      VALUES (?1, ?2, ?3, ?4)",
                     (
                         thread.key,
-                        stored_version(version),
+                        i64::from(version),
                         source.revision.clone(),
                         source.end as i64,
                     ),

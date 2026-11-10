@@ -186,10 +186,10 @@ mod tests {
             repository("git.acme.test:3000/forge", "team", "app")
         );
         assert_eq!(
-            pull_request_url(&[], "https://codeberg.org/forgejo/forgejo/pulls/9")
+            pull_request_url(&[], "https://codeberg.org/team/app/pulls/9")
                 .unwrap()
                 .0,
-            PullRequestKey::new("codeberg.org", "forgejo/forgejo", 9)
+            PullRequestKey::new("codeberg.org", "team/app", 9)
         );
         assert!(pull_request_url(&[], "https://git.example.com/a/b/pulls/9").is_none());
         assert!(pull_request_url(&known, "https://git.acme.test:3000/forge/a/b/pull/9").is_none());

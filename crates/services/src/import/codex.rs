@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::{ConvertedEntry, ConvertedThread, file_modified_ms, timestamp_ms};
 
-pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<ConvertedThread>, String> {
+pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread, String> {
     let file =
         File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
     let fallback_ts = file_modified_ms(path);
@@ -29,9 +29,6 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
             path.display()
         ));
     }
-    if meta.pointer("/payload/originator").and_then(Value::as_str) == Some("tcode") {
-        return Ok(None);
-    }
 
     let first_meta_ts = meta
         .get("timestamp")
@@ -39,13 +36,12 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
         .unwrap_or(fallback_ts);
     let created_ms = first_meta_ts;
     let mut updated_ms = first_meta_ts;
-    let mut first_user = None;
     let mut entries = Vec::new();
     let mut pending = HashMap::<String, usize>::new();
     let mut next_id = 0_u64;
 
     for line in lines {
-        let Ok(line) = line else { continue };
+        let line = line.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -78,7 +74,6 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                                 continue;
                             }
                             let content = if role == Some("user") {
-                                first_user.get_or_insert_with(|| text.clone());
                                 ItemContent::UserMessage {
                                     text,
                                     context_len: None,
@@ -93,24 +88,6 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                                 continue;
                             };
                             push_item(&mut entries, ts, &mut next_id, content, None);
-                        }
-                    }
-                    "agent_message" => {
-                        if let Some(text) = payload
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .or_else(|| payload.get("text").and_then(Value::as_str))
-                        {
-                            push_item(
-                                &mut entries,
-                                ts,
-                                &mut next_id,
-                                ItemContent::AssistantMessage {
-                                    text: text.to_string(),
-                                    summarized: false,
-                                },
-                                None,
-                            );
                         }
                     }
                     "reasoning" => {
@@ -268,23 +245,21 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                     }
                     "local_shell_call" => {
                         let command = payload
-                            .get("command")
-                            .map(readable_output)
-                            .unwrap_or_default();
+                            .pointer("/action/command")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ");
                         push_item(
                             &mut entries,
                             ts,
                             &mut next_id,
                             ItemContent::CommandExecution {
                                 command,
-                                output: payload
-                                    .get("output")
-                                    .map(readable_output)
-                                    .unwrap_or_default(),
-                                exit_code: payload
-                                    .get("exit_code")
-                                    .and_then(Value::as_i64)
-                                    .and_then(|code| i32::try_from(code).ok()),
+                                output: String::new(),
+                                exit_code: None,
                                 status: ItemStatus::Completed,
                             },
                             payload.get("id").and_then(Value::as_str),
@@ -293,12 +268,16 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                     _ => {}
                 }
             }
-            Some("event_msg")
-                if value.pointer("/payload/type").and_then(Value::as_str)
-                    == Some("context_compacted") =>
-            {
-                entries.push(ConvertedEntry::Compacted { ts });
-            }
+            Some("event_msg") => match value.pointer("/payload/type").and_then(Value::as_str) {
+                Some("context_compacted") => entries.push(ConvertedEntry::Compacted { ts }),
+                Some("thread_rolled_back") => {
+                    if let Some(turns) = value.pointer("/payload/num_turns").and_then(Value::as_u64)
+                    {
+                        roll_back(&mut entries, &mut pending, turns);
+                    }
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -310,13 +289,44 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
             *status = ItemStatus::Interrupted;
         }
     }
-    Ok(Some(ConvertedThread {
+    Ok(ConvertedThread {
         external_id: external_id.to_string(),
         created_ms,
         updated_ms,
-        first_user,
+        title: None,
         entries,
-    }))
+    })
+}
+
+/// Drop the last `turns` user turns, as Codex replays a rollback
+/// (`ContextManager::drop_last_n_user_turns`): everything from the user
+/// message that opens the first dropped turn on, and when there are no more
+/// turns than that, from the first user message on.
+fn roll_back(entries: &mut Vec<ConvertedEntry>, pending: &mut HashMap<String, usize>, turns: u64) {
+    let starts: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            matches!(
+                entry,
+                ConvertedEntry::Item {
+                    item: ThreadItem {
+                        content: ItemContent::UserMessage { .. },
+                        ..
+                    },
+                    ..
+                }
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let turns = usize::try_from(turns).unwrap_or(usize::MAX);
+    if turns == 0 || starts.is_empty() {
+        return;
+    }
+    let cut = starts[starts.len().saturating_sub(turns)];
+    entries.truncate(cut);
+    pending.retain(|_, index| *index < cut);
 }
 
 fn push_item(
@@ -358,10 +368,9 @@ fn message_texts(payload: &Value, kind: &str) -> Vec<String> {
 
 fn is_harness_text(text: &str) -> bool {
     let text = text.trim_start();
-    text.starts_with('<')
-        && ["<environment_context", "<user_instructions", "<permissions"]
-            .iter()
-            .any(|prefix| text.starts_with(prefix))
+    ["<environment_context", "<permissions"]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
 }
 
 /// What Codex writes as the output of a call it dropped when its turn was

@@ -1,14 +1,14 @@
 //! What Tcode reads of a Bitbucket Cloud pull request, in Tcode's terms. Users carry no
 //! username on Bitbucket: an account shows by its nickname, and a write names it by its uuid.
 
-use super::api::{Api, PAGE_LIMIT, Request, error};
-use crate::forge::{ForgeError, ForgeErrorKind};
+use super::api::{Api, PAGE_LIMIT, Request};
+use crate::forge::ForgeError;
 use serde_json::Value;
 use std::collections::HashMap;
 use tcode_core::{
     pull_request::{
-        ChecksState, Mergeability, PullRequestAuthor, PullRequestKey, PullRequestSnapshot,
-        PullRequestState,
+        ChecksState, Mergeability, PullRequestAuthor, PullRequestKey, PullRequestMergeMethod,
+        PullRequestSnapshot, PullRequestState,
     },
     pull_request_watch::{CheckStatus, PullRequestCheck, PullRequestRemark},
     session::ReviewSide,
@@ -67,14 +67,7 @@ impl Pr<'_> {
         self.api.send(Request::get(path, operation))?.json()
     }
     pub(super) fn pr(&self) -> Result<Value, ForgeError> {
-        let pr = self.get(self.path("?fields=-rendered"), "PullRequest")?;
-        if pr["id"].as_u64() != Some(self.key.number) {
-            return Err(error(
-                ForgeErrorKind::Uncertain,
-                "Bitbucket answered another pull request",
-            ));
-        }
-        Ok(pr)
+        self.get(self.path("?fields=-rendered"), "PullRequest")
     }
     /// The build statuses of `head`, one page of them.
     pub(super) fn checks(&self, head: &str) -> Result<Vec<PullRequestCheck>, ForgeError> {
@@ -225,8 +218,8 @@ pub(super) fn actor(user: &Value) -> Option<PullRequestActor> {
     })
 }
 
-/// The pull request from one read; `checks` are the head's build statuses. Bitbucket keeps no
-/// closing time, so a closed or merged pull request's last update stands for it.
+/// The pull request from one read; `checks` are the head's build statuses. The pull request
+/// object holds no time it was closed or merged, so neither is known.
 pub(super) fn snapshot(
     pr: &Value,
     checks: &[PullRequestCheck],
@@ -234,17 +227,16 @@ pub(super) fn snapshot(
 ) -> Option<PullRequestSnapshot> {
     let state = state(pr)?;
     let updated_at = text(pr, "updated_on")?;
-    let ended_at = (state != PullRequestState::Open).then(|| updated_at.clone());
     Some(PullRequestSnapshot {
         state,
         title: text(pr, "title")?,
         head_branch: text(&pr["source"]["branch"], "name")?,
         base_branch: text(&pr["destination"]["branch"], "name")?,
         is_draft: pr["draft"].as_bool().unwrap_or(false),
-        updated_at,
+        updated_at: Some(updated_at),
         synced_at,
-        closed_at: ended_at.clone(),
-        merged_at: ended_at.filter(|_| state == PullRequestState::Merged),
+        closed_at: None,
+        merged_at: None,
         author: login(&pr["author"]).map(|login| PullRequestAuthor {
             login,
             avatar_url: text(&pr["author"]["links"]["avatar"], "href"),
@@ -258,6 +250,44 @@ pub(super) fn snapshot(
         // Conflicts are a read of their own, which the summary leaves to the detail.
         mergeability: Mergeability::Unknown,
     })
+}
+
+/// Bitbucket's name for a merge method. Rebase is the linear history GitHub calls rebase and
+/// merge.
+pub(super) fn merge_strategy(method: PullRequestMergeMethod) -> &'static str {
+    match method {
+        PullRequestMergeMethod::Merge => "merge_commit",
+        PullRequestMergeMethod::Squash => "squash",
+        PullRequestMergeMethod::Rebase => "rebase_fast_forward",
+    }
+}
+
+/// The methods the destination branch allows, its default first: `destination.branch`'s
+/// `merge_strategies` and `default_merge_strategy`. A strategy Tcode has no method for is
+/// left out.
+pub(super) fn merge_methods(pr: &Value) -> Vec<PullRequestMergeMethod> {
+    let branch = &pr["destination"]["branch"];
+    let method = |strategy: &str| {
+        [
+            PullRequestMergeMethod::Merge,
+            PullRequestMergeMethod::Squash,
+            PullRequestMergeMethod::Rebase,
+        ]
+        .into_iter()
+        .find(|method| merge_strategy(*method) == strategy)
+    };
+    let mut methods: Vec<_> = branch["merge_strategies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|strategy| method(strategy.as_str()?))
+        .collect();
+    if let Some(default) = branch["default_merge_strategy"].as_str().and_then(method)
+        && let Some(at) = methods.iter().position(|method| *method == default)
+    {
+        methods[..=at].rotate_right(1);
+    }
+    methods
 }
 
 /// The second a timestamp names, which Bitbucket writes to the microsecond.
@@ -467,11 +497,10 @@ pub(super) fn conversation(
 
 /// A participant's vote, the nearest Bitbucket has to a review.
 fn vote(participant: &Value) -> Option<PullRequestReviewState> {
-    match participant["state"].as_str() {
-        Some("approved") => Some(PullRequestReviewState::Approved),
-        Some("changes_requested") => Some(PullRequestReviewState::ChangesRequested),
-        _ => (participant["approved"].as_bool() == Some(true))
-            .then_some(PullRequestReviewState::Approved),
+    match participant["state"].as_str()? {
+        "approved" => Some(PullRequestReviewState::Approved),
+        "changes_requested" => Some(PullRequestReviewState::ChangesRequested),
+        _ => None,
     }
 }
 
@@ -572,4 +601,63 @@ pub(super) fn remarks(activity: &[Value]) -> Vec<PullRequestRemark> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The conflicts page is Bitbucket's one word on mergeability, taken at the first read
+    /// (#729): a path in it is a conflict, an empty page is clean.
+    ///
+    /// Shape: `paginated_file_conflicts`, the answer `/pullrequests/{id}/conflicts` redirects to
+    /// (Bitbucket Cloud OpenAPI, GET /repositories/{workspace}/{repo_slug}/file-conflicts/{spec},
+    /// whose documented example this follows). Content is invented.
+    /// The destination branch's strategies as Bitbucket lists them (shape: Bitbucket Cloud
+    /// OpenAPI, `pullrequest_endpoint.branch`'s `merge_strategies` and
+    /// `default_merge_strategy`; content invented): the default comes first, and a strategy
+    /// Tcode has no method for is left out.
+    #[test]
+    fn the_destination_branch_names_the_merge_methods() {
+        let pr = |strategies: Value, default: &str| {
+            json!({ "destination": { "branch": {
+                "name": "main",
+                "merge_strategies": strategies,
+                "default_merge_strategy": default,
+            } } })
+        };
+        assert_eq!(
+            merge_methods(&pr(
+                json!([
+                    "merge_commit",
+                    "squash",
+                    "fast_forward",
+                    "rebase_fast_forward"
+                ]),
+                "rebase_fast_forward"
+            )),
+            [
+                PullRequestMergeMethod::Rebase,
+                PullRequestMergeMethod::Merge,
+                PullRequestMergeMethod::Squash,
+            ]
+        );
+        assert_eq!(
+            merge_methods(&pr(json!(["squash", "squash_fast_forward"]), "squash")),
+            [PullRequestMergeMethod::Squash]
+        );
+    }
+
+    #[test]
+    fn a_conflicts_page_with_a_path_is_a_conflict() {
+        let conflicting = json!({
+            "pagelen": 500, "page": 1, "size": 1,
+            "values": [{"path": "src/lib.rs", "scenario": "content",
+                        "message": "File modified in both source and destination"}],
+        });
+        let clean = json!({"pagelen": 500, "page": 1, "size": 0, "values": []});
+        assert_eq!(conflicts(&conflicting), Mergeability::Conflicting);
+        assert_eq!(conflicts(&clean), Mergeability::Clean);
+    }
 }

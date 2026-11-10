@@ -419,8 +419,6 @@ impl AppState {
                 | Command::CheckoutBranch { session_id, .. }
                 | Command::MergeWorktree { session_id }
                 | Command::SetDraftWorkspace { session_id, .. }
-                | Command::MarkSessionRead { session_id, .. }
-                | Command::MarkSessionUnread { session_id }
                 | Command::WriteRelaunchMarker { session_id, .. } => session(session_id),
                 Command::ForkThread { id, .. } => session(id),
                 // A space may move its threads only between its own projects.
@@ -444,7 +442,11 @@ impl AppState {
                     session(session_id)?;
                     session(thread_id)
                 }
+                // Read marks are the host owner's, kept in their settings like the sidebar
+                // and favourite marks below.
                 Command::DeleteSession { .. }
+                | Command::MarkSessionRead { .. }
+                | Command::MarkSessionUnread { .. }
                 | Command::DeleteProject { .. }
                 | Command::CreateProject { .. }
                 | Command::CreateNewProject { .. }

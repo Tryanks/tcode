@@ -26,31 +26,19 @@ use std::{
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::Arc,
-    time::Duration,
 };
 
 #[derive(Default)]
 struct PlatformCallbacks {
-    open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
     quit: Option<Box<dyn FnMut() -> bool>>,
-    reopen: Option<Box<dyn FnMut()>>,
     displays_changed: Option<Box<dyn FnMut()>>,
-    system_sleep: Option<Box<dyn FnMut()>>,
-    system_wake: Option<Box<dyn FnMut()>>,
     lifecycle: Option<Box<dyn FnMut(AppLifecyclePhase)>>,
     memory_warning: Option<Box<dyn FnMut()>>,
-    app_menu_action: Option<ActionCallback>,
-    will_open_app_menu: Option<Box<dyn FnMut()>>,
-    validate_app_menu: Option<ValidateActionCallback>,
     thermal: Option<Box<dyn FnMut()>>,
     power_mode: Option<Box<dyn FnMut()>>,
-    keyboard_layout: Option<Box<dyn FnMut()>>,
     process_back: Option<Box<dyn FnMut()>>,
     scroll_capture: Option<Box<dyn FnMut(ScrollCaptureRequest)>>,
 }
-
-type ActionCallback = Box<dyn FnMut(&dyn Action)>;
-type ValidateActionCallback = Box<dyn FnMut(&dyn Action) -> bool>;
 
 pub(crate) struct AndroidPlatform {
     app: AndroidApp,
@@ -63,7 +51,6 @@ pub(crate) struct AndroidPlatform {
     window: RefCell<Option<Weak<AndroidWindowInner>>>,
     active_handle: Cell<Option<AnyWindowHandle>>,
     callbacks: RefCell<PlatformCallbacks>,
-    clipboard: RefCell<Option<ClipboardItem>>,
     thermal_state: Cell<ThermalState>,
     power_mode: Cell<PowerMode>,
     quit_pending: Cell<bool>,
@@ -92,7 +79,6 @@ impl AndroidPlatform {
             window: RefCell::new(None),
             active_handle: Cell::new(None),
             callbacks: RefCell::new(PlatformCallbacks::default()),
-            clipboard: RefCell::new(None),
             thermal_state: Cell::new(ThermalState::Nominal),
             power_mode: Cell::new(PowerMode::Unknown),
             quit_pending: Cell::new(false),
@@ -285,9 +271,7 @@ impl AndroidPlatform {
     }
 
     fn process_host_events(&self) {
-        // The Java Choreographer queues a frame every vsync. When drawing
-        // outlasts one, drawing each queued frame in turn would keep input
-        // unread for the whole backlog, so a drain draws at most once.
+        // A frame draws once, after every other event the drain holds.
         let mut frame = false;
         for event in host::drain() {
             if let HostEvent::RefreshRate(rate) = event {
@@ -437,11 +421,17 @@ struct AndroidKeyboardLayout;
 struct AndroidGestures;
 
 impl PlatformGestures for AndroidGestures {
+    /// Read once, when GPUI opens the window.
     fn tuning(&self) -> GestureTuning {
+        let defaults = GestureTuning::default();
+        let long_press_duration = host::long_press_timeout().unwrap_or_else(|error| {
+            log::error!("ViewConfiguration.getLongPressTimeout failed: {error:#}");
+            defaults.long_press_duration
+        });
         GestureTuning {
-            long_press_duration: Duration::from_millis(450),
+            long_press_duration,
             scroll_physics: ScrollPhysics::android(),
-            ..GestureTuning::default()
+            ..defaults
         }
     }
 }
@@ -561,9 +551,7 @@ impl Platform for AndroidPlatform {
         host::open_url(url);
     }
 
-    fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>) {
-        self.callbacks.borrow_mut().open_urls = Some(callback);
-    }
+    fn on_open_urls(&self, _callback: Box<dyn FnMut(Vec<String>)>) {}
 
     fn register_url_scheme(&self, _url: &str) -> Task<Result<()>> {
         Task::ready(Ok(()))
@@ -600,19 +588,13 @@ impl Platform for AndroidPlatform {
         self.callbacks.borrow_mut().quit = Some(callback);
     }
 
-    fn on_reopen(&self, callback: Box<dyn FnMut()>) {
-        self.callbacks.borrow_mut().reopen = Some(callback);
-    }
+    fn on_reopen(&self, _callback: Box<dyn FnMut()>) {}
 
     // Android reports device sleep only through the activity lifecycle
-    // (`on_app_lifecycle`), so these callbacks are kept but never fired.
-    fn on_system_sleep(&self, callback: Box<dyn FnMut()>) {
-        self.callbacks.borrow_mut().system_sleep = Some(callback);
-    }
+    // (`on_app_lifecycle`).
+    fn on_system_sleep(&self, _callback: Box<dyn FnMut()>) {}
 
-    fn on_system_wake(&self, callback: Box<dyn FnMut()>) {
-        self.callbacks.borrow_mut().system_wake = Some(callback);
-    }
+    fn on_system_wake(&self, _callback: Box<dyn FnMut()>) {}
 
     fn on_app_lifecycle(&self, callback: Box<dyn FnMut(AppLifecyclePhase)>) {
         self.callbacks.borrow_mut().lifecycle = Some(callback);
@@ -638,17 +620,11 @@ impl Platform for AndroidPlatform {
         Task::ready(Vec::new())
     }
 
-    fn on_app_menu_action(&self, callback: Box<dyn FnMut(&dyn Action)>) {
-        self.callbacks.borrow_mut().app_menu_action = Some(callback);
-    }
+    fn on_app_menu_action(&self, _callback: Box<dyn FnMut(&dyn Action)>) {}
 
-    fn on_will_open_app_menu(&self, callback: Box<dyn FnMut()>) {
-        self.callbacks.borrow_mut().will_open_app_menu = Some(callback);
-    }
+    fn on_will_open_app_menu(&self, _callback: Box<dyn FnMut()>) {}
 
-    fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>) {
-        self.callbacks.borrow_mut().validate_app_menu = Some(callback);
-    }
+    fn on_validate_app_menu_command(&self, _callback: Box<dyn FnMut(&dyn Action) -> bool>) {}
 
     fn thermal_state(&self) -> ThermalState {
         self.thermal_state.get()
@@ -695,16 +671,13 @@ impl Platform for AndroidPlatform {
     }
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
-        host::read_clipboard()
-            .map(ClipboardItem::new_string)
-            .or_else(|| self.clipboard.borrow().clone())
+        host::read_clipboard().map(ClipboardItem::new_string)
     }
 
     fn write_to_clipboard(&self, item: ClipboardItem) {
         if let Some(text) = item.text() {
             host::write_clipboard(text.to_string());
         }
-        *self.clipboard.borrow_mut() = Some(item);
     }
 
     fn write_credentials(&self, _url: &str, _username: &str, _password: &[u8]) -> Task<Result<()>> {
@@ -714,11 +687,15 @@ impl Platform for AndroidPlatform {
     }
 
     fn read_credentials(&self, _url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
-        Task::ready(Ok(None))
+        Task::ready(Err(anyhow!(
+            "credential storage is not implemented on Android"
+        )))
     }
 
     fn delete_credentials(&self, _url: &str) -> Task<Result<()>> {
-        Task::ready(Ok(()))
+        Task::ready(Err(anyhow!(
+            "credential storage is not implemented on Android"
+        )))
     }
 
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout> {
@@ -729,7 +706,5 @@ impl Platform for AndroidPlatform {
         Rc::new(DummyKeyboardMapper)
     }
 
-    fn on_keyboard_layout_change(&self, callback: Box<dyn FnMut()>) {
-        self.callbacks.borrow_mut().keyboard_layout = Some(callback);
-    }
+    fn on_keyboard_layout_change(&self, _callback: Box<dyn FnMut()>) {}
 }

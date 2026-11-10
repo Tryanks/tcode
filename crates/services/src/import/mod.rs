@@ -3,6 +3,8 @@
 mod claude;
 mod codex;
 mod scan;
+#[cfg(test)]
+mod tests;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -10,32 +12,38 @@ use std::path::PathBuf;
 use agent::{AgentEvent, ProviderKind, ResumeCursor, ThreadItem, TurnStatus};
 use serde_json::json;
 
-use crate::export::{ReadExportError, TcodeThreadExport, read_tcode_export};
 use crate::store::{Mutation, SessionStore};
 use tcode_core::project::{Project, SessionMeta};
-pub use tcode_protocol::{ExternalThread, RecentDir, SourceTool};
+pub use tcode_protocol::{ExternalHistory, ExternalThread, RecentDir, SourceTool};
 
+/// Where each tool keeps its history; `None` or empty where there is none
+/// to scan, as for a host with no home directory.
 #[derive(Debug, Clone)]
 pub struct ExternalRoots {
-    pub claude_projects: PathBuf,
-    pub claude_desktop_meta: PathBuf,
+    pub claude_projects: Option<PathBuf>,
+    pub claude_desktop_meta: Option<PathBuf>,
     pub codex_session_roots: Vec<PathBuf>,
 }
 
 impl ExternalRoots {
     pub fn detect() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let home = dirs::home_dir();
         let codex_home = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".codex"));
+            .or_else(|| home.as_ref().map(|home| home.join(".codex")));
         Self {
-            claude_projects: home.join(".claude/projects"),
+            claude_projects: home.as_ref().map(|home| home.join(".claude/projects")),
             claude_desktop_meta: home
-                .join("Library/Application Support/Claude/claude-code-sessions"),
-            codex_session_roots: vec![
-                codex_home.join("sessions"),
-                codex_home.join("archived_sessions"),
-            ],
+                .as_ref()
+                .map(|home| home.join("Library/Application Support/Claude/claude-code-sessions")),
+            codex_session_roots: codex_home
+                .map(|codex_home| {
+                    vec![
+                        codex_home.join("sessions"),
+                        codex_home.join("archived_sessions"),
+                    ]
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -74,7 +82,8 @@ struct ConvertedThread {
     external_id: String,
     created_ms: u64,
     updated_ms: u64,
-    first_user: Option<String>,
+    /// The name the source tool itself gives the thread.
+    title: Option<String>,
     entries: Vec<ConvertedEntry>,
 }
 
@@ -103,29 +112,17 @@ pub fn import_thread(
         return ImportOutcome::SkippedDuplicate;
     }
 
-    if thread.source == SourceTool::T3Code {
-        match read_tcode_export(&thread.file) {
-            Ok(export) => return import_tcode_thread(store, project, export, existing),
-            Err(ReadExportError::NotTcode) => {
-                // Older T3 releases persisted Claude's native transcript and
-                // are still handled by the Claude converter below.
-            }
-            Err(ReadExportError::Invalid(error)) => return ImportOutcome::Failed(error),
-        }
-    }
-
     let converted = match thread.source {
         SourceTool::ClaudeCode
         | SourceTool::ClaudeDesktop
-        | SourceTool::T3Code
-        | SourceTool::Unknown => claude::convert(&thread.file, &thread.external_id),
+        | SourceTool::ClaudeAgentSdk
+        | SourceTool::T3Code => claude::convert(&thread.file, &thread.external_id),
         SourceTool::CodexCli | SourceTool::CodexDesktop => {
             codex::convert(&thread.file, &thread.external_id)
         }
     };
     let converted = match converted {
-        Ok(Some(converted)) => converted,
-        Ok(None) => return ImportOutcome::SkippedEmpty,
+        Ok(converted) => converted,
         Err(err) => return ImportOutcome::Failed(err),
     };
     if converted.item_count() == 0 {
@@ -146,30 +143,32 @@ pub fn import_thread(
         )
     };
 
+    let user_messages = || {
+        converted.entries.iter().filter_map(|entry| match entry {
+            ConvertedEntry::Item {
+                item:
+                    ThreadItem {
+                        content: agent::ItemContent::UserMessage { text, .. },
+                        ..
+                    },
+                ..
+            } => Some(text.as_str()),
+            _ => None,
+        })
+    };
     // Harness-injected user messages (`<task-notification>`, `<system-reminder>`,
     // …) make terrible titles: prefer the first human-looking message.
-    let title_user = converted
-        .entries
-        .iter()
-        .find_map(|entry| match entry {
-            ConvertedEntry::Item { item, .. } => match &item.content {
-                agent::ItemContent::UserMessage { text, .. }
-                    if !text.trim_start().starts_with('<') =>
-                {
-                    Some(text.clone())
-                }
-                _ => None,
-            },
-            ConvertedEntry::Compacted { .. } => None,
-        })
-        .or(converted.first_user.clone());
+    let title_user = user_messages()
+        .find(|text| !text.trim_start().starts_with('<'))
+        .or_else(|| user_messages().next());
 
     let mut meta = SessionMeta::new(provider, project.root.clone(), None);
     meta.project_id = Some(project.id.clone());
     meta.title = thread
         .title_hint
         .clone()
-        .or_else(|| title_user.as_deref().map(title_from_text))
+        .or_else(|| converted.title.clone())
+        .or_else(|| title_user.map(title_from_text))
         .unwrap_or_else(|| format!("Imported {} thread", thread.source.display_name()));
     meta.created_at = converted.created_ms / 1000;
     meta.updated_at = converted.updated_ms / 1000;
@@ -252,41 +251,6 @@ pub fn import_thread(
     ImportOutcome::Imported
 }
 
-fn import_tcode_thread(
-    store: &SessionStore,
-    project: &Project,
-    export: TcodeThreadExport,
-    existing: &mut HashSet<String>,
-) -> ImportOutcome {
-    if export.events.is_empty() {
-        return ImportOutcome::SkippedEmpty;
-    }
-    let external_id = format!("tcode:{}", export.meta.id);
-    if existing.contains(&external_id) {
-        return ImportOutcome::SkippedDuplicate;
-    }
-
-    let mut meta = export.meta;
-    let fresh = SessionMeta::new(meta.provider, project.root.clone(), meta.model.clone());
-    meta.id = fresh.id;
-    meta.cwd = project.root.clone();
-    meta.project_id = Some(project.id.clone());
-    meta.archived_at = None;
-    meta.worktree = None;
-    meta.parent_session_id = None;
-    meta.imported_from = Some(external_id.clone());
-
-    let mutations = [
-        Mutation::replace_event_log(&meta.id, export.event_log),
-        Mutation::upsert_meta(meta),
-    ];
-    if let Err(error) = store.apply(&mutations) {
-        return ImportOutcome::Failed(format!("failed to write imported session: {error}"));
-    }
-    existing.insert(external_id);
-    ImportOutcome::Imported
-}
-
 fn title_from_text(text: &str) -> String {
     let first_line = text.lines().next().unwrap_or_default().trim();
     let mut title: String = first_line.chars().take(64).collect();
@@ -312,30 +276,39 @@ fn file_modified_ms(path: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// The files under `root` that `predicate` takes; a directory that cannot be
+/// read is added to `unreadable`, and a missing `root` holds nothing.
 fn collect_files(
     root: &std::path::Path,
     predicate: &impl Fn(&std::path::Path) -> bool,
+    unreadable: &mut Vec<String>,
 ) -> Vec<PathBuf> {
     fn visit(
         dir: &std::path::Path,
         predicate: &impl Fn(&std::path::Path) -> bool,
         files: &mut Vec<PathBuf>,
+        unreadable: &mut Vec<String>,
     ) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                unreadable.push(scan::unreadable_path(dir, &error));
+                return;
+            }
         };
         for entry in entries.flatten() {
             let path = entry.path();
             // Not followed through symlinks: a link back to an ancestor would
             // make the walk branch without end.
             if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                visit(&path, predicate, files);
+                visit(&path, predicate, files, unreadable);
             } else if predicate(&path) {
                 files.push(path);
             }
         }
     }
     let mut files = Vec::new();
-    visit(root, predicate, &mut files);
+    visit(root, predicate, &mut files, unreadable);
     files
 }

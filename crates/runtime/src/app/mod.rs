@@ -23,7 +23,7 @@ use crate::terminal::{
 };
 use tcode_core::acp::{AcpAgentPatch, InstalledAcpAgent as InstalledAgent};
 use tcode_core::attachments::mime_from_path;
-use tcode_core::git::{GitAction, GitStatus, build_commit_prompt, sanitize_commit_message};
+use tcode_core::git::{GitAction, GitStatus, build_commit_prompt};
 use tcode_core::project::{
     Project, SessionMeta, SettledOverride, WorktreeInfo, WorktreeSharing, descendant_session_ids,
     project_name_from_root, rebase_path,
@@ -34,7 +34,8 @@ use tcode_core::relay::{
     render_relay_transcript,
 };
 use tcode_core::session::{
-    Author, EntryContent, MessageOrigin, ReviewComment, Timeline, append_review_comments_to_prompt,
+    Author, EntryContent, MessageOrigin, ReviewComment, StoredEvent, Timeline,
+    append_review_comments_to_prompt,
 };
 use tcode_core::settings::{
     ChildApprovalMode, EnvVar, FavoriteModel, ProfileSettingsPatch, ProviderProfile,
@@ -44,14 +45,14 @@ use tcode_core::ui::{
     ConversationDestination, MAX_TERMINALS_PER_SESSION, TerminalSplitDirection, WorkspaceMode,
 };
 use tcode_protocol::{
-    AcpMarketplaceItem, ArchivedSessions, EventEnvelope, ExternalImportState, ExternalImportStatus,
-    ExternalThread, ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot,
-    IndexSummary, MergeWorktreeFailure, PathEntry, ProtocolError,
+    AcpMarketplaceItem, ArchivedSessions, EventEnvelope, ExternalHistory, ExternalImportState,
+    ExternalImportStatus, ExternalThread, ForkAvailability, GitActionRequest, GitStatusStatus,
+    ImportFailure, IndexSnapshot, IndexSummary, MergeWorktreeFailure, PathEntry, ProtocolError,
     ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueryResponse,
-    QueuedMessageStatus, RecentDir, RuntimeEffect, RuntimeError, RuntimeNotice,
+    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
     RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast, ServerEvent,
-    SessionActivity, SessionEventRecord, SessionPlan, SessionSearchHit, SessionStatus,
-    TcodeUpdateStatus, TerminalStatus, ThreadExportFormat, Topic,
+    SessionActivity, SessionContentHits, SessionPlan, SessionStatus, TcodeUpdateStatus,
+    TerminalStatus, ThreadExportFormat, Topic,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
@@ -319,7 +320,7 @@ pub struct ProviderVersionState {
     pub checking: bool,
     /// Whether an installation update is currently running.
     pub updating: bool,
-    /// Verified installation and the exact update plan presented to the user.
+    /// The installation and the update plan presented to the user.
     pub installation: Option<Installation>,
 }
 
@@ -365,11 +366,8 @@ pub struct AppState {
     /// Set once the store failed and every thread was stopped.
     store_failed: bool,
     /// Why settings.json could not be read at start. While set, no settings
-    /// are written: the file may be a newer build's, and these settings are
-    /// defaults standing in for it.
-    settings_unreadable: Option<String>,
-    /// Whether the first settings write refused for that reason was reported.
-    settings_unreadable_reported: bool,
+    /// are written: these settings are defaults standing in for it.
+    settings_unreadable: Option<UnreadableFile>,
     pub sessions: SessionIndex,
     archived_revision: u64,
     activity_pending: VecDeque<String>,
@@ -449,10 +447,11 @@ pub struct AppState {
     /// Live provider approvals for every resident session. This is the sole
     /// host-side authority; persisted timeline approvals remain client state.
     approvals: Revisioned<HashMap<String, Vec<agent::ApprovalRequest>>>,
-    /// Background-computed git state of the active session's cwd, driving the
-    /// adaptive header quick-action button (`None` until the first refresh /
-    /// with no active session). See [`AppState::refresh_git_status`].
-    pub git_status: HashMap<String, GitStatus>,
+    /// Background-computed git state of the active session's cwd, or git's
+    /// error reading it, driving the adaptive header quick-action button
+    /// (absent until the first refresh / with no active session). See
+    /// [`AppState::refresh_git_status`].
+    pub git_status: HashMap<String, Result<GitStatus, String>>,
     /// A git quick-action (commit/push/pull/…) is currently running, so the
     /// button is disabled with an in-progress hint.
     pub git_busy: HashSet<String>,
@@ -491,6 +490,35 @@ pub struct AppState {
     session_search: Arc<SessionSearch>,
 }
 
+/// A file of the host's own that exists and could not be read at start. The
+/// host runs on the default standing in for it and writes nothing over the
+/// file, which may be a newer build's; the first write refused says why.
+pub(super) struct UnreadableFile {
+    error: String,
+    reported: bool,
+}
+
+impl UnreadableFile {
+    pub(super) fn read<T: Default>(read: std::io::Result<T>) -> (T, Option<Self>) {
+        match read {
+            Ok(value) => (value, None),
+            Err(error) => {
+                log::error!("running without an unreadable file: {error}");
+                let unreadable = Self {
+                    error: error.to_string(),
+                    reported: false,
+                };
+                (T::default(), Some(unreadable))
+            }
+        }
+    }
+
+    /// The reason, the first time a write is refused.
+    pub(super) fn first_refusal(&mut self) -> Option<String> {
+        (!std::mem::replace(&mut self.reported, true)).then(|| self.error.clone())
+    }
+}
+
 fn emit_runtime(cx: &mut HostCx, event: RuntimeEvent) {
     cx.emit(HostEvent::Runtime(event));
 }
@@ -524,21 +552,20 @@ impl AppState {
             project.quick_chat = scratch_root.as_ref() == Some(&project.root);
         }
         let settings_store = SettingsStore::new(store.root().clone());
-        let (settings, settings_unreadable) = match settings_store.try_load() {
-            Ok(settings) => (settings, None),
-            Err(error) => {
-                log::error!("settings.json is unreadable; running on defaults: {error}");
-                (Settings::default(), Some(error.to_string()))
-            }
-        };
-        let review_records = settings_store.load_review_records();
-        let control_activity = settings_store.load_control_activity();
+        let (settings, settings_unreadable) = UnreadableFile::read(settings_store.try_load());
+        let (review_records, reviews_unreadable) =
+            UnreadableFile::read(settings_store.load_review_records());
+        let (control_activity, activity_unreadable) =
+            UnreadableFile::read(settings_store.load_control_activity());
         let forge = tcode_services::forge::connect(settings_store.clone(), std::env::vars());
         forge.configure(settings.source_control.hosts.clone());
         let releases = Arc::new(ReleaseFeed::new(tcode_services::github::GitHubApi::host(
             tcode_services::github::Credentials::new(settings_store.clone(), []),
         )));
-        let provider_secret_names = provider_secret_names(&settings, &settings_store);
+        // An unreadable secrets.json refuses every write and is reported by
+        // whatever reads a secret, so no secret is shown as saved.
+        let provider_secret_names =
+            provider_secret_names(&settings, &settings_store).unwrap_or_default();
         // Push the loaded computer-use config to the (already-running) MCP layer
         // so the tools honor the persisted image-mode / allow-input choices from
         // the first call, not just after a settings change.
@@ -600,7 +627,6 @@ impl AppState {
             store_writer: None,
             store_failed: false,
             settings_unreadable,
-            settings_unreadable_reported: false,
             sessions: sessions.into(),
             projects,
             archived_revision: 0,
@@ -650,7 +676,12 @@ impl AppState {
             acp_installing: std::collections::HashSet::new(),
             plugin_catalogs: HashMap::new().into(),
             mcp: McpWiring::default(),
-            control: control::ControlState::new(review_records, control_activity),
+            control: control::ControlState::new(
+                review_records,
+                reviews_unreadable,
+                control_activity,
+                activity_unreadable,
+            ),
             callback_approval_requests: HashSet::new(),
             callback_user_input_requests: HashSet::new(),
             approvals: Default::default(),
@@ -703,7 +734,6 @@ impl AppState {
                 while let Ok(failure) = failures.recv().await {
                     host_cx.enqueue(move |state, cx| match failure {
                         StoreWriteFailure::Error(error) => state.report_error(error, cx),
-                        StoreWriteFailure::Warning(message) => log::warn!("{message}"),
                         StoreWriteFailure::StoreFailed(reason) => state.store_failed(&reason, cx),
                     });
                 }
@@ -758,9 +788,8 @@ impl AppState {
     }
 
     fn enqueue_settings(&mut self, settings: &Settings, cx: &mut HostCx) {
-        if let Some(error) = &self.settings_unreadable {
-            if !std::mem::replace(&mut self.settings_unreadable_reported, true) {
-                let error = error.clone();
+        if let Some(unreadable) = &mut self.settings_unreadable {
+            if let Some(error) = unreadable.first_refusal() {
                 self.report_error(RuntimeError::SettingsUnreadable { error }, cx);
             }
             return;

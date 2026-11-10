@@ -449,7 +449,7 @@ pub(super) fn operation_chip(
         links,
         &PullRequestKey::new(&operation.host, &operation.repository, *merged),
     )
-    .map(|map| map.stack.url.clone());
+    .and_then(|map| map.stack.url.clone());
     let titles: Vec<(u64, String)> = layers
         .iter()
         .map(|&number| {

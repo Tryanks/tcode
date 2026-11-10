@@ -46,14 +46,12 @@ pub struct ClientMessage {
 pub enum Principal {
     Full,
     Space {
-        #[serde(default)]
         policy_revision: u64,
         space_id: String,
         space_name: String,
         project_ids: Vec<String>,
         device_id: String,
         device_name: String,
-        #[serde(default = "crate::SpacePolicy::unrestricted")]
         policy: crate::SpacePolicy,
     },
 }
@@ -89,7 +87,6 @@ pub struct Subscription {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known_index: Option<String>,
     pub topic: Topic,
-    #[serde(default)]
     pub after: Option<u64>,
 }
 

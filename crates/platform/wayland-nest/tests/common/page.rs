@@ -16,19 +16,14 @@ pub const TIMEOUT: Duration = Duration::from_secs(30);
 /// premultiplied ARGB.
 pub const BACKGROUND: [u8; 4] = 0xff00_8000_u32.to_ne_bytes();
 
-/// A green page with a `<select>` at the top left, a text field below it and
-/// a box that keeps animating at the top right. The page reports its state
-/// through its title.
+/// A green page with a `<select>` at the top left and a text field below it.
+/// The page reports its state through its title.
 pub const PAGE: &str = r#"<!doctype html>
 <style>
   html, body { margin: 0; background: rgb(0, 128, 0); }
   select { position: absolute; left: 10px; top: 10px; width: 150px; height: 28px; }
   input { position: absolute; left: 10px; top: 200px; width: 300px; height: 28px; }
-  #spinner { position: absolute; left: 360px; top: 10px; width: 20px; height: 20px;
-             background: white; animation: spin 1s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
-<div id="spinner"></div>
 <select><option>one</option><option>two</option><option>three</option>
 <option>four</option><option>five</option><option>six</option></select>
 <input id="field">

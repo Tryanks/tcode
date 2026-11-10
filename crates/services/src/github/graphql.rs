@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 pub struct Document {
@@ -66,35 +66,27 @@ pub struct Pages<T> {
     pub truncated: bool,
 }
 
+/// Reads pages from the first until a page names no next cursor or `max_pages` are read; the
+/// result is `truncated` when it stopped at the bound.
 pub fn pages<T, E>(
-    from: Option<String>,
-    max_pages: Option<usize>,
-    mut read: impl FnMut(Option<&str>, &[T]) -> Result<T, E>,
+    max_pages: usize,
+    mut read: impl FnMut(Option<&str>) -> Result<T, E>,
     next_cursor: impl Fn(&T) -> Option<String>,
-    until: impl Fn(&[T]) -> bool,
 ) -> Result<Pages<T>, E> {
     let mut pages = Vec::new();
-    let mut seen = HashSet::new();
-    let mut after = from;
+    let mut after = None;
     loop {
-        let page = read(after.as_deref(), &pages)?;
+        let page = read(after.as_deref())?;
         let next = next_cursor(&page);
         pages.push(page);
-        let Some(next) = next else {
-            return Ok(Pages {
-                pages,
-                truncated: false,
-            });
-        };
-        if !seen.insert(next.clone())
-            || max_pages.is_some_and(|max| pages.len() >= max)
-            || until(&pages)
-        {
-            return Ok(Pages {
-                pages,
-                truncated: true,
-            });
+        match next {
+            Some(next) if pages.len() < max_pages => after = Some(next),
+            next => {
+                return Ok(Pages {
+                    pages,
+                    truncated: next.is_some(),
+                });
+            }
         }
-        after = Some(next);
     }
 }

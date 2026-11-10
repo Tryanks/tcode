@@ -61,18 +61,16 @@ struct ProvidersFile {
     claude_agent: Option<CatalogFile>,
 }
 
+/// Models, profiles and descriptors are read one entry at a time: an entry
+/// in a shape tcode cannot read is skipped, and the rest of the catalog
+/// stands.
 #[derive(Deserialize)]
 struct CatalogFile {
     #[serde(default)]
-    defaults: DefaultsFile,
+    defaults: Value,
     #[serde(default)]
-    profiles: HashMap<String, ProfileFile>,
-    models: Vec<ModelFile>,
-}
-
-#[derive(Deserialize, Default)]
-struct DefaultsFile {
-    chat: Option<String>,
+    profiles: HashMap<String, Value>,
+    models: Vec<Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -87,7 +85,7 @@ struct ProfileFile {
 #[serde(rename_all = "camelCase")]
 struct CapabilitiesFile {
     #[serde(default)]
-    option_descriptors: Vec<OptionFile>,
+    option_descriptors: Vec<Value>,
 }
 
 #[derive(Deserialize)]
@@ -264,47 +262,50 @@ pub(crate) struct ClaudeCatalog {
     pub(crate) models: Vec<CatalogModel>,
 }
 
-fn non_empty(value: &str, what: &str) -> Result<String, String> {
+/// `value` trimmed, unless nothing is left.
+fn non_empty(value: &str) -> Option<String> {
     let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(format!("empty {what}"));
-    }
-    Ok(trimmed.to_owned())
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
-fn parse_version(value: &str) -> Result<Version, String> {
-    crate::parse_semver(value).ok_or_else(|| format!("invalid version {value:?}"))
-}
-
-fn descriptor(option: &OptionFile) -> Result<Option<OptionDescriptor>, String> {
-    Ok(Some(match option {
+/// The descriptor an option entry describes; `None` for one tcode cannot
+/// read or render. A select option without a value or label is left out.
+fn descriptor(option: &Value) -> Option<OptionDescriptor> {
+    let option = serde_json::from_value::<OptionFile>(option.clone())
+        .inspect_err(|error| log::warn!("skipping a Claude model option: {error}"))
+        .ok()?;
+    Some(match option {
         OptionFile::Select {
             id,
             label,
             options,
             prompt_injected_values,
         } => {
-            let id = non_empty(id, "option id")?;
+            let id = non_empty(&id)?;
             let mut default_value = None;
             let mut mapped = Vec::with_capacity(options.len());
             for option in options
                 .iter()
                 .filter(|option| !prompt_injected_values.contains(&option.id))
             {
-                let value = non_empty(&option.id, "option value")?;
+                let (Some(value), Some(label)) = (non_empty(&option.id), non_empty(&option.label))
+                else {
+                    log::warn!("skipping a choice of Claude model option {id:?}");
+                    continue;
+                };
                 if option.is_default && default_value.is_none() {
                     default_value = Some(value.clone());
                 }
                 mapped.push(SelectOption {
                     value,
-                    label: non_empty(&option.label, "option label")?,
+                    label,
                     description: option.description.clone(),
                     unavailable: None,
                 });
             }
             OptionDescriptor::Select {
                 id: option_id(&id).to_owned(),
-                label: non_empty(label, "option label")?,
+                label: non_empty(&label)?,
                 options: mapped,
                 default_value,
                 role: crate::OptionRole::Model,
@@ -314,16 +315,16 @@ fn descriptor(option: &OptionFile) -> Result<Option<OptionDescriptor>, String> {
             }
         }
         OptionFile::Boolean { id, label } => OptionDescriptor::Boolean {
-            id: option_id(&non_empty(id, "option id")?).to_owned(),
-            label: non_empty(label, "option label")?,
+            id: option_id(&non_empty(&id)?).to_owned(),
+            label: non_empty(&label)?,
             default_value: false,
             role: crate::OptionRole::Model,
             apply: crate::ApplyTiming::Live,
             recommended: None,
             permissive: None,
         },
-        OptionFile::Unknown => return Ok(None),
-    }))
+        OptionFile::Unknown => return None,
+    })
 }
 
 /// A `contextWindow` selector whose only preset is the model's fixed window.
@@ -347,6 +348,85 @@ fn fixed_context_window_descriptor(tokens: u64) -> OptionDescriptor {
     }
 }
 
+/// One model entry as tcode runs it, or why it cannot be.
+fn catalog_model(
+    model: &Value,
+    profiles: &HashMap<&str, ProfileFile>,
+    defaults: &Value,
+) -> Result<CatalogModel, String> {
+    let model: ModelFile =
+        serde_json::from_value(model.clone()).map_err(|error| error.to_string())?;
+    let slug = non_empty(&model.slug).ok_or("empty model slug")?;
+    let no_profile = ProfileFile::default();
+    let profile = match &model.profile {
+        Some(name) => profiles
+            .get(name.as_str())
+            .ok_or_else(|| format!("model {slug:?} references unknown profile {name:?}"))?,
+        None => &no_profile,
+    };
+    let mut runtime = profile.adapter.claude_code.clone().unwrap_or_default();
+    // An effort without a name, or mapped to an empty flag, has no `--effort`.
+    runtime.effort_map.retain(|effort, mapped| {
+        non_empty(effort).is_some()
+            && mapped
+                .as_deref()
+                .is_none_or(|flag| non_empty(flag).is_some())
+    });
+    let version = |value: Option<&str>| {
+        value
+            .map(|value| {
+                crate::parse_semver(value)
+                    .ok_or_else(|| format!("model {slug:?} has invalid version {value:?}"))
+            })
+            .transpose()
+    };
+    let compat = model.adapter.claude_code.as_ref();
+    let min_version = version(compat.and_then(|compat| compat.min_version.as_deref()))?;
+    let max_version_exclusive =
+        version(compat.and_then(|compat| compat.max_version_exclusive.as_deref()))?;
+    if let (Some(min), Some(max)) = (min_version, max_version_exclusive)
+        && min >= max
+    {
+        return Err(format!(
+            "model {slug:?} minVersion is not below maxVersionExclusive"
+        ));
+    }
+    let mut options: Vec<_> = profile
+        .capabilities
+        .option_descriptors
+        .iter()
+        .filter_map(descriptor)
+        .collect();
+    // Upstream lists no selector for a fixed window because it only
+    // chooses between slug suffixes. Claude Code's `autoCompactWindow`
+    // runs any of these models at a smaller window, so the window is
+    // still a choice here.
+    if let Some(tokens) = runtime.fixed_context_window_tokens
+        && !options.iter().any(
+            |option| matches!(option, OptionDescriptor::Select { id, .. } if id == "contextWindow"),
+        )
+    {
+        options.push(fixed_context_window_descriptor(tokens));
+    }
+    Ok(CatalogModel {
+        spec: ModelSpec {
+            is_default: defaults.get("chat").and_then(Value::as_str) == Some(slug.as_str()),
+            display_name: non_empty(&model.name)
+                .ok_or_else(|| format!("model {slug:?} has no name"))?,
+            id: slug,
+            options,
+        },
+        aliases: model
+            .aliases
+            .iter()
+            .filter_map(|alias| non_empty(alias))
+            .collect(),
+        runtime,
+        min_version,
+        max_version_exclusive,
+    })
+}
+
 impl ClaudeCatalog {
     pub(crate) fn from_json(text: &str) -> Result<Self, String> {
         serde_json::from_str(text)
@@ -368,83 +448,31 @@ impl ClaudeCatalog {
             .providers
             .claude_agent
             .ok_or("manifest has no claudeAgent catalog")?;
+        let profiles: HashMap<&str, ProfileFile> = catalog
+            .profiles
+            .iter()
+            .filter_map(|(name, profile)| {
+                serde_json::from_value(profile.clone())
+                    .inspect_err(|error| {
+                        log::warn!("skipping Claude model profile {name:?}: {error}");
+                    })
+                    .ok()
+                    .map(|profile| (name.as_str(), profile))
+            })
+            .collect();
         let mut seen = HashSet::new();
         let mut models = Vec::with_capacity(catalog.models.len());
-        let no_profile = ProfileFile::default();
         for model in &catalog.models {
-            let slug = non_empty(&model.slug, "model slug")?;
-            if !seen.insert(slug.clone()) {
-                return Err(format!("duplicate model slug {slug:?}"));
+            match catalog_model(model, &profiles, &catalog.defaults) {
+                Ok(model) if seen.insert(model.spec.id.clone()) => models.push(model),
+                Ok(model) => log::warn!("skipping a second Claude model {:?}", model.spec.id),
+                Err(error) => log::warn!("skipping a Claude model: {error}"),
             }
-            let profile = match &model.profile {
-                Some(name) => catalog
-                    .profiles
-                    .get(name)
-                    .ok_or_else(|| format!("model {slug:?} references unknown profile {name:?}"))?,
-                None => &no_profile,
-            };
-            let runtime = profile.adapter.claude_code.clone().unwrap_or_default();
-            for (effort, mapped) in &runtime.effort_map {
-                non_empty(effort, "effortMap key")?;
-                if let Some(mapped) = mapped {
-                    non_empty(mapped, "effortMap value")?;
-                }
-            }
-            let compat = model.adapter.claude_code.as_ref();
-            let min_version = compat
-                .and_then(|compat| compat.min_version.as_deref())
-                .map(parse_version)
-                .transpose()?;
-            let max_version_exclusive = compat
-                .and_then(|compat| compat.max_version_exclusive.as_deref())
-                .map(parse_version)
-                .transpose()?;
-            if let (Some(min), Some(max)) = (min_version, max_version_exclusive)
-                && min >= max
-            {
-                return Err(format!(
-                    "model {slug:?} minVersion is not below maxVersionExclusive"
-                ));
-            }
-            let mut options = profile
-                .capabilities
-                .option_descriptors
-                .iter()
-                .filter_map(|option| descriptor(option).transpose())
-                .collect::<Result<Vec<_>, _>>()?;
-            // Upstream lists no selector for a fixed window because it only
-            // chooses between slug suffixes. Claude Code's `autoCompactWindow`
-            // runs any of these models at a smaller window, so the window is
-            // still a choice here.
-            if let Some(tokens) = runtime.fixed_context_window_tokens
-                && !options.iter().any(|option| {
-                    matches!(option, OptionDescriptor::Select { id, .. } if id == "contextWindow")
-                })
-            {
-                options.push(fixed_context_window_descriptor(tokens));
-            }
-            let aliases = model
-                .aliases
-                .iter()
-                .map(|alias| non_empty(alias, "model alias"))
-                .collect::<Result<Vec<_>, _>>()?;
-            models.push(CatalogModel {
-                spec: ModelSpec {
-                    is_default: catalog.defaults.chat.as_deref() == Some(slug.as_str()),
-                    display_name: non_empty(&model.name, "model name")?,
-                    id: slug,
-                    options,
-                },
-                aliases,
-                runtime,
-                min_version,
-                max_version_exclusive,
-            });
         }
-        if let Some(chat) = &catalog.defaults.chat
-            && !seen.contains(chat)
-        {
-            return Err(format!("default model {chat:?} is not in the catalog"));
+        // Every entry unreadable is a manifest in a shape tcode cannot read,
+        // not a catalog of no models.
+        if models.is_empty() {
+            return Err("manifest has no model tcode can read".into());
         }
         Ok(Self {
             updated_at: file.updated_at,
@@ -498,14 +526,12 @@ fn bundled() -> ClaudeCatalog {
     ClaudeCatalog::from_json(BUNDLED).expect("bundled Claude model manifest is valid")
 }
 
-/// In-memory manifest plus the fetch bookkeeping that paces refreshes.
+/// In-memory manifest and when it was fetched.
 pub(crate) struct ManifestState {
     catalog: Arc<ClaudeCatalog>,
     /// Wall-clock millis of the fetch that produced `catalog`; `None` for the
-    /// bundle. Persisted with the disk cache so a restart does not refetch.
+    /// bundle. Persisted with the disk cache.
     fetched_at_ms: Option<u64>,
-    last_attempt_ms: Option<u64>,
-    disk_loaded: bool,
     #[cfg(feature = "process")]
     source_responses: HashMap<String, (String, Vec<u8>)>,
 }
@@ -529,8 +555,6 @@ impl ManifestState {
         Self {
             catalog: Arc::new(catalog),
             fetched_at_ms: None,
-            last_attempt_ms: None,
-            disk_loaded: false,
             #[cfg(feature = "process")]
             source_responses: HashMap::new(),
         }
@@ -563,11 +587,8 @@ mod refresh {
         ),
     ];
     pub(super) const CACHE_FILE: &str = "claude-model-manifest.json";
-    /// How long a fetched manifest stays fresh.
-    pub(super) const TTL_MS: u64 = 60 * 60 * 1000;
-    /// Minimum gap between attempts after a failure, so an offline machine
-    /// does not pay a network timeout on every catalog refresh.
-    pub(super) const RETRY_MS: u64 = 5 * 60 * 1000;
+    /// How old a fetched manifest is before a refresh fetches again.
+    const TTL_MS: u64 = 60 * 60 * 1000;
     const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
     const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
@@ -586,11 +607,8 @@ mod refresh {
     }
 
     impl ManifestState {
-        /// Adopt the disk cache once, unless the bundle is newer by `updatedAt`.
+        /// Adopt the disk cache, unless the bundle is newer by `updatedAt`.
         pub(crate) fn load_cache(&mut self, path: &Path) {
-            if std::mem::replace(&mut self.disk_loaded, true) {
-                return;
-            }
             let Some(cache) = std::fs::read_to_string(path)
                 .ok()
                 .and_then(|text| serde_json::from_str::<CacheFile>(&text).ok())
@@ -607,28 +625,18 @@ mod refresh {
             }
         }
 
-        /// Whether a fetch is due now; records the attempt when it is.
-        pub(crate) fn begin_fetch(&mut self, now_ms: u64, network: bool) -> bool {
-            // A timestamp in the future means the wall clock moved backwards;
-            // treat it as expired so the refetch rewrites both timestamps.
-            let within = |since: Option<u64>, window: u64| {
-                since.is_some_and(|since| now_ms >= since && now_ms - since < window)
-            };
-            if !network
-                || within(self.fetched_at_ms, TTL_MS)
-                || within(self.last_attempt_ms, RETRY_MS)
-            {
-                return false;
-            }
-            self.last_attempt_ms = Some(now_ms);
-            true
+        /// Whether a refresh fetches: the copy in effect is the bundle, or
+        /// was fetched [`TTL_MS`] or more from `now_ms`.
+        fn fetch_due(&self, now_ms: u64) -> bool {
+            self.fetched_at_ms
+                .is_none_or(|at| now_ms.abs_diff(at) >= TTL_MS)
         }
 
         /// Adopt a fetched manifest when it is at least as new by `updatedAt`
         /// as the catalog in effect; returns the adopted manifest. An
         /// undecodable or invalid body leaves the catalog in place and is an
         /// error. A valid but older manifest is `Ok(None)`: not adopted, but
-        /// it still counts as a fetch so the TTL paces the next attempt.
+        /// it still counts as a fetch, so the next is a TTL later.
         pub(crate) fn install(
             &mut self,
             now_ms: u64,
@@ -681,17 +689,20 @@ mod refresh {
         })
     }
 
-    /// Load the disk cache under `cache_dir` and, when the TTL allows and
-    /// `network` is on, fetch every remote manifest and keep the newest.
-    /// Blocking; never fails.
+    /// Stand the disk cache under `cache_dir` in for the bundle and, when
+    /// `network` is on and the copy in effect is the bundle or a TTL old,
+    /// fetch every remote manifest and keep the newest. Blocking; never
+    /// fails.
     pub(crate) fn refresh(cache_dir: Option<&Path>, network: bool) {
         let cache_path = cache_dir.map(|dir| dir.join(CACHE_FILE));
         let now = now_ms();
         let due = with_state(|state| {
-            if let Some(path) = &cache_path {
+            if state.fetched_at_ms.is_none()
+                && let Some(path) = &cache_path
+            {
                 state.load_cache(path);
             }
-            state.begin_fetch(now, network)
+            network && state.fetch_due(now)
         });
         if !due {
             return;
@@ -996,50 +1007,62 @@ mod tests {
         assert!(mutate(|v| v["version"] = json!(2)).contains("version"));
         assert!(mutate(|v| v["providers"] = json!({})).contains("claudeAgent"));
         assert!(
-            mutate(|v| v["providers"]["claudeAgent"]["models"][1]["slug"] = json!("test-wide"))
-                .contains("duplicate")
-        );
-        assert!(
-            mutate(|v| v["providers"]["claudeAgent"]["models"][0]["profile"] = json!("nope"))
-                .contains("unknown profile")
-        );
-        assert!(
-            mutate(|v| v["providers"]["claudeAgent"]["defaults"]["chat"] = json!("nope"))
-                .contains("default model")
-        );
-        assert!(
             mutate(|v| {
-                v["providers"]["claudeAgent"]["models"][0]["adapter"]["claudeCode"]["minVersion"] =
-                    json!("latest")
+                for model in v["providers"]["claudeAgent"]["models"]
+                    .as_array_mut()
+                    .unwrap()
+                {
+                    model["slug"] = json!("");
+                }
             })
-            .contains("invalid version")
+            .contains("no model")
         );
-        assert!(mutate(|v| {
-            v["providers"]["claudeAgent"]["models"][1]["adapter"]["claudeCode"]
-                ["maxVersionExclusive"] = json!("2.1.111")
-        })
-        .contains("maxVersionExclusive"));
-        assert!(mutate(|v| {
-            v["providers"]["claudeAgent"]["profiles"]["wide"]["capabilities"]
-                ["optionDescriptors"][0]["id"] = json!(" ")
-        })
-        .contains("option id"));
-        assert!(mutate(|v| {
-            v["providers"]["claudeAgent"]["profiles"]["wide"]["capabilities"]
-                ["optionDescriptors"][0]["options"][0]["id"] = json!("")
-        })
-        .contains("option value"));
-        assert!(mutate(|v| {
-            v["providers"]["claudeAgent"]["profiles"]["wide"]["adapter"]["claudeCode"]
-                ["effortMap"][""] = json!("low")
-        })
-        .contains("effortMap"));
         assert!(ClaudeCatalog::from_json("not json").is_err());
+    }
+
+    /// A bad entry costs only itself: the model it describes, or the
+    /// choice or selector within a model.
+    #[test]
+    fn a_bad_entry_is_skipped_and_the_rest_of_the_manifest_stands() {
+        let mut value: Value = serde_json::from_str(TEST_MANIFEST).unwrap();
+        let catalog = &mut value["providers"]["claudeAgent"];
+        catalog["models"][1]["adapter"]["claudeCode"]["minVersion"] = json!("latest");
+        catalog["models"][2]["profile"] = json!("missing");
+        catalog["models"][3]["name"] = json!(7);
+        catalog["defaults"]["chat"] = json!("missing");
+        let wide = &mut catalog["profiles"]["wide"];
+        wide["capabilities"]["optionDescriptors"][0]["options"][0]["id"] = json!("");
+        wide["capabilities"]["optionDescriptors"][1]["label"] = json!(" ");
+        wide["adapter"]["claudeCode"]["effortMap"][""] = json!("low");
+        let catalog = ClaudeCatalog::from_value(value).unwrap();
+        assert_eq!(
+            catalog
+                .models
+                .iter()
+                .map(|model| model.spec.id.as_str())
+                .collect::<Vec<_>>(),
+            ["test-wide"]
+        );
+        let wide = &catalog.models[0];
+        assert!(!wide.spec.is_default);
+        let [OptionDescriptor::Select { id, options, .. }] = &wide.spec.options[..] else {
+            panic!("{:?}", wide.spec.options);
+        };
+        assert_eq!(id, "reasoningEffort");
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["medium", "max", "ultracode"]
+        );
+        assert_eq!(wide.cli_effort("ultracode").as_deref(), Some("xhigh"));
+        assert!(!wide.runtime.effort_map.contains_key(""));
     }
 
     #[cfg(feature = "process")]
     mod refresh {
-        use super::super::refresh::{CACHE_FILE, CacheFile, RETRY_MS, TTL_MS};
+        use super::super::refresh::{CACHE_FILE, CacheFile};
         use super::*;
 
         fn fresh_state() -> ManifestState {
@@ -1068,9 +1091,6 @@ mod tests {
             let mut state = fresh_state();
             let before = model_ids(&state);
             assert!(state.install(1_000, b"{ not json").is_err());
-            let mut broken = manifest_with("2031-01-01T00:00:00Z", "test-wide");
-            broken["providers"]["claudeAgent"]["models"][0]["profile"] = json!("missing");
-            assert!(state.install(1_000, broken.to_string().as_bytes()).is_err());
             assert_eq!(model_ids(&state), before);
             assert_eq!(state.fetched_at_ms, None);
 
@@ -1138,22 +1158,6 @@ mod tests {
         }
 
         #[test]
-        fn fetches_are_paced_by_ttl_retry_and_setting() {
-            let mut state = fresh_state();
-            assert!(!state.begin_fetch(1_000, false), "network disabled");
-            assert!(state.begin_fetch(1_000, true));
-            assert!(!state.begin_fetch(1_000 + RETRY_MS - 1, true), "retry gap");
-            assert!(state.begin_fetch(1_000 + RETRY_MS, true));
-            state.fetched_at_ms = Some(10_000);
-            assert!(!state.begin_fetch(10_000 + TTL_MS - 1, true), "fresh");
-            assert!(state.begin_fetch(10_000 + TTL_MS, true));
-            // A future timestamp (clock moved backwards) counts as expired.
-            state.fetched_at_ms = Some(u64::MAX);
-            state.last_attempt_ms = Some(u64::MAX);
-            assert!(state.begin_fetch(5, true));
-        }
-
-        #[test]
         fn disk_cache_is_adopted_unless_the_bundle_is_newer() {
             let dir = std::env::temp_dir().join(format!(
                 "tcode-manifest-{}-{}",
@@ -1186,11 +1190,6 @@ mod tests {
             state.load_cache(&path);
             assert_eq!(model_ids(&state)[0], "test-cached");
             assert_eq!(state.fetched_at_ms, Some(42));
-
-            // Loaded once: a later cache write is not re-read.
-            write("2035-01-01T00:00:00Z");
-            state.load_cache(&path);
-            assert_eq!(model_ids(&state)[0], "test-cached");
 
             // Corrupt cache: bundle stays.
             std::fs::write(&path, b"{}").unwrap();

@@ -3,7 +3,6 @@ package com.tryanks.tcode;
 import android.app.Activity;
 import android.content.Context;
 import android.graphics.PixelFormat;
-import android.os.Build;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -41,9 +40,8 @@ final class TcodeWebView extends WebView {
         placement.gravity = Gravity.TOP | Gravity.LEFT;
         placement.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
         placement.setTitle("tcode Preview");
-        if (Build.VERSION.SDK_INT >= 28)
-            placement.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-        if (Build.VERSION.SDK_INT >= 30) placement.setFitInsetsTypes(0);
+        placement.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        placement.setFitInsetsTypes(0);
         container.setOnTouchListener((view, event) -> {
             if (event.getActionMasked() == MotionEvent.ACTION_OUTSIDE) releasePreviewFocus();
             return false;

@@ -187,7 +187,6 @@ pub enum Query {
     /// The latest `tcode_control` writes across every thread, newest first.
     ControlActivity {
         limit: u32,
-        #[serde(default)]
         filter: ControlActivityFilter,
     },
     /// The MCP servers a profile's harness is configured with in its own files.
@@ -206,9 +205,9 @@ pub enum Query {
     },
 }
 
-/// Widths the host will render command output at. Narrower than the low bound is
-/// unreadable; wider is a client asking for a grid nobody can see.
-pub const STORED_OUTPUT_COLS: std::ops::RangeInclusive<u16> = 20..=400;
+/// The widest the host renders command output: a client asks for any width up
+/// to it, and the bound is what one render may cost the host.
+pub const MAX_STORED_OUTPUT_COLS: u16 = 400;
 
 /// Screen rows the host emulates command output into. Trailing blank rows are
 /// trimmed, so a shorter output returns a shorter frame.
@@ -240,7 +239,7 @@ pub enum QueryResponse {
     /// Records standing for the log cursors `from..end`, with the same
     /// merging as [`crate::ServerEvent::SessionSnapshot`].
     SessionHistoryPage {
-        records: Vec<crate::SessionEventRecord>,
+        records: Vec<tcode_core::session::StoredEvent>,
         from: u64,
         end: u64,
         truncated: bool,
@@ -252,7 +251,7 @@ pub enum QueryResponse {
         entries: Vec<IconImageEntry>,
     },
     Directories(DirectoryListing),
-    ExternalHistory(Vec<RecentDir>),
+    ExternalHistory(ExternalHistory),
     CommitMessage(String),
     GitDiff(GitDiffResult),
     FileBytes(#[serde(with = "crate::wire::base64_bytes")] Vec<u8>),
@@ -269,7 +268,7 @@ pub enum QueryResponse {
         suggested_name: String,
         mime: String,
     },
-    SessionContentHits(Vec<SessionSearchHit>),
+    SessionContentHits(SessionContentHits),
     ItemOutput(String),
     /// `None` when no entry was recorded at or before the position.
     ThreadAnchorTurn(Option<usize>),
@@ -282,6 +281,14 @@ pub enum QueryResponse {
         /// Unix seconds after which the host answers this read afresh.
         expires_at: u64,
     },
+}
+
+/// A content search's matches, and the sessions it could not search.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionContentHits {
+    pub hits: Vec<SessionSearchHit>,
+    /// A session that could not be searched, and why, one per entry.
+    pub unreadable: Vec<String>,
 }
 
 /// One content match in a stored session, addressed by the folded timeline
@@ -302,8 +309,6 @@ pub struct SessionSearchHit {
 pub enum GitDiffScope {
     WorkingTree,
     Branch,
-    #[serde(other)]
-    Unknown,
 }
 
 /// Full base- and new-side text for one changed file.
@@ -377,11 +382,11 @@ impl PathEntry {
 pub enum SourceTool {
     ClaudeCode,
     ClaudeDesktop,
+    /// An application built on the Claude Agent SDK.
+    ClaudeAgentSdk,
     T3Code,
     CodexCli,
     CodexDesktop,
-    #[serde(other)]
-    Unknown,
 }
 
 impl SourceTool {
@@ -389,10 +394,10 @@ impl SourceTool {
         match self {
             Self::ClaudeCode => "Claude Code",
             Self::ClaudeDesktop => "Claude Desktop",
+            Self::ClaudeAgentSdk => "Claude Agent SDK",
             Self::T3Code => "T3 Code",
             Self::CodexCli => "Codex CLI",
             Self::CodexDesktop => "Codex Desktop",
-            Self::Unknown => "Unknown",
         }
     }
 }
@@ -407,6 +412,15 @@ pub struct ExternalThread {
     pub last_active_ms: u64,
 }
 
+/// What a scan of external agents' histories found, and what it could not
+/// read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalHistory {
+    pub dirs: Vec<RecentDir>,
+    /// A path the scan could not read, and why, one per entry.
+    pub unreadable: Vec<String>,
+}
+
 /// Recently active directory containing external threads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecentDir {
@@ -417,9 +431,6 @@ pub struct RecentDir {
 
 /// Fresh history and backwards pages are bounded independently of live cursors.
 pub const SESSION_HISTORY_RECORDS: usize = 200;
-/// The most one history reply may carry: a single record larger than this is
-/// an error rather than a reply.
-pub const MAX_SESSION_HISTORY_BYTES: usize = 8 * 1024 * 1024;
 /// What one history reply aims for. A reply always carries at least one
 /// record, so a larger record still arrives alone.
 pub const SESSION_WINDOW_BYTES: usize = 512 * 1024;
@@ -433,7 +444,6 @@ pub enum HostingAction {
     State,
     SetEnabled(bool),
     /// Mint an invitation, replacing the current one.
-    #[serde(alias = "new_code")]
     NewInvitation,
     /// Remove a device; from every machine of the group when it is a group
     /// member.
@@ -535,7 +545,6 @@ pub struct SpaceInfo {
     pub link_enabled: bool,
     pub link_dead: bool,
     pub members: Vec<HostedDevice>,
-    #[serde(default = "SpacePolicy::unrestricted")]
     pub policy: SpacePolicy,
 }
 
@@ -549,20 +558,15 @@ pub struct SpacePolicy {
     pub agents: SpaceAgents,
     pub approval: SpaceApproval,
     /// Open, type into and restart terminals.
-    #[serde(default)]
     pub terminals: bool,
     /// Push, pull and publish branches, and work with pull requests, all
     /// under the machine's own credentials.
-    #[serde(default)]
     pub git_remote: bool,
     /// Reach the machine's local services through Preview tunnels.
-    #[serde(default)]
     pub preview: bool,
     /// Let a member's turn operate the machine's desktop through computer use.
-    #[serde(default)]
     pub computer_use: bool,
     /// Open the space's projects in an editor over the machine's SSH channel.
-    #[serde(default)]
     pub editor: bool,
 }
 
@@ -721,7 +725,6 @@ pub struct HostingState {
     pub created_space_id: Option<String>,
     pub enabled: bool,
     /// Seconds until `invite` expires; `0` without one.
-    #[serde(default)]
     pub expires_in_secs: u64,
     pub host_id: String,
     pub host_name: String,
@@ -732,11 +735,9 @@ pub struct HostingState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite: Option<String>,
     pub devices: Vec<HostedDevice>,
-    #[serde(default)]
     pub spaces: Vec<SpaceInfo>,
     /// How each Traverse source this machine publishes to is doing, in
     /// configured order; empty with none.
-    #[serde(default)]
     pub traverse: Vec<TraverseSourceStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<GroupInfo>,
@@ -822,7 +823,6 @@ pub enum TraverseLookupState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostedDevice {
-    #[serde(default)]
     pub access: DeviceAccess,
     pub id: String,
     pub name: String,
@@ -845,7 +845,7 @@ pub struct PathInfo {
     pub relay: Option<String>,
     /// The direct path's remote address is on this machine's own network
     /// (private, link-local or loopback) rather than punched across the
-    /// internet. A peer that predates the flag reads as punched.
+    /// internet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lan: bool,
     /// A relay carries the connection while a direct path is open but not

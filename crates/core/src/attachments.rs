@@ -23,7 +23,7 @@ pub const UPLOAD_CHUNK_BYTES: usize = 512 * 1024;
 
 /// Whether `ext` is safe to append to a generated attachment file name.
 pub fn is_safe_extension(ext: &str) -> bool {
-    !ext.is_empty() && ext.len() <= 8 && ext.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    !ext.is_empty() && ext.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 /// Best-effort MIME type from a file extension.

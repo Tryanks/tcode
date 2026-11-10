@@ -51,12 +51,12 @@ pub(super) struct Credential {
 }
 
 impl Credential {
-    /// A personal access token goes as Basic with an empty user; az's token as a bearer. A
-    /// token that is not one header-safe word is none at all, so it never reaches a request.
+    /// A personal access token goes as Basic with an empty user; az's token as a bearer. An
+    /// empty token is none at all.
     fn new(token: &str, bearer: bool, source: CredentialSource) -> Option<Self> {
         use base64::Engine as _;
         let token = token.trim();
-        if token.is_empty() || !token.bytes().all(|b| b.is_ascii_graphic()) {
+        if token.is_empty() {
             return None;
         }
         let authorization = if bearer {
@@ -146,6 +146,9 @@ impl<'a> Request<'a> {
     }
 }
 
+/// az's token, none signed out, or az's failure.
+type TokenRead = Result<Option<String>, ForgeError>;
+
 struct Cached<V> {
     value: V,
     expires: Instant,
@@ -157,7 +160,7 @@ pub(super) struct Api {
     hosts: RwLock<BTreeMap<String, HostSettings>>,
     agent: ureq::Agent,
     /// az's token, which is its signed-in account's for every organization.
-    az: Mutex<Option<Cached<Option<String>>>>,
+    az: Mutex<Option<Cached<TokenRead>>>,
     rate_limits: Mutex<crate::forge::RateLimits>,
     /// The account each credential reads as, by fingerprint, for a few minutes.
     viewers: Mutex<HashMap<String, Cached<Value>>>,
@@ -218,7 +221,11 @@ impl Api {
                 "Azure DevOps host turned off",
             ));
         }
-        if let Some(token) = self.store.token(HostKind::Azure, authority) {
+        if let Some(token) = self
+            .store
+            .token(HostKind::Azure, authority)
+            .map_err(ForgeError::credentials_unreadable)?
+        {
             return Ok(Credential::new(&token, false, CredentialSource::Saved));
         }
         if self.environment_host().as_deref() == Some(authority) {
@@ -232,7 +239,7 @@ impl Api {
                 )
             }));
         }
-        Ok(self.az_token().and_then(|token| {
+        Ok(self.az_token()?.and_then(|token| {
             Credential::new(&token, true, CredentialSource::Cli { tool: "az".into() })
         }))
     }
@@ -242,7 +249,7 @@ impl Api {
     }
 
     pub(super) fn token_saved(&self, authority: &str) -> bool {
-        self.store.token(HostKind::Azure, authority).is_some()
+        matches!(self.store.token(HostKind::Azure, authority), Ok(Some(_)))
     }
 
     /// What the organization's last answer to `credential` says: its account, and any problem.
@@ -331,8 +338,10 @@ impl Api {
     }
 
     /// The Entra token az mints for Azure DevOps while it is signed in, held five minutes, or
-    /// ten seconds when there is none.
-    fn az_token(&self) -> Option<String> {
+    /// ten seconds when there is none. Signed out, az fails saying "Please run 'az login' to
+    /// setup account." (azure-cli `_profile.py`, `_AZ_LOGIN_MESSAGE`), which is none; any
+    /// other failure is az's.
+    fn az_token(&self) -> Result<Option<String>, ForgeError> {
         let mut held = self.az.lock().unwrap();
         if let Some(cached) = held
             .as_ref()
@@ -340,7 +349,7 @@ impl Api {
         {
             return cached.value.clone();
         }
-        let token = self.az_program().and_then(|program| {
+        let token = self.az_program().map(|program| {
             crate::forge::run_cli(
                 program,
                 &[
@@ -359,10 +368,24 @@ impl Api {
                 true,
             )
         });
-        let token = token
-            .map(|token| token.trim().to_owned())
-            .filter(|token| !token.is_empty());
-        let ttl = if token.is_some() { 300 } else { 10 };
+        let token = match token {
+            None => Ok(None),
+            Some(Ok(token)) => Ok(Some(token.trim().to_owned()).filter(|token| !token.is_empty())),
+            Some(Err(failure))
+                if failure.exited
+                    && failure
+                        .said
+                        .contains("Please run 'az login' to setup account.") =>
+            {
+                Ok(None)
+            }
+            Some(Err(failure)) => Err(failure.error("az")),
+        };
+        let ttl = if matches!(token, Ok(Some(_))) {
+            300
+        } else {
+            10
+        };
         *held = Some(Cached {
             value: token.clone(),
             expires: Instant::now() + Duration::from_secs(ttl),
@@ -462,8 +485,15 @@ impl Api {
         };
         let response = match answer {
             Ok(response) | Err(ureq::Error::Status(_, response)) => response,
-            Err(ureq::Error::Transport(_)) => {
-                return Err(if started.elapsed() >= DEADLINE {
+            Err(ureq::Error::Transport(transport)) => {
+                // ureq checks every header before sending; its message quotes the header, which
+                // may be the credential, so only its kind is told.
+                return Err(if transport.kind() == ureq::ErrorKind::BadHeader {
+                    error(
+                        ForgeErrorKind::InvalidInput,
+                        "Azure DevOps request not sent (ureq: invalid header)",
+                    )
+                } else if started.elapsed() >= DEADLINE {
                     error(ForgeErrorKind::Deadline, "Azure DevOps request deadline")
                 } else {
                     error(
@@ -658,6 +688,18 @@ mod tests {
         );
         assert_eq!(read(&named, "dev.azure.com/fabrikam"), env);
         assert_eq!(read(&named, "dev.azure.com/tailspin"), None);
+        // A token as saved goes out, for Azure to accept or refuse, whatever it carries.
+        store
+            .set_token(
+                HostKind::Azure,
+                "dev.azure.com/tailspin",
+                Some("tailspin\u{200b}secret"),
+            )
+            .unwrap();
+        assert_eq!(
+            read(&named, "dev.azure.com/tailspin"),
+            Some((CredentialSource::Saved, basic("tailspin\u{200b}secret")))
+        );
         // A host that is no organization's never gets one, whatever the key carries.
         for elsewhere in [
             "dev.azure.com:x@evil.test",

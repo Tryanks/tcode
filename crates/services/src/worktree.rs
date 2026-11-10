@@ -5,15 +5,13 @@
 //! resolved base, and which branch removal may delete.
 
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use sha2::{Digest as _, Sha256};
 
 use crate::git::run_git;
 use crate::store::SessionStore;
-
-const WORKTREE_SEED_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 
 /// How much of a repository's directory name its worktrees' directory keeps.
 const REPOSITORY_NAME_CHARS: usize = 24;
@@ -32,7 +30,6 @@ pub struct WorktreeSeedSummary {
     pub manifest_found: bool,
     pub copied_files: usize,
     pub skipped: Vec<String>,
-    pub limit_reached: bool,
 }
 
 /// The complete identity of a newly provisioned worktree.
@@ -157,14 +154,7 @@ pub fn provision(
             .to_string(),
     };
     let bucket = worktrees_root(data_dir).join(repository_key(&checkout)?);
-    provision_at(
-        &checkout,
-        &path_safe(name),
-        &base,
-        &bucket,
-        WORKTREE_SEED_LIMIT_BYTES,
-    )
-    .map_err(Into::into)
+    provision_at(&checkout, &path_safe(name), &base, &bucket).map_err(Into::into)
 }
 
 /// Where [`provision`] puts a worktree called `name` for the repository
@@ -234,47 +224,22 @@ fn provision_at(
     name: &str,
     base: &str,
     worktrees_root: &Path,
-    seed_limit: u64,
 ) -> Result<ProvisionedWorktree, WorktreeError> {
     let path = worktrees_root.join(name);
     let requested_branch = format!("{BRANCH_PREFIX}{name}");
     let seed_plan = read_seed_plan(root)?;
     std::fs::create_dir_all(worktrees_root).map_err(io_error)?;
     let branch = available_branch(root, &requested_branch)?;
-    if registered_worktree(root, &path)?.is_some() {
-        return Err(WorktreeError(format!(
-            "worktree target is already registered: {}",
-            path.display()
-        )));
-    }
-    if path.exists() {
-        prune(root)?;
-    }
-
-    let failure =
-        |output: &std::process::Output| String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let mut output = add(root, &path, &branch, base)?;
-    if !output.status.success() && registered_worktree(root, &path)?.is_none() {
-        let first = failure(&output);
-        // `worktree add -b` makes the branch before it checks it out, so a
-        // failed add can leave the branch behind and the retry would only
-        // say it already exists.
-        delete_branch_without_own_commits(root, &branch);
-        prune(root)?;
-        output = add(root, &path, &branch, base)?;
-        if !output.status.success() {
-            delete_branch_without_own_commits(root, &branch);
-            return Err(WorktreeError(format!(
-                "{first} (again after pruning: {})",
-                failure(&output)
-            )));
-        }
-    }
+    let output = add(root, &path, &branch, base)?;
     if !output.status.success() {
-        return Err(WorktreeError(failure(&output)));
+        // `worktree add -b` makes the branch before it checks it out.
+        delete_branch_without_own_commits(root, &branch);
+        return Err(WorktreeError(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
     }
 
-    let seed_summary = match seed(&path, seed_plan, seed_limit) {
+    let seed_summary = match seed(&path, seed_plan) {
         Ok(summary) => summary,
         Err(error) => {
             if let Err(cleanup_error) = remove(root, &path) {
@@ -566,9 +531,14 @@ pub fn merge_back(
     match run_git(destination, &["merge", "--no-ff", "--no-edit", branch]) {
         Ok(_) => Ok(MergeBackOutcome::MergeCommit),
         Err(error) => {
-            let conflicted = destination.join(".git/MERGE_HEAD").exists()
-                || run_git(destination, &["diff", "--name-only", "--diff-filter=U"])
-                    .is_ok_and(|paths| !paths.trim().is_empty());
+            // A merge stopped on conflicts leaves MERGE_HEAD in the
+            // destination's own Git directory, which Git resolves for a
+            // linked worktree too.
+            let conflicted = run_git(
+                destination,
+                &["rev-parse", "--quiet", "--verify", "MERGE_HEAD"],
+            )
+            .is_ok();
             if conflicted {
                 run_git(destination, &["merge", "--abort"]).map_err(MergeBackError::Git)?;
                 Err(MergeBackError::DivergedConflict)
@@ -768,12 +738,17 @@ fn old_enough(modified: SystemTime, now: SystemTime, minimum_age: Duration) -> b
         .is_ok_and(|age| age > minimum_age)
 }
 
+/// The files `.worktreeinclude` selects, read as Claude Code 2.1.322 reads
+/// its file of the same name: gitignore patterns, matched against the
+/// untracked files Git ignores, which is all a new checkout lacks.
 #[derive(Debug)]
 struct SeedPlan {
     manifest_found: bool,
     root: PathBuf,
-    entries: Vec<(String, PathBuf, PathBuf)>,
-    missing: Vec<String>,
+    /// Repository-relative paths, as Git lists them.
+    files: Vec<String>,
+    /// Patterns no matcher could be built from, which match nothing.
+    unusable: Vec<String>,
 }
 
 fn read_seed_plan(root: &Path) -> Result<SeedPlan, WorktreeError> {
@@ -784,16 +759,15 @@ fn read_seed_plan(root: &Path) -> Result<SeedPlan, WorktreeError> {
         ))
     })?;
     let manifest = root.join(".worktreeinclude");
+    let mut plan = SeedPlan {
+        manifest_found: false,
+        root: canonical_root,
+        files: Vec::new(),
+        unusable: Vec::new(),
+    };
     let contents = match std::fs::read_to_string(&manifest) {
         Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SeedPlan {
-                manifest_found: false,
-                root: canonical_root,
-                entries: Vec::new(),
-                missing: Vec::new(),
-            });
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(plan),
         Err(error) => {
             return Err(WorktreeError(format!(
                 "cannot read {}: {error}",
@@ -801,57 +775,112 @@ fn read_seed_plan(root: &Path) -> Result<SeedPlan, WorktreeError> {
             )));
         }
     };
-    let mut entries = Vec::new();
-    let mut missing = Vec::new();
-    for (index, raw) in contents.lines().enumerate() {
-        let entry = raw.trim();
-        if entry.is_empty() || entry.starts_with('#') {
-            continue;
+    plan.manifest_found = true;
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(&plan.root);
+    for line in contents.lines() {
+        if let Err(error) = builder.add_line(None, line) {
+            log::warn!("unusable .worktreeinclude pattern {line:?}: {error}");
+            plan.unusable.push(line.trim().to_string());
         }
-        let relative = PathBuf::from(entry);
-        if relative.is_absolute()
-            || relative.components().any(|component| {
-                matches!(
-                    component,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
-        {
-            return Err(WorktreeError(format!(
-                "invalid .worktreeinclude entry on line {}: {entry:?} must be relative and cannot contain '..'",
-                index + 1
-            )));
-        }
-        let source = root.join(&relative);
-        let canonical_source = match source.canonicalize() {
-            Ok(path) => path,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                log::info!("skipping missing .worktreeinclude entry {entry:?}");
-                missing.push(entry.to_string());
-                continue;
-            }
-            Err(error) => {
-                return Err(WorktreeError(format!(
-                    "cannot resolve .worktreeinclude entry {entry:?}: {error}"
-                )));
-            }
-        };
-        if !canonical_source.starts_with(&canonical_root) {
-            return Err(WorktreeError(format!(
-                ".worktreeinclude entry {entry:?} resolves outside the repository"
-            )));
-        }
-        entries.push((entry.to_string(), canonical_source, relative));
     }
-    Ok(SeedPlan {
-        manifest_found: true,
-        root: canonical_root,
-        entries,
-        missing,
+    let matcher = builder
+        .build()
+        .map_err(|error| WorktreeError(format!("cannot read {}: {error}", manifest.display())))?;
+    if matcher.is_empty() {
+        return Ok(plan);
+    }
+    let selected = |path: &str, dir: bool| {
+        matcher
+            .matched_path_or_any_parents(path.trim_end_matches('/'), dir)
+            .is_ignore()
+    };
+    let patterns: Vec<&str> = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    let ignored = |paths: &[&str]| {
+        let mut args = vec![
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+        ];
+        args.extend_from_slice(paths);
+        run_git(root, &args).map_err(WorktreeError)
+    };
+    let listed = ignored(&["--directory"])?;
+    let mut directories = Vec::new();
+    for path in listed.split('\0').filter(|path| !path.is_empty()) {
+        if path.ends_with('/') {
+            if may_hold_selected(&patterns, path) || selected(path, true) {
+                directories.push(path);
+            }
+        } else if selected(path, false) {
+            plan.files.push(path.to_string());
+        }
+    }
+    if !directories.is_empty() {
+        let mut paths = vec!["--"];
+        paths.extend(directories);
+        let listed = ignored(&paths)?;
+        plan.files.extend(
+            listed
+                .split('\0')
+                .filter(|path| !path.is_empty() && selected(path, false))
+                .map(str::to_string),
+        );
+    }
+    Ok(plan)
+}
+
+/// Whether a directory Git listed whole may hold a file a pattern selects,
+/// as Claude Code 2.1.322 decides which such directories to list: a
+/// pattern that starts with the directory, whose literal part before its
+/// first wildcard the directory starts with, or that begins with `**/`
+/// and names one of the directory's components.
+fn may_hold_selected(patterns: &[&str], directory: &str) -> bool {
+    let is_wildcard = |c: char| matches!(c, '*' | '?' | '[');
+    let components: Vec<String> = directory
+        .trim_end_matches('/')
+        .split('/')
+        .map(str::to_lowercase)
+        .collect();
+    patterns.iter().any(|pattern| {
+        let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
+        if pattern.starts_with(directory) {
+            return true;
+        }
+        if let Some(wildcard) = pattern.find(is_wildcard)
+            && wildcard > 0
+            && directory.starts_with(&pattern[..wildcard])
+        {
+            return true;
+        }
+        let mut anywhere = pattern;
+        while let Some(rest) = anywhere.strip_prefix("**/") {
+            anywhere = rest;
+        }
+        if anywhere.len() == pattern.len() {
+            return false;
+        }
+        let head = anywhere.split('/').next().unwrap_or(anywhere);
+        let wildcard = head.find(is_wildcard);
+        let literal = head[..wildcard.unwrap_or(head.len())]
+            .replace('\\', "")
+            .to_lowercase();
+        !literal.is_empty()
+            && match wildcard {
+                None => components.contains(&literal),
+                Some(_) => components
+                    .iter()
+                    .any(|component| component.starts_with(&literal)),
+            }
     })
 }
 
-fn seed(worktree: &Path, plan: SeedPlan, limit: u64) -> Result<WorktreeSeedSummary, WorktreeError> {
+fn seed(worktree: &Path, plan: SeedPlan) -> Result<WorktreeSeedSummary, WorktreeError> {
     let canonical_worktree = worktree.canonicalize().map_err(|error| {
         WorktreeError(format!(
             "cannot resolve new worktree {}: {error}",
@@ -860,46 +889,34 @@ fn seed(worktree: &Path, plan: SeedPlan, limit: u64) -> Result<WorktreeSeedSumma
     })?;
     let mut summary = WorktreeSeedSummary {
         manifest_found: plan.manifest_found,
-        skipped: plan.missing,
+        skipped: plan.unusable,
         ..WorktreeSeedSummary::default()
     };
-    let mut copied_bytes = 0_u64;
-    let mut visited_directories = HashSet::new();
-    for (display, source, relative) in plan.entries {
-        copy_seed_entry(
-            &plan.root,
-            &canonical_worktree,
-            &source,
-            &canonical_worktree.join(relative),
-            &display,
-            limit,
-            &mut copied_bytes,
-            &mut visited_directories,
-            &mut summary,
-        )?;
-    }
-    if summary.limit_reached {
-        log::warn!(
-            "worktree seed limit reached for {}; skipped: {}",
-            worktree.display(),
-            summary.skipped.join(", ")
-        );
+    for path in plan.files {
+        copy_seed_file(&plan.root, &canonical_worktree, &path, &mut summary)?;
     }
     Ok(summary)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn copy_seed_entry(
+/// Copy one selected file; a link, as Claude Code does, is not copied.
+fn copy_seed_file(
     source_root: &Path,
     destination_root: &Path,
-    source: &Path,
-    destination: &Path,
-    display: &str,
-    limit: u64,
-    copied_bytes: &mut u64,
-    visited_directories: &mut HashSet<PathBuf>,
+    path: &str,
     summary: &mut WorktreeSeedSummary,
 ) -> Result<(), WorktreeError> {
+    let source = source_root.join(path);
+    let destination = destination_root.join(path);
+    let metadata = std::fs::symlink_metadata(&source).map_err(|error| {
+        WorktreeError(format!(
+            "cannot inspect seed source {}: {error}",
+            source.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() {
+        summary.skipped.push(path.to_string());
+        return Ok(());
+    }
     let canonical_source = source.canonicalize().map_err(|error| {
         WorktreeError(format!(
             "cannot resolve seed source {}: {error}",
@@ -908,64 +925,19 @@ fn copy_seed_entry(
     })?;
     if !canonical_source.starts_with(source_root) {
         return Err(WorktreeError(format!(
-            ".worktreeinclude path {display:?} resolves outside the repository"
+            ".worktreeinclude path {path:?} resolves outside the repository"
         )));
     }
-    let metadata = std::fs::metadata(&canonical_source).map_err(|error| {
-        WorktreeError(format!(
-            "cannot inspect seed source {}: {error}",
-            source.display()
-        ))
-    })?;
-    if destination_has_unsafe_ancestor(destination_root, destination)? {
-        summary.skipped.push(display.to_string());
-        return Ok(());
-    }
-    if metadata.is_dir() {
-        if !visited_directories.insert(canonical_source.clone()) {
-            summary.skipped.push(display.to_string());
-            return Ok(());
-        }
-        if let Ok(destination_metadata) = std::fs::symlink_metadata(destination) {
-            if !destination_metadata.is_dir() || destination_metadata.file_type().is_symlink() {
-                summary.skipped.push(display.to_string());
-                return Ok(());
-            }
-        } else {
-            std::fs::create_dir(destination).map_err(io_error)?;
-        }
-        let children = std::fs::read_dir(&canonical_source).map_err(io_error)?;
-        for child in children {
-            let child = child.map_err(io_error)?;
-            let name = child.file_name();
-            copy_seed_entry(
-                source_root,
-                destination_root,
-                &child.path(),
-                &destination.join(&name),
-                &format!("{display}/{}", name.to_string_lossy()),
-                limit,
-                copied_bytes,
-                visited_directories,
-                summary,
-            )?;
-        }
-        return Ok(());
-    }
-    if std::fs::symlink_metadata(destination).is_ok() {
-        summary.skipped.push(display.to_string());
-        return Ok(());
-    }
-    if summary.limit_reached || copied_bytes.saturating_add(metadata.len()) > limit {
-        summary.limit_reached = true;
-        summary.skipped.push(display.to_string());
+    if destination_has_unsafe_ancestor(destination_root, &destination)?
+        || std::fs::symlink_metadata(&destination).is_ok()
+    {
+        summary.skipped.push(path.to_string());
         return Ok(());
     }
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(io_error)?;
     }
     std::fs::copy(&canonical_source, destination).map_err(io_error)?;
-    *copied_bytes += metadata.len();
     summary.copied_files += 1;
     Ok(())
 }
@@ -1178,84 +1150,83 @@ mod tests {
         }
     }
 
+    /// The destination is the main checkout or a linked worktree, whose Git
+    /// directory is not `.git`.
     #[test]
     fn merge_back_aborts_conflict_and_restores_clean_destination() {
-        let (temp, root) = scratch_repo("tcode-merge-back-conflict-test");
-        let created = provision_for_test(&root, "conflict", &temp);
-        commit_file(&created.path, "tracked.txt", "worktree\n", "worktree edit");
-        commit_file(&root, "tracked.txt", "destination\n", "destination edit");
-        assert_eq!(
-            merge_back(&root, &created.path, &created.branch),
-            Err(MergeBackError::DivergedConflict)
-        );
-        assert!(
-            run_git(&root, &["status", "--porcelain"])
-                .unwrap()
-                .trim()
-                .is_empty()
-        );
-        assert!(!root.join(".git/MERGE_HEAD").exists());
-        remove(&root, &created.path).unwrap();
-        let _ = std::fs::remove_dir_all(temp);
+        for linked in [false, true] {
+            let (temp, root) = scratch_repo("tcode-merge-back-conflict-test");
+            let created = provision_for_test(&root, "conflict", &temp);
+            commit_file(&created.path, "tracked.txt", "worktree\n", "worktree edit");
+            let destination = if linked {
+                provision_for_test(&root, "destination", &temp).path
+            } else {
+                root.clone()
+            };
+            commit_file(
+                &destination,
+                "tracked.txt",
+                "destination\n",
+                "destination edit",
+            );
+            assert_eq!(
+                merge_back(&destination, &created.path, &created.branch),
+                Err(MergeBackError::DivergedConflict)
+            );
+            assert!(
+                run_git(&destination, &["status", "--porcelain"])
+                    .unwrap()
+                    .trim()
+                    .is_empty()
+            );
+            assert!(run_git(&destination, &["rev-parse", "--verify", "MERGE_HEAD"]).is_err());
+            remove(&root, &created.path).unwrap();
+            let _ = std::fs::remove_dir_all(temp);
+        }
     }
 
+    /// `.worktreeinclude` in the syntax Claude Code 2.1.322 reads it with:
+    /// gitignore patterns, selecting among the untracked files Git ignores.
+    /// A pattern reaches into a directory Git ignores whole, a file the
+    /// patterns do not select stays behind however Git treats it, and a
+    /// tracked file the checkout already has is left as it is.
     #[test]
-    fn seeding_copies_selected_paths_without_overwriting() {
+    fn seeding_copies_the_ignored_files_the_patterns_select() {
         let (temp, root) = scratch_repo("tcode-worktree-seed-test");
+        commit_file(
+            &root,
+            ".gitignore",
+            ".env*\nconfig/\nbuild/\n",
+            "ignore local files",
+        );
         std::fs::write(root.join(".env.local"), "TOKEN=test-only\n").unwrap();
-        std::fs::create_dir(root.join("ignored-config")).unwrap();
-        std::fs::write(root.join("ignored-config/settings.json"), "{}\n").unwrap();
+        std::fs::create_dir_all(root.join("config/nested")).unwrap();
+        std::fs::write(root.join("config/nested/settings.json"), "{}\n").unwrap();
+        std::fs::create_dir(root.join("build")).unwrap();
+        std::fs::write(root.join("build/out.bin"), "build output\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "untracked, not ignored\n").unwrap();
         std::fs::write(
             root.join(".worktreeinclude"),
-            "# local build inputs\n.env.local\nignored-config\nmissing.file\ntracked.txt\n",
+            "# local build inputs\n.env*\nconfig/**/*.json\nnotes.txt\ntracked.txt\n",
         )
         .unwrap();
         let created = provision_for_test(&root, "seed", &temp);
         assert_eq!(created.seed_summary.copied_files, 2);
-        assert_eq!(
-            created.seed_summary.skipped,
-            ["missing.file", "tracked.txt"]
-        );
+        assert!(created.seed_summary.skipped.is_empty());
         assert_eq!(
             std::fs::read_to_string(created.path.join(".env.local")).unwrap(),
             "TOKEN=test-only\n"
         );
         assert_eq!(
+            std::fs::read_to_string(created.path.join("config/nested/settings.json")).unwrap(),
+            "{}\n"
+        );
+        assert!(!created.path.join("build").exists());
+        assert!(!created.path.join("notes.txt").exists());
+        assert_eq!(
             std::fs::read_to_string(created.path.join("tracked.txt")).unwrap(),
             "initial\n"
         );
-        remove(&root, &created.path).unwrap();
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn seed_rejects_traversal_before_creating_a_worktree() {
-        let (temp, root) = scratch_repo("tcode-worktree-seed-traversal-test");
-        std::fs::write(root.join(".worktreeinclude"), "../outside\n").unwrap();
-        let worktrees = temp.join("worktrees");
-        let error = provision_at(
-            &root,
-            "traversal",
-            "main",
-            &worktrees,
-            WORKTREE_SEED_LIMIT_BYTES,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("cannot contain '..'"));
-        assert!(!worktrees.join("traversal").exists());
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn seed_stops_at_total_size_limit() {
-        let (temp, root) = scratch_repo("tcode-worktree-seed-limit-test");
-        std::fs::write(root.join("first.bin"), b"1234").unwrap();
-        std::fs::write(root.join("second.bin"), b"5678").unwrap();
-        std::fs::write(root.join(".worktreeinclude"), "first.bin\nsecond.bin\n").unwrap();
-        let created = provision_at(&root, "limit", "main", &temp.join("worktrees"), 4).unwrap();
-        assert_eq!(created.seed_summary.copied_files, 1);
-        assert!(created.seed_summary.limit_reached);
-        assert_eq!(created.seed_summary.skipped, ["second.bin"]);
         remove(&root, &created.path).unwrap();
         let _ = std::fs::remove_dir_all(temp);
     }

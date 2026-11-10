@@ -411,9 +411,8 @@ impl Reader<'_> {
     fn viewed_files(&self) -> Result<PullRequestViewedFiles, GitHubError> {
         let query = "query PullRequestViewedFiles($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { files(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { path viewerViewedState } } } } }";
         let read = graphql::pages(
-            None,
-            Some(VIEWED_PAGES),
-            |after, _| {
+            VIEWED_PAGES,
+            |after| {
                 self.query(
                     "PullRequestViewedFiles",
                     query.to_owned(),
@@ -421,7 +420,6 @@ impl Reader<'_> {
                 )
             },
             |page| next_cursor(&page["data"]["repository"]["pullRequest"]["files"]),
-            |_| false,
         )?;
         if read
             .pages
@@ -1190,4 +1188,63 @@ pub(crate) fn diff_files(diff: &str) -> Option<Vec<PullRequestFile>> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Rows of GitHub's REST "List pull requests files" answer. Shape: the diff entry schema of
+    /// docs.github.com/en/rest/pulls/pulls (`filename`, `status` one of added, removed,
+    /// modified, renamed, copied, changed, unchanged, `additions`, `deletions`, optional
+    /// `patch` and `previous_filename`, `sha`). Content is invented.
+    #[test]
+    fn a_files_listing_row_says_what_changed_and_whether_github_showed_how() {
+        let row = |status: &str, additions: u64, patch: Option<&str>, sha: &str| {
+            let mut row = json!({
+                "sha": sha,
+                "filename": "src/lexer.rs",
+                "status": status,
+                "additions": additions,
+                "deletions": 0,
+                "changes": additions,
+                "blob_url": "https://github.com/example-org/tool/blob/1/src/lexer.rs",
+                "raw_url": "https://github.com/example-org/tool/raw/1/src/lexer.rs",
+                "contents_url": "https://api.github.com/repos/example-org/tool/contents/src/lexer.rs",
+            });
+            if let Some(patch) = patch {
+                row["patch"] = json!(patch);
+            }
+            if status == "renamed" {
+                row["previous_filename"] = json!("src/scanner.rs");
+            }
+            listed_file(&row).unwrap()
+        };
+        let hunk = "@@ -0,0 +1 @@\n+fn lex() {}";
+        let added = row("added", 1, Some(hunk), "a1");
+        assert_eq!(added.kind, FileChangeKind::Create);
+        assert_eq!(added.patch, PullRequestPatch::Hunks(hunk.to_owned()));
+        assert_eq!(row("removed", 0, None, "a2").kind, FileChangeKind::Delete);
+        let renamed = row("renamed", 0, None, "a3");
+        assert_eq!(
+            (renamed.kind, renamed.previous_path.as_deref()),
+            (FileChangeKind::Rename, Some("src/scanner.rs"))
+        );
+        // Renamed alone, it has no hunks to show.
+        assert_eq!(renamed.patch, PullRequestPatch::Hunks(String::new()));
+        // Changed lines and no patch: GitHub withheld it for size.
+        assert_eq!(
+            row("modified", 4000, None, "a4").patch,
+            PullRequestPatch::Oversized
+        );
+        // Neither lines nor patch: binary, or past GitHub's limits.
+        assert_eq!(
+            row("modified", 0, None, "a5").patch,
+            PullRequestPatch::Withheld
+        );
+        assert_eq!(
+            row("added", 0, None, EMPTY_BLOB).patch,
+            PullRequestPatch::Hunks(String::new())
+        );
+    }
 }

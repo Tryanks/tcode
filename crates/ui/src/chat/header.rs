@@ -1474,10 +1474,12 @@ impl ChatView {
     /// Unlabelled, the main part is its icon, named by its tooltip (or the
     /// disabled hint) and its accessibility label.
     fn render_git_button(&self, labelled: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (quick, items) = self
-            .workspace_store
-            .read(cx)
-            .chat_git_controls_for(self.session_id.as_deref(), cx)?;
+        let store = self.workspace_store.read(cx);
+        let session_id = self.session_id.as_deref();
+        let Some((quick, items)) = store.chat_git_controls_for(session_id, cx) else {
+            let error = store.chat_git_error_for(session_id, cx)?;
+            return Some(self.render_git_error(error, cx));
+        };
         let border = cx.theme().border;
 
         let label: SharedString = crate::tr!(git_action_label_key(quick.label))
@@ -1594,6 +1596,31 @@ impl ChatView {
                 .child(chevron)
                 .into_any_element(),
         )
+    }
+
+    /// The git button when git could not read the status: disabled, named by
+    /// git's own error.
+    fn render_git_error(&self, error: String, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .flex_none()
+            .items_center()
+            .rounded(crate::material::radius_input(cx))
+            .border_1()
+            .border_color(cx.theme().border)
+            .overflow_hidden()
+            .child(
+                Button::new("git-main")
+                    .motion(&self.motion)
+                    .debug_selector(|| "git-main".into())
+                    .ghost()
+                    .small()
+                    .disabled(true)
+                    .aria_label(SharedString::from(error.clone()))
+                    .icon(Icon::empty().path("icons/git-branch.svg"))
+                    .tooltip(error),
+            )
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .into_any_element()
     }
 
     /// Dispatch a git quick-action: commit-style actions open the commit dialog;

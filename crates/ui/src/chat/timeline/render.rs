@@ -2648,18 +2648,9 @@ mod tests {
             })
         };
         let mut settle = |cx: &mut VisualTestContext,
-                          description: &str,
+                          what: &str,
                           ready: &dyn Fn(&mut VisualTestContext) -> bool| {
-            let deadline = crate::store::tests::host_deadline();
-            loop {
-                driver.step(cx, &store);
-                draw_settled(cx);
-                if ready(cx) {
-                    return;
-                }
-                assert!(Instant::now() < deadline, "waiting for {description}");
-                std::thread::sleep(Duration::from_millis(1));
-            }
+            driver.settle_until(cx, &store, what, ready);
         };
         // Nothing drives this turn on the host, so its Work Log reads as
         // finished and folded: open it and the command, as a reader would.
@@ -2806,12 +2797,10 @@ mod tests {
         store.update(cx, |store, _| {
             store.send_turn_for(session_id.clone(), "Plan it first".into(), Vec::new())
         });
-        driver.wait_until(cx, &store, "the turn reaches the provider", |_| {
-            matches!(
-                provider_commands.try_recv(),
-                Ok(agent::SessionCommand::SendTurn { .. })
-            )
-        });
+        while !matches!(
+            driver.recv(cx, &store, &provider_commands),
+            agent::SessionCommand::SendTurn { .. }
+        ) {}
 
         let window_state = cx.new(|_| WindowState::default());
         cx.update(|cx| cx.set_reduce_motion(true));
@@ -2867,34 +2856,23 @@ mod tests {
             }
         };
         let decided = |driver: &mut crate::store::tests::LocalHostDriver,
-                       cx: &mut VisualTestContext,
-                       what: &str| {
-            let mut decision = None;
-            let deadline = crate::store::tests::host_deadline();
-            while decision.is_none() {
-                assert!(Instant::now() < deadline, "waiting for {what}");
-                driver.step(cx, &store);
-                draw_settled(cx);
-                if let Ok(agent::SessionCommand::RespondApproval {
+                       cx: &mut VisualTestContext| {
+            draw_settled(cx);
+            loop {
+                if let agent::SessionCommand::RespondApproval {
                     request_id,
-                    decision: answer,
-                }) = provider_commands.try_recv()
+                    decision,
+                } = driver.recv(cx, &store, &provider_commands)
                 {
-                    decision = Some((request_id, answer));
+                    return (request_id, decision);
                 }
-                std::thread::sleep(Duration::from_millis(1));
             }
-            decision.unwrap()
         };
         let shown = |driver: &mut crate::store::tests::LocalHostDriver,
                      cx: &mut VisualTestContext| {
-            let deadline = crate::store::tests::host_deadline();
-            while cx.debug_bounds("plan-decision").is_none() {
-                assert!(Instant::now() < deadline, "waiting for the plan's decision");
-                driver.step(cx, &store);
-                draw_settled(cx);
-                std::thread::sleep(Duration::from_millis(1));
-            }
+            driver.settle_until(cx, &store, "the plan's decision", |cx| {
+                cx.debug_bounds("plan-decision").is_some()
+            });
         };
 
         propose("plan-1", "decide-1");
@@ -2908,7 +2886,7 @@ mod tests {
             .expect("approve button");
         cx.simulate_click(approve.center(), Modifiers::default());
         assert_eq!(
-            decided(&mut driver, cx, "the approval"),
+            decided(&mut driver, cx),
             (
                 "decide-1".to_string(),
                 agent::ApprovalDecision::Option("allow".into())
@@ -2927,7 +2905,7 @@ mod tests {
         cx.simulate_input("Split step one");
         cx.simulate_keystrokes("enter");
         assert_eq!(
-            decided(&mut driver, cx, "the feedback"),
+            decided(&mut driver, cx),
             (
                 "decide-2".to_string(),
                 agent::ApprovalDecision::Feedback("Split step one".into())
@@ -3257,18 +3235,15 @@ This begins after the hard break."#;
             assert!(window.debug_bounds("rewind-preview-checking").is_some());
 
             let mut asked = Vec::new();
-            driver.wait_until(window, &store, "the previews reach the Harness", |_| {
-                while let Ok(command) = commands.try_recv() {
-                    if let SessionCommand::PreviewRewind {
-                        checkpoint_id,
-                        mode,
-                    } = command
-                    {
-                        asked.push((checkpoint_id, mode));
-                    }
+            while asked.len() < 2 {
+                if let SessionCommand::PreviewRewind {
+                    checkpoint_id,
+                    mode,
+                } = driver.recv(window, &store, &commands)
+                {
+                    asked.push((checkpoint_id, mode));
                 }
-                asked.len() == 2
-            });
+            }
             for (checkpoint_id, mode) in asked {
                 assert_eq!(checkpoint_id, "checkpoint-0");
                 events
@@ -3303,18 +3278,9 @@ This begins after the hard break."#;
             };
             // The spinner is the selected scope's preview alone; the scopes
             // offered settle once the other scope's answer lands as well.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            while window.debug_bounds("rewind-preview-checking").is_some()
-                || shown(window) != offered
-            {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the previews are answered: {:?}, not {offered:?}, for {files:?}",
-                    shown(window)
-                );
-                driver.wait_until(window, &store, "the host's answers", |_| true);
-                draw_settled(window);
-            }
+            driver.settle_until(window, &store, "the previews' answers", |window| {
+                window.debug_bounds("rewind-preview-checking").is_none() && shown(window) == offered
+            });
             assert_eq!(
                 window.debug_bounds("rewind-preview-files").is_some(),
                 !files.is_empty(),
@@ -3478,15 +3444,9 @@ This begins after the hard break."#;
             window.simulate_resize(size(px(1_024.), px(700.)));
             // The origin comes with the thread's metadata, once its status
             // reaches this window, which redraws it.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            while window.debug_bounds("fork-origin").is_none() {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the fork names its source"
-                );
-                driver.wait_until(window, &store, "the host's answers", |_| true);
-                draw_settled(window);
-            }
+            driver.settle_until(window, &store, "the fork's source", |window| {
+                window.debug_bounds("fork-origin").is_some()
+            });
             assert_eq!(
                 view.read_with(window, |view, cx| view.composer.read(cx).draft(cx)),
                 ""
@@ -3643,10 +3603,9 @@ This begins after the hard break."#;
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(900.)));
         // The pulse never rests while the turn runs: frames as a display
-        // spaces them, on both clocks.
+        // spaces them.
         let frames = |count: usize, cx: &mut VisualTestContext| {
             for _ in 0..count {
-                std::thread::sleep(Duration::from_millis(16));
                 cx.executor().advance_clock(Duration::from_millis(16));
                 draw(cx);
             }

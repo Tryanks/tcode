@@ -1624,16 +1624,6 @@ async fn handle_command(
             ControlFlow::Continue(())
         }
         SessionCommand::Shutdown => {
-            // Settle pending AskUserQuestion callbacks before closing stdin.
-            for (request_id, response) in mapper.cancel_pending_user_input() {
-                let _ = write_line(stdin, &response).await;
-                let _ = event_tx
-                    .send(AgentEvent::UserInputResolved {
-                        request_id,
-                        answers: serde_json::Map::new(),
-                    })
-                    .await;
-            }
             let _ = stdin.close().await;
             let _ = child.kill();
             ControlFlow::Break("shutdown requested")
@@ -2485,24 +2475,6 @@ impl Mapper {
         ))
     }
 
-    /// Drain every pending `AskUserQuestion`, producing `(request_id, deny
-    /// control_response)` pairs with the cancellation message.
-    fn cancel_pending_user_input(&mut self) -> Vec<(String, Value)> {
-        self.pending_user_input
-            .drain()
-            .map(|(request_id, _questions)| {
-                let response = control_response(
-                    &request_id,
-                    json!({
-                        "behavior": "deny",
-                        "message": "User cancelled tool execution.",
-                    }),
-                );
-                (request_id, response)
-            })
-            .collect()
-    }
-
     /// The `initialize` control request registering the worktree hooks.
     fn initialize_request(&mut self) -> Value {
         let message = self.control_request(json!({
@@ -2701,6 +2673,7 @@ impl Mapper {
             }
             Some("user") => self.on_user(&msg),
             Some("control_request") => self.on_control_request(&msg),
+            Some("control_cancel_request") => self.on_control_cancel_request(&msg),
             Some("control_response") => self.on_control_response(&msg),
             Some("rate_limit_event") => self.on_rate_limit_event(&msg),
             Some("result") => self.on_result(&msg),
@@ -3059,7 +3032,12 @@ impl Mapper {
         // `background_tasks_changed` drops it: removing it here lets a drain
         // that follows this notification publish zero before the follow-up
         // turn (see `on_background_tasks_changed`).
-        if let Some(path) = msg.get("output_file").and_then(Value::as_str) {
+        // Claude Code sends "" for a task with no output file.
+        if let Some(path) = msg
+            .get("output_file")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+        {
             self.tail_requests.push(TailRequest::PreferPath {
                 parent_id: tool_use_id.clone(),
                 path: PathBuf::from(path),
@@ -4040,6 +4018,27 @@ impl Mapper {
         }
     }
 
+    /// Claude Code withdrew one of its own prompts, as it does for a pending
+    /// `can_use_tool` when the turn is interrupted.
+    fn on_control_cancel_request(&mut self, msg: &Value) -> Vec<AgentEvent> {
+        let Some(request_id) = msg.get("request_id").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        if self.pending_approvals.remove(request_id).is_some() {
+            vec![AgentEvent::ApprovalResolved {
+                request_id: request_id.to_owned(),
+                decision: ApprovalDecision::Cancel,
+            }]
+        } else if self.pending_user_input.remove(request_id).is_some() {
+            vec![AgentEvent::UserInputResolved {
+                request_id: request_id.to_owned(),
+                answers: serde_json::Map::new(),
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+
     fn on_control_request(&mut self, msg: &Value) -> Vec<AgentEvent> {
         let request = match msg.get("request") {
             Some(r) => r,
@@ -4412,7 +4411,7 @@ fn api_retry_notice(msg: &Value) -> AgentEvent {
 }
 
 fn is_file_tool(name: &str) -> bool {
-    matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit")
+    matches!(name, "Write" | "Edit" | "NotebookEdit")
 }
 
 pub(crate) fn one_line_summary(text: &str) -> String {
@@ -7188,26 +7187,54 @@ mod tests {
         );
     }
 
+    /// `control_cancel_request {request_id}` as Claude Code 2.1.322's SDK
+    /// schema describes it: the sender no longer needs the answer to its own
+    /// request, "for example a pending can_use_tool prompt after the turn was
+    /// interrupted". Its `sendRequest` writes one when the turn's abort signal
+    /// fires.
     #[test]
-    fn ask_user_question_parse_and_answer_wire_shape() {
+    fn prompts_claude_code_withdraws_are_reported_resolved() {
         let mut m = Mapper::new();
+        m.start_turn();
         feed(
             &mut m,
-            r#"{"type":"control_request","request_id":"ctrl-x","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"q?","header":"h"}]}}}"#,
+            r#"{"type":"control_request","request_id":"ctrl-bash","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"cargo test"},"tool_use_id":"toolu_bash"}}"#,
         );
-        let cancels = m.cancel_pending_user_input();
-        assert_eq!(cancels.len(), 1);
-        let (id, resp) = &cancels[0];
-        assert_eq!(id, "ctrl-x");
-        assert_eq!(resp["response"]["response"]["behavior"], "deny");
-        assert_eq!(
-            resp["response"]["response"]["message"],
-            "User cancelled tool execution."
+        feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"ctrl-ask","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which DB?","header":"DB"}]},"tool_use_id":"toolu_ask"}}"#,
         );
-        // Drained: no longer answerable.
-        let empty = serde_json::Map::new();
-        assert!(m.build_user_input_response("ctrl-x", &empty).is_none());
+        let events = feed(
+            &mut m,
+            r#"{"type":"control_cancel_request","request_id":"ctrl-bash"}"#,
+        );
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::ApprovalResolved { request_id, decision: ApprovalDecision::Cancel }] if request_id == "ctrl-bash"),
+            "{events:?}"
+        );
+        let events = feed(
+            &mut m,
+            r#"{"type":"control_cancel_request","request_id":"ctrl-ask"}"#,
+        );
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::UserInputResolved { request_id, answers }] if request_id == "ctrl-ask" && answers.is_empty()),
+            "{events:?}"
+        );
+        assert!(
+            m.build_approval_response("ctrl-bash", ApprovalDecision::Option("allow".into()))
+                .is_none()
+        );
+        assert!(
+            feed(
+                &mut m,
+                r#"{"type":"control_cancel_request","request_id":"ctrl-bash"}"#
+            )
+            .is_empty()
+        );
+    }
 
+    #[test]
+    fn ask_user_question_parse_and_answer_wire_shape() {
         let mut m = Mapper::new();
         m.start_turn();
         let evs = feed(
@@ -7807,6 +7834,29 @@ mod tests {
             "{events:?}"
         );
         assert!(mapper.take_pending_subagent_terminals().is_empty());
+    }
+
+    /// Claude Code 2.1.322 builds a `task_notification` with
+    /// `output_file: outputFile ?? ""`: an empty string is no file, and a
+    /// tail told to prefer it would read nothing and stop looking for the
+    /// subagent's transcript.
+    #[test]
+    fn a_notification_without_an_output_file_names_no_path_to_tail() {
+        let mut mapper = Mapper::new();
+        feed(
+            &mut mapper,
+            r#"{"type":"system","subtype":"task_notification","session_id":"session","task_id":"a-child","tool_use_id":"toolu_child","status":"completed","output_file":"","summary":"Done"}"#,
+        );
+        let requests = mapper.take_tail_requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|request| matches!(request, TailRequest::PreferPath { .. }))
+        );
+        assert!(matches!(
+            &requests[..],
+            [TailRequest::Stop { parent_id }] if parent_id == "toolu_child"
+        ));
     }
 
     /// A recorded stdout trace driven as the actor drives it: every line, then

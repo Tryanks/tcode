@@ -22,8 +22,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use turso::Connection;
 
+use super::DB_FILE;
 use super::db::{Db, SCHEMA, SCHEMA_VERSION, V1_VERSION, blob, integer, text, wal_path};
-use super::{DB_FILE, read_index};
 use crate::fs_tree::sync_dir;
 
 pub(super) const SOURCE_FILE: &str = "tcode.db.v1";
@@ -121,32 +121,6 @@ impl Source {
                 (id, bound(positions.start), bound(positions.end)),
                 |row| each(integer(row, 0)? as u64, blob(row, 1)?),
             )
-        })
-    }
-
-    /// The first row in `positions` containing `tag`.
-    pub(super) fn find(
-        &self,
-        id: &str,
-        positions: Range<u64>,
-        tag: &[u8],
-    ) -> io::Result<Option<(u64, Vec<u8>)>> {
-        if positions.is_empty() {
-            return Ok(None);
-        }
-        self.db().read(|db, connection| {
-            let mut found = None;
-            db.query(
-                connection,
-                "SELECT position, line FROM events WHERE session_id = ?1 AND position >= ?2 \
-                 AND position < ?3 AND instr(line, ?4) > 0 ORDER BY position LIMIT 1",
-                (id, positions.start as i64, positions.end as i64, tag),
-                |row| {
-                    found = Some((integer(row, 0)? as u64, blob(row, 1)?));
-                    Ok(())
-                },
-            )?;
-            Ok(found)
         })
     }
 
@@ -491,10 +465,6 @@ pub(super) fn switch(root: &Path) -> io::Result<()> {
             Ok(())
         })?;
         new.checkpoint()?;
-        // Confirm what a fresh open will see before publishing it.
-        if new.read(read_index)?.sessions.len() != carried.index.len() {
-            return Err(io::Error::other("the staged database lost sessions"));
-        }
     }
     fs::OpenOptions::new()
         .write(true)

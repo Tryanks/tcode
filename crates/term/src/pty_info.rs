@@ -1,16 +1,10 @@
-use std::{
-    path::PathBuf,
-    sync::Mutex,
-    time::{Duration, Instant},
-};
+use std::path::PathBuf;
 
 #[cfg(unix)]
 use std::fs::File;
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd as _;
-
-use crate::sync::MutexExt as _;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProcessInfo {
@@ -23,33 +17,17 @@ pub(crate) struct PtyInfo {
     file: File,
     #[cfg(unix)]
     fallback_pid: u32,
-    last_refresh: Mutex<Option<Instant>>,
 }
 
 impl PtyInfo {
     #[cfg(unix)]
     pub fn new(file: File, fallback_pid: u32) -> Self {
-        Self {
-            file,
-            fallback_pid,
-            last_refresh: Mutex::new(None),
-        }
+        Self { file, fallback_pid }
     }
 
     #[cfg(not(unix))]
     pub fn new() -> Self {
-        Self {
-            last_refresh: Mutex::new(None),
-        }
-    }
-
-    pub fn should_refresh(&self) -> bool {
-        let mut last = self.last_refresh.lock_recover();
-        if last.is_some_and(|time| time.elapsed() < Duration::from_millis(250)) {
-            return false;
-        }
-        *last = Some(Instant::now());
-        true
+        Self {}
     }
 
     #[cfg(unix)]

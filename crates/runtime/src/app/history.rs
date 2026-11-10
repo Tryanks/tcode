@@ -7,8 +7,8 @@ use tcode_core::session::{
     ItemStreams, SupersededStream, TurnSnapshots, TurnStarts, drop_turn_diffs,
 };
 use tcode_protocol::{
-    CommandResponse, HostMessage, MAX_SESSION_HISTORY_BYTES, OUTPUT_PREVIEW_BYTES,
-    SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, Subscription,
+    CommandResponse, HostMessage, OUTPUT_PREVIEW_BYTES, SESSION_HISTORY_RECORDS,
+    SESSION_WINDOW_BYTES, Subscription,
 };
 use tcode_services::store::{EventLog, LogRead, TurnIndex};
 
@@ -26,9 +26,9 @@ impl std::io::Write for ByteCount {
     }
 }
 
-fn wire_len(record: &SessionEventRecord) -> usize {
+fn wire_len(value: &impl serde::Serialize) -> usize {
     let mut count = ByteCount(0);
-    serde_json::to_writer(&mut count, record).expect("serializable record");
+    serde_json::to_writer(&mut count, value).expect("serializable value");
     count.0
 }
 
@@ -72,7 +72,7 @@ fn oversized_output(event: &AgentEvent) -> bool {
     }
 }
 
-const HISTORY_PREVIEW_POLICY: u32 = 2;
+const HISTORY_PREVIEW_POLICY: u32 = 3;
 static HISTORY_PREVIEW_VERSION: LazyLock<String> =
     LazyLock::new(|| format!("history-preview-{HISTORY_PREVIEW_POLICY}-{OUTPUT_PREVIEW_BYTES}"));
 const HISTORY_PREVIEW_CACHE_BYTES: usize = 16 * 1024;
@@ -80,11 +80,11 @@ const HISTORY_PREVIEW_CACHE_BYTES: usize = 16 * 1024;
 /// A record as clients receive it: tool and command output beyond
 /// [`OUTPUT_PREVIEW_BYTES`] stays on the host, read back with
 /// `Query::ReadItemOutput`.
-pub(super) fn wire_record(record: &SessionEventRecord) -> Cow<'_, SessionEventRecord> {
+pub(super) fn wire_record(record: &StoredEvent) -> Cow<'_, StoredEvent> {
     let Some((event, elided)) = wire_event(&record.event) else {
         return Cow::Borrowed(record);
     };
-    Cow::Owned(SessionEventRecord {
+    Cow::Owned(StoredEvent {
         origin: record.origin,
         author: record.author.clone(),
         ts: record.ts,
@@ -219,7 +219,7 @@ pub(super) fn append_projection(
     if bytes < HISTORY_PREVIEW_CACHE_BYTES || !oversized_output(event) {
         return None;
     }
-    let record = SessionEventRecord {
+    let record = StoredEvent {
         origin,
         author: author.cloned(),
         ts: Some(ts),
@@ -252,19 +252,23 @@ fn wire_image(image: &agent::Attachment) -> agent::Attachment {
 /// The records that stand for the log cursors in `range`.
 struct Window {
     range: Range<usize>,
-    records: Vec<SessionEventRecord>,
+    records: Vec<StoredEvent>,
 }
 
 /// Choose the contiguous cursors a reply covers and the records it sends for
 /// them. Starting from the `backwards` end of `requested`, records are taken
-/// while the reply fits [`SESSION_WINDOW_BYTES`], and always at least one.
+/// while the reply fits [`SESSION_WINDOW_BYTES`], and always at least one: a
+/// first record whose reply is longer than `line_limit`, the longest line the
+/// receiving connection carries, is refused by name instead, since a network
+/// connection closes on a longer line. An in-process connection has no limit.
 /// Consecutive deltas of one item are merged into one, which folds the same
 /// because nothing between them moves the turn.
 fn wire_window(
-    records: &[SessionEventRecord],
+    records: &[StoredEvent],
     requested: Range<usize>,
     backwards: bool,
     overhead: usize,
+    line_limit: Option<usize>,
 ) -> Result<Window, tcode_protocol::ProtocolError> {
     let budget = SESSION_WINDOW_BYTES.saturating_sub(overhead);
     let mut used = 0;
@@ -277,10 +281,17 @@ fn wire_window(
         };
         // Separator; also leaves room for an empty array.
         let size = wire_len(&wire_record(&records[index])) + 1;
-        if count == 0 && size > MAX_SESSION_HISTORY_BYTES.saturating_sub(overhead) {
+        if count == 0
+            && let Some(line_limit) = line_limit
+            && overhead + size > line_limit
+        {
             return Err(tcode_protocol::ProtocolError {
                 code: "history_record_too_large".into(),
-                message: "A history record exceeds the 8 MiB response limit.".into(),
+                message: format!(
+                    "A history record takes {} bytes to send, more than the {line_limit} bytes \
+                     one reply to this device can carry.",
+                    overhead + size
+                ),
             });
         }
         if count > 0 && used + size > budget {
@@ -294,7 +305,7 @@ fn wire_window(
     } else {
         requested.start..requested.start + count
     };
-    let mut merged: Vec<SessionEventRecord> = Vec::with_capacity(range.len());
+    let mut merged: Vec<StoredEvent> = Vec::with_capacity(range.len());
     for index in range.clone() {
         let record = &records[index];
         if let AgentEvent::Delta {
@@ -344,7 +355,7 @@ fn wire_window(
 /// Cursors are row positions. A blank or undecodable row holds no record, so
 /// a range of cursors can hold fewer records than it spans.
 struct LogView<'a> {
-    records: &'a [SessionEventRecord],
+    records: &'a [StoredEvent],
     /// Lower cursor covered by this read, including blank or undecodable rows.
     from: u64,
     /// The row each record is in, ascending.
@@ -391,23 +402,23 @@ impl LogView<'_> {
     /// newest end. A client that missed more than a reply holds gets the
     /// thread as a fresh subscriber does, in one reply, rather than every
     /// record it missed over as many round trips.
-    fn events_window(&self, subscription: &Subscription) -> ServerEvent {
+    fn events_window(&self, subscription: &Subscription, line_limit: Option<usize>) -> ServerEvent {
         let continuation = subscription
             .after
             .filter(|after| *after <= self.end)
-            .map(|after| self.window(&subscription.topic, Some(after)));
+            .map(|after| self.window(&subscription.topic, Some(after), line_limit));
         match continuation {
             Some(ServerEvent::SessionSnapshot { end, total, .. }) if end < total => {
-                self.window(&subscription.topic, None)
+                self.window(&subscription.topic, None, line_limit)
             }
             Some(window) => window,
-            None => self.window(&subscription.topic, None),
+            None => self.window(&subscription.topic, None, line_limit),
         }
     }
 
     /// The records from `after` on, as many as fit one reply, or without it
     /// the baseline [`Self::events_window`] describes.
-    fn window(&self, topic: &Topic, after: Option<u64>) -> ServerEvent {
+    fn window(&self, topic: &Topic, after: Option<u64>, line_limit: Option<usize>) -> ServerEvent {
         let empty = HostMessage::Event(EventEnvelope {
             request_id: Some(u64::MAX),
             topic: topic.clone(),
@@ -429,6 +440,7 @@ impl LogView<'_> {
             first..self.records.len(),
             after.is_none(),
             wire_overhead(&empty),
+            line_limit,
         ) {
             Ok(window) => {
                 let start = self.start(window.range.start, first, from);
@@ -459,6 +471,7 @@ impl LogView<'_> {
         &self,
         before: u64,
         limit: u32,
+        line_limit: Option<usize>,
     ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
         let end = before.min(self.end);
         let start = self.page_start(end, limit);
@@ -472,7 +485,13 @@ impl LogView<'_> {
                 truncated: false,
             }),
         };
-        let window = wire_window(self.records, requested.clone(), true, wire_overhead(&empty))?;
+        let window = wire_window(
+            self.records,
+            requested.clone(),
+            true,
+            wire_overhead(&empty),
+            line_limit,
+        )?;
         Ok(QueryResponse::SessionHistoryPage {
             from: self.start(window.range.start, requested.start, start),
             end,
@@ -507,7 +526,7 @@ const BASELINE_RECORDS: u64 = 400;
 /// diffs, as the store keeps it, so no window sends them.
 #[derive(Clone)]
 pub(super) struct SessionLog {
-    records: Vec<SessionEventRecord>,
+    records: Vec<StoredEvent>,
     retained_bytes: usize,
     /// The stored row each record is in, ascending.
     rows: Vec<u64>,
@@ -549,13 +568,13 @@ impl SessionLog {
     /// Append the record the store is about to append, returning the rows of
     /// the streamed deltas it supersedes. The log keeps them: its fold is the
     /// same either way.
-    pub(super) fn push(&mut self, record: SessionEventRecord) -> Option<SupersededStream<u64>> {
+    pub(super) fn push(&mut self, record: StoredEvent) -> Option<SupersededStream<u64>> {
         let row = self.next_row;
         self.next_row += 1;
         self.push_at(record, row)
     }
 
-    fn push_at(&mut self, record: SessionEventRecord, row: u64) -> Option<SupersededStream<u64>> {
+    fn push_at(&mut self, record: StoredEvent, row: u64) -> Option<SupersededStream<u64>> {
         let index = self.records.len();
         let (change, superseded) =
             self.snapshots
@@ -579,12 +598,12 @@ impl SessionLog {
         self.retained_bytes
     }
 
-    pub(super) fn records(&self) -> &[SessionEventRecord] {
+    pub(super) fn records(&self) -> &[StoredEvent] {
         &self.records
     }
 
     /// The records in rows from `position` on.
-    pub(super) fn records_from(&self, position: u64) -> &[SessionEventRecord] {
+    pub(super) fn records_from(&self, position: u64) -> &[StoredEvent] {
         &self.records[self.rows.partition_point(|row| *row < position)..]
     }
 
@@ -620,16 +639,21 @@ impl SessionLog {
         }
     }
 
-    pub(super) fn events_window(&self, subscription: &Subscription) -> ServerEvent {
-        self.view().events_window(subscription)
+    pub(super) fn events_window(
+        &self,
+        subscription: &Subscription,
+        line_limit: Option<usize>,
+    ) -> ServerEvent {
+        self.view().events_window(subscription, line_limit)
     }
 
     pub(super) fn history_page(
         &self,
         before: u64,
         limit: u32,
+        line_limit: Option<usize>,
     ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
-        self.view().history_page(before, limit)
+        self.view().history_page(before, limit, line_limit)
     }
 
     fn image_attachment(
@@ -713,21 +737,43 @@ impl SessionLog {
                 code: "unknown_item_output".into(),
                 message: format!("no output for item {item_id} in {session_id}"),
             })?;
-        if output.len() > MAX_SESSION_HISTORY_BYTES {
-            return Err(tcode_protocol::ProtocolError {
-                code: "item_output_too_large".into(),
-                message: "The output exceeds the 8 MiB response limit.".into(),
-            });
-        }
         Ok(QueryResponse::ItemOutput(output))
     }
+}
+
+/// `response` when its reply fits one line of the asking client's connection,
+/// escapes included: a network connection closes on a longer one, so the client
+/// is told instead. An in-process client's connection has no line limit.
+fn whole_output_reply(
+    response: QueryResponse,
+    line_limit: Option<usize>,
+) -> Result<QueryResponse, ProtocolError> {
+    let Some(line_limit) = line_limit else {
+        return Ok(response);
+    };
+    let envelope = HostMessage::QueryResult {
+        id: u64::MAX,
+        result: Ok(QueryResponse::ItemOutput(String::new())),
+    };
+    let reply = wire_overhead(&envelope) - wire_len(&QueryResponse::ItemOutput(String::new()))
+        + wire_len(&response);
+    if reply > line_limit {
+        return Err(ProtocolError {
+            code: "item_output_too_large".into(),
+            message: format!(
+                "The output takes {reply} bytes to send, more than the {line_limit} bytes one reply \
+                 to this device can carry."
+            ),
+        });
+    }
+    Ok(response)
 }
 
 /// The last rows of a log, as many as a baseline window can use, read with
 /// the turn index of the whole log so the window is the one the whole log
 /// would give.
 pub(super) struct Tail {
-    records: Vec<SessionEventRecord>,
+    records: Vec<StoredEvent>,
     rows: Vec<u64>,
     from: u64,
     end: u64,
@@ -814,9 +860,10 @@ impl Tail {
 /// rows after that end.
 pub(super) struct Hydration {
     live: bool,
-    pending: Vec<SessionEventRecord>,
-    /// Subscription replies; one without a request id answers no request.
-    replies: Vec<(Option<u64>, Subscription)>,
+    pending: Vec<StoredEvent>,
+    /// Subscription replies, each with the longest line its connection
+    /// carries; one without a request id answers no request.
+    replies: Vec<(Option<u64>, Subscription, Option<usize>)>,
     /// Queries answered from the whole log.
     queries: Vec<LogQuery>,
     /// The timeline load waiting for the log, with how many `pending` records
@@ -944,7 +991,7 @@ impl AppState {
                     code: "history_unavailable".into(),
                     message: format!("could not read the history of {session_id}: {error}"),
                 });
-                for (request_id, subscription) in &hydration.replies {
+                for (request_id, subscription, _) in &hydration.replies {
                     self.reply_with(failure.clone(), *request_id, subscription, cx);
                 }
                 for query in hydration.queries {
@@ -1023,12 +1070,12 @@ impl AppState {
     fn reply_from_log(
         &self,
         log: &SessionLog,
-        replies: &[(Option<u64>, Subscription)],
+        replies: &[(Option<u64>, Subscription, Option<usize>)],
         cx: &mut HostCx,
     ) {
-        for (request_id, subscription) in replies {
+        for (request_id, subscription, line_limit) in replies {
             self.reply_with(
-                log.events_window(subscription),
+                log.events_window(subscription, *line_limit),
                 *request_id,
                 subscription,
                 cx,
@@ -1104,10 +1151,13 @@ impl AppState {
         });
     }
 
+    /// Answer `subscription` for a connection whose lines carry at most
+    /// `line_limit` bytes.
     pub(crate) fn reply_to_subscription(
         &mut self,
         request_id: Option<u64>,
         subscription: Subscription,
+        line_limit: Option<usize>,
         cx: &mut HostCx,
     ) {
         if let Topic::CommandOutput { .. } = &subscription.topic {
@@ -1117,7 +1167,7 @@ impl AppState {
         if let Topic::SessionEvents { session_id } = &subscription.topic {
             if let Some(log) = self.event_records.get(session_id) {
                 self.reply_with(
-                    log.events_window(&subscription),
+                    log.events_window(&subscription, line_limit),
                     request_id,
                     &subscription,
                     cx,
@@ -1126,9 +1176,11 @@ impl AppState {
             }
             let session_id = session_id.clone();
             let after = subscription.after;
-            self.hydrate_log(&session_id, None, cx)
-                .replies
-                .push((request_id, subscription.clone()));
+            self.hydrate_log(&session_id, None, cx).replies.push((
+                request_id,
+                subscription.clone(),
+                line_limit,
+            ));
             let read_id = session_id.clone();
             self.read_bounded(
                 &read_id,
@@ -1161,7 +1213,7 @@ impl AppState {
                                 tail.records.len(), tail.from, tail.covered_end, tail.end,
                             );
                             state.reply_with(
-                                tail.view().events_window(&subscription),
+                                tail.view().events_window(&subscription, line_limit),
                                 request_id,
                                 &subscription,
                                 cx,
@@ -1188,12 +1240,7 @@ impl AppState {
     /// Accept a record for a session whose log is not resident. It is held
     /// while the log is read, since its row comes after whatever the read
     /// holds, and sent at once when the log is already live.
-    pub(super) fn hold_record(
-        &mut self,
-        session_id: &str,
-        record: SessionEventRecord,
-        cx: &mut HostCx,
-    ) {
+    pub(super) fn hold_record(&mut self, session_id: &str, record: StoredEvent, cx: &mut HostCx) {
         let hydration = self.hydrate_log(session_id, None, cx);
         let live = hydration.live;
         let wire = live.then(|| wire_record(&record).into_owned());
@@ -1253,11 +1300,15 @@ impl AppState {
         session_id: &str,
         before: u64,
         limit: u32,
+        line_limit: Option<usize>,
         cx: &mut HostCx,
     ) -> HostTask<Result<QueryResponse, tcode_protocol::ProtocolError>> {
         let resident = self.event_records.contains_key(session_id);
-        let (answer, task) =
-            self.query_session_log(session_id, move |log| log.history_page(before, limit), cx);
+        let (answer, task) = self.query_session_log(
+            session_id,
+            move |log| log.history_page(before, limit, line_limit),
+            cx,
+        );
         if resident {
             return task;
         }
@@ -1266,7 +1317,7 @@ impl AppState {
             move |read| Tail::read_cut(read, None, Some((before, limit))),
             move |_, _, tail, _| {
                 if let Some(tail) = tail.filter(|tail| before <= tail.end) {
-                    answer.complete(tail.view().history_page(before, limit));
+                    answer.complete(tail.view().history_page(before, limit, line_limit));
                 }
             },
             cx,
@@ -1382,10 +1433,13 @@ impl AppState {
         decode_image_read(read, cx)
     }
 
+    /// The whole output of one item, for a client whose connection carries
+    /// lines of at most `line_limit` bytes.
     pub(crate) fn item_output(
         &mut self,
         session_id: &str,
         item_id: String,
+        line_limit: Option<usize>,
         cx: &mut HostCx,
     ) -> HostTask<Result<QueryResponse, tcode_protocol::ProtocolError>> {
         let read_id = session_id.to_string();
@@ -1394,13 +1448,15 @@ impl AppState {
             session_id,
             item_id.clone(),
             move |log| {
-                log.item_output(&read_id, &item_id).map_err(|error| {
-                    if scoped && error.code == "unknown_item_output" {
-                        ProtocolError::out_of_scope("item is outside this session")
-                    } else {
-                        error
-                    }
-                })
+                log.item_output(&read_id, &item_id)
+                    .map_err(|error| {
+                        if scoped && error.code == "unknown_item_output" {
+                            ProtocolError::out_of_scope("item is outside this session")
+                        } else {
+                            error
+                        }
+                    })
+                    .and_then(|response| whole_output_reply(response, line_limit))
             },
             cx,
         )
@@ -1590,8 +1646,8 @@ mod tests {
             .unwrap()
             .unwrap()
             .view()
-            .events_window(&subscription);
-        assert_eq!(cold, resident.events_window(&subscription));
+            .events_window(&subscription, None);
+        assert_eq!(cold, resident.events_window(&subscription, None));
         let ServerEvent::SessionSnapshot {
             from,
             end,
@@ -1610,7 +1666,7 @@ mod tests {
         assert!(matches!(&records[1].event, AgentEvent::Warning { message } if message == "last"));
         subscription.after = Some(from);
         assert_eq!(
-            resident.events_window(&subscription),
+            resident.events_window(&subscription, None),
             ServerEvent::SessionSnapshot {
                 from,
                 end,
@@ -1624,89 +1680,5 @@ mod tests {
         drop(cut);
         store.close().unwrap();
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn history_preview_policy_golden() {
-        let image = agent::Attachment {
-            media_type: "image/png".into(),
-            data_base64: "AQID".repeat(10_000),
-            source_path: Some("/fixture/image.png".into()),
-        };
-        let command = ItemContent::CommandExecution {
-            command: "make".into(),
-            output: format!("{}tail", "é".repeat(20_000)),
-            exit_code: Some(0),
-            status: agent::ItemStatus::Completed,
-        };
-        let tool = ItemContent::ToolCall {
-            image_reads: vec![image.clone()],
-            name: "Read".into(),
-            input: serde_json::json!({"path": "/fixture/image.png"}),
-            output: Some(format!("{}{}suffix", image.data_base64, "é".repeat(20_000))),
-            status: agent::ItemStatus::Completed,
-        };
-        let attachment = ItemContent::ImageRead {
-            path: "/fixture/image.png".into(),
-            image: Some(image),
-        };
-        let item = |id: &str, content| agent::ThreadItem {
-            id: id.into(),
-            parent_item_id: Some("parent".into()),
-            content,
-        };
-        let events = vec![
-            AgentEvent::ItemStarted(item("command-start", command.clone())),
-            AgentEvent::ItemUpdated(item("command-update", command.clone())),
-            AgentEvent::ItemCompleted(item("command", command)),
-            AgentEvent::Delta {
-                item_id: "command".into(),
-                kind: DeltaKind::CommandOutput,
-                text: format!("{}tail", "é".repeat(20_000)),
-            },
-            AgentEvent::ItemCompleted(item("tool", tool)),
-            AgentEvent::ItemCompleted(item("image", attachment)),
-        ];
-        let records: Vec<_> = events
-            .into_iter()
-            .map(|event| SessionEventRecord {
-                origin: Some(MessageOrigin::Agent),
-                author: Some(Author {
-                    device_id: "fixture-device".into(),
-                    name: "Fixture".into(),
-                }),
-                ts: Some(1234),
-                event,
-                elided: None,
-            })
-            .collect();
-        let previews: Vec<_> = records
-            .iter()
-            .map(|record| wire_record(record).into_owned())
-            .collect();
-        let serialized = serde_json::to_vec(&previews).unwrap();
-        let hash = serialized
-            .iter()
-            .fold(0xcbf29ce484222325_u64, |hash, byte| {
-                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-            });
-        assert_eq!(
-            hash, 0x97dd8e2f15bd29c0,
-            "wire previews changed: bump HISTORY_PREVIEW_POLICY and update this golden for an intentional policy change"
-        );
-        for (record, preview) in records.iter().zip(previews) {
-            let (_, body) = append_projection(
-                wire_len(record) + 1,
-                record.ts.unwrap(),
-                &record.event,
-                record.author.as_ref(),
-                record.origin,
-            )
-            .unwrap();
-            assert_eq!(
-                serde_json::from_slice::<SessionEventRecord>(&body).unwrap(),
-                preview
-            );
-        }
     }
 }

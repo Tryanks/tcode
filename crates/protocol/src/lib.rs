@@ -42,26 +42,26 @@ pub use event::{
     BackgroundTaskStatus, ControlActivityEntry, ControlStatus, DiskUsage, DiskUsagePart,
     DiskUsageState, EndpointDescription, EndpointPresetDescription, EventEnvelope,
     ExternalImportState, ExternalImportStatus, ForkAvailability, ForkStatus, GitActionRequest,
-    GitStatusStatus, HarnessDescription, HarnessPermission, IndexSnapshot, IndexSummary,
-    InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools, MergeWorktreeFailure,
-    NoticeSeverity, PendingRewind, PluginCatalogState, PluginChallenge, PluginChallengeKind,
-    PluginOperationTarget, PluginStaleReason, ProviderDiskUsage, ProviderPluginCatalog,
-    ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus,
-    QueuedMessageStatus, RewindBlocked, RewindStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
-    RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice,
-    ServerEvent, SessionActivity, SessionEventRecord, SessionPlan, SessionStatus, StorageMigration,
-    TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
-    ThreadReferenceStatus, ThreadWakes, Topic,
+    GitStatusStatus, HarnessDescription, HarnessPermission, ImportFailure, IndexSnapshot,
+    IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools,
+    MergeWorktreeFailure, NoticeSeverity, PendingRewind, PluginCatalogState, PluginChallenge,
+    PluginChallengeKind, PluginOperationTarget, PluginStaleReason, ProviderDiskUsage,
+    ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus,
+    ProvidersStatus, QueuedMessageStatus, RewindBlocked, RewindStatus, RuntimeEffect, RuntimeError,
+    RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope,
+    ScopedProviderChoice, ServerEvent, SessionActivity, SessionPlan, SessionStatus,
+    StorageMigration, TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus,
+    TerminalSplitStatus, TerminalStatus, ThreadReferenceStatus, ThreadWakes, Topic,
 };
 pub use query::{
     AgentAccess, AgentGrant, ControlActivityFilter, ControlActivityPage, ControlActivityThread,
-    DeviceAccess, DirectoryListing, ExternalThread, GitDiffResult, GitDiffScope, GitFileText,
-    GroupAction, GroupInfo, GroupMachineInfo, HostedDevice, HostingAction, HostingState,
-    IconImageEntry, MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, ModelGrant,
+    DeviceAccess, DirectoryListing, ExternalHistory, ExternalThread, GitDiffResult, GitDiffScope,
+    GitFileText, GroupAction, GroupInfo, GroupMachineInfo, HostedDevice, HostingAction,
+    HostingState, IconImageEntry, MAX_STORED_OUTPUT_COLS, MAX_THREAD_EXPORT_BYTES, ModelGrant,
     OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo, PathKind, Query, QueryResponse, RecentDir,
-    SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, STORED_OUTPUT_BYTES, STORED_OUTPUT_COLS,
-    STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool, SpaceAction,
-    SpaceAgents, SpaceApproval, SpaceInfo, SpacePolicy, TraverseLookupState, TraverseLookupStatus,
+    SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, STORED_OUTPUT_BYTES, STORED_OUTPUT_HISTORY,
+    STORED_OUTPUT_ROWS, SessionContentHits, SessionSearchHit, SourceTool, SpaceAction, SpaceAgents,
+    SpaceApproval, SpaceInfo, SpacePolicy, TraverseLookupState, TraverseLookupStatus,
     TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus, TraverseSourceStatus,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
@@ -307,6 +307,25 @@ pub use wire::{
 // SessionMeta's other_worktrees; spaces' SpacePolicy, carried by SpaceInfo,
 // the Space principal and scope and set by SpaceAction set_policy; and the
 // {"type":"ssh"} stream carrying an SSH connection to the machine.
+//
+// Unreleased: a field may be missing only where the sender leaves it out at
+// its empty value; a message missing any other field no longer decodes, and
+// nothing stands in for it (a principal, scope or space without a policy was
+// read as unrestricted). HostingAction no longer reads new_code. HostProblem
+// gains credentials_unreadable. RuntimeNotice::WorktreeSeeded has no
+// limit_reached. RewindStatus has no running_turn (a running turn is always
+// interrupted first) and its blocked no "turn_running". SourceTool gains
+// claude_agent_sdk.
+// QueryResponse::ExternalHistory carries an ExternalHistory {dirs,
+// unreadable}, and SessionContentHits a SessionContentHits {hits, unreadable}.
+// tcode/group/1 no longer has the full rejection. RuntimeError gains
+// file_unreadable. GitStatusStatus carries git's error. HostProblem gains
+// cli_failed. PullRequestStack's url may be absent (GitHub gives none).
+// GitDiffScope and SourceTool have no unknown value. ExternalImportState's
+// finished carries failed, the ImportFailure {file, error} of each thread an
+// import could not bring in, which skipped no longer counts.
+// PullRequestSnapshot's updated_at may be absent (Azure DevOps keeps none).
+// RuntimeError gains mcp_unavailable.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

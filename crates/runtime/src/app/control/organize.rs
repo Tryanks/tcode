@@ -51,7 +51,7 @@ impl AppState {
             .map(|change| change.thread_id.clone())
             .collect();
         if positioned.is_empty() {
-            return Answer::Now(Ok(self.update_threads(caller, params, &HashMap::new(), cx)));
+            return Answer::Now(self.update_threads(caller, params, &HashMap::new(), cx));
         }
         let store = self.store.clone();
         let flush = self.store_write_barrier(cx);
@@ -74,8 +74,8 @@ impl AppState {
                 error => Err(format!("store write barrier failed: {error:?}")),
             };
             finish_on_host(host_cx, move |state, cx| {
-                ends.map(|ends| state.update_threads(&caller, params, &ends, cx))
-                    .map_err(|error| format!("could not read the threads' logs: {error}"))
+                ends.map_err(|error| format!("could not read the threads' logs: {error}"))
+                    .and_then(|ends| state.update_threads(&caller, params, &ends, cx))
             })
             .await
         }))
@@ -87,7 +87,7 @@ impl AppState {
         params: UpdateThreadsParams,
         log_ends: &HashMap<String, u64>,
         cx: &mut HostCx,
-    ) -> serde_json::Value {
+    ) -> Result<serde_json::Value, String> {
         let dry_run = params.dry_run.unwrap_or(false);
         let mut cx = agent_cx(cx);
         let results = params
@@ -95,7 +95,8 @@ impl AppState {
             .into_iter()
             .map(|change| self.update_thread(caller, change, dry_run, log_ends, &mut cx))
             .collect();
-        serde_json::to_value(UpdateThreadsAnswer { dry_run, results }).unwrap_or_default()
+        serde_json::to_value(UpdateThreadsAnswer { dry_run, results })
+            .map_err(|error| error.to_string())
     }
 
     fn update_thread(
@@ -352,8 +353,17 @@ impl AppState {
         records.push(record.clone());
         let excess = records.len().saturating_sub(REVIEW_RECORD_LIMIT);
         records.drain(..excess);
-        let records = records.clone();
-        self.enqueue_store_write(StoreWrite::WriteReviewRecords(records), cx);
+        match &mut self.control.reviews_unreadable {
+            Some(unreadable) => {
+                if let Some(error) = unreadable.first_refusal() {
+                    self.report_error(RuntimeError::FileUnreadable { error }, cx);
+                }
+            }
+            None => {
+                let records = self.control.review_records.clone();
+                self.enqueue_store_write(StoreWrite::WriteReviewRecords(records), cx);
+            }
+        }
         emit_runtime(
             cx,
             RuntimeEvent::Notice(RuntimeNotice::ReviewRecorded {
@@ -643,8 +653,8 @@ fn describe_settle(effects: SettleEffects) -> Vec<String> {
     if effects.unpinned {
         described.push("unpinned".into());
     }
-    if effects.input_answered {
-        described.push("pending input answered with empty answers".into());
+    if effects.input_closed {
+        described.push("pending non-blocking input closed unanswered".into());
     }
     described
 }

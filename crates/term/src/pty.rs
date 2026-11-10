@@ -72,8 +72,6 @@ struct Shared {
     process_name: Option<String>,
     working_directory: Option<PathBuf>,
     exited: bool,
-    command_line: String,
-    command_label: Option<String>,
     /// Grows with every input write and every output read, so a command
     /// started while the shell is inspected still changes it.
     activity: u64,
@@ -156,8 +154,6 @@ impl PtyHandle {
             process_name: None,
             working_directory: Some(cwd.clone()),
             exited: false,
-            command_line: String::new(),
-            command_label: None,
             activity: 0,
         }));
         let (notifications, events) = async_channel::unbounded();
@@ -218,10 +214,6 @@ impl PtyHandle {
         self.events.clone()
     }
 
-    pub fn cwd(&self) -> &Path {
-        &self.cwd
-    }
-
     pub fn working_directory(&self) -> PathBuf {
         self.shared
             .lock_recover()
@@ -252,19 +244,13 @@ impl PtyHandle {
         self.shared.lock_recover().exited
     }
 
-    pub(crate) fn write_input_inner(&self, bytes: Vec<u8>) -> io::Result<bool> {
-        let label_changed = {
-            let mut shared = self.shared.lock_recover();
-            if !bytes.is_empty() {
-                shared.activity += 1;
-            }
-            let previous_label = shared.command_label.clone();
-            track_command_input(&mut shared, &bytes);
-            shared.command_label != previous_label
-        };
+    pub(crate) fn write_input(&self, bytes: Vec<u8>) -> io::Result<()> {
+        if !bytes.is_empty() {
+            self.shared.lock_recover().activity += 1;
+        }
         let result = self.sender.send(PtyCommand::Input(bytes));
         self.refresh.schedule();
-        result.map(|()| label_changed)
+        result
     }
 
     /// Write terminal-protocol response bytes without tracking them as user input.
@@ -509,10 +495,7 @@ fn record_exit(
     notifications: &async_channel::Sender<PtyEvent>,
     exit_code: Option<i32>,
 ) {
-    let mut shared = shared.lock_recover();
-    shared.exited = true;
-    shared.command_label = None;
-    drop(shared);
+    shared.lock_recover().exited = true;
     let _ = notifications.try_send(PtyEvent::Exited { exit_code });
 }
 
@@ -555,10 +538,10 @@ fn refresh_process_info(
 }
 
 /// The foreground process's name and directory, refreshed on one worker per
-/// terminal that sleeps until it is asked.
+/// terminal that sleeps until it is asked. A request made while a refresh
+/// waits is covered by that refresh's trailing read.
 #[derive(Clone)]
 struct ProcessRefresh {
-    info: Arc<pty_info::PtyInfo>,
     running: Arc<AtomicBool>,
     wake: std::sync::mpsc::Sender<()>,
 }
@@ -572,62 +555,30 @@ impl ProcessRefresh {
     ) -> io::Result<Self> {
         let (wake, woken) = std::sync::mpsc::channel::<()>();
         let running = Arc::new(AtomicBool::new(false));
-        let worker_info = info.clone();
         let worker_running = running.clone();
         thread::Builder::new()
             .name("tcode-terminal-pty-info".into())
             .spawn(move || {
                 while woken.recv().is_ok() {
-                    refresh_process_info(&worker_info, &shared, &notifications);
+                    refresh_process_info(&info, &shared, &notifications);
                     // Input/output can precede the shell applying `cd` or
-                    // launching its foreground process. One bounded trailing
-                    // refresh catches that transition even when the command
-                    // itself is silent.
+                    // launching its foreground process, and the OS announces
+                    // neither. One trailing refresh catches that transition
+                    // even when the command itself is silent.
                     thread::sleep(Duration::from_millis(300));
-                    refresh_process_info(&worker_info, &shared, &notifications);
+                    refresh_process_info(&info, &shared, &notifications);
                     worker_running.store(false, Ordering::Release);
                 }
             })?;
-        Ok(Self {
-            info,
-            running,
-            wake,
-        })
+        Ok(Self { running, wake })
     }
 
     fn schedule(&self) {
-        if !self.info.should_refresh() || self.running.swap(true, Ordering::AcqRel) {
+        if self.running.swap(true, Ordering::AcqRel) {
             return;
         }
         if self.wake.send(()).is_err() {
             self.running.store(false, Ordering::Release);
-        }
-    }
-}
-
-/// Derive the compact tab label used after a command is submitted.
-fn derive_command_label(command: &str) -> Option<String> {
-    let first = command.split_whitespace().next()?;
-    let first = first.rsplit('/').next().unwrap_or(first);
-    (!first.is_empty()).then(|| first.to_string())
-}
-
-fn track_command_input(shared: &mut Shared, bytes: &[u8]) {
-    for &byte in bytes {
-        match byte {
-            3 => {
-                shared.command_line.clear();
-                shared.command_label = None;
-            }
-            b'\r' | b'\n' => {
-                shared.command_label = derive_command_label(&shared.command_line);
-                shared.command_line.clear();
-            }
-            0x7f | 0x08 => {
-                shared.command_line.pop();
-            }
-            0x20..=0x7e => shared.command_line.push(byte as char),
-            _ => {}
         }
     }
 }

@@ -92,7 +92,8 @@ mouse-down/up click pair until the tap wins, emits drag scrolling as
 momentum on later frames, and preserves its own long-press deadline. A second
 touch can therefore participate in GPUI's multi-touch recognition without
 creating a second mouse pointer, and small movements do not break click or
-long-press timing. The backend supplies touch events and platform tuning; application components
+long-press timing. The backend supplies touch events and keeps GPUI's own
+gesture tuning, whose defaults are UIKit's; application components
 choose which gestures to handle. The same portable arena serves Android.
 
 ## Keyboard bridge

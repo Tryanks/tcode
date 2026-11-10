@@ -202,8 +202,9 @@ impl tcode_client::original::OriginalOpener for BrowserOriginal {
                 .set("Authorization", &format!("Bearer {token}"))
                 .map_err(js_error)?;
             let response: web_sys::Response =
-                original_await(window().fetch_with_request(&request), &abort.0)
-                    .await?
+                wasm_bindgen_futures::JsFuture::from(window().fetch_with_request(&request))
+                    .await
+                    .map_err(js_error)?
                     .dyn_into()
                     .map_err(js_error)?;
             if response.status() != 200 {
@@ -287,7 +288,9 @@ impl tcode_client::original::OriginalReader for BrowserOriginalReader {
                         return Ok(Some(bytes));
                     }
                 }
-                let result = original_await(self.reader.read(), &self.abort.0).await?;
+                let result = wasm_bindgen_futures::JsFuture::from(self.reader.read())
+                    .await
+                    .map_err(js_error)?;
                 if js_sys::Reflect::get(&result, &JsValue::from_str("done"))
                     .map_err(js_error)?
                     .as_bool()
@@ -314,29 +317,6 @@ impl tcode_client::original::OriginalReader for BrowserOriginalReader {
 fn js_error(value: impl Into<JsValue>) -> tcode_protocol::ProtocolError {
     let value = value.into();
     tcode_client::original::error(value.as_string().unwrap_or_else(|| format!("{value:?}")))
-}
-
-async fn original_await(
-    promise: js_sys::Promise,
-    abort: &web_sys::AbortController,
-) -> Result<JsValue, tcode_protocol::ProtocolError> {
-    let (tx, elapsed) = async_channel::bounded(1);
-    let _timer = Timer::new(60_000, tx);
-    race(
-        async {
-            wasm_bindgen_futures::JsFuture::from(promise)
-                .await
-                .map_err(js_error)
-        },
-        async {
-            let _ = elapsed.recv().await;
-            abort.abort();
-            Err(tcode_client::original::error(
-                "original made no progress for 60 seconds",
-            ))
-        },
-    )
-    .await
 }
 
 enum Input {

@@ -36,7 +36,8 @@ use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 use crate::time::{humanize_ago, now_secs};
 use tcode_core::settings::ProjectStart;
 use tcode_protocol::{
-    CommandResponse, DirectoryListing, ExternalImportState, ExternalThread, RecentDir, SourceTool,
+    CommandResponse, DirectoryListing, ExternalHistory, ExternalImportState, ExternalThread,
+    RecentDir, SourceTool,
 };
 
 gpui::actions!(add_project, [CompleteFolder]);
@@ -97,7 +98,7 @@ impl FolderBrowser {
 
 enum RecentState {
     Loading,
-    Ready(Vec<RecentDir>),
+    Ready(ExternalHistory),
     Failed(String),
 }
 
@@ -378,10 +379,17 @@ impl AddProjectDialog {
         let mut recents_from = None;
         if typed.trim().is_empty()
             && let RecentState::Ready(recent) = &self.recent
-            && !recent.is_empty()
+            && !recent.dirs.is_empty()
         {
             recents_from = Some(rows.len());
-            rows.extend(recent.iter().take(RECENT_LIMIT).cloned().map(Row::Recent));
+            rows.extend(
+                recent
+                    .dirs
+                    .iter()
+                    .take(RECENT_LIMIT)
+                    .cloned()
+                    .map(Row::Recent),
+            );
         }
         let folders_from = rows.len();
         let answer = self.folders.answer_for(&directory);
@@ -941,6 +949,14 @@ impl Render for AddProjectDialog {
                     crate::tr!("sidebar.recent_failed", reason = error.clone()).into_owned(),
                     true,
                 )),
+                RecentState::Ready(recent) if !recent.unreadable.is_empty() => Some((
+                    crate::tr!(
+                        "sidebar.recent_unreadable",
+                        reason = recent.unreadable.join("; ")
+                    )
+                    .into_owned(),
+                    true,
+                )),
                 _ => None,
             }
         } else {
@@ -1093,7 +1109,11 @@ impl Render for ImportProgress {
             _ => None,
         };
         let summary = match state {
-            Some(ExternalImportState::Finished { imported, skipped }) => Some((imported, skipped)),
+            Some(ExternalImportState::Finished {
+                imported,
+                skipped,
+                failed,
+            }) => Some((imported, skipped, failed)),
             _ => None,
         };
         // A run with nothing to import is complete the moment it starts; a
@@ -1132,7 +1152,30 @@ impl Render for ImportProgress {
                     .into_any_element(),
             ));
         }
-        if let Some((imported, skipped)) = summary {
+        if let Some((imported, skipped, failed)) = summary {
+            let failures = (!failed.is_empty()).then(|| {
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_secondary(false, cx)
+                            .child(crate::tr!("sidebar.import_failures", count = failed.len())),
+                    )
+                    .child(
+                        div()
+                            .id("external-import-failures")
+                            .max_h(px(160.))
+                            .overflow_y_scroll_area()
+                            .text_code(cx)
+                            .children(failed.into_iter().map(|failure| {
+                                div().child(format!(
+                                    "{}: {}",
+                                    failure.file.display(),
+                                    failure.error
+                                ))
+                            })),
+                    )
+            });
             layers.push((
                 1,
                 v_flex()
@@ -1142,6 +1185,7 @@ impl Render for ImportProgress {
                         imported = imported,
                         skipped = skipped
                     )))
+                    .children(failures)
                     .child(
                         h_flex().w_full().justify_end().child(
                             Button::new("external-import-ok")
@@ -1357,6 +1401,7 @@ fn tool_counts(threads: &[ExternalThread]) -> String {
     [
         SourceTool::ClaudeCode,
         SourceTool::ClaudeDesktop,
+        SourceTool::ClaudeAgentSdk,
         SourceTool::T3Code,
         SourceTool::CodexCli,
         SourceTool::CodexDesktop,
@@ -1545,7 +1590,7 @@ mod tests {
             let [(id, _)] = asked.as_slice() else {
                 panic!("expected one recents scan, asked: {asked:?}");
             };
-            let recent = paths
+            let dirs = paths
                 .iter()
                 .map(|path| RecentDir {
                     path: path.into(),
@@ -1556,7 +1601,10 @@ mod tests {
             self.send(
                 HostMessage::QueryResult {
                     id: *id,
-                    result: Ok(QueryResponse::ExternalHistory(recent)),
+                    result: Ok(QueryResponse::ExternalHistory(ExternalHistory {
+                        dirs,
+                        unreadable: Vec::new(),
+                    })),
                 },
                 cx,
             );
@@ -1836,11 +1884,10 @@ mod tests {
             },
         )
         .expect("spawn add-project test host");
-        let link = tcode_client::HostLink::new(host.to_host.clone(), host.from_host.clone());
-        let mut pump = std::pin::pin!(link.pump());
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
-                link.clone(),
+                driver.link.clone(),
                 WorkspaceAttachment::Remote {
                     host_id: "build-box".into(),
                     host_name: "build-box".into(),
@@ -1851,32 +1898,7 @@ mod tests {
             )
         });
         crate::store::tests::place_shown_threads(&store, cx);
-        fn wait_until(
-            cx: &mut TestAppContext,
-            store: &Entity<WorkspaceStore>,
-            mut pump: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
-            description: &str,
-            mut ready: impl FnMut(&TestAppContext) -> bool,
-        ) {
-            let deadline = crate::store::tests::host_deadline();
-            let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
-            loop {
-                // Host replies arrive on an OS thread. Decode them here so ACKs
-                // wake GPUI tasks on the test scheduler's own thread.
-                let _ = pump.as_mut().poll(&mut task_cx);
-                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-                cx.run_until_parked();
-                if ready(cx) {
-                    return;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "waiting for {description}"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-        }
-        wait_until(cx, &store, pump.as_mut(), "host baseline", |cx| {
+        driver.wait_until(cx, &store, "host baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         // The dialog closes itself on success, which routes through the
@@ -1908,7 +1930,7 @@ mod tests {
         // rejected there, not here.
         retype(cx, r"C:\Users\dev\src");
         cx.simulate_keystrokes("enter");
-        wait_until(cx, &store, pump.as_mut(), "host path refusal", |cx| {
+        driver.wait_until(cx, &store, "host path refusal", |cx| {
             dialog.read_with(cx, |dialog, _| dialog.error.is_some())
         });
         let error = dialog.read_with(cx, |dialog, _| dialog.error.clone());
@@ -1926,29 +1948,16 @@ mod tests {
         // The folder list under the field is the host's too: typing the start
         // of a name in the host's home lists the matching folders there.
         retype(cx, "~/work");
-        let deadline = crate::store::tests::host_deadline();
-        loop {
-            let _ = pump
-                .as_mut()
-                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-            crate::test_frames::draw_settled(cx);
-            if cx.debug_bounds("add-project-folder-workspace").is_some() {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "waiting for the host's folder listing"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        driver.settle_until(cx, &store, "the host's folder listing", |cx| {
+            cx.debug_bounds("add-project-folder-workspace").is_some()
+        });
         assert!(cx.debug_bounds("add-project-folder-data").is_none());
 
         // A directory that exists on the host is accepted even though this
         // client never looked at it, written as the host reads it.
         retype(cx, "~/workspace/");
         cx.simulate_keystrokes(SECONDARY_ENTER);
-        wait_until(cx, &store, pump.as_mut(), "host project draft", |cx| {
+        driver.wait_until(cx, &store, "host project draft", |cx| {
             store.read_with(cx, |store, _| store.sole_thread().is_some())
         });
         assert_eq!(dialog.read_with(cx, |dialog, _| dialog.error.clone()), None);
@@ -1964,18 +1973,7 @@ mod tests {
             vec![workspace.clone()]
         );
 
-        let mut shutdown = std::pin::pin!(link.shutdown());
-        wait_until(cx, &store, pump.as_mut(), "host shutdown", |_| {
-            let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
-            match shutdown.as_mut().poll(&mut task_cx) {
-                std::task::Poll::Ready(result) => {
-                    result.expect("stop host");
-                    true
-                }
-                std::task::Poll::Pending => false,
-            }
-        });
-        host.stopped.recv_blocking().expect("host stopped");
+        driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 }

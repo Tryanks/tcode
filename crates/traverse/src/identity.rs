@@ -74,13 +74,10 @@ struct HostFile {
     group: Option<GroupRecord>,
 }
 
-/// A machine outside any group writes version 3, which an older build still
-/// reads; version 4 adds the group, and version 5 a space policy other than
-/// the access every space had before policies, which a build that would drop
-/// it on saving must not read.
-const VERSION_WITHOUT_GROUP: u32 = 3;
-const VERSION_WITH_GROUP: u32 = 4;
+/// The version this build writes. Releases wrote 2 (migrated on load), 3
+/// (before groups) and 4 (before space policies), which are still read.
 const VERSION: u32 = 5;
+const READ_VERSIONS: [u32; 3] = [3, 4, VERSION];
 
 fn enabled() -> bool {
     true
@@ -111,14 +108,11 @@ impl HostIdentity {
                     value["v"] = 3.into();
                 }
                 let file: HostFile = serde_json::from_value(value).map_err(io::Error::other)?;
-                if ![VERSION_WITHOUT_GROUP, VERSION_WITH_GROUP, VERSION].contains(&file.v) {
+                if !READ_VERSIONS.contains(&file.v) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("{HOST_FILE} has unsupported version {}", file.v),
                     ));
-                }
-                if file.devices.iter().any(|device| matches!(&device.access, DeviceGrant::Spaces(ids) if ids.is_empty() || ids.iter().any(|id| !tcode_client::pairing::valid_space_id(id)))) {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid device access"));
                 }
                 let mut identity = Self {
                     host_name: file.host_name,
@@ -164,17 +158,7 @@ impl HostIdentity {
 
     pub fn save(&self) -> io::Result<()> {
         let file = HostFile {
-            v: if self
-                .spaces
-                .iter()
-                .any(|space| space.policy != tcode_protocol::SpacePolicy::unrestricted())
-            {
-                VERSION
-            } else if self.group.is_some() {
-                VERSION_WITH_GROUP
-            } else {
-                VERSION_WITHOUT_GROUP
-            },
+            v: VERSION,
             host_name: self.host_name.clone(),
             secret_key: encode_hex(&self.secret_key.to_bytes()),
             devices: self.devices.clone(),

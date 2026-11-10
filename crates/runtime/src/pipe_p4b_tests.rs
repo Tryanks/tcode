@@ -643,6 +643,7 @@ fn import_status_survives_clients_and_gates_new_runs_by_lifecycle() {
         ExternalImportState::Finished {
             imported: 0,
             skipped: 0,
+            failed: Vec::new(),
         }
     );
 
@@ -667,6 +668,7 @@ fn import_status_survives_clients_and_gates_new_runs_by_lifecycle() {
         ExternalImportState::Finished {
             imported: 0,
             skipped: 0,
+            failed: Vec::new(),
         }
     );
 
@@ -797,7 +799,10 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
                 status: Some(status),
                 ..
             } => {
-                if let ExternalImportState::Finished { imported, skipped } = status.state {
+                if let ExternalImportState::Finished {
+                    imported, skipped, ..
+                } = status.state
+                {
                     assert_eq!((imported, skipped), (2, 0));
                     assert_eq!(
                         imported_ids.len(),
@@ -861,7 +866,7 @@ fn content_search_is_host_owned_and_survives_appends_limits_and_blank_queries() 
         }))
         .unwrap()
         {
-            QueryResponse::SessionContentHits(hits) => hits,
+            QueryResponse::SessionContentHits(found) => found.hits,
             other => panic!("unexpected search response: {other:?}"),
         }
     };

@@ -802,7 +802,8 @@ impl AppState {
             }
             SendRouting::Steer => {
                 let session_id = active.meta.id.clone();
-                let wire_text = wire_text_with_placeholder(text.clone(), &attachments);
+                let wire_text =
+                    wire_text_with_placeholder(text.clone(), &attachments, active.meta.provider);
                 let wire_text = native_skill_invocation(wire_text, &active.provider_commands);
                 // Persist the pending request before handing it to the provider.
                 let request_id = self.record_steer_request(&session_id, &text, &attachments, cx);

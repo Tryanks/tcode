@@ -1,8 +1,9 @@
 //! Tool windows driven the way the app shows them: a thread's stored log,
 //! read back by a host, folded into the timeline and drawn by the chat.
 //! Each log is tool items inside one turn (`fixtures/*.jsonl`): rows in the
-//! shape tcode.db stores them, as recorded, with invented paths, ids and
-//! content.
+//! shape the current build writes to tcode.db (`EventEnvelopeRef` in
+//! `tcode_services::store`, items as the `agent` adapters map them now),
+//! with invented paths, ids and content.
 
 use std::sync::Arc;
 
@@ -240,9 +241,7 @@ pub(in crate::chat) fn read(
 }
 
 /// A call no family claims reads as its server and tool and the value that
-/// names it — a Codex connector's whose result was stored as MCP JSON as
-/// much as a Claude Code MCP call's; an item canonicalization does not
-/// model as its kind and the value in its summary, never as JSON.
+/// names it — a Codex connector's as much as a Claude Code MCP call's.
 #[gpui::test]
 fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
@@ -272,16 +271,6 @@ fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppCo
     ] {
         assert_eq!(thread.header(id, cx), expected, "{id}");
     }
-    let other = "call_000000000000000000000025";
-    let header = thread.header(other, cx);
-    assert_eq!(
-        (header.verb, header.subject, header.argument),
-        (
-            None,
-            Some("subAgentActivity".to_owned()),
-            Some("/root".to_owned())
-        ),
-    );
 
     thread.open_work_log(mcp, cx);
     assert!(!shows(cx, &format!("tool-error-{mcp}")));
@@ -302,10 +291,6 @@ fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppCo
     click(cx, &format!("tool-nested-{mcp}-rows"));
     assert!(shows(cx, &rows));
     assert!(shows(cx, &format!("tool-text-{mcp}-output-more")));
-
-    // An item canonicalization does not model has nothing more to open.
-    click(cx, &format!("activity-row-{other}"));
-    assert!(!shows(cx, &format!("tool-detail-{other}")));
     thread.shutdown(cx);
 }
 
@@ -543,8 +528,8 @@ fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
 /// A read reads as the file and the lines read: numbered as its harness
 /// numbered them, or counted from the offset it asked for when the harness
 /// returned bare lines; a failure by the harness's own words; an image read
-/// as viewed, its image a tile above the row, whether it came live or from a
-/// Codex rollout stored before images had their own field.
+/// as viewed, its image a tile above the row, whether it came live or from an
+/// imported Codex rollout.
 #[gpui::test]
 fn a_read_reads_as_its_file_and_lines(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
@@ -998,19 +983,9 @@ fn a_shortened_output_loads_whole_when_asked(cx: &mut TestAppContext) {
     click(cx, "activity-row-long");
     assert!(shows(cx, "load-output-long"), "the preview offers the rest");
     click(cx, "load-output-long");
-    let store = thread.store.clone();
-    thread
-        .driver
-        .wait_until(cx, &store, "the whole output", |_| true);
-    let deadline = crate::store::tests::host_deadline();
-    while shows(cx, "load-output-long") {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the output never loaded"
-        );
-        thread.driver.step(cx, &store);
-        draw_settled(cx);
-    }
+    step_until(&mut thread, "the whole output", cx, |cx| {
+        !shows(cx, "load-output-long")
+    });
     click(cx, "tool-text-long-output-more");
     assert!(shows(cx, "tool-text-long-output"));
     thread.shutdown(cx);
@@ -1156,20 +1131,10 @@ fn a_shortened_commands_output_loads_into_its_grid(cx: &mut TestAppContext) {
         "the preview holds the start: {preview}"
     );
     click(cx, "load-output-long");
-    let store = thread.store.clone();
     // Loaded, the grid ends on the command's last line.
-    let deadline = crate::store::tests::host_deadline();
-    loop {
-        thread.driver.step(cx, &store);
-        draw_settled(cx);
-        if copied_output("long", cx).ends_with("line 600 of the run") {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the output never loaded into the grid"
-        );
-    }
+    step_until(&mut thread, "the output in the grid", cx, |cx| {
+        copied_output("long", cx).ends_with("line 600 of the run")
+    });
     assert!(!shows(cx, "tool-text-long-output"), "no text view");
     scroll_output("long", 1_000., cx);
     let start = copied_output("long", cx);
@@ -1180,23 +1145,15 @@ fn a_shortened_commands_output_loads_into_its_grid(cx: &mut TestAppContext) {
     thread.shutdown(cx);
 }
 
-/// Steps the host until `done`, failing with `what` after a few seconds.
+/// Steps the host until the window drawn at rest shows `what`.
 fn step_until(
     thread: &mut StoredThread,
     what: &str,
     cx: &mut VisualTestContext,
-    mut done: impl FnMut(&mut VisualTestContext) -> bool,
+    done: impl FnMut(&mut VisualTestContext) -> bool,
 ) {
     let store = thread.store.clone();
-    let deadline = crate::store::tests::host_deadline();
-    loop {
-        thread.driver.step(cx, &store);
-        draw_settled(cx);
-        if done(cx) {
-            return;
-        }
-        assert!(std::time::Instant::now() < deadline, "{what}");
-    }
+    thread.driver.settle_until(cx, &store, what, done);
 }
 
 /// A command that printed five thousand lines, its host's screen of them in
@@ -1212,7 +1169,7 @@ fn a_five_thousand_line_command_scrolls_to_its_first_line(cx: &mut TestAppContex
     let (mut thread, cx) = StoredThread::open(cx, &log, 1_024.);
     thread.open_work_log("count", cx);
     click(cx, "activity-row-count");
-    step_until(&mut thread, "the host's screen never came", cx, |cx| {
+    step_until(&mut thread, "the host's screen", cx, |cx| {
         copied_output("count", cx).ends_with("line 5000 of the run")
     });
     assert!(!shows(cx, "load-output-count"), "nothing left to load");
@@ -1248,7 +1205,7 @@ fn an_output_past_the_grids_ceiling_says_so_and_copies_whole(cx: &mut TestAppCon
     draw_settled(cx);
     click(cx, "menu-item-1");
     let whole = numbered(lines);
-    step_until(&mut thread, "Copy output never copied it all", cx, |cx| {
+    step_until(&mut thread, "the whole output copied", cx, |cx| {
         cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
             .as_deref()
             == Some(whole.as_str())
@@ -1696,9 +1653,9 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
 /// The harness's calls about the session read as what they did: the tools
 /// a search loaded, the skill launched, a plan proposed as a call, a
 /// question asked and the answer it got, the reviewer's verdict with its
-/// risk and, when it denied, its rationale. A wait and an image generated,
-/// recorded as Codex items before they were mapped, read as such, and an
-/// image viewed then shows as its image, as one recorded now does.
+/// risk and, when it denied, its rationale. Codex's wait and generated image
+/// read as such, and the image it viewed and the one it generated show as
+/// their images.
 #[gpui::test]
 fn a_harness_call_reads_as_what_it_did_to_the_session(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();

@@ -1,7 +1,7 @@
 //! What Tcode reads of a Forgejo or Gitea pull request, in Tcode's terms.
 
-use super::api::{Api, Request, Server, error};
-use crate::forge::{ForgeError, ForgeErrorKind};
+use super::api::{Api, Request, Server};
+use crate::forge::ForgeError;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use tcode_core::{
@@ -27,8 +27,9 @@ const REVIEW: &str = "review-";
 
 pub(super) fn capabilities(server: Server) -> PullRequestCapabilities {
     PullRequestCapabilities {
-        reply: server.replies(),
-        resolve: server.resolves(),
+        // Gitea's API replies to and resolves a review comment; Forgejo 17's has neither.
+        reply: server.gitea,
+        resolve: server.gitea,
         reactions: true,
         labels: true,
         request_changes: true,
@@ -66,14 +67,7 @@ impl Pull<'_> {
             .json()
     }
     pub(super) fn pull(&self) -> Result<Value, ForgeError> {
-        let pr = self.get(&format!("pulls/{}", self.key.number), "PullRequest")?;
-        if pr["number"].as_u64() != Some(self.key.number) {
-            return Err(error(
-                ForgeErrorKind::Uncertain,
-                "Forgejo answered another pull request",
-            ));
-        }
-        Ok(pr)
+        self.get(&format!("pulls/{}", self.key.number), "PullRequest")
     }
     pub(super) fn repository(&self) -> Result<Value, ForgeError> {
         self.get("", "Repository")
@@ -92,20 +86,10 @@ impl Pull<'_> {
     /// The newest status of each context on `sha`, as the server combines them. The servers
     /// ignore a sort on the plain list, which answers oldest first.
     pub(super) fn checks(&self, sha: &str) -> Result<Vec<PullRequestCheck>, ForgeError> {
-        let combined = self.get(&format!("commits/{sha}/status?limit=50"), "CommitStatus")?;
-        Ok(combined["statuses"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|status| {
-                Some(PullRequestCheck {
-                    name: text(status, "context")?,
-                    status: check_status(status["status"].as_str().unwrap_or_default()),
-                    url: text(status, "target_url").filter(|url| !url.is_empty()),
-                    required: None,
-                })
-            })
-            .collect())
+        Ok(checks(&self.get(
+            &format!("commits/{sha}/status?limit=50"),
+            "CommitStatus",
+        )?))
     }
     /// Every issue comment: the servers answer the whole list whatever page is asked for.
     pub(super) fn issue_comments(&self) -> Result<Vec<Value>, ForgeError> {
@@ -140,7 +124,25 @@ pub(super) fn text(raw: &Value, field: &str) -> Option<String> {
     raw[field].as_str().map(str::to_owned)
 }
 
-/// A `warning` is a finished status asking for attention, so it fails rather than waits.
+/// A combined status's `statuses`, one check each.
+pub(super) fn checks(combined: &Value) -> Vec<PullRequestCheck> {
+    combined["statuses"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|status| {
+            Some(PullRequestCheck {
+                name: text(status, "context")?,
+                status: check_status(status["status"].as_str().unwrap_or_default()),
+                url: text(status, "target_url").filter(|url| !url.is_empty()),
+                required: None,
+            })
+        })
+        .collect()
+}
+
+/// A `warning` is a finished status asking for attention, so it fails rather than waits, as
+/// Gitea's own combined state counts it.
 fn check_status(state: &str) -> CheckStatus {
     match state {
         "success" => CheckStatus::Success,
@@ -177,8 +179,9 @@ pub(super) fn state(pr: &Value) -> Option<PullRequestState> {
     }
 }
 
-/// What `mergeable` says: true is clean, and false is as much a check unfinished or failed, or
-/// a draft, as a conflict, and the API states nothing that tells them apart, so it is unknown.
+/// What `mergeable` says: true is clean, and false is as much a conflict check still running or
+/// failed, or a draft, as a conflict, and the API states nothing that tells them apart, so it
+/// is unknown.
 pub(super) fn mergeability(pr: &Value) -> Mergeability {
     if pr["mergeable"].as_bool() == Some(true) {
         Mergeability::Clean
@@ -199,7 +202,7 @@ pub(super) fn snapshot(
         head_branch: head_branch(pr)?,
         base_branch: text(&pr["base"], "ref")?,
         is_draft: pr["draft"].as_bool().unwrap_or(false),
-        updated_at: text(pr, "updated_at")?,
+        updated_at: Some(text(pr, "updated_at")?),
         synced_at,
         closed_at: text(pr, "closed_at"),
         merged_at: text(pr, "merged_at"),
@@ -488,4 +491,79 @@ pub(super) fn review_remark(raw: &Value) -> Option<PullRequestRemark> {
         path: None,
         review_state: text(raw, "state"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A `warning` status fails the head's checks (#643: Forgejo and Gitea finish a status as
+    /// `warning`, which Gitea's own combined state counts as a failure), and `mergeable: false`
+    /// is unknown, never a conflict: the servers also answer it for a conflict check still
+    /// running or failed and for a draft (#729, where it woke a watch for a false conflict).
+    ///
+    /// Shapes: `CombinedStatus` and `CommitStatus` in modules/structs/status.go and the states
+    /// in modules/structs/commit_status.go (Forgejo v17.0; Gitea v28 has the same fields);
+    /// `PullRequest.mergeable` in modules/structs/pull.go and `PullRequest.Mergeable` in
+    /// models/issues/pull.go (Forgejo v17.0). Content is invented.
+    #[test]
+    fn a_warning_status_fails_and_mergeable_false_is_not_a_conflict() {
+        let status = |id: u64, context: &str, state: &str, target_url: &str| {
+            json!({
+                "id": id,
+                "status": state,
+                "target_url": target_url,
+                "description": "",
+                "url": format!("https://forge.example.test/api/v1/repos/team/app/statuses/{id}"),
+                "context": context,
+                "creator": null,
+                "created_at": "2026-10-09T08:00:00Z",
+                "updated_at": "2026-10-09T08:05:00Z",
+            })
+        };
+        let combined = json!({
+            "state": "warning",
+            "sha": "4f2c9e1b7a",
+            "total_count": 3,
+            "statuses": [
+                status(3, "ci/build", "success", "https://ci.example.test/runs/3"),
+                status(2, "ci/lint", "warning", "https://ci.example.test/runs/2"),
+                status(1, "docs/preview", "pending", ""),
+            ],
+            "repository": null,
+            "commit_url": "https://forge.example.test/api/v1/repos/team/app/commits/4f2c9e1b7a",
+            "url": "https://forge.example.test/api/v1/repos/team/app/commits/4f2c9e1b7a/status",
+        });
+        let checks = checks(&combined);
+        assert_eq!(
+            checks
+                .iter()
+                .map(|check| (check.name.as_str(), check.status, check.url.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "ci/build",
+                    CheckStatus::Success,
+                    Some("https://ci.example.test/runs/3")
+                ),
+                (
+                    "ci/lint",
+                    CheckStatus::Failure,
+                    Some("https://ci.example.test/runs/2")
+                ),
+                ("docs/preview", CheckStatus::Pending, None),
+            ]
+        );
+        assert_eq!(checks_state(&checks), Some(ChecksState::Failing));
+
+        let pull = |mergeable: bool, draft: bool| {
+            json!({"number": 7, "state": "open", "draft": draft, "merged": false,
+                   "mergeable": mergeable})
+        };
+        for draft in [false, true] {
+            assert_eq!(mergeability(&pull(false, draft)), Mergeability::Unknown);
+        }
+        assert_eq!(mergeability(&pull(true, false)), Mergeability::Clean);
+    }
 }

@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use axum::Router;
 use axum::http::{StatusCode, header::AUTHORIZATION};
@@ -16,12 +15,12 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 pub struct BrokerErrors {
     pub unavailable: &'static str,
     pub dropped: &'static str,
-    pub timed_out: &'static str,
 }
 
+/// Hands a tool call to the host and waits for its answer. How long a call
+/// may take is the harness's to decide, as for any MCP server it runs.
 pub struct Broker<Request> {
     requests: async_channel::Sender<Request>,
-    timeout: Duration,
     errors: BrokerErrors,
 }
 
@@ -29,23 +28,14 @@ impl<Request> Clone for Broker<Request> {
     fn clone(&self) -> Self {
         Self {
             requests: self.requests.clone(),
-            timeout: self.timeout,
             errors: self.errors,
         }
     }
 }
 
 impl<Request> Broker<Request> {
-    pub fn new(
-        requests: async_channel::Sender<Request>,
-        timeout: Duration,
-        errors: BrokerErrors,
-    ) -> Self {
-        Self {
-            requests,
-            timeout,
-            errors,
-        }
+    pub fn new(requests: async_channel::Sender<Request>, errors: BrokerErrors) -> Self {
+        Self { requests, errors }
     }
 
     pub async fn invoke<Reply>(
@@ -57,11 +47,10 @@ impl<Request> Broker<Request> {
             .send(request(reply))
             .await
             .map_err(|_| self.errors.unavailable.to_string())?;
-        match tokio::time::timeout(self.timeout, response.recv()).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(self.errors.dropped.to_string()),
-            Err(_) => Err(self.errors.timed_out.to_string()),
-        }
+        response
+            .recv()
+            .await
+            .unwrap_or_else(|_| Err(self.errors.dropped.to_string()))
     }
 }
 
@@ -196,31 +185,20 @@ impl Host {
 
     pub fn start(self) -> std::io::Result<()> {
         self.listener.set_nonblocking(true)?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let listener = {
+            let _context = runtime.enter();
+            tokio::net::TcpListener::from_std(self.listener)?
+        };
         std::thread::Builder::new()
             .name("mcp-host".into())
             .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
+                if let Err(error) = runtime.block_on(axum::serve(listener, self.app).into_future())
                 {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        log::error!("mcp-host: failed to build tokio runtime: {error}");
-                        return;
-                    }
-                };
-                runtime.block_on(async move {
-                    let listener = match tokio::net::TcpListener::from_std(self.listener) {
-                        Ok(listener) => listener,
-                        Err(error) => {
-                            log::error!("mcp-host: failed to adopt listener: {error}");
-                            return;
-                        }
-                    };
-                    if let Err(error) = axum::serve(listener, self.app).await {
-                        log::error!("mcp-host: server exited with error: {error}");
-                    }
-                });
+                    log::error!("mcp-host: server exited with error: {error}");
+                }
             })?;
         Ok(())
     }
@@ -230,28 +208,16 @@ impl Host {
 mod tests {
     use super::*;
 
-    #[test]
-    fn tokens_keep_scopes_isolated_and_revoke_independently() {
-        let registry = TokenRegistry::new(|scope| scope);
-        let first = registry.register("session-a");
-        let second = registry.register("session-b");
-        assert_ne!(first, second);
-        assert_eq!(registry.services.read().unwrap()[&first].0, "session-a");
-        registry.revoke(&first);
-        let services = registry.services.read().unwrap();
-        assert!(!services.contains_key(&first));
-        assert_eq!(services[&second].0, "session-b");
-    }
-
     #[derive(Clone)]
     struct Nothing;
 
     impl ServerHandler for Nothing {}
 
     /// A suspended scope's calls are refused at the door, its tokens kept for when it
-    /// resumes, and another scope's calls are not touched.
+    /// resumes; a revoked token is refused outright; another scope's calls are not
+    /// touched by either.
     #[test]
-    fn a_suspended_scope_is_refused_until_it_resumes() {
+    fn suspended_and_revoked_tokens_are_refused_at_the_door() {
         let tokens = TokenRegistry::new(|_| {
             StreamableHttpService::new(
                 || Ok(Nothing),
@@ -284,5 +250,8 @@ mod tests {
         assert!(admitted(status(&owner)));
         tokens.resume("member-turn");
         assert!(admitted(status(&member)));
+        tokens.revoke(&member);
+        assert_eq!(status(&member), StatusCode::UNAUTHORIZED);
+        assert!(admitted(status(&owner)));
     }
 }

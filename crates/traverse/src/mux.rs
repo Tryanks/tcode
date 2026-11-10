@@ -138,9 +138,6 @@ impl HostMux {
                 futures_lite::future::block_on(futures_lite::future::race(
                     async {
                         while let Ok(line) = client_rx.recv().await {
-                            if client_rx.is_closed() {
-                                break;
-                            }
                             if ingress
                                 .send(Ingress::Line(connection_id, line))
                                 .await
@@ -716,6 +713,38 @@ mod tests {
             released,
             HashSet::from([session_topic.to_string(), index_topic.to_string()])
         );
+    }
+
+    /// A client that sends and then ends its stream, as a device does when
+    /// it disconnects right after a command, still has the command run.
+    #[test]
+    fn lines_queued_before_a_client_ends_reach_the_host() {
+        let (to_host, host_rx) = async_channel::unbounded();
+        let (_host_tx, from_host) = async_channel::unbounded();
+        let mux = HostMux::new(to_host, from_host);
+        let ping = |key: &str| {
+            encode_line(&serde_json::json!({
+                "id": 1,
+                "key": key,
+                "payload": {"type": "query", "content": {"type": "ping"}},
+            }))
+            .unwrap()
+        };
+        let leaving = mux.attach(Principal::Full, AttachmentPolicy::network());
+        leaving.to_host.send_blocking(ping("first")).unwrap();
+        leaving.to_host.send_blocking(ping("second")).unwrap();
+        leaving.to_host.close();
+        assert!(leaving.from_host.recv_blocking().is_err());
+        // The mux takes clients' lines in order, so the marker comes last.
+        let marker = mux.attach(Principal::Full, AttachmentPolicy::network());
+        marker.to_host.send_blocking(ping("marker")).unwrap();
+        let mut forwarded = Vec::new();
+        while forwarded.last().is_none_or(|key| key != "marker") {
+            let line: serde_json::Value =
+                serde_json::from_str(&host_rx.recv_blocking().unwrap().line).unwrap();
+            forwarded.push(line["key"].as_str().unwrap().to_owned());
+        }
+        assert_eq!(forwarded, ["first", "second", "marker"]);
     }
 
     /// A terminal's subscription reply reaches its client under the

@@ -317,8 +317,22 @@ type SavedAddrs = dyn Fn(EndpointId) -> Vec<SocketAddr> + Send + Sync;
 struct Inner {
     saved: Box<SavedAddrs>,
     options: LanOptions,
-    /// Resolves in flight, ended early by [`LanLookup::connected`].
-    active: Mutex<HashMap<EndpointId, Vec<Arc<AtomicBool>>>>,
+    /// Resolves in flight, ended early by [`LanLookup::connected`]: the
+    /// task is aborted, and the flag stops a blocking DNS-SD browse.
+    active: Mutex<HashMap<EndpointId, Vec<Resolve>>>,
+}
+
+#[derive(Clone)]
+struct Resolve {
+    cancel: Arc<AtomicBool>,
+    task: tokio::task::AbortHandle,
+}
+
+impl Resolve {
+    fn stop(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.task.abort();
+    }
 }
 
 impl std::fmt::Debug for LanLookup {
@@ -349,9 +363,9 @@ impl LanLookup {
     /// is not needed. iroh keeps polling a lookup after it has a path, and
     /// every address it learns stays on the machine's dial list.
     pub fn connected(&self, id: EndpointId) {
-        if let Some(flags) = self.inner.active.lock().unwrap().remove(&id) {
-            for flag in flags {
-                flag.store(true, Ordering::Relaxed);
+        if let Some(resolves) = self.inner.active.lock().unwrap().remove(&id) {
+            for resolve in resolves {
+                resolve.stop();
             }
         }
     }
@@ -361,19 +375,22 @@ impl AddressLookup for LanLookup {
     fn resolve(&self, id: EndpointId) -> Option<Boxed<Result<Item, Error>>> {
         let (sender, receiver) = async_channel::bounded(16);
         let cancel = Arc::new(AtomicBool::new(false));
+        let task = runtime().spawn(self.inner.clone().run(id, sender, cancel.clone()));
+        let resolve = Resolve {
+            cancel,
+            task: task.abort_handle(),
+        };
         self.inner
             .active
             .lock()
             .unwrap()
             .entry(id)
             .or_default()
-            .push(cancel.clone());
-        let task = runtime().spawn(self.inner.clone().run(id, sender, cancel.clone()));
+            .push(resolve.clone());
         Some(Box::pin(Resolving {
             receiver: Box::pin(receiver),
             _stop: Stop {
-                task: task.abort_handle(),
-                cancel,
+                resolve,
                 inner: self.inner.clone(),
                 id,
             },
@@ -399,20 +416,18 @@ impl Stream for Resolving {
 }
 
 struct Stop {
-    task: tokio::task::AbortHandle,
-    cancel: Arc<AtomicBool>,
+    resolve: Resolve,
     inner: Arc<Inner>,
     id: EndpointId,
 }
 
 impl Drop for Stop {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
-        self.task.abort();
+        self.resolve.stop();
         let mut active = self.inner.active.lock().unwrap();
-        if let Some(flags) = active.get_mut(&self.id) {
-            flags.retain(|flag| !Arc::ptr_eq(flag, &self.cancel));
-            if flags.is_empty() {
+        if let Some(resolves) = active.get_mut(&self.id) {
+            resolves.retain(|resolve| !Arc::ptr_eq(&resolve.cancel, &self.resolve.cancel));
+            if resolves.is_empty() {
                 active.remove(&self.id);
             }
         }
@@ -467,13 +482,10 @@ impl Inner {
                 let (_request, results) = browser.begin();
                 let deadline = tokio::time::Instant::now() + BROWSE_TIME;
                 let mut seen: Vec<SocketAddr> = Vec::new();
-                while !cancel.load(Ordering::Relaxed) {
-                    // Poll the flag the way the blocking browse does, so a
-                    // connection coming up ends the browse within 100 ms.
+                loop {
                     let result = tokio::select! {
                         result = results.recv() => result,
                         _ = tokio::time::sleep_until(deadline) => break,
-                        _ = tokio::time::sleep(Duration::from_millis(100)) => continue,
                     };
                     let Ok((claimed, addrs)) = result else {
                         break;

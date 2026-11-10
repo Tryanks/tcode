@@ -5,8 +5,9 @@
 //! group; see [`crate::group`]. `tcode/1` is accepted only from a paired
 //! `EndpointId`; its first bi stream opens with `hello` and, after `hello_ok`,
 //! carries `ClientMessage`/`HostMessage` lines. Every control line is JSON
-//! terminated by `\n`, at most [`MAX_CONTROL_LINE`] bytes, and must arrive
-//! within [`CONTROL_TIMEOUT`].
+//! terminated by `\n` and at most [`MAX_CONTROL_LINE`] bytes, and must arrive
+//! within [`CONTROL_TIMEOUT`], except the first line of a stream a paired
+//! device opens on `tcode/1`.
 //!
 //! The protocol lines after `hello_ok` travel as one raw deflate stream per
 //! direction ([`LineWriter`], [`LineStream`]), sync-flushed after every line
@@ -27,8 +28,7 @@
 //! connection to the machine's own SSH server, which runs in the host process
 //! and listens on no port. The machine answers `connected` before the first
 //! SSH byte, or `refused` when the device may not open one. These streams
-//! share the tunnel bound but never idle out: an editor leaves its connection
-//! quiet for long stretches and SSH keeps it alive itself.
+//! share the tunnel bound.
 use std::{io, time::Duration};
 
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress};
@@ -53,8 +53,6 @@ pub const MAX_TUNNELS: usize = MAX_STREAMS as usize - 8;
 /// How long the machine dials a tunnel target before answering
 /// `connect_failed`.
 pub const TUNNEL_CONNECT: Duration = Duration::from_secs(10);
-/// A tunnel with no bytes in either direction for this long is closed.
-pub const TUNNEL_IDLE: Duration = Duration::from_secs(60);
 
 pub const KEEP_ALIVE: Duration = Duration::from_secs(10);
 pub const MAX_IDLE: Duration = Duration::from_secs(30);
@@ -250,9 +248,19 @@ pub async fn read_control_within<T: serde::de::DeserializeOwned>(
     reader: &mut LineReader,
     max: usize,
 ) -> io::Result<T> {
-    let line = tokio::time::timeout(CONTROL_TIMEOUT, read_line(reader, max))
+    tokio::time::timeout(CONTROL_TIMEOUT, read_first(reader, max))
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "control line timed out"))??
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "control line timed out"))?
+}
+
+/// Read a stream's first line of at most `max` bytes and decode it, for as
+/// long as the peer takes.
+pub async fn read_first<T: serde::de::DeserializeOwned>(
+    reader: &mut LineReader,
+    max: usize,
+) -> io::Result<T> {
+    let line = read_line(reader, max)
+        .await?
         .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no control line"))?;
     serde_json::from_str(&line).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }

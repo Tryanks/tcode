@@ -17,6 +17,7 @@ schemars = "1"
 log = "0.4"
 mcp-host = { path = "../mcp-host" }
 tcode-protocol = { path = "../protocol", default-features = false }
+tokio-util = "0.7"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros", "time"] }
+tokio = { version = "1", features = ["rt", "macros"] }

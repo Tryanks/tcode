@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-test-support = ["tcode-services/test-support"]
+test-support = []
 
 [dependencies]
 agent = { path = "../agent" }
@@ -30,7 +30,6 @@ uuid = { version = "1", features = ["v4"] }
 ureq = { version = "2", default-features = false, features = ["tls"] }
 chrono = "0.4"
 filetime = "0.2"
-tcode-services = { path = "../services", features = ["test-support"] }
 tcode-traverse = { path = "../traverse", default-features = false }
 
 [target.'cfg(unix)'.dev-dependencies]

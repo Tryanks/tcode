@@ -49,17 +49,8 @@ fn main_window_background() -> WindowBackgroundAppearance {
     }
 }
 
-const QUIT_PROMPT_TIMEOUT: Duration = Duration::from_secs(15);
-
-fn finish_quit_prompt(window_state: &Entity<WindowState>, epoch: u64, cx: &mut App) -> bool {
-    window_state.update(cx, |state, _| {
-        if !state.quit_prompt_open || state.quit_prompt_epoch != epoch {
-            return false;
-        }
-        state.quit_prompt_epoch = state.quit_prompt_epoch.wrapping_add(1);
-        state.quit_prompt_open = false;
-        true
-    })
+fn finish_quit_prompt(window_state: &Entity<WindowState>, cx: &mut App) {
+    window_state.update(cx, |state, _| state.quit_prompt_open = false);
 }
 
 fn handle_quit(_: &Quit, shell: &Entity<AppShell>, cx: &mut App) {
@@ -94,17 +85,12 @@ fn handle_quit(_: &Quit, shell: &Entity<AppShell>, cx: &mut App) {
     };
 
     let window_state = shell.read(cx).window_state();
-    let epoch = window_state.update(cx, |state, _| {
-        if state.quit_prompt_open {
-            return None;
-        }
-        state.quit_prompt_epoch = state.quit_prompt_epoch.wrapping_add(1);
-        state.quit_prompt_open = true;
-        Some(state.quit_prompt_epoch)
+    let opened = window_state.update(cx, |state, _| {
+        !std::mem::replace(&mut state.quit_prompt_open, true)
     });
-    let Some(epoch) = epoch else {
+    if !opened {
         return;
-    };
+    }
 
     let prompt_state = window_state.clone();
     if window_handle
@@ -132,7 +118,7 @@ fn handle_quit(_: &Quit, shell: &Entity<AppShell>, cx: &mut App) {
                                     .label(tcode_ui::tr!("quit.confirm"))
                                     .danger()
                                     .on_click(move |_, window, cx| {
-                                        finish_quit_prompt(&quit_state, epoch, cx);
+                                        finish_quit_prompt(&quit_state, cx);
                                         window.close_dialog(cx);
                                         cx.quit();
                                     }),
@@ -142,38 +128,26 @@ fn handle_quit(_: &Quit, shell: &Entity<AppShell>, cx: &mut App) {
                                     .label(tcode_ui::tr!("settings.cancel"))
                                     .primary()
                                     .on_click(move |_, window, cx| {
-                                        finish_quit_prompt(&cancel_state, epoch, cx);
+                                        finish_quit_prompt(&cancel_state, cx);
                                         window.close_dialog(cx);
                                     }),
                             ),
                     )
                     .on_ok(move |_, _, cx| {
-                        finish_quit_prompt(&enter_state, epoch, cx);
+                        finish_quit_prompt(&enter_state, cx);
                         true
                     })
                     .on_cancel(move |_, _, cx| {
-                        finish_quit_prompt(&escape_state, epoch, cx);
+                        finish_quit_prompt(&escape_state, cx);
                         true
                     })
             });
         })
         .is_err()
     {
-        finish_quit_prompt(&window_state, epoch, cx);
+        finish_quit_prompt(&window_state, cx);
         cx.quit();
-        return;
     }
-
-    let timeout_state = window_state.clone();
-    cx.spawn(async move |cx| {
-        cx.background_executor().timer(QUIT_PROMPT_TIMEOUT).await;
-        cx.update(|cx| {
-            if finish_quit_prompt(&timeout_state, epoch, cx) {
-                let _ = window_handle.update(cx, |_, window, cx| window.close_dialog(cx));
-            }
-        });
-    })
-    .detach();
 }
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {
@@ -205,9 +179,7 @@ fn start_local(store: SessionStore) -> std::io::Result<(SpawnedHost, HostMux)> {
         ai_title_generation: true,
         ..HostServices::default()
     };
-    if let Err(error) = host_services.start_mcp_servers(true) {
-        log::warn!("MCP servers unavailable: {error}");
-    }
+    host_services.start_mcp_servers(true);
     let host = spawn_host(store, host_services)?;
     let mux = HostMux::new(host.attachments.clone(), host.from_host.clone())
         .with_original_backend(std::sync::Arc::new(host.clone()));
@@ -366,9 +338,10 @@ impl LocalKernel {
 
     /// Make this kernel the process's host: it hosts remote devices when its
     /// settings say so, and stops when the application quits. Returns its
-    /// settings.
-    fn own(&self, data_dir: &std::path::Path, cx: &mut App) -> settings::Settings {
-        let local_settings = self.settings();
+    /// settings, or why they could not be read, which the window shows
+    /// instead of this host.
+    fn own(&self, data_dir: &std::path::Path, cx: &mut App) -> Result<settings::Settings, String> {
+        let local_settings = self.settings()?;
         // Hosting belongs to the process-owned local kernel; it carries no
         // current-attachment mode.
         cx.set_global(RemoteController::new(
@@ -400,7 +373,7 @@ impl LocalKernel {
             }
         })
         .detach();
-        local_settings
+        Ok(local_settings)
     }
 
     /// A window's link to the local kernel. The mux keeps the kernel alive
@@ -427,16 +400,17 @@ impl LocalKernel {
         }
     }
 
-    fn settings(&self) -> settings::Settings {
+    /// The host's settings, read once before the window opens. Nothing on
+    /// screen can stop this wait yet, so it ends after five seconds.
+    fn settings(&self) -> Result<settings::Settings, String> {
         let topic = tcode_protocol::Topic::Settings;
-        if let Err(error) = self.control_link.subscribe(tcode_protocol::Subscription {
-            known_index: None,
-            topic: topic.clone(),
-            after: None,
-        }) {
-            log::error!("could not request local settings: {}", error.message);
-            return settings::Settings::default();
-        }
+        self.control_link
+            .subscribe(tcode_protocol::Subscription {
+                known_index: None,
+                topic: topic.clone(),
+                after: None,
+            })
+            .map_err(|error| error.message)?;
         let events = self.control_link.events();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let result = loop {
@@ -446,12 +420,17 @@ impl LocalKernel {
                         tcode_protocol::ServerEvent::SettingsSnapshot(settings)
                         | tcode_protocol::ServerEvent::SettingsReplaced(settings),
                     ..
-                }) => break settings,
+                }) => break Ok(settings),
                 Ok(_) => {}
                 Err(async_channel::TryRecvError::Empty) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(1));
                 }
-                Err(_) => break settings::Settings::default(),
+                Err(async_channel::TryRecvError::Empty) => {
+                    break Err(tcode_ui::tr!("remote.failure.timeout").into_owned());
+                }
+                Err(async_channel::TryRecvError::Closed) => {
+                    break Err(tcode_ui::tr!("remote.failure.host_closed").into_owned());
+                }
             }
         };
         let _ = self.control_link.unsubscribe(tcode_protocol::Subscription {
@@ -651,7 +630,6 @@ fn main() {
         let _ = std::io::stderr().flush();
         return;
     }
-    let preview_smoke_watchdog = preview_smoke.then(preview_smoke::Watchdog::start);
 
     // A Finder/Dock launch inherits launchd's minimal PATH, under which none of
     // the provider CLIs resolve — import the login shell's environment first,
@@ -801,15 +779,15 @@ fn main() {
 
         let launch = move |cx: &mut App, started: Result<LocalKernel, String>| {
             let initial_target = initial_target();
-            let (kernel, failure) = match started {
-                Ok(kernel) => (Some(Rc::new(kernel)), None),
-                Err(reason) => (None, Some(reason)),
+            let owned = started.and_then(|kernel| {
+                let settings = kernel.own(&data_dir, cx)?;
+                Ok((Rc::new(kernel), settings))
+            });
+            let (kernel, failure, local_settings) = match owned {
+                Ok((kernel, settings)) => (Some(kernel), None, settings),
+                // A window without a local host has read none of its settings.
+                Err(reason) => (None, Some(reason), settings::Settings::default()),
             };
-            // A window without a local host has read none of its settings.
-            let local_settings = kernel
-                .as_ref()
-                .map(|kernel| kernel.own(&data_dir, cx))
-                .unwrap_or_default();
             let owned = Rc::new(RefCell::new(kernel.clone()));
             let local: tcode_ui::attachment::LocalTransport = Rc::new(move |cx| {
                 if let Some(kernel) = owned.borrow().as_ref() {
@@ -817,7 +795,7 @@ fn main() {
                 }
                 match start_local_host()? {
                     LocalStart::Started(kernel) => {
-                        kernel.own(&data_dir, cx);
+                        kernel.own(&data_dir, cx)?;
                         let transport = kernel.transport();
                         *owned.borrow_mut() = Some(Rc::new(kernel));
                         Ok(transport)
@@ -868,8 +846,8 @@ fn main() {
             }
 
             cx.spawn(async move |cx| {
-                if let Some(watchdog) = preview_smoke_watchdog {
-                    preview_smoke::run(watchdog, shell, window, cx).await;
+                if preview_smoke {
+                    preview_smoke::run(shell, window, cx).await;
                     return;
                 }
                 let _ = window;

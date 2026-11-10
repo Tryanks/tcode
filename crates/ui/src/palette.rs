@@ -31,7 +31,7 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
-use tcode_protocol::{SessionSearchHit, ThreadExportFormat};
+use tcode_protocol::{SessionContentHits, ThreadExportFormat};
 
 use crate::provider_card::profile_glyph;
 use crate::settings::ThemeMode;
@@ -176,7 +176,7 @@ pub struct CommandPalette {
     focus_handle: FocusHandle,
     selected: usize,
     pub(crate) outside_dismissal: crate::overlay::OutsideDismissal,
-    content_hits: HashMap<HostKey, Vec<SessionSearchHit>>,
+    content_hits: HashMap<HostKey, SessionContentHits>,
     search_generation: u64,
     results: Option<Rc<Results>>,
     list_state: ListState,
@@ -365,7 +365,7 @@ impl CommandPalette {
         &mut self,
         generation: u64,
         host: HostKey,
-        hits: Vec<SessionSearchHit>,
+        hits: SessionContentHits,
         cx: &mut Context<Self>,
     ) {
         if self.search_generation != generation {
@@ -766,11 +766,28 @@ impl CommandPalette {
         for host in &hosts {
             let store = host.store.read(cx);
             let key = store.host_key();
-            let Some(hits) = self.content_hits.get(&key).filter(|hits| !hits.is_empty()) else {
+            let Some(found) = self.content_hits.get(&key) else {
                 continue;
             };
+            // What the host could not search heads its hits, with no row
+            // to open.
+            if !found.unreadable.is_empty() {
+                groups.push(Group {
+                    label: crate::tr!(
+                        "palette.messages_unreadable",
+                        reason = found.unreadable.join("; ")
+                    )
+                    .into_owned(),
+                    items: Vec::new(),
+                    hits_of: None,
+                });
+            }
+            if found.hits.is_empty() {
+                continue;
+            }
             let sessions = store.sidebar_sessions();
-            let messages = hits
+            let messages = found
+                .hits
                 .iter()
                 .map(|hit| {
                     let meta = sessions.iter().find(|meta| meta.id == hit.session_id);
@@ -1606,6 +1623,7 @@ impl Focusable for CommandPalette {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
+    use tcode_protocol::SessionSearchHit;
     use tcode_runtime::pipe::{HostServices, spawn_host};
     use tcode_services::store::SessionStore;
 
@@ -1836,11 +1854,8 @@ mod tests {
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
-        let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            pump_link
-                .pump_with_timer(|delay| executor.timer(delay))
-                .await;
+            pump_link.pump().await;
         });
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -2107,11 +2122,8 @@ mod tests {
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
-        let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            pump_link
-                .pump_with_timer(|delay| executor.timer(delay))
-                .await;
+            pump_link.pump().await;
         });
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -2232,7 +2244,10 @@ mod tests {
                 palette.apply_content_hits(
                     stale,
                     HostKey::Local,
-                    vec![hit("answer for `first`")],
+                    SessionContentHits {
+                        hits: vec![hit("answer for `first`")],
+                        unreadable: Vec::new(),
+                    },
                     cx,
                 );
                 assert!(
@@ -2243,10 +2258,13 @@ mod tests {
                 palette.apply_content_hits(
                     current,
                     HostKey::Local,
-                    vec![hit("answer for `second`")],
+                    SessionContentHits {
+                        hits: vec![hit("answer for `second`")],
+                        unreadable: Vec::new(),
+                    },
                     cx,
                 );
-                let hits = &palette.content_hits[&HostKey::Local];
+                let hits = &palette.content_hits[&HostKey::Local].hits;
                 assert_eq!(hits.len(), 1);
                 assert_eq!(hits[0].snippet, "answer for `second`");
             });

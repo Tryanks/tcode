@@ -312,10 +312,8 @@ pub(crate) fn read_subagent_spawn(
 ) -> Option<ThreadItem> {
     let session_dir = find_named_dir(&claude_dir.join("projects"), session_id, 5)?;
     let name = format!("agent-{task_id}.meta.json");
-    let path = std::fs::read_dir(session_dir.join("subagents"))
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
+    let path = subagent_metas(&session_dir)
+        .into_iter()
         .find(|path| path.file_name().is_some_and(|file| file == name.as_str()))?;
     let meta: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     Some(ThreadItem {
@@ -343,17 +341,7 @@ pub(crate) fn find_transcript(
     if task_path.is_file() {
         return Some(task_path);
     }
-    let subagents = session_dir.join("subagents");
-    for entry in std::fs::read_dir(subagents).ok()?.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json")
-            || !path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".meta.json"))
-        {
-            continue;
-        }
+    for path in subagent_metas(&session_dir) {
         let Ok(meta) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -372,6 +360,34 @@ pub(crate) fn find_transcript(
         }
     }
     None
+}
+
+/// Every subagent's `.meta.json` in a session. Claude Code 2.1.322 writes
+/// a subagent's transcript to `<session>/subagents/agent-<id>.jsonl`, or
+/// under the subdirectory it records for the agent
+/// (`agentTranscriptSubdirs`, `workflows/<run>` for a workflow's agents),
+/// and its metadata beside it as `agent-<id>.meta.json`.
+fn subagent_metas(session_dir: &Path) -> Vec<PathBuf> {
+    fn visit(dir: &Path, metas: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                visit(&path, metas);
+            } else if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".meta.json"))
+            {
+                metas.push(path);
+            }
+        }
+    }
+    let mut metas = Vec::new();
+    visit(&session_dir.join("subagents"), &mut metas);
+    metas
 }
 
 fn find_named_dir(root: &Path, name: &str, depth: usize) -> Option<PathBuf> {
@@ -490,6 +506,34 @@ mod tests {
         ));
         assert!(tail.read_appended().unwrap().is_empty());
         let _ = std::fs::remove_file(path);
+    }
+
+    /// A workflow's agent, which Claude Code 2.1.322 writes under
+    /// `<session>/subagents/workflows/<run>/` (its transcript path is
+    /// `subagents/<recorded subdir>/agent-<id>.jsonl`, the metadata the same
+    /// path ending `.meta.json`), is found by the tool call that spawned it.
+    #[test]
+    fn a_transcript_in_a_subagents_subdirectory_is_found() {
+        let claude_dir =
+            std::env::temp_dir().join(format!("tcode-subagent-dirs-{}", uuid::Uuid::new_v4()));
+        let run =
+            claude_dir.join("projects/-work-example/session-1/subagents/workflows/wf_example1");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(
+            run.join("agent-a1.meta.json"),
+            r#"{"agentType":"general-purpose","description":"Check the build","toolUseId":"toolu_wf"}"#,
+        )
+        .unwrap();
+        std::fs::write(run.join("agent-a1.jsonl"), "").unwrap();
+        assert_eq!(
+            find_transcript(&claude_dir, "session-1", "a1", "toolu_wf"),
+            Some(run.join("agent-a1.jsonl"))
+        );
+        assert!(matches!(
+            read_subagent_spawn(&claude_dir, "session-1", "a1"),
+            Some(ThreadItem { id, .. }) if id == "toolu_wf"
+        ));
+        std::fs::remove_dir_all(claude_dir).unwrap();
     }
 
     /// Claude's Read of an image yields the image block and then a synthetic

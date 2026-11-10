@@ -236,9 +236,7 @@ impl TextSystemState {
         let family = self
             .memory_source
             .select_family_by_name(requested)
-            .or_else(|_| self.system_source.select_family_by_name(requested))
-            .or_else(|_| self.system_source.select_family_by_name("PingFang SC"))
-            .or_else(|_| self.system_source.select_family_by_name("Helvetica"))?;
+            .or_else(|_| self.system_source.select_family_by_name(requested))?;
 
         let mut result = SmallVec::new();
         for handle in family.fonts() {
@@ -372,7 +370,7 @@ impl TextSystemState {
             );
 
         if emoji {
-            for pixel in bytes.chunks_exact_mut(4) {
+            for pixel in bytes.as_chunks_mut::<4>().0 {
                 swap_rgba_pa_to_bgra(pixel);
             }
         }

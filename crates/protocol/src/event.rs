@@ -16,10 +16,6 @@ use tcode_core::{
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 
-/// Backward-compatible name for the core event record now used directly on
-/// the protocol wire.
-pub type SessionEventRecord = StoredEvent;
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Topic {
@@ -48,7 +44,7 @@ pub enum Topic {
         terminal_id: u64,
     },
     /// One command execution's output, rendered by the host at `cols`
-    /// (clamped into [`crate::STORED_OUTPUT_COLS`]). Answered on subscribe and
+    /// (capped at [`crate::MAX_STORED_OUTPUT_COLS`]). Answered on subscribe and
     /// again while the output grows.
     CommandOutput {
         session_id: String,
@@ -195,13 +191,10 @@ pub enum ServerEvent {
         from: u64,
         end: u64,
         records: Vec<StoredEvent>,
-        #[serde(default)]
         total: u64,
         /// Absolute turn count keeps turn-addressed actions correct in a window.
-        #[serde(default)]
         total_turns: u64,
         /// The byte budget reduced this reply below the requested record count.
-        #[serde(default)]
         truncated: bool,
     },
     SessionHistoryError(crate::ProtocolError),
@@ -234,7 +227,6 @@ pub enum Scope {
         space_name: String,
         projects: Vec<Project>,
         providers: Vec<ScopedProviderChoice>,
-        #[serde(default = "crate::SpacePolicy::unrestricted")]
         policy: crate::SpacePolicy,
     },
 }
@@ -346,8 +338,19 @@ pub enum ExternalImportState {
     },
     Finished {
         imported: usize,
+        /// Already imported, or holding nothing to import.
         skipped: usize,
+        /// The threads that could not be imported, and why.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        failed: Vec<ImportFailure>,
     },
+}
+
+/// A thread an import could not bring in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportFailure {
+    pub file: PathBuf,
+    pub error: String,
 }
 
 /// Full provider/settings-page read projection.
@@ -363,10 +366,8 @@ pub struct ProvidersStatus {
     pub tcode_update: TcodeUpdateStatus,
     pub provider_snapshots: HashMap<String, ProviderSnapshot>,
     /// Latest account usage per profile id (Codex / Claude Code only).
-    #[serde(default)]
     pub provider_usage: HashMap<String, tcode_core::usage::ProviderUsage>,
     /// Profile ids with a usage fetch in flight.
-    #[serde(default)]
     pub usage_checking: HashSet<String>,
     pub acp_marketplace_items: Vec<AcpMarketplaceItem>,
     pub acp_registry_loading: bool,
@@ -380,11 +381,9 @@ pub struct ProvidersStatus {
     /// Native plugin catalogs of the profiles a client asked about: for each,
     /// the listing from outside any project and the listing of the one
     /// project last asked about.
-    #[serde(default)]
     pub plugins: Vec<ProviderPluginCatalog>,
     /// What each harness is, as clients present it: every native one, then
     /// every installed ACP agent.
-    #[serde(default)]
     pub harnesses: Vec<HarnessDescription>,
 }
 
@@ -395,53 +394,35 @@ pub struct ProvidersStatus {
 pub struct HarnessDescription {
     pub provider: ProviderKind,
     /// The installed ACP agent this is, for an ACP harness.
-    #[serde(default)]
     pub acp_agent_id: Option<String>,
     /// The command looked up on `PATH`, for a harness with a binary setting.
-    #[serde(default)]
     pub binary_name: Option<String>,
     /// How an ACP agent is started.
-    #[serde(default)]
     pub launch_summary: Option<String>,
-    #[serde(default)]
     pub install_command: Option<String>,
-    #[serde(default)]
     pub doctor_command: Option<String>,
     /// What to run in a terminal to sign in, where Tcode does not sign in.
-    #[serde(default)]
     pub sign_in_command: Option<String>,
     /// The variable naming each account's config directory, when the
     /// harness has one.
-    #[serde(default)]
     pub config_dir_env: Option<String>,
-    #[serde(default)]
     pub default_config_dir: Option<String>,
-    #[serde(default)]
     pub endpoint: Option<EndpointDescription>,
     /// The ids of the harness's native switches.
-    #[serde(default)]
     pub toggles: Vec<String>,
     /// Tcode runs the harness's account sign-in, so accounts can be added.
-    #[serde(default)]
     pub account_login: bool,
-    #[serde(default)]
     pub launch_args: bool,
     /// Its plugins are managed in Settings → Plugins.
-    #[serde(default)]
     pub plugins: bool,
-    #[serde(default)]
     pub mcp_servers: bool,
-    #[serde(default)]
     pub native_computer_use: bool,
     /// Its own configuration can be listed ([`crate::Query::NativeMcpServers`]).
-    #[serde(default)]
     pub native_mcp_config: bool,
     /// The choice of what a new thread may do without asking, where the
     /// harness has more than one.
-    #[serde(default)]
     pub permission: Option<HarnessPermission>,
     /// A newer version of an ACP agent in the registry.
-    #[serde(default)]
     pub registry_update: Option<String>,
 }
 
@@ -450,7 +431,6 @@ pub struct HarnessDescription {
 pub struct HarnessPermission {
     pub id: String,
     pub options: Vec<agent::SelectOption>,
-    #[serde(default)]
     pub recommended: Option<String>,
 }
 
@@ -477,12 +457,9 @@ impl HarnessPermission {
 pub struct EndpointDescription {
     pub base_url_env: String,
     pub key_env: String,
-    #[serde(default)]
     pub model_env: Option<String>,
     /// Endpoint profiles can be added for it.
-    #[serde(default)]
     pub profiles: bool,
-    #[serde(default)]
     pub presets: Vec<EndpointPresetDescription>,
 }
 
@@ -490,7 +467,6 @@ pub struct EndpointDescription {
 pub struct EndpointPresetDescription {
     pub name: String,
     pub base_url: String,
-    #[serde(default)]
     pub model: Option<String>,
 }
 
@@ -512,12 +488,7 @@ impl HarnessDescription {
             default_config_dir: text(facts.default_config_dir),
             endpoint: facts.endpoint.map(|endpoint| EndpointDescription {
                 base_url_env: endpoint.base_url_env.to_owned(),
-                key_env: endpoint
-                    .key_envs
-                    .first()
-                    .copied()
-                    .unwrap_or_default()
-                    .to_owned(),
+                key_env: endpoint.key_envs[0].to_owned(),
                 model_env: text(endpoint.model_env),
                 profiles: endpoint.profiles,
                 presets: endpoint
@@ -557,25 +528,17 @@ pub struct ProviderPluginCatalog {
     pub profile_id: String,
     /// The project directory the catalog was listed from; `None` lists from
     /// outside any project, so only user scope is offered.
-    #[serde(default)]
     pub context_cwd: Option<PathBuf>,
-    #[serde(default)]
     pub marketplaces: Vec<agent::ProviderPluginMarketplace>,
-    #[serde(default)]
     pub marketplace_actions: Vec<agent::MarketplaceAction>,
-    #[serde(default)]
     pub entries: Vec<agent::ProviderPluginEntry>,
     /// Native errors for parts of the catalog that could not be read; the
     /// rest of the listing still stands.
-    #[serde(default)]
     pub errors: Vec<String>,
     pub state: PluginCatalogState,
-    #[serde(default)]
     pub loading: bool,
     /// Plugin ids or marketplace names with an operation in flight.
-    #[serde(default)]
     pub pending: Vec<String>,
-    #[serde(default)]
     pub challenges: Vec<PluginChallenge>,
 }
 
@@ -609,7 +572,6 @@ pub struct PluginChallenge {
     /// The plugin id or marketplace name the operation targets.
     pub entry_id: String,
     pub kind: PluginChallengeKind,
-    #[serde(default)]
     pub native_text: Option<String>,
 }
 
@@ -620,7 +582,6 @@ pub enum PluginChallengeKind {
     AcceptCommand {
         command: String,
         sha256: String,
-        #[serde(default)]
         mode: Option<String>,
     },
     /// The native operation has no confirmation of its own but removes more
@@ -672,7 +633,6 @@ pub struct ProviderVersionStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_command_summary: Option<String>,
     /// The command needs an interactive terminal (for example, elevation).
-    #[serde(default)]
     pub update_requires_terminal: bool,
 }
 
@@ -700,6 +660,9 @@ pub struct AcpMarketplaceItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct GitStatusStatus {
     pub status: Option<GitStatus>,
+    /// git's own error when it could not read the status; `status` is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub busy: bool,
 }
 
@@ -810,7 +773,6 @@ pub struct AgentStatus {
     pub execution: AgentExecution,
     pub delivery: AgentDelivery,
     /// Whether the child has reported to its lead (see `AgentReport`).
-    #[serde(default)]
     pub report: AgentReport,
     /// When its latest run started and ended (unix ms); an end before the
     /// start belongs to an earlier run.
@@ -857,7 +819,6 @@ pub struct SessionStatus {
     pub delivery_in_flight: Option<u64>,
     pub activity: SessionActivity,
     /// An interrupt was accepted by the provider and its turn has not ended yet.
-    #[serde(default)]
     pub stopping: bool,
     /// When that first interrupt went out (unix ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -934,7 +895,6 @@ pub struct RewindStatus {
     pub steer_targets: bool,
     pub later_history: agent::LaterHistory,
     pub preview: agent::RewindPreviewKind,
-    pub running_turn: agent::RunningTurnPolicy,
     pub restores_command_edits: bool,
     /// Why no rewind can start now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -960,8 +920,6 @@ pub enum RewindBlocked {
     InProgress,
     /// A message is on its way to the harness.
     Delivering,
-    /// A turn runs and the harness does not stop it for a rewind.
-    TurnRunning,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1001,7 +959,6 @@ pub struct InjectedTools {
     /// Each tool's name and the description the model reads, across every server offered.
     pub tools: Vec<(String, String)>,
     /// Which server offers them: `tools` holds each server's tools together, in this order.
-    #[serde(default)]
     pub servers: Vec<InjectedServer>,
     /// False once the provider took none of Tcode's MCP servers: its model has neither these
     /// tools nor the linking instructions.
@@ -1037,9 +994,7 @@ pub enum InjectedChannel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalStatus {
     pub id: u64,
-    #[serde(default)]
     pub title: String,
-    #[serde(default)]
     pub exited: bool,
 }
 
@@ -1068,7 +1023,6 @@ pub struct QueuedMessageStatus {
     pub text: String,
     /// Unix timestamp for a scheduled row, or `None` for an ordinary queued
     /// message. Like the queue itself, this status is ephemeral.
-    #[serde(default)]
     pub fire_at_unix_secs: Option<u64>,
     /// Held because the space it was sent from does not allow the thread's
     /// setup as it stands; it goes once the thread or the space allows it.
@@ -1090,13 +1044,10 @@ pub struct IndexSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexSummary {
     /// Host-authored activity for every unarchived stored session.
-    #[serde(default)]
     pub activity: HashMap<String, SessionActivity>,
     /// Background title requests, including threads with no live provider.
-    #[serde(default)]
     pub title_generating: HashSet<String>,
     /// Archived threads per project id.
-    #[serde(default)]
     pub archived_counts: HashMap<String, usize>,
     pub worktree_shared: HashSet<String>,
     pub archived_revision: u64,
@@ -1149,7 +1100,6 @@ pub enum MergeWorktreeFailure {
     Git,
 }
 
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeToast {
@@ -1238,7 +1188,6 @@ pub enum RuntimeToast {
     },
 }
 
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeError {
@@ -1249,6 +1198,17 @@ pub enum RuntimeError {
     /// settings.json could not be read at start, so the host runs on defaults
     /// and writes no settings over it.
     SettingsUnreadable {
+        error: String,
+    },
+    /// Another file of the host's own (reviews.json, control_activity.json)
+    /// could not be read at start, so the host runs without what it holds and
+    /// writes nothing over it. `error` names the file.
+    FileUnreadable {
+        error: String,
+    },
+    /// The host's MCP servers did not start, so threads start without Tcode's tools; told
+    /// once, when the first thread that would have had them starts.
+    McpUnavailable {
         error: String,
     },
     TerminalStart {
@@ -1318,7 +1278,6 @@ pub enum RuntimeError {
     },
 }
 
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeNotice {
@@ -1332,7 +1291,6 @@ pub enum RuntimeNotice {
     WorktreeSeeded {
         copied_files: usize,
         skipped: Vec<String>,
-        limit_reached: bool,
     },
     WorktreeMergedFastForward,
     WorktreeMergedCommit,

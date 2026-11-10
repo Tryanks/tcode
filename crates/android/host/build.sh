@@ -25,7 +25,7 @@ fi
 export ANDROID_HOME="${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}"
 export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk/27.1.12297006}"
 export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@21}"
-export CARGO_NDK_PLATFORM="${CARGO_NDK_PLATFORM:-26}"
+export CARGO_NDK_PLATFORM="${CARGO_NDK_PLATFORM:-30}"
 
 cd "$CRATE_DIR"
 # cargo-ndk checks destination mtime, not profile or contents. A newer dev or

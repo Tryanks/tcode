@@ -647,7 +647,7 @@ impl AppState {
             | AgentEvent::SteerRequested { .. } => cx.origin,
             _ => None,
         };
-        let record = SessionEventRecord {
+        let record = StoredEvent {
             origin,
             author: author.clone(),
             ts: Some(ts),

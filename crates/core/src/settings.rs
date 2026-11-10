@@ -105,6 +105,11 @@ pub enum HostProblem {
     /// The host refused the token in use, saved or from the environment, with `status` at
     /// `at` (seconds since the Unix epoch). It stays refused until the token changes.
     Rejected { status: u16, at: u64 },
+    /// The machine's saved tokens could not be read, so no request is sent with any token.
+    CredentialsUnreadable { error: String },
+    /// The CLI failed when asked for its login, saying `error`, so whether it has one for the
+    /// host is unknown.
+    CliFailed { tool: String, error: String },
 }
 
 /// The account a token signs in as. Only names cross to clients, never the token.
@@ -483,7 +488,6 @@ pub enum ChildApprovalMode {
     AlwaysAllow,
     Manual,
     #[default]
-    #[serde(other)]
     Auto,
 }
 
@@ -1611,10 +1615,6 @@ mod tests {
                 ChildApprovalMode::AlwaysAllow,
             ),
             (r#"{"child_approval":"manual"}"#, ChildApprovalMode::Manual),
-            (
-                r#"{"child_approval":"future_value"}"#,
-                ChildApprovalMode::Auto,
-            ),
         ] {
             let settings: SubagentSettings = serde_json::from_str(json).unwrap();
             assert_eq!(settings.child_approval, expected, "{json}");

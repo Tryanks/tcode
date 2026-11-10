@@ -7936,15 +7936,18 @@ pub(crate) mod tests {
             answer_query(
                 host,
                 id,
-                Ok(tcode_protocol::QueryResponse::SessionContentHits(vec![
-                    tcode_protocol::SessionSearchHit {
-                        session_id: session.into(),
-                        session_title: session.into(),
-                        entry_id: "entry-1".into(),
-                        turn: 0,
-                        snippet: "a zebra".into(),
+                Ok(tcode_protocol::QueryResponse::SessionContentHits(
+                    tcode_protocol::SessionContentHits {
+                        hits: vec![tcode_protocol::SessionSearchHit {
+                            session_id: session.into(),
+                            session_title: session.into(),
+                            entry_id: "entry-1".into(),
+                            turn: 0,
+                            snippet: "a zebra".into(),
+                        }],
+                        unreadable: Vec::new(),
                     },
-                ])),
+                )),
             );
         }
         crate::test_frames::draw_settled(cx);
@@ -17292,6 +17295,7 @@ pub(crate) mod tests {
                 },
                 ServerEvent::GitStatusReplaced(tcode_protocol::GitStatusStatus {
                     status: Some(git),
+                    error: None,
                     busy: false,
                 }),
             ),

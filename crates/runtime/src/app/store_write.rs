@@ -98,7 +98,6 @@ pub(super) enum StoreWrite {
 /// What the writer reports back to the host.
 pub(super) enum StoreWriteFailure {
     Error(RuntimeError),
-    Warning(String),
     /// The store stopped serving after a panic or a broken connection; the
     /// failed writes are reported separately.
     StoreFailed(String),
@@ -415,16 +414,16 @@ impl StoreWriter {
         match write {
             StoreWrite::SaveCommands { key, commands } => {
                 self.store.save_commands(&key, &commands).err().map(|err| {
-                    StoreWriteFailure::Warning(format!(
+                    StoreWriteFailure::Error(RuntimeError::External(format!(
                         "failed to persist {key:?} command cache: {err}"
-                    ))
+                    )))
                 })
             }
             StoreWrite::InvalidateCommands(key) => {
                 self.store.invalidate_commands(&key).err().map(|err| {
-                    StoreWriteFailure::Warning(format!(
+                    StoreWriteFailure::Error(RuntimeError::External(format!(
                         "failed to invalidate {key:?} command cache: {err}"
-                    ))
+                    )))
                 })
             }
             StoreWrite::WriteSettings(bytes) => {

@@ -13,7 +13,7 @@
 //! where it goes back in the bare form, relative to the previous one. The
 //! header stays uncompressed so the type and references read without the
 //! payload. Decoding puts every run back and yields the canonical bytes
-//! exactly; a row is never written unless it does.
+//! exactly.
 
 use std::collections::HashMap;
 use std::io;
@@ -162,36 +162,24 @@ pub(super) struct Codec {
 
 impl Codec {
     /// Every stored dictionary; the highest id compresses new rows.
-    pub(super) fn new(stored: impl IntoIterator<Item = (u32, Vec<u8>)>) -> io::Result<Self> {
+    pub(super) fn new(stored: impl IntoIterator<Item = (u32, Vec<u8>)>) -> Self {
         let mut codec = Self::default();
         for (id, bytes) in stored {
-            codec.add(id, &bytes)?;
+            codec
+                .dictionaries
+                .insert(id, Arc::new(zstd::dict::DecoderDictionary::copy(&bytes)));
+            if codec
+                .current
+                .as_ref()
+                .is_none_or(|(current, _)| *current < id)
+            {
+                codec.current = Some((
+                    id,
+                    Arc::new(zstd::dict::EncoderDictionary::copy(&bytes, LEVEL)),
+                ));
+            }
         }
-        Ok(codec)
-    }
-
-    pub(super) fn add(&mut self, id: u32, bytes: &[u8]) -> io::Result<()> {
-        if id == 0 || bytes.is_empty() {
-            return Err(invalid("a dictionary needs a nonzero id and bytes"));
-        }
-        // A dictionary that does not load would make every row it compressed
-        // unreadable; refuse it before any row uses it.
-        let mut probe = zstd::bulk::Compressor::with_dictionary(LEVEL, bytes)?;
-        let frame = probe.compress(b"{\"ts\":0,\"event\":{\"type\":\"warning\"}}")?;
-        zstd::bulk::Decompressor::with_dictionary(bytes)?.decompress(&frame, 64)?;
-        self.dictionaries
-            .insert(id, Arc::new(zstd::dict::DecoderDictionary::copy(bytes)));
-        if self
-            .current
-            .as_ref()
-            .is_none_or(|(current, _)| *current < id)
-        {
-            self.current = Some((
-                id,
-                Arc::new(zstd::dict::EncoderDictionary::copy(bytes, LEVEL)),
-            ));
-        }
-        Ok(())
+        codec
     }
 
     pub(super) fn has_dictionary(&self) -> bool {
@@ -310,11 +298,7 @@ impl Codec {
             }
             None => (0, zstd::bulk::Compressor::new(LEVEL)?),
         };
-        Ok(Encoder {
-            decoder: self.decoder(),
-            compressor,
-            dict,
-        })
+        Ok(Encoder { compressor, dict })
     }
 
     pub(super) fn decoder(&self) -> Decoder<'_> {
@@ -327,19 +311,13 @@ impl Codec {
 
 /// Encodes rows with the newest dictionary, reusing one compression context.
 pub(super) struct Encoder<'a> {
-    decoder: Decoder<'a>,
     compressor: zstd::bulk::Compressor<'a>,
     dict: u32,
 }
 
 impl Encoder<'_> {
-    /// Encode `canonical`, proving the result decodes back to it.
     pub(super) fn encode(&mut self, canonical: &[u8]) -> io::Result<Encoded> {
-        self.encode_split(canonical, split(canonical))
-    }
-
-    pub(super) fn encode_split(&mut self, canonical: &[u8], split: Split) -> io::Result<Encoded> {
-        let Split { bare, refs, blobs } = split;
+        let Split { bare, refs, blobs } = split(canonical);
         let compressed = self.compressor.compress(&bare)?;
         let compress = compressed.len() < bare.len();
         let mut bytes = vec![
@@ -357,20 +335,7 @@ impl Encoder<'_> {
             previous = reference.at;
         }
         bytes.extend_from_slice(if compress { &compressed } else { &bare });
-        let encoded = Encoded { bytes, blobs };
-        let decoded = self
-            .decoder
-            .decode(&encoded.bytes, Mode::Full, &mut |hash| {
-                Ok(encoded
-                    .blobs
-                    .iter()
-                    .find(|blob| blob.hash == *hash)
-                    .map(|blob| blob.bytes.clone()))
-            })?;
-        if decoded.missing || decoded.bytes != canonical {
-            return Err(invalid("an encoded row does not decode back to itself"));
-        }
-        Ok(encoded)
+        Ok(Encoded { bytes, blobs })
     }
 }
 

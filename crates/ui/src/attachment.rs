@@ -45,12 +45,11 @@ impl AttachmentRuntime {
         let (finished, pump_finished) = async_channel::bounded(1);
         let pump = link.clone();
         let state_link = link.clone();
-        let executor = cx.background_executor().clone();
         Self {
             finished: pump_finished,
             tasks: vec![
                 cx.background_spawn(async move {
-                    pump.pump_with_timer(|delay| executor.timer(delay)).await;
+                    pump.pump().await;
                     let _ = finished.try_send(());
                 }),
                 // A local transport has no state channel behind it; the closed

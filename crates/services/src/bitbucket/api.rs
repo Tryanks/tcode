@@ -23,8 +23,6 @@ pub(super) const HOST: &str = "bitbucket.org";
 const API: &str = "https://api.bitbucket.org/2.0";
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(60);
-/// Bitbucket's rate-limit window.
-const WINDOW: Duration = Duration::from_secs(3600);
 /// Same-origin redirects followed for one read, as `/diff` and `/diffstat` answer with one.
 const REDIRECTS: usize = 3;
 /// The token for bitbucket.org, an API token when `ENV_EMAIL` names its account.
@@ -209,7 +207,11 @@ impl Api {
                 "Bitbucket host turned off",
             ));
         }
-        if let Some((token, email)) = self.store.saved_credential(HostKind::Bitbucket, HOST) {
+        if let Some((token, email)) = self
+            .store
+            .saved_credential(HostKind::Bitbucket, HOST)
+            .map_err(ForgeError::credentials_unreadable)?
+        {
             let source = match &email {
                 Some(email) => CredentialSource::SavedBasic {
                     email: email.clone(),
@@ -230,7 +232,7 @@ impl Api {
     }
 
     pub(super) fn token_saved(&self) -> bool {
-        self.store.token(HostKind::Bitbucket, HOST).is_some()
+        matches!(self.store.token(HostKind::Bitbucket, HOST), Ok(Some(_)))
     }
 
     /// What Bitbucket's last answer to `credential` says: its account, and any problem.
@@ -425,12 +427,7 @@ impl Api {
             break response;
         };
         let status = response.status();
-        // `X-RateLimit-Reset` is the seconds left in Bitbucket's hourly window; a 429 may carry
-        // it without `Retry-After`.
-        let retry_after = response
-            .header("retry-after")
-            .or_else(|| response.header("x-ratelimit-reset"))
-            .map(str::to_owned);
+        let retry_after = response.header("retry-after").map(str::to_owned);
         let limit = request.limit.min(BODY_LIMIT);
         let mut body = Vec::new();
         response
@@ -441,11 +438,7 @@ impl Api {
         let truncated = body.len() > limit;
         body.truncate(limit);
         if status == 429 {
-            let named = retry_after
-                .as_deref()
-                .and_then(retry_at)
-                // No answer outlasts Bitbucket's hourly window.
-                .map(|at| at.min(SystemTime::now() + WINDOW));
+            let named = retry_after.as_deref().and_then(retry_at);
             let retry_at =
                 self.rate_limits
                     .lock()
@@ -557,7 +550,7 @@ impl Api {
     }
 }
 
-/// `Retry-After` or `X-RateLimit-Reset` as seconds, or `Retry-After` as an HTTP date.
+/// `Retry-After` as seconds or as an HTTP date (RFC 9110, 10.2.3).
 fn retry_at(value: &str) -> Option<SystemTime> {
     let value = value.trim();
     if let Ok(seconds) = value.parse::<u64>() {

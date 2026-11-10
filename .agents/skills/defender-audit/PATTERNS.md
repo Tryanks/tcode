@@ -336,6 +336,19 @@ next round, not a reason to keep the timeouts for good.
 - Assertion-free `#[ignore]`d manual tools in the test tree: delete.
 - Scope: "It should be the whole of Tcode's implementation", tests included,
   not production code alone.
+- On test waits: "Another of the most important problems: no wait in any
+  test should consume the real clock."
+- On the questions a round leaves: after the second round's 122 questions,
+  "all of them as you recommend", with later rounds left to the session's
+  judgement. The rules that answer stood on are the ones a later round
+  applies without asking: cuts that do not say what they left out go, cuts
+  that say so and offer the whole stay; a number the feature needs stays, one
+  the source's documentation contradicts follows the documentation, one that
+  only guards against runaway with no incident goes; security checks stay; a
+  timeout the user cannot cancel stays until the cancel path exists; checks
+  on Tcode's own data and messages go; a file of Tcode's own that cannot be
+  read is an error, never an empty default written back over it; what only a
+  real device can judge is left alone.
 - On agents following the code they find: "That is what is wrong with the
   codebase as it stands: you carry on its old inertia without telling good
   from bad, and the old bad inertia is exactly what I want gone."

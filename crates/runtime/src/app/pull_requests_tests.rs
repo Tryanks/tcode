@@ -290,7 +290,8 @@ fn instructions_reach_the_provider_at_launch_and_no_turn_carries_them() {
 fn the_agent_tools_are_disclosed_before_the_first_turn() {
     let store = TestStore::new("tcode-pr-tools-disclosed");
     let mut services = crate::pipe::HostServices::default();
-    services.start_mcp_servers(false).unwrap();
+    services.start_mcp_servers(false);
+    assert_eq!(services.mcp_unavailable, None);
     let host = crate::pipe::spawn_host((*store).clone(), services).unwrap();
     for (provider, disclosed) in [(ProviderKind::ClaudeCode, true), (ProviderKind::Pi, false)] {
         let tools = smol::block_on(host.update_state_for_test(move |state, _| {

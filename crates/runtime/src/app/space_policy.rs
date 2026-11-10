@@ -188,7 +188,7 @@ impl AppState {
         for id in ids {
             self.refresh_policy_holds(&id);
             if self.dispatch_next_queued(&id, cx).is_err() {
-                log::warn!("{id}: dispatch after a space policy change failed (process gone)");
+                self.report_error(RuntimeError::ProcessGone, cx);
             }
         }
     }
@@ -224,7 +224,7 @@ impl AppState {
             .resident(session_id)
             .is_some_and(|session| session.queue.iter().any(|message| message.space_held));
         if holding && self.dispatch_next_queued(session_id, cx).is_err() {
-            log::warn!("{session_id}: dispatch after a setup change failed (process gone)");
+            self.report_error(RuntimeError::ProcessGone, cx);
         }
     }
 

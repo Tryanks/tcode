@@ -87,9 +87,6 @@ pub(crate) fn blocked_reason(blocked: tcode_protocol::RewindBlocked, harness: &s
         tcode_protocol::RewindBlocked::Delivering => {
             crate::tr!("rewind.blocked.delivering", harness = harness)
         }
-        tcode_protocol::RewindBlocked::TurnRunning => {
-            crate::tr!("rewind.blocked.turn_running", harness = harness)
-        }
     }
     .into_owned()
 }
@@ -200,7 +197,8 @@ pub(crate) fn panel_body(
         }),
         (includes_files && target.worktree)
             .then(|| crate::tr!("rewind.note.worktree").into_owned()),
-        (target.turn_running && target.rewind.running_turn == agent::RunningTurnPolicy::Interrupt)
+        target
+            .turn_running
             .then(|| crate::tr!("rewind.note.running", harness = harness.as_str()).into_owned()),
         (target.queued > 0).then(|| {
             counted(

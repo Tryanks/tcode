@@ -13,16 +13,12 @@ pub enum PreviewRequest {
     /// Click the element a snapshot's `ref` names, or the first `selector`
     /// match.
     Click {
-        #[serde(default)]
         selector: Option<String>,
-        #[serde(default)]
         r#ref: Option<String>,
     },
     /// Focus the element and type `text` into it (dispatching input events).
     Type {
-        #[serde(default)]
         selector: Option<String>,
-        #[serde(default)]
         r#ref: Option<String>,
         text: String,
     },
@@ -38,7 +34,6 @@ pub enum PreviewRequest {
         delta_x: f64,
         delta_y: f64,
         selector: Option<String>,
-        #[serde(default)]
         r#ref: Option<String>,
     },
     /// Wait until all requested conditions match or time out.
@@ -53,9 +48,7 @@ pub enum PreviewRequest {
     /// A PNG of what is on screen, of the element a snapshot's `ref` names,
     /// or of the whole document.
     Screenshot {
-        #[serde(default)]
         r#ref: Option<String>,
-        #[serde(default)]
         full_page: bool,
     },
 }

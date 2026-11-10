@@ -19,6 +19,7 @@ use crate::backend::{
     RootFilters, RootInfo, RootObservation,
 };
 use crate::outline::{self, UiNode};
+use crate::state::StateStore;
 
 pub use crate::backend::{ActionKind as UiActionKind, MouseButton, RootKind};
 
@@ -185,14 +186,19 @@ struct WaitForParams {
 pub struct ComputerUseTools {
     tool_router: ToolRouter<Self>,
     feedback: Arc<crate::feedback::FeedbackSession>,
+    states: Arc<Mutex<StateStore>>,
 }
 
 #[tool_router]
 impl ComputerUseTools {
-    fn new(feedback: Arc<crate::feedback::FeedbackSession>) -> Self {
+    fn new(
+        feedback: Arc<crate::feedback::FeedbackSession>,
+        states: Arc<Mutex<StateStore>>,
+    ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             feedback,
+            states,
         }
     }
 
@@ -228,13 +234,13 @@ impl ComputerUseTools {
                 root.frame.h
             ));
         }
-        bounded_success(None, lines.join("\n"), Vec::new())
+        bounded_success(&self.states, None, lines.join("\n"), Vec::new())
     }
 
     #[tool(
         description = "Observe a desktop root and return a folded outline, state_id, @e element refs, and a screenshot when requested by the observation mode. \
                        Use find_roots → observe_ui, query that cached state with search_ui/expand_ui/inspect_ui, then use act_ui/wait_for and observe again; those cached queries do not touch the live UI. \
-                       Every @e ref belongs to its producing state_id; observations are immutable and kept in a bounded LRU (default 8), so an evicted or stale state or a ref from another state requires a fresh observe_ui. \
+                       Every @e ref belongs to its producing state_id; observations are immutable and kept in a bounded LRU (default 8), so an evicted state or a ref from another state requires a fresh observe_ui. \
                        This server exposes desktop windows only, so use the tcode_preview tools for web pages. \
                        On macOS, grant Accessibility for all tools and Screen Recording for screenshots in Tcode Settings → Computer Use; Windows needs no permissions, and other platforms are unsupported."
     )]
@@ -269,7 +275,11 @@ impl ComputerUseTools {
             Ok(observed) => observed,
             Err(error) => return backend_error(error),
         };
-        save_observation(observed, capture_warning(config.image_mode, &permissions))
+        save_observation(
+            &self.states,
+            observed,
+            capture_warning(config.image_mode, &permissions),
+        )
     }
 
     #[tool(
@@ -278,11 +288,7 @@ impl ComputerUseTools {
                        Oversized results return a preview and continuation ref for read_text."
     )]
     async fn search_ui(&self, Parameters(params): Parameters<SearchUiParams>) -> CallToolResult {
-        let permissions = permissions();
-        if let Some(result) = permission_gate(permissions, true, false) {
-            return result;
-        }
-        let observation = match crate::state::global().lock().unwrap().get(&params.state_id) {
+        let observation = match self.states.lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
         };
@@ -304,7 +310,12 @@ impl ComputerUseTools {
                 outline::render_line(result.node, 0)
             ));
         }
-        bounded_success(Some(&observation.state_id), lines.join("\n"), Vec::new())
+        bounded_success(
+            &self.states,
+            Some(&observation.state_id),
+            lines.join("\n"),
+            Vec::new(),
+        )
     }
 
     #[tool(
@@ -313,20 +324,17 @@ impl ComputerUseTools {
                        Oversized results return a preview and continuation ref for read_text."
     )]
     async fn expand_ui(&self, Parameters(params): Parameters<ExpandUiParams>) -> CallToolResult {
-        let permissions = permissions();
-        if let Some(result) = permission_gate(permissions, true, false) {
-            return result;
-        }
-        let observation = match crate::state::global().lock().unwrap().get(&params.state_id) {
+        let observation = match self.states.lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
         };
-        let depth = params.depth.unwrap_or(3).min(12) as usize;
+        let depth = params.depth.unwrap_or(3) as usize;
         let expanded = match outline::render_expanded(&observation.tree, &params.r#ref, depth) {
             Ok(expanded) => expanded,
             Err(error) => return tool_error(&error),
         };
         bounded_success(
+            &self.states,
             Some(&observation.state_id),
             format!("state_id: {}\n{expanded}", observation.state_id),
             Vec::new(),
@@ -339,11 +347,7 @@ impl ComputerUseTools {
                        Oversized results return a preview and continuation ref for read_text."
     )]
     async fn inspect_ui(&self, Parameters(params): Parameters<InspectUiParams>) -> CallToolResult {
-        let permissions = permissions();
-        if let Some(result) = permission_gate(permissions, true, false) {
-            return result;
-        }
-        let observation = match crate::state::global().lock().unwrap().get(&params.state_id) {
+        let observation = match self.states.lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
         };
@@ -362,9 +366,10 @@ impl ComputerUseTools {
             "enabled": node.enabled,
             "focused": node.focused,
             "child_count": node.children.len(),
+            "children_error": node.children_error,
         });
         let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-        bounded_success(Some(&observation.state_id), text, Vec::new())
+        bounded_success(&self.states, Some(&observation.state_id), text, Vec::new())
     }
 
     #[tool(
@@ -373,7 +378,7 @@ impl ComputerUseTools {
                        Each step uses the element's accessibility action (AX on macOS, UI Automation on Windows) when one fits and otherwise delivers events to the target app's own process or windows, so it works on background windows, never moves the user's pointer, and sends keys to the target app rather than whichever app the user has focused; each step reports its delivery. \
                        When keys for type_text, keypress or set_text's keyboard replacement cannot be delivered to the target app, the step fails, its message says why, and its delivery is none. \
                        Hover that an app tracks from the real pointer may not respond to move_mouse. \
-                       Every @e ref must belong to the supplied state_id; an evicted or stale state or a ref from another state errors and requires a fresh observe_ui, while a successful call returns a successor state_id that must replace the old one. \
+                       Every @e ref must belong to the supplied state_id; an evicted state or a ref from another state errors and requires a fresh observe_ui. A step whose target's live role or title no longer matches the state fails and asks for a fresh observe_ui; a successful call returns a successor state_id to use from then on. \
                        Results report worked/didnt/unknown per step, stop at the first failure with stopped_at, and use expect as a postcondition rather than treating event delivery as success. \
                        Input is refused when observe-only mode is enabled (allow_input=false) in Settings → Computer Use, and oversized output returns a preview plus a continuation ref for read_text."
     )]
@@ -392,23 +397,12 @@ impl ComputerUseTools {
                 "observe-only mode is enabled in Settings → Computer Use; input actions are disabled",
             );
         }
-        if params.actions.is_empty() {
-            return tool_error("act_ui requires at least one action");
-        }
-        let pid = match crate::state::global().lock().unwrap().get(&params.state_id) {
-            Ok(observation) => observation.root.pid,
-            Err(error) => return tool_error(&error.to_string()),
-        };
-        let lane = observation_lane(pid);
-        let _transaction = lane.lock().await;
-        let previous = match crate::state::global()
-            .lock()
-            .unwrap()
-            .validate_for_action(&params.state_id)
-        {
+        let previous = match self.states.lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
         };
+        let lane = observation_lane(previous.root.pid);
+        let _transaction = lane.lock().await;
         let mut step_results = Vec::new();
         let mut action_descriptions = Vec::new();
         let mut stopped_at = None;
@@ -449,7 +443,7 @@ impl ComputerUseTools {
                 break;
             }
         }
-        crate::state::global()
+        self.states
             .lock()
             .unwrap()
             .record_actions(&previous.root, action_descriptions);
@@ -460,13 +454,29 @@ impl ComputerUseTools {
             .is_some_and(|condition| condition_satisfied(&previous.tree, condition));
         let successor_result = tokio::select! {
             _ = context.ct.cancelled() => return tool_error("computer-use action cancelled"),
-            result = poll_successor(&previous, params.expect.as_ref(), expectation_preexisting) => result,
+            result = poll_successor(
+                &previous,
+                params.expect.as_ref(),
+                expectation_preexisting,
+                stopped_at.is_none(),
+            ) => result,
         };
-        let (successor, expectation_status, root_changed) = match successor_result {
+        let (successor, expectation_status) = match successor_result {
             Ok(result) => result,
-            Err(error) => return backend_error(error),
+            Err(error) => {
+                let report = json!({
+                    "previous_state_id": previous.state_id,
+                    "stopped_at": stopped_at,
+                    "steps": step_results,
+                    "successor_error": error,
+                });
+                return tool_error(
+                    &serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string()),
+                );
+            }
         };
-        let successor = crate::state::global()
+        let successor = self
+            .states
             .lock()
             .unwrap()
             .insert_observation(successor.root, successor.tree);
@@ -492,12 +502,11 @@ impl ComputerUseTools {
             "stopped_at": stopped_at,
             "steps": step_results,
             "expect": expectation_status,
-            "root_changed": root_changed,
             "diff_confidence": diff.confidence,
         });
         let mut text = serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string());
         text.push('\n');
-        if diff.use_full_view || root_changed {
+        if diff.use_full_view {
             text.push_str("successor full view:\n");
             text.push_str(&outline::render_folded(&successor.tree));
         } else {
@@ -508,7 +517,7 @@ impl ComputerUseTools {
         if feedback.is_current() {
             feedback.complete();
         }
-        bounded_success(Some(&successor.state_id), text, Vec::new())
+        bounded_success(&self.states, Some(&successor.state_id), text, Vec::new())
     }
 
     #[tool(
@@ -517,16 +526,12 @@ impl ComputerUseTools {
                        Continue with the returned ref and next offset until eof."
     )]
     async fn read_text(&self, Parameters(params): Parameters<ReadTextParams>) -> CallToolResult {
-        let permissions = permissions();
-        if let Some(result) = permission_gate(permissions, true, false) {
-            return result;
-        }
         let offset = match params.offset.map(usize::try_from).transpose() {
             Ok(offset) => offset,
             Err(_) => return tool_error("offset is too large for this platform"),
         };
         let page = if params.r#ref.starts_with("@o") {
-            crate::state::global().lock().unwrap().read_output(
+            self.states.lock().unwrap().read_output(
                 &params.r#ref,
                 params.state_id.as_deref(),
                 offset,
@@ -535,7 +540,7 @@ impl ComputerUseTools {
             let Some(state_id) = params.state_id.as_deref() else {
                 return tool_error("state_id is required when reading an @e element ref");
             };
-            crate::state::global().lock().unwrap().page_element_text(
+            self.states.lock().unwrap().page_element_text(
                 state_id,
                 &params.r#ref,
                 offset.unwrap_or(0),
@@ -557,6 +562,7 @@ impl ComputerUseTools {
             )
         };
         bounded_success(
+            &self.states,
             page.owner_state.as_deref(),
             format!(
                 "ref: {}\nstate_id: {}\noffset: {}\nnext_offset: {}\ntotal_bytes: {}\neof: {}\n{}\n---\n{}",
@@ -575,60 +581,35 @@ impl ComputerUseTools {
 
     #[tool(
         description = "After observe_ui, wait against that state for a text, role, value, or referenced UI element to become present or absent. \
-                       Every @e ref must belong to the supplied state_id; an evicted or stale state or a ref from another state errors and requires a fresh observe_ui. \
+                       Every @e ref must belong to the supplied state_id; an evicted state or a ref from another state errors and requires a fresh observe_ui. \
                        The call touches the live UI and returns a successor state_id; reuse that instead of the old state, then observe again after later UI changes. \
                        Oversized output returns a preview plus a continuation ref for read_text."
     )]
-    async fn wait_for(&self, Parameters(params): Parameters<WaitForParams>) -> CallToolResult {
+    async fn wait_for(
+        &self,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        Parameters(params): Parameters<WaitForParams>,
+    ) -> CallToolResult {
         let permissions = permissions();
         if let Some(result) = permission_gate(permissions, true, false) {
             return result;
         }
-        let pid = match crate::state::global().lock().unwrap().get(&params.state_id) {
-            Ok(observation) => observation.root.pid,
-            Err(error) => return tool_error(&error.to_string()),
-        };
-        let lane = observation_lane(pid);
-        let _transaction = lane.lock().await;
-        let previous = match crate::state::global()
-            .lock()
-            .unwrap()
-            .validate_for_action(&params.state_id)
-        {
+        let previous = match self.states.lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
         };
-        let timeout = Duration::from_millis(
-            params
-                .condition
-                .timeout_ms
-                .unwrap_or(DEFAULT_TIMEOUT_MS)
-                .min(MAX_TIMEOUT_MS),
-        );
-        let deadline = Instant::now() + timeout;
-        let mut polls = 0_u64;
-        let (observed, root_changed, matched) = loop {
-            polls += 1;
-            let (mut observed, root_changed) = match observe_with_root_fallback(
-                &previous.root,
-                ObserveRequest {
-                    semantic: true,
-                    capture: CapturePolicy::Never,
-                },
-            ) {
-                Ok(observed) => observed,
-                Err(error) => return backend_error(error),
-            };
-            outline::assign_refs_from_previous(&previous.tree, &mut observed.tree);
-            if condition_satisfied(&observed.tree, &params.condition) {
-                break (observed, root_changed, true);
-            }
-            if Instant::now() >= deadline {
-                break (observed, root_changed, false);
-            }
-            tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
+        let lane = observation_lane(previous.root.pid);
+        let _transaction = lane.lock().await;
+        let waited = tokio::select! {
+            _ = context.ct.cancelled() => return tool_error("wait_for cancelled"),
+            waited = poll_condition(&previous, &params.condition) => waited,
         };
-        let successor = crate::state::global()
+        let (observed, matched, polls) = match waited {
+            Ok(waited) => waited,
+            Err(error) => return backend_error(error),
+        };
+        let successor = self
+            .states
             .lock()
             .unwrap()
             .insert_observation(observed.root, observed.tree);
@@ -639,12 +620,11 @@ impl ComputerUseTools {
             "status": status,
             "until": until_name(params.condition.until),
             "polls": polls,
-            "root_changed": root_changed,
         });
         let mut text = serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string());
         text.push('\n');
         text.push_str(&outline::render_folded(&successor.tree));
-        bounded_success(Some(&successor.state_id), text, Vec::new())
+        bounded_success(&self.states, Some(&successor.state_id), text, Vec::new())
     }
 }
 
@@ -689,16 +669,18 @@ impl ServerHandler for ComputerUseTools {
 
 pub type Service = StreamableHttpService<ComputerUseTools, LocalSessionManager>;
 
+/// One registration's endpoint. Its observations are its own: another
+/// thread's calls neither read nor evict them.
 pub(crate) fn service(feedback: Arc<crate::feedback::FeedbackSession>) -> Service {
+    let states = Arc::new(Mutex::new(StateStore::default()));
     StreamableHttpService::new(
-        move || Ok(ComputerUseTools::new(feedback.clone())),
+        move || Ok(ComputerUseTools::new(feedback.clone(), states.clone())),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     )
 }
 
 const DEFAULT_TIMEOUT_MS: u64 = 3_000;
-const MAX_TIMEOUT_MS: u64 = 30_000;
 const POLL_INTERVAL_MS: u64 = 100;
 
 #[derive(Default)]
@@ -891,7 +873,11 @@ fn capture_warning(
     None
 }
 
-fn save_observation(observed: RootObservation, warning: Option<&str>) -> CallToolResult {
+fn save_observation(
+    states: &Mutex<StateStore>,
+    observed: RootObservation,
+    warning: Option<&str>,
+) -> CallToolResult {
     let RootObservation {
         root,
         tree,
@@ -899,10 +885,7 @@ fn save_observation(observed: RootObservation, warning: Option<&str>) -> CallToo
         screenshot,
         screenshot_mime,
     } = observed;
-    let observation = crate::state::global()
-        .lock()
-        .unwrap()
-        .insert_observation(root, tree);
+    let observation = states.lock().unwrap().insert_observation(root, tree);
     let mut text = format!(
         "state_id: {}\nroot: {} app=\"{}\" title=\"{}\"\nelements: {} interactive: {}",
         observation.state_id,
@@ -932,7 +915,7 @@ fn save_observation(observed: RootObservation, warning: Option<&str>) -> CallToo
         })
         .into_iter()
         .collect();
-    bounded_success(Some(&observation.state_id), text, extra)
+    bounded_success(states, Some(&observation.state_id), text, extra)
 }
 
 fn prepare_action(tree: &UiNode, action: &UiAction) -> Result<ActionRequest, String> {
@@ -968,20 +951,22 @@ fn prepare_action(tree: &UiNode, action: &UiAction) -> Result<ActionRequest, Str
     })
 }
 
+/// The state after an action and whether it met `condition`; it is waited for
+/// only when `wait`, which a transaction whose step failed does not.
 async fn poll_successor(
     previous: &crate::state::Observation,
     condition: Option<&UiCondition>,
     preexisting: bool,
-) -> Result<(RootObservation, &'static str, bool), crate::backend::BackendError> {
+    wait: bool,
+) -> Result<(RootObservation, &'static str), crate::backend::BackendError> {
     let timeout = Duration::from_millis(
         condition
             .and_then(|condition| condition.timeout_ms)
-            .unwrap_or(DEFAULT_TIMEOUT_MS)
-            .min(MAX_TIMEOUT_MS),
+            .unwrap_or(DEFAULT_TIMEOUT_MS),
     );
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now().checked_add(if wait { timeout } else { Duration::ZERO });
     loop {
-        let (mut observed, root_changed) = observe_with_root_fallback(
+        let mut observed = crate::backend::observe(
             &previous.root,
             ObserveRequest {
                 semantic: true,
@@ -993,32 +978,48 @@ async fn poll_successor(
             None => Some("not_requested"),
             Some(_) if preexisting => Some("preexisting"),
             Some(condition) if condition_satisfied(&observed.tree, condition) => Some("verified"),
-            Some(_) if Instant::now() >= deadline => Some("failed"),
+            Some(_) if past(deadline) => Some("failed"),
             Some(_) => None,
         };
         if let Some(status) = status {
-            return Ok((observed, status, root_changed));
+            return Ok((observed, status));
         }
         tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
 }
 
-fn observe_with_root_fallback(
-    root: &RootInfo,
-    request: ObserveRequest,
-) -> Result<(RootObservation, bool), crate::backend::BackendError> {
-    match crate::backend::observe(root, request) {
-        Ok(observed) => Ok((observed, false)),
-        Err(original_error) => {
-            let discovered = crate::backend::list_roots(&RootFilters::default())?;
-            let discovered = roots().lock().unwrap().refresh(discovered);
-            let Some(successor_root) = discovered.into_iter().next() else {
-                return Err(original_error);
-            };
-            crate::backend::observe(&successor_root, request)
-                .map(|observed| (observed, successor_root.identity() != root.identity()))
+/// The last observation, whether it met the condition, and the polls taken.
+async fn poll_condition(
+    previous: &crate::state::Observation,
+    condition: &UiCondition,
+) -> Result<(RootObservation, bool, u64), crate::backend::BackendError> {
+    let timeout = Duration::from_millis(condition.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+    let deadline = Instant::now().checked_add(timeout);
+    let mut polls = 0_u64;
+    loop {
+        polls += 1;
+        let mut observed = crate::backend::observe(
+            &previous.root,
+            ObserveRequest {
+                semantic: true,
+                capture: CapturePolicy::Never,
+            },
+        )?;
+        outline::assign_refs_from_previous(&previous.tree, &mut observed.tree);
+        if condition_satisfied(&observed.tree, condition) {
+            return Ok((observed, true, polls));
         }
+        if past(deadline) {
+            return Ok((observed, false, polls));
+        }
+        tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
+}
+
+/// A deadline too far to represent is never reached; the harness's
+/// cancellation ends such a wait.
+fn past(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() >= deadline)
 }
 
 fn condition_satisfied(tree: &UiNode, condition: &UiCondition) -> bool {
@@ -1099,14 +1100,12 @@ fn escaped(value: &str) -> String {
 }
 
 fn bounded_success(
+    states: &Mutex<StateStore>,
     owner_state: Option<&str>,
     text: String,
     mut extra: Vec<ContentBlock>,
 ) -> CallToolResult {
-    let text = crate::state::global()
-        .lock()
-        .unwrap()
-        .bound_model_text(owner_state, text);
+    let text = states.lock().unwrap().bound_model_text(owner_state, text);
     let mut content = vec![ContentBlock::text(text)];
     content.append(&mut extra);
     CallToolResult::success(content)
@@ -1200,7 +1199,8 @@ mod observation_tests {
             assert_eq!(policy, expected);
             let screenshot = policy.should_capture(true).then(|| vec![0xff, 0xd8, 0xff]);
             let warning = capture_warning(configured, &permissions);
-            let result = save_observation(sparse_observation(screenshot), warning);
+            let states = Mutex::new(StateStore::default());
+            let result = save_observation(&states, sparse_observation(screenshot), warning);
             assert!(
                 matches!(&result.content[0], ContentBlock::Text(text) if text.text.contains("text_sparse: true"))
             );

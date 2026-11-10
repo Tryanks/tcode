@@ -4,9 +4,6 @@
 #[derive(Default)]
 pub struct Backoff {
     failures: u32,
-    /// Consecutive failures since the last network change; drives the delay
-    /// while `failures` keeps numbering attempts for the banner.
-    exponent: u32,
 }
 
 impl Backoff {
@@ -18,22 +15,13 @@ impl Backoff {
     pub fn failed(&mut self, stable_ms: u64, sample: f64) -> u64 {
         let base = if stable_ms >= 30_000 {
             self.failures = 0;
-            self.exponent = 0;
             1_000
         } else {
-            let base = (1_000_u64 << self.exponent.min(5)).min(30_000);
+            let base = (1_000_u64 << self.failures.min(5)).min(30_000);
             self.failures = self.failures.saturating_add(1);
-            self.exponent = self.exponent.saturating_add(1);
             base
         };
         ((base as f64 * (0.8 + 0.4 * sample.clamp(0., 1.))) as u64).min(30_000)
-    }
-
-    /// The network changed under the retry loop: the next failure waits the
-    /// shortest delay again, while the attempt count keeps increasing so an
-    /// observer can tell the retries apart.
-    pub fn network_changed(&mut self) {
-        self.exponent = 0;
     }
 }
 
@@ -65,19 +53,5 @@ mod tests {
             assert!((800..=1200).contains(&backoff.failed(0, sample)));
             assert_eq!(backoff.attempt(), 2);
         }
-    }
-
-    #[test]
-    fn network_change_shortens_the_next_delay_without_restarting_attempt_numbers() {
-        let mut backoff = Backoff::default();
-        for _ in 0..4 {
-            backoff.failed(0, 0.5);
-        }
-        assert_eq!(backoff.attempt(), 5);
-        backoff.network_changed();
-        assert_eq!(backoff.attempt(), 5);
-        assert!((800..=1200).contains(&backoff.failed(0, 0.5)));
-        assert_eq!(backoff.attempt(), 6);
-        assert!((1600..=2400).contains(&backoff.failed(0, 0.5)));
     }
 }

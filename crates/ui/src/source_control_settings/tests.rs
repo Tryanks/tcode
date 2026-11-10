@@ -101,9 +101,8 @@ impl Remote {
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump = link.clone();
-        let executor = cx.background_executor.clone();
         let pump = cx.background_executor.spawn(async move {
-            pump.pump_with_timer(|delay| executor.timer(delay)).await;
+            pump.pump().await;
         });
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(

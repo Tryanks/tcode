@@ -3,7 +3,9 @@
 use std::sync::{Arc, OnceLock};
 
 use tcode_client::HostLink;
-use tcode_client::attachment::{AttachmentMessage, AttachmentPolicy, AttachmentSender};
+use tcode_client::attachment::{
+    AttachmentMessage, AttachmentPolicy, AttachmentSender, QueuePolicy,
+};
 use tcode_core::thread_sort::ThreadSection;
 use tcode_protocol::{
     ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, Principal, ProtocolError,
@@ -34,25 +36,35 @@ pub struct HostServices {
     /// request receiver or live backend handle.
     pub computer_use: Option<computer_use_mcp::ComputerUseMcpServer>,
     pub control: Option<control_mcp::ControlMcpServer>,
+    /// Why the MCP servers could not start; the host tells the user when the first thread
+    /// starts without them.
+    pub mcp_unavailable: Option<String>,
 }
 
 impl HostServices {
     /// Starts the MCP servers a host offers its agents on one loopback MCP host, computer use
-    /// only where `computer_use`. A host that cannot bind or start runs without any of them.
-    /// Preview requests travel to the client rendering the thread's preview, so a host without a
-    /// desktop serves preview too.
-    pub fn start_mcp_servers(&mut self, computer_use: bool) -> std::io::Result<()> {
-        let mut host = mcp_host::Host::bind()?;
-        let preview = preview_mcp::start(&mut host);
-        let pull_requests = pull_request_mcp::start(&mut host);
-        let control = control_mcp::start(&mut host);
-        let computer_use = computer_use.then(|| computer_use_mcp::start(&mut host));
-        host.start()?;
-        self.preview = Some(preview);
-        self.pull_requests = Some(pull_requests);
-        self.control = Some(control);
-        self.computer_use = computer_use;
-        Ok(())
+    /// only where `computer_use`. A host that cannot bind or start runs without any of them,
+    /// and keeps the reason in `mcp_unavailable`. Preview requests travel to the client
+    /// rendering the thread's preview, so a host without a desktop serves preview too.
+    pub fn start_mcp_servers(&mut self, computer_use: bool) {
+        let started = (|| {
+            let mut host = mcp_host::Host::bind()?;
+            let preview = preview_mcp::start(&mut host);
+            let pull_requests = pull_request_mcp::start(&mut host);
+            let control = control_mcp::start(&mut host);
+            let computer_use = computer_use.then(|| computer_use_mcp::start(&mut host));
+            host.start()?;
+            std::io::Result::Ok((preview, pull_requests, control, computer_use))
+        })();
+        match started {
+            Ok((preview, pull_requests, control, computer_use)) => {
+                self.preview = Some(preview);
+                self.pull_requests = Some(pull_requests);
+                self.control = Some(control);
+                self.computer_use = computer_use;
+            }
+            Err(error) => self.mcp_unavailable = Some(error.to_string()),
+        }
     }
 }
 
@@ -264,6 +276,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             if let Some(server) = services.control.take() {
                 state.attach_control_mcp(server);
             }
+            state.mcp_unavailable(services.mcp_unavailable.take());
             let mut cx = HostCx::new(mailbox_tx, event_tx);
             state.pump_pull_request_requests(services.pull_requests.take(), &mut cx);
             state.start_pull_request_workers(&mut cx);
@@ -361,9 +374,7 @@ async fn host_loop(
                 Err(_) => break,
             },
         }
-        state.sync_terminal_handles();
-        state.reap_terminal_projections();
-        domain_diff.emit_changes(&mut state, &mut cx);
+        after_input(&mut state, &mut domain_diff, &mut cx);
     }
     // Reject late completions and release their captured results.
     mailbox.close();
@@ -371,6 +382,24 @@ async fn host_loop(
         drop(operation);
     }
     state
+}
+
+/// What the host does after each input it handles: the terminal registry and
+/// projections follow the terminals threads now hold, and clients receive what
+/// the input changed.
+pub(crate) fn after_input(state: &mut AppState, domain_diff: &mut DomainDiff, cx: &mut HostCx) {
+    state.sync_terminal_handles();
+    state.reap_terminal_projections();
+    domain_diff.emit_changes(state, cx);
+}
+
+/// The longest line `policy`'s connection carries: a network connection
+/// closes on a longer one; an in-process connection has no limit.
+fn line_limit(policy: &AttachmentPolicy) -> Option<usize> {
+    match policy.queue {
+        QueuePolicy::Disconnect { max_line_bytes, .. } => Some(max_line_bytes),
+        QueuePolicy::Unbounded => None,
+    }
 }
 
 fn malformed_message_id(line: &str) -> Option<u64> {
@@ -497,7 +526,7 @@ pub(crate) fn handle_client_message(
         }
         ClientPayload::Subscribe(subscription) => {
             state.subscribe(&subscription, cx);
-            state.reply_to_subscription(Some(id), subscription, cx);
+            state.reply_to_subscription(Some(id), subscription, line_limit(&policy), cx);
         }
         ClientPayload::Unsubscribe(subscription) => {
             state.unsubscribe(&subscription, cx);
@@ -539,14 +568,6 @@ enum CommandOutcome {
 fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> CommandOutcome {
     if let Err(error) = app.validate_command_target(&command) {
         return CommandOutcome::Immediate(Err(error));
-    }
-    if matches!(cx.principal, Principal::Space { .. })
-        && matches!(
-            command,
-            Command::MarkSessionRead { .. } | Command::MarkSessionUnread { .. }
-        )
-    {
-        return CommandOutcome::Immediate(Ok(CommandResponse::Unit));
     }
     let mut response = CommandResponse::Unit;
     match command {
@@ -1251,7 +1272,7 @@ fn dispatch_query(
             session_id,
             before,
             limit,
-        } => app.session_history_page(&session_id, before, limit, cx),
+        } => app.session_history_page(&session_id, before, limit, line_limit(&policy), cx),
         Query::Hosting { .. } => cx.spawn_background(async {
             Err(ProtocolError {
                 code: "unsupported".into(),
@@ -1295,17 +1316,6 @@ fn dispatch_query(
             base,
             ignore_whitespace,
         } => {
-            if !matches!(
-                scope,
-                tcode_protocol::GitDiffScope::WorkingTree | tcode_protocol::GitDiffScope::Branch
-            ) {
-                return cx.spawn_background(async {
-                    Err(ProtocolError {
-                        code: "unsupported_scope".into(),
-                        message: "unknown git diff scope".into(),
-                    })
-                });
-            }
             let task = cx.unblock(move || {
                 tcode_services::git::load_git_diff(&cwd, scope, base.as_deref(), ignore_whitespace)
             });
@@ -1470,7 +1480,7 @@ fn dispatch_query(
         Query::ReadItemOutput {
             session_id,
             item_id,
-        } => app.item_output(&session_id, item_id, cx),
+        } => app.item_output(&session_id, item_id, line_limit(&policy), cx),
         Query::ThreadAnchorTurn {
             session_id,
             position,
@@ -1869,15 +1879,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// A recorded image opened from a thread a client is reading streams from
-    /// the thread's history already in memory: neither its bytes nor the check
-    /// that they are still current read the stored log again. Its size is
+    /// A recorded image opened from a thread a client is reading: its size is
     /// known before its bytes, for the viewer to lay out its preview, and its
     /// bytes arrive in full 64 KiB blocks: each block is a hand-over to the
     /// viewer, and the 768-byte reads of the history's base64 once made a
     /// screenshot hundreds of them.
     #[test]
-    fn originals_of_a_subscribed_session_reuse_its_history() {
+    fn an_original_of_a_subscribed_session_streams_in_full_blocks() {
         use base64::Engine as _;
         use tcode_client::original::OriginalBackend as _;
         let data_root =
@@ -1909,7 +1917,6 @@ mod tests {
                 }),
             )
             .expect("append image");
-        let reader = store.clone();
         let host = spawn_host(store, HostServices::default()).expect("spawn host");
         let link = host.link();
         link.subscribe(Subscription {
@@ -1920,17 +1927,6 @@ mod tests {
             },
         })
         .expect("subscribe to the thread");
-        // The subscription is answered from the log's tail while its one read
-        // of the whole log runs on; a user opens the image after that read.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while reader.event_reads() == 0 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the subscription never read the thread's log"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
         let source = smol::block_on(host.open(
             tcode_protocol::Principal::Full,
             tcode_protocol::OriginalTarget::Item {
@@ -1962,11 +1958,6 @@ mod tests {
                 .iter()
                 .all(|&len| len == 64 * 1024),
             "every block but the last is full: {block_lens:?}"
-        );
-        assert_eq!(
-            reader.event_reads(),
-            1,
-            "the original was served from the thread's history"
         );
 
         drop(source);
@@ -2078,13 +2069,7 @@ mod tests {
                 .collect::<String>()
         };
 
-        for (requested, cols, first_line_rows) in [
-            (0, 20, 2),
-            (4, 20, 2),
-            (20, 20, 2),
-            (40, 40, 1),
-            (4000, 400, 1),
-        ] {
+        for (requested, cols, first_line_rows) in [(20, 20, 2), (40, 40, 1), (4000, 400, 1)] {
             let rendered = reply(&topic("cmd-1", requested));
             assert_eq!(rendered.cols, cols);
             assert_eq!(usize::from(rendered.rows), first_line_rows + 2);

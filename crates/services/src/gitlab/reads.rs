@@ -135,17 +135,10 @@ impl Mr<'_> {
             .json()
     }
     pub(super) fn mr(&self) -> Result<Value, ForgeError> {
-        let mr = self.get(
+        self.get(
             self.path("?include_diverged_commits_count=true"),
             "MergeRequest",
-        )?;
-        if mr["iid"].as_u64() != Some(self.key.number) {
-            return Err(error(
-                ForgeErrorKind::Uncertain,
-                "GitLab answered another merge request",
-            ));
-        }
-        Ok(mr)
+        )
     }
     pub(super) fn graphql(
         &self,
@@ -243,13 +236,12 @@ impl Mr<'_> {
             labels["pageInfo"]["hasNextPage"].as_bool() != Some(true),
         ))
     }
-    /// Each path's blob at `revision`, 100 paths a query; `None` when GitLab did not answer
-    /// for the project at all.
+    /// Each path's blob at `revision`, 100 paths a query.
     pub(super) fn blobs(
         &self,
         revision: &str,
         paths: &[String],
-    ) -> Result<Option<std::collections::BTreeMap<String, String>>, ForgeError> {
+    ) -> Result<std::collections::BTreeMap<String, String>, ForgeError> {
         let mut blobs = std::collections::BTreeMap::new();
         for chunk in paths.chunks(100) {
             let data = self.api.graphql(
@@ -258,16 +250,17 @@ impl Mr<'_> {
                 json!({ "path": self.key.repository, "ref": revision, "paths": chunk }),
                 "Blobs",
             )?;
-            let Some(found) = data["project"]["repository"]["blobs"]["nodes"].as_array() else {
-                return Ok(None);
-            };
-            for blob in found {
+            // GraphQL answers a project the reader cannot see as null.
+            if data["project"].is_null() {
+                return Err(error(ForgeErrorKind::NotFound, "GitLab project not found"));
+            }
+            for blob in nodes(&data["project"]["repository"]["blobs"]) {
                 if let (Some(path), Some(oid)) = (text(blob, "path"), text(blob, "oid")) {
                     blobs.insert(path, oid);
                 }
             }
         }
-        Ok(Some(blobs))
+        Ok(blobs)
     }
 }
 
@@ -287,9 +280,6 @@ pub(super) fn rest_id(global: &str) -> Option<String> {
 }
 
 pub(super) fn state(mr: &Value) -> Option<PullRequestState> {
-    if mr["merged_at"].as_str().is_some_and(|at| !at.is_empty()) {
-        return Some(PullRequestState::Merged);
-    }
     match mr["state"].as_str()? {
         "merged" => Some(PullRequestState::Merged),
         "closed" => Some(PullRequestState::Closed),
@@ -302,18 +292,11 @@ pub(super) fn state(mr: &Value) -> Option<PullRequestState> {
 /// What one read says of conflicts; a check GitLab has yet to finish is pending.
 pub(super) fn mergeability(mr: &Value) -> Mergeability {
     let detailed = mr["detailed_merge_status"].as_str().unwrap_or_default();
-    let status = mr["merge_status"].as_str().unwrap_or_default();
-    if mr["has_conflicts"].as_bool() == Some(true)
-        || detailed == "conflict"
-        || status == "cannot_be_merged"
-    {
+    if mr["has_conflicts"].as_bool() == Some(true) || detailed == "conflict" {
         Mergeability::Conflicting
     } else if matches!(
         detailed,
         "checking" | "unchecked" | "preparing" | "approvals_syncing"
-    ) || matches!(
-        status,
-        "checking" | "unchecked" | "cannot_be_merged_recheck"
     ) {
         Mergeability::Pending
     } else {
@@ -390,7 +373,7 @@ pub(super) fn checks_state(checks: &[PullRequestCheck]) -> Option<ChecksState> {
 }
 
 /// "12", or "1000+" past GitLab's counting limit, whose number is the floor.
-fn changed_files(mr: &Value) -> u64 {
+pub(super) fn changed_files(mr: &Value) -> u64 {
     let count = mr["changes_count"].as_str().unwrap_or_default();
     count.trim_end_matches('+').parse().unwrap_or(0)
 }
@@ -408,7 +391,7 @@ pub(super) fn snapshot(
         head_branch: text(mr, "source_branch")?,
         base_branch: text(mr, "target_branch")?,
         is_draft: mr["draft"].as_bool().unwrap_or(false),
-        updated_at: text(mr, "updated_at")?,
+        updated_at: Some(text(mr, "updated_at")?),
         synced_at,
         closed_at: text(mr, "closed_at"),
         merged_at: text(mr, "merged_at"),
@@ -458,10 +441,7 @@ fn absolute(authority: &str, url: Option<String>) -> Option<String> {
 pub(super) fn actor(authority: &str, raw: &Value) -> Option<PullRequestActor> {
     Some(PullRequestActor {
         login: text(raw, "username")?,
-        avatar_url: absolute(
-            authority,
-            text(raw, "avatarUrl").or_else(|| text(raw, "avatar_url")),
-        ),
+        avatar_url: absolute(authority, text(raw, "avatarUrl")),
     })
 }
 
@@ -830,8 +810,7 @@ pub(super) fn remarks(discussions: &[Value]) -> Vec<PullRequestRemark> {
 /// and none at all for a file too large to show or one it collapsed.
 pub(super) fn file(row: &Value) -> Option<PullRequestFile> {
     let path = text(row, "new_path")?;
-    let diff = row["diff"].as_str().unwrap_or_default();
-    let hunks = diff.find("@@").map_or("", |at| &diff[at..]);
+    let hunks = row["diff"].as_str().unwrap_or_default();
     let count = |sign: char| hunks.lines().filter(|line| line.starts_with(sign)).count() as u64;
     let flag = |field: &str| row[field].as_bool() == Some(true);
     Some(PullRequestFile {
@@ -847,7 +826,7 @@ pub(super) fn file(row: &Value) -> Option<PullRequestFile> {
         },
         additions: count('+'),
         deletions: count('-'),
-        patch: if diff.starts_with("Binary files ") {
+        patch: if hunks.starts_with("Binary files ") {
             PullRequestPatch::Binary
         } else if hunks.is_empty() && flag("too_large") {
             PullRequestPatch::Oversized
@@ -881,5 +860,183 @@ mod tests {
             absolute_uploads(code, "gitlab.com", "a/b"),
             "```md\n![shot](/uploads/ab12/shot.png)\n```\n~~~~\n[ref]: /uploads/ef56/a.png\n~~~~\nwrite `![x](/uploads/a/x.png)` for ![x](https://gitlab.com/a/b/uploads/a/x.png), `bärenhunger`"
         );
+    }
+
+    /// A merge request as GitLab's REST API answers it (shape: GitLab REST merge requests
+    /// API, "Get single MR": `state`, `detailed_merge_status`, `has_conflicts`, `draft`,
+    /// `head_pipeline.status`, `changes_count` as a string capped at "1000+"; content
+    /// invented). Its state, conflicts and what a merge would meet read as GitLab states them.
+    #[test]
+    fn a_merge_request_reads_as_gitlab_states_it() {
+        let mr = |state: &str, detailed: &str, pipeline: &str| {
+            json!({
+                "iid": 7,
+                "title": "Add the parser",
+                "state": state,
+                "draft": false,
+                "has_conflicts": false,
+                "detailed_merge_status": detailed,
+                "source_branch": "parser",
+                "target_branch": "main",
+                "updated_at": "2026-01-02T03:04:05.000Z",
+                "merged_at": null,
+                "closed_at": null,
+                "changes_count": "1000+",
+                "author": { "username": "ada", "avatar_url": "https://gitlab.example/a.png" },
+                "head_pipeline": { "status": pipeline, "web_url": "https://gitlab.example/p/1" },
+            })
+        };
+        for (detailed, conflicts, merge) in [
+            (
+                "mergeable",
+                Mergeability::Clean,
+                PullRequestMergeState::Clean,
+            ),
+            (
+                "conflict",
+                Mergeability::Conflicting,
+                PullRequestMergeState::Dirty,
+            ),
+            (
+                "checking",
+                Mergeability::Pending,
+                PullRequestMergeState::Unknown,
+            ),
+            (
+                "need_rebase",
+                Mergeability::Clean,
+                PullRequestMergeState::Behind,
+            ),
+            (
+                "not_approved",
+                Mergeability::Clean,
+                PullRequestMergeState::Blocked,
+            ),
+            (
+                "draft_status",
+                Mergeability::Clean,
+                PullRequestMergeState::Draft,
+            ),
+        ] {
+            let read = mr("opened", detailed, "success");
+            assert_eq!(mergeability(&read), conflicts, "{detailed}");
+            assert_eq!(
+                merge_state(&read, conflicts, &checks(&read)),
+                merge,
+                "{detailed}"
+            );
+        }
+        // Mergeable with a pipeline still running is not clean.
+        let running = mr("opened", "mergeable", "running");
+        let pipeline = checks(&running);
+        assert_eq!(checks_state(&pipeline), Some(ChecksState::Pending));
+        assert_eq!(
+            merge_state(&running, Mergeability::Clean, &pipeline),
+            PullRequestMergeState::Unstable
+        );
+        let mut conflicted = mr("opened", "ci_still_running", "running");
+        conflicted["has_conflicts"] = json!(true);
+        assert_eq!(mergeability(&conflicted), Mergeability::Conflicting);
+        let read = snapshot(&running, Some((12, 3)), Mergeability::Clean, 0).unwrap();
+        assert_eq!(read.state, PullRequestState::Open);
+        assert_eq!(read.changed_files, Some(1000));
+        assert_eq!((read.additions, read.deletions), (Some(12), Some(3)));
+        assert_eq!(read.author.unwrap().login, "ada");
+        for (named, read) in [
+            ("merged", PullRequestState::Merged),
+            ("closed", PullRequestState::Closed),
+            // Locked while GitLab merges it.
+            ("locked", PullRequestState::Open),
+        ] {
+            assert_eq!(state(&mr(named, "not_open", "success")), Some(read));
+        }
+    }
+
+    /// Diff rows as GitLab lists them (shape: GitLab REST merge requests API, "List merge
+    /// request diffs": `old_path`, `new_path`, `diff` from the first hunk header, the
+    /// `new_file`, `renamed_file`, `deleted_file`, `too_large` and `collapsed` flags; content
+    /// invented).
+    #[test]
+    fn diff_rows_read_as_gitlab_lists_them() {
+        let row = |old: &str, new: &str, diff: &str, flag: Option<&str>| {
+            let mut row = json!({
+                "old_path": old,
+                "new_path": new,
+                "a_mode": "100644",
+                "b_mode": "100644",
+                "diff": diff,
+                "new_file": false,
+                "renamed_file": false,
+                "deleted_file": false,
+                "generated_file": false,
+                "collapsed": false,
+                "too_large": false,
+            });
+            if let Some(flag) = flag {
+                row[flag] = json!(true);
+            }
+            file(&row).unwrap()
+        };
+        let edited = row("README", "README", "@@ -1 +1 @@\n-Title\n+Readme\n", None);
+        assert_eq!(edited.kind, agent::FileChangeKind::Modify);
+        assert_eq!((edited.additions, edited.deletions), (1, 1));
+        assert_eq!(
+            edited.patch,
+            PullRequestPatch::Hunks("@@ -1 +1 @@\n-Title\n+Readme\n".into())
+        );
+        let moved = row("old.rs", "new.rs", "", Some("renamed_file"));
+        assert_eq!(moved.kind, agent::FileChangeKind::Rename);
+        assert_eq!(moved.previous_path.as_deref(), Some("old.rs"));
+        assert_eq!(moved.patch, PullRequestPatch::Hunks(String::new()));
+        let added = row(
+            "a.rs",
+            "a.rs",
+            "@@ -0,0 +1,2 @@\n+one\n+two\n",
+            Some("new_file"),
+        );
+        assert_eq!(
+            (added.kind, added.additions, added.previous_path),
+            (agent::FileChangeKind::Create, 2, None)
+        );
+        let gone = row(
+            "b.rs",
+            "b.rs",
+            "@@ -1 +0,0 @@\n-one\n",
+            Some("deleted_file"),
+        );
+        assert_eq!(
+            (gone.kind, gone.deletions),
+            (agent::FileChangeKind::Delete, 1)
+        );
+        assert_eq!(
+            row("big.json", "big.json", "", Some("too_large")).patch,
+            PullRequestPatch::Oversized
+        );
+        assert_eq!(
+            row("lock", "lock", "", Some("collapsed")).patch,
+            PullRequestPatch::Withheld
+        );
+    }
+
+    /// A project's merge settings as GitLab's REST API answers them (shape: GitLab REST
+    /// projects API: `merge_method` one of `merge`, `rebase_merge`, `ff`; `squash_option` one of
+    /// `never`, `always`, `default_on`, `default_off`). The merge endpoint takes no method, so
+    /// only the project's own and, where allowed, a squash are offered.
+    #[test]
+    fn a_project_offers_the_merge_methods_its_settings_allow() {
+        use PullRequestMergeMethod::{Merge, Rebase, Squash};
+        for (method, squash, offered) in [
+            ("merge", "never", vec![Merge]),
+            ("merge", "default_off", vec![Merge, Squash]),
+            ("rebase_merge", "default_on", vec![Rebase, Squash]),
+            ("ff", "never", vec![Rebase]),
+            ("ff", "always", vec![Squash]),
+        ] {
+            assert_eq!(
+                merge_methods(&json!({ "merge_method": method, "squash_option": squash })),
+                offered,
+                "{method} {squash}"
+            );
+        }
     }
 }

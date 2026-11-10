@@ -109,7 +109,7 @@ fn http(addr: SocketAddr, method: &str, path: &str, body: &str) -> (String, Vec<
 }
 
 fn login(addr: SocketAddr, password: &str, device_name: &str) -> (String, Value) {
-    let body = json!({"password": password, "device_name": device_name, "device_id": format!("{device_name}-id"), "platform": "macOS"});
+    let body = json!({"password": password, "device_name": device_name, "device_id": format!("{device_name}-id")});
     let (status, body) = http(addr, "POST", "/auth/login", &body.to_string());
     (status, serde_json::from_slice(&body).unwrap_or_default())
 }
@@ -204,6 +204,36 @@ fn static_bundle_get_and_head_share_headers() {
     server.shutdown();
 }
 
+/// The shapes the login page sends (`crates/web/static/auth.mjs`): setup
+/// with the password alone, which reaches the already-configured answer
+/// rather than a malformed one, and login with the browser's device id and
+/// name.
+#[test]
+fn setup_takes_the_password_alone_and_login_names_the_device() {
+    let dir = TestDir::new("setup");
+    configure_password(&dir.0, "secret password");
+    let silent = silent_host();
+    let server = serve(silent.mux.clone(), config(dir.0.clone())).unwrap();
+    let addr = server.local_addr();
+    let post = |path, body: Value| http(addr, "POST", path, &body.to_string()).0;
+    assert_eq!(
+        post("/auth/setup", json!({"password": "secret password"})),
+        "HTTP/1.1 409 Conflict"
+    );
+    assert_eq!(
+        post(
+            "/auth/login",
+            json!({"password": "secret password", "device_name": "Browser"})
+        ),
+        "HTTP/1.1 400 Bad Request"
+    );
+    assert_eq!(
+        login(addr, "secret password", "Browser").0,
+        "HTTP/1.1 200 OK"
+    );
+    server.shutdown();
+}
+
 #[test]
 fn two_browsers_get_their_own_acks_and_shared_broadcasts() {
     let dir = TestDir::new("two");
@@ -259,6 +289,48 @@ fn two_browsers_get_their_own_acks_and_shared_broadcasts() {
             let reply = two.recv().await;
             if reply["type"] == "ack" {
                 assert_eq!(reply["content"]["id"], 9, "the ack reaches only its sender");
+                break;
+            }
+        }
+    });
+    server.shutdown();
+    real_host::stop(runtime, &mux);
+}
+
+/// An authenticated browser sends protocol lines of any size the protocol
+/// allows: one upload chunk, as the composer writes it, reaches the host and
+/// is answered on the same socket.
+#[test]
+fn an_upload_chunk_crosses_the_socket_after_the_hello() {
+    let dir = TestDir::new("chunk");
+    let (runtime, mux) = real_host::spawn(&dir.0, Default::default(), |_| {});
+    configure_password(&dir.0, "secret password");
+    let server = serve(mux.clone(), config(dir.0.clone())).unwrap();
+    let addr = server.local_addr();
+    let token = login(addr, "secret password", "Chrome").1["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let chunk = tcode_protocol::encode_line(&tcode_protocol::ClientMessage {
+        principal: None,
+        key: None,
+        id: 3,
+        payload: tcode_protocol::ClientPayload::Query(tcode_protocol::Query::WriteUpload {
+            session_id: "no-such-session".into(),
+            path: "upload".into(),
+            offset: 0,
+            bytes: vec![7; tcode_core::attachments::UPLOAD_CHUNK_BYTES],
+        }),
+    })
+    .unwrap();
+    tcode_traverse::block_on(async {
+        let (mut browser, reply) = Browser::hello(addr, hello(&token, "Chrome")).await;
+        assert_eq!(reply["type"], "hello_ok");
+        browser.send(serde_json::from_str(&chunk).unwrap()).await;
+        loop {
+            let reply = browser.recv().await;
+            if reply["type"] == "query_result" {
+                assert_eq!(reply["content"]["id"], 3);
                 break;
             }
         }

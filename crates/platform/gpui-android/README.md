@@ -15,33 +15,28 @@ over a small Rust worker pool; delayed work waits on one timer thread, in
 deadline order, and foreground continuations wake the Android looper.
 
 GPUI's `frame_waker` and `schedule_frame` start frames; unrelated looper wakes
-do not render. On API 29+ ([vsync.rs](src/android/vsync.rs)) the native activity
-thread, whose looper android-activity polls, posts an NDK `AChoreographer`
-callback (`AChoreographer_postFrameCallback64`), and each one that fires while
-frames are wanted draws once the poll returns, then posts the next; nothing
-crosses to Java. On API 30+ the same path votes for the display's maximum
-refresh rate with `ANativeWindow_setFrameRate` (seamless switching only, as its
-NDK definition says) while frames run, re-applies the vote to a new surface,
-and releases it (rate 0) when frames stop or the surface goes. The symbols are
-looked up in `libandroid.so` at run time, since minSdk is 26. Where
-`postFrameCallback64` is missing, frames run on the Java path instead: Rust
-asks the activity to start or stop a Java `Choreographer` callback, which
-reposts itself each vsync until native code pauses it, and the activity votes
-with `Surface.setFrameRate` on API 30+ (seamless-only on API 31+). Only one path
-runs, and it alone votes. Rust starts frames for each new surface on both
-paths. android-activity 0.6.1 logs an error each time its poll runs a looper
-callback, so `tcode-android`'s logger drops that one message.
+do not render. The native activity thread ([vsync.rs](src/android/vsync.rs)),
+whose looper android-activity polls, posts an NDK `AChoreographer` callback
+(`AChoreographer_postFrameCallback64`), and each one that fires while frames
+are wanted draws once the poll returns, then posts the next; nothing crosses
+to Java. The same path votes for the display's maximum refresh rate with
+`ANativeWindow_setFrameRate` (seamless switching only, as its NDK definition
+says) while frames run, re-applies the vote to a new surface, and releases it
+(rate 0) when frames stop or the surface goes. Rust starts frames for each new
+surface. The minimum Android version is 11 (API 30), the level that has every
+symbol this path links. android-activity 0.6.1 logs an error each time its
+poll runs a looper callback, so `tcode-android`'s logger drops that one
+message.
 
 [FramePacer](../frame-pacing/src/lib.rs) owns demand and activity grace, shared
 with iOS. Isolated invalidations return to pause; touch input and next-frame
 animations keep callbacks scheduled. Pausing the activity or losing its surface
 suspends pacing without losing invalidation. The Java host reports the display's
 maximum refresh capability, which also sets the native vote. Idle clears the
-frame-rate vote, leaving system power and thermal policy in control. On API
-29+ the host also reports `PowerManager`'s thermal status and its changes, so
-GPUI's own thermal frame cap applies; below that the state stays nominal. On every level it reports
-Battery Saver (`isPowerSaveMode` and `ACTION_POWER_SAVE_MODE_CHANGED`), so
-GPUI's Low Power Mode cap applies too.
+frame-rate vote, leaving system power and thermal policy in control. The host
+also reports `PowerManager`'s thermal status and its changes, so GPUI's own
+thermal frame cap applies, and Battery Saver (`isPowerSaveMode` and
+`ACTION_POWER_SAVE_MODE_CHANGED`), so GPUI's Low Power Mode cap applies too.
 
 The platform exposes one full-screen `PlatformWindow`. It owns the current
 `ANativeWindow`, a `gpui_wgpu::WgpuRenderer`, and the shared `WgpuContext`.
@@ -61,7 +56,7 @@ without packaging a second font. Older devices use Swash's CBDT/CBLC path.
 tcode also registers its shared UI and monospace fonts, exactly once.
 
 A missing system emoji font is not expected on supported stock Android devices
-(minSdk 26); Android has supplied color emoji since 4.4, and compatibility rules
+(API 30 and later); Android has supplied color emoji since 4.4, and compatibility rules
 require the system font. For custom ROM distributions that omit it, the application
 can read an optional `app/src/main/assets/fonts/NotoColorEmoji.ttf` bitmap fallback
 only when the system file is absent. Standard builds contain no fallback font or
@@ -81,8 +76,6 @@ The Java declarations live in
 The matching JNI exports in [tcode-android](../../android/src/lib.rs) forward
 callbacks to this backend. Rust calls activity methods on Android's Java UI
 thread; incoming callbacks are queued for the native activity/GPUI thread.
-`nativeFrame`, `gpuiRequestFrame` and `gpuiPauseFrames` are used only on the
-Java frame path.
 Keep the method signatures at these two ends synchronized.
 
 URL opening uses an Android `ACTION_VIEW` intent on the Java UI thread, handing
@@ -112,8 +105,10 @@ the motion stream's monotonic down time so a reused Android id cannot collide
 with an earlier GPUI touch.
 
 Gesture interpretation lives in GPUI's portable gesture arena, the same
-path used by `gpui-ios`. Android supplies only platform tuning: a 450 ms long
-press and `ScrollPhysics::android()`. Tap synthesis, touch slop, scroll capture,
+path used by `gpui-ios`. Android supplies only platform tuning: the long-press
+timeout `ViewConfiguration.getLongPressTimeout()` reports, which is the user's
+"Touch & hold delay" accessibility setting, read when the window opens, and
+`ScrollPhysics::android()`. Tap synthesis, touch slop, scroll capture,
 drag-cancels-click, velocity sampling, and momentum are therefore shared with
 iOS rather than reimplemented in this backend.
 
@@ -130,7 +125,8 @@ adb shell am start -W -n com.tryanks.tcode/.GpuiActivity
 
 The script builds the arm64 Rust library and Gradle Debug APK. Set
 `ANDROID_HOME`, `ANDROID_NDK_HOME` and `JAVA_HOME` to your local installations;
-the script's defaults are Homebrew paths. `CARGO_NDK_PLATFORM` defaults to 26.
+the script's defaults are Homebrew paths. `CARGO_NDK_PLATFORM` defaults to 30,
+the minimum API level, which the native library must be linked against.
 The debug build embeds the shared font/SVG assets so it does not depend on
 source paths from the development machine.
 
@@ -201,7 +197,7 @@ host address reachable from the device.
   and accessibility bridging are not implemented in this backend;
   applications must provide any required services in their host.
 - The text clipboard is bridged to Android `ClipboardManager`. Non-text GPUI
-  clipboard data is retained only in-process.
+  clipboard data is not carried.
 - Raw multi-touch reaches the portable gesture arena, but this backend does not
   yet translate stylus buttons, hover, or hardware mouse-wheel axes.
 

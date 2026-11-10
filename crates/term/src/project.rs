@@ -330,11 +330,11 @@ mod tests {
 
     #[test]
     fn projects_wide_cells_spacers_combining_marks_and_osc8_links() {
-        let emulator = crate::GridEmulator::with_size(20, 3);
+        let emulator = crate::GridEmulator::with_scrollback(20, 3, 0);
         emulator.feed(
             "中e\u{301}\x1b]8;;https://example.com/target\x1b\\link\x1b]8;;\x1b\\".as_bytes(),
         );
-        let snapshot = emulator.snapshot();
+        let snapshot = emulator.snapshot_since(0, 0);
         let mut projector = super::Projector::default();
         let row = projector.visible_row(&snapshot, 0);
 

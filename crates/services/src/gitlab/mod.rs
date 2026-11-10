@@ -124,12 +124,7 @@ impl GitLab {
         let mr = self.mr(key);
         let read = mr.mr()?;
         let refs = &read["diff_refs"];
-        let changed_files = read["changes_count"]
-            .as_str()
-            .unwrap_or_default()
-            .trim_end_matches('+')
-            .parse()
-            .unwrap_or(0);
+        let changed_files = reads::changed_files(&read);
         let mut next = Some(page.unwrap_or(1));
         let mut files = Vec::new();
         let pages = if page.is_some() { 1 } else { MAX_PAGES };
@@ -226,38 +221,30 @@ impl GitLab {
         })
     }
 
-    /// Each changed path's blob at the head, a deleted one's as a missing side; `None` when
-    /// GitLab could not say.
+    /// Each changed path's blob at the head, a deleted one's as a missing side.
     fn revisions(
         &self,
         key: &PullRequestKey,
         files: &PullRequestFiles,
-    ) -> Result<Option<BTreeMap<String, String>>, ForgeError> {
+    ) -> Result<BTreeMap<String, String>, ForgeError> {
         let (deleted, present): (Vec<_>, Vec<_>) = files
             .files
             .iter()
             .partition(|file| file.kind == agent::FileChangeKind::Delete);
         let paths: Vec<_> = present.iter().map(|file| file.path.clone()).collect();
-        let Some(mut revisions) = self.mr(key).blobs(&files.head, &paths)? else {
-            return Ok(None);
-        };
+        let mut revisions = self.mr(key).blobs(&files.head, &paths)?;
         revisions.extend(
             deleted
                 .into_iter()
                 .map(|file| (file.path.clone(), DELETED.to_owned())),
         );
-        Ok(Some(revisions))
+        Ok(revisions)
     }
 
     fn viewed_files(&self, key: &PullRequestKey) -> Result<PullRequestViewedFiles, ForgeError> {
         let viewer = self.mr(key).viewer()?;
         let files = self.files(key, None)?;
-        let Some(revisions) = self.revisions(key, &files)? else {
-            return Ok(PullRequestViewedFiles {
-                files: Vec::new(),
-                complete: false,
-            });
-        };
+        let revisions = self.revisions(key, &files)?;
         Ok(PullRequestViewedFiles {
             files: self
                 .viewed
@@ -374,10 +361,8 @@ impl GitLab {
         // GitLab keeps the field set on a merge request it has merged.
         let armed = reads::state(&read) == Some(tcode_core::pull_request::PullRequestState::Open)
             && read["merge_when_pipeline_succeeds"].as_bool() == Some(true);
-        // GitLab keeps the squash choice beside a scheduled merge, and the project's one method.
-        let armed_with = if read["squash_on_merge"].as_bool() == Some(true)
-            || read["squash"].as_bool() == Some(true)
-        {
+        // Whether GitLab will squash the scheduled merge, else the project's one method.
+        let armed_with = if read["squash_on_merge"].as_bool() == Some(true) {
             PullRequestMergeMethod::Squash
         } else {
             merge_methods
@@ -509,11 +494,11 @@ impl Forge for GitLab {
         // Each host, and whether only settings name it.
         let mut hosts: BTreeMap<String, bool> =
             configured.keys().map(|host| (host.clone(), true)).collect();
-        let detected = self
-            .api
-            .glab_logins()
-            .into_iter()
-            .chain(self.api.environment_host());
+        let (logins, listing) = match self.api.glab_logins() {
+            Ok(logins) => (logins, None),
+            Err(error) => (Vec::new(), error.cli_problem()),
+        };
+        let detected = logins.into_iter().chain(self.api.environment_host());
         for host in detected {
             hosts.insert(host, false);
         }
@@ -529,7 +514,14 @@ impl Forge for GitLab {
             .into_iter()
             .map(|(host, added)| {
                 let enabled = configured.get(&host).is_none_or(|choice| choice.enabled);
-                let credential = self.api.credential(&host).ok().flatten();
+                let read = self.api.credential(&host);
+                // Without a login of its own, glab failing to list them leaves it unknown.
+                let failed = read
+                    .as_ref()
+                    .err()
+                    .and_then(ForgeError::cli_problem)
+                    .or_else(|| listing.clone());
+                let credential = read.ok().flatten();
                 let source = credential
                     .as_ref()
                     .map(|credential| credential.source.clone());
@@ -539,6 +531,7 @@ impl Forge for GitLab {
                     .unwrap_or_default();
                 let problem = match &credential {
                     None if !enabled => None,
+                    None if failed.is_some() => failed,
                     None if glab => Some(HostProblem::NotSignedIn {
                         tool: "glab".into(),
                         command: Some(format!("glab auth login --hostname {host}")),
@@ -611,11 +604,7 @@ impl Forge for GitLab {
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {
         let mr = self.mr(key);
         let read = mr.mr()?;
-        // The counts only decorate the summary; without them it shows no stat.
-        let stats = mr.diff_stats().unwrap_or_else(|failure| {
-            log::debug!("gitlab host={} diff stats unread: {failure}", key.host);
-            None
-        });
+        let stats = mr.diff_stats()?;
         Ok(Summary {
             snapshot: reads::snapshot(&read, stats, reads::mergeability(&read), Self::now())
                 .ok_or_else(|| {
@@ -723,9 +712,7 @@ impl Forge for GitLab {
     ) -> Result<(), ForgeError> {
         let account = self.account(key)?;
         let files = self.files(key, None)?;
-        let revisions = self
-            .revisions(key, &files)?
-            .ok_or_else(|| error(ForgeErrorKind::Uncertain, "GitLab file revisions unread"))?;
+        let revisions = self.revisions(key, &files)?;
         self.viewed
             .set(&account, key, &revisions, paths, viewed)
             .map_err(|_| error(ForgeErrorKind::Uncertain, "viewed marks not saved"))

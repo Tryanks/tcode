@@ -284,10 +284,8 @@ impl Render for MigrationView {
 }
 
 /// A move by rename counts entries; a copy across filesystems counts bytes,
-/// and gets a bar of its own before the threads migrate. Import and
-/// verification each go through every log once, but import writes and syncs
-/// each chunk while verification only reads it back, which takes a fraction
-/// of the time. The phases around them take a moment.
+/// and gets a bar of its own before the threads migrate. Import goes through
+/// every log once; the phases around it take a moment.
 fn overall_percent(progress: &MigrationProgress) -> f32 {
     let fraction = |done: u64, total: u64| {
         if total == 0 {
@@ -303,8 +301,7 @@ fn overall_percent(progress: &MigrationProgress) -> f32 {
         }
         MigrationPhase::Relocating => phase * 100.,
         MigrationPhase::Scanning => 0.,
-        MigrationPhase::Importing => phase * 85.,
-        MigrationPhase::Verifying => 85. + phase * 15.,
+        MigrationPhase::Importing => phase * 100.,
         MigrationPhase::Publishing | MigrationPhase::Archiving => 100.,
     }
 }
@@ -341,7 +338,6 @@ fn phase_line(
         }
         MigrationPhase::Scanning => tcode_ui::tr!("migration.scanning").into_owned(),
         MigrationPhase::Importing => counts("migration.importing"),
-        MigrationPhase::Verifying => counts("migration.verifying"),
         MigrationPhase::Publishing => tcode_ui::tr!("migration.publishing").into_owned(),
         MigrationPhase::Archiving => tcode_ui::tr!("migration.archiving").into_owned(),
     }

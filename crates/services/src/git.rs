@@ -206,7 +206,6 @@ fn load_file_texts(
                         .as_deref()
                         .and_then(|path| read_git_text(cwd, "HEAD", path)),
                 },
-                GitDiffScope::Unknown => GitFileText::default(),
             }
         })
         .collect()
@@ -285,14 +284,6 @@ pub fn load_git_diff(
             let args = branch_diff_args(&merge_base, ignore_whitespace);
             base_revision = Some(merge_base);
             args
-        }
-        GitDiffScope::Unknown => {
-            return GitDiffResult {
-                error: Some("unknown git diff scope".into()),
-                branches,
-                default_base,
-                ..GitDiffResult::default()
-            };
         }
     };
     let output = match git_output(cwd, &args) {
@@ -467,12 +458,26 @@ pub fn is_git_repo(cwd: &Path) -> bool {
     run_git(cwd, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|out| out.trim() == "true")
 }
 
-pub fn read_status(cwd: &Path) -> GitStatus {
+/// The repository state of `cwd`; the default outside a repository, and git's
+/// own error when it cannot read the status or the changed lines.
+pub fn read_status(cwd: &Path) -> Result<GitStatus, String> {
     if !is_git_repo(cwd) {
-        return GitStatus::default();
+        return Ok(GitStatus::default());
     }
-    let porcelain = run_git(cwd, &["status", "--porcelain=2", "--branch"]).unwrap_or_default();
-    let numstat = read_numstat(cwd);
+    // `-z` prints paths unquoted; `status.relativePaths=false` makes them
+    // relative to the repository root, as `--no-relative` does for numstat.
+    let porcelain = run_git(
+        cwd,
+        &[
+            "-c",
+            "status.relativePaths=false",
+            "status",
+            "--porcelain=2",
+            "--branch",
+            "-z",
+        ],
+    )?;
+    let numstat = read_numstat(cwd)?;
     let checkout = crate::forge::Checkout::new(cwd);
     let has_origin_remote = checkout.remotes().iter().any(|(name, _)| name == "origin");
     let default_branch = run_git(cwd, &["symbolic-ref", "refs/remotes/origin/HEAD"])
@@ -492,44 +497,62 @@ pub fn read_status(cwd: &Path) -> GitStatus {
     );
     status.github_repository = crate::github::repository::resolve(&checkout)
         .map(|repository| format!("{}/{}", repository.owner, repository.name));
-    status
+    Ok(status)
 }
 
-fn read_numstat(cwd: &Path) -> Vec<(String, u32, u32)> {
+fn read_numstat(cwd: &Path) -> Result<Vec<(String, u32, u32)>, String> {
     let mut out = Vec::new();
     for args in [
-        ["diff", "--numstat"].as_slice(),
-        ["diff", "--cached", "--numstat"].as_slice(),
+        ["diff", "--numstat", "--no-relative", "-z"].as_slice(),
+        ["diff", "--cached", "--numstat", "--no-relative", "-z"].as_slice(),
     ] {
-        if let Ok(text) = run_git(cwd, args) {
-            for line in text.lines() {
-                let mut columns = line.split('\t');
-                let (Some(insertions), Some(deletions), Some(path)) =
-                    (columns.next(), columns.next(), columns.next())
-                else {
-                    continue;
-                };
-                out.push((
-                    path.to_string(),
-                    insertions.parse().unwrap_or(0),
-                    deletions.parse().unwrap_or(0),
-                ));
-            }
-        }
+        parse_numstat(&run_git(cwd, args)?, &mut out);
     }
-    out
+    Ok(out)
 }
 
-pub fn commit_diff_context(cwd: &Path, included: Option<&[String]>) -> (String, String) {
+/// Rows of `git diff --numstat -z`, in the format git-diff(1) gives for it: a
+/// renamed or copied entry leaves the path empty and is followed by its
+/// preimage and postimage paths, each in its own NUL-terminated field.
+fn parse_numstat(text: &str, out: &mut Vec<(String, u32, u32)>) {
+    let mut fields = text.split('\0');
+    while let Some(field) = fields.next() {
+        let mut columns = field.splitn(3, '\t');
+        let (Some(insertions), Some(deletions), Some(path)) =
+            (columns.next(), columns.next(), columns.next())
+        else {
+            continue;
+        };
+        let path = if path.is_empty() {
+            fields.nth(1)
+        } else {
+            Some(path)
+        };
+        let Some(path) = path else {
+            break;
+        };
+        // A binary file has `-` for both counts: git counts no lines in it.
+        let (Ok(insertions), Ok(deletions)) = (insertions.parse(), deletions.parse()) else {
+            continue;
+        };
+        out.push((path.to_string(), insertions, deletions));
+    }
+}
+
+pub fn commit_diff_context(
+    cwd: &Path,
+    included: Option<&[String]>,
+) -> Result<(String, String), String> {
     let has_head = run_git(cwd, &["rev-parse", "--verify", "HEAD"]).is_ok();
-    let pathspec: Vec<&str> = match included {
+    let pathspec = match included {
         Some(paths) if !paths.is_empty() => {
-            let mut values = vec!["--"];
-            values.extend(paths.iter().map(String::as_str));
+            let mut values = vec!["--".to_string()];
+            values.extend(status_pathspecs(paths));
             values
         }
         _ => Vec::new(),
     };
+    let pathspec: Vec<&str> = pathspec.iter().map(String::as_str).collect();
     let mut stat_args = vec!["diff", "--stat"];
     let mut patch_args = vec!["diff", "--no-ext-diff", "--patch", "--minimal"];
     if has_head {
@@ -538,12 +561,12 @@ pub fn commit_diff_context(cwd: &Path, included: Option<&[String]>) -> (String, 
     }
     stat_args.extend_from_slice(&pathspec);
     patch_args.extend_from_slice(&pathspec);
-    let mut stat = run_git(cwd, &stat_args).unwrap_or_default();
+    let mut stat = run_git(cwd, &stat_args)?;
     if stat.trim().is_empty() {
-        stat = run_git(cwd, &["status", "--short"]).unwrap_or_default();
+        stat = run_git(cwd, &["status", "--short"])?;
     }
-    let patch = run_git(cwd, &patch_args).unwrap_or_default();
-    (stat, patch)
+    let patch = run_git(cwd, &patch_args)?;
+    Ok((stat, patch))
 }
 
 pub fn run_claude_headless(
@@ -612,19 +635,32 @@ pub fn perform_action(
 pub fn stage_for_commit(cwd: &Path, included: Option<&[String]>) -> Result<(), String> {
     match included {
         Some(paths) if !paths.is_empty() => {
-            let _ = run_git(cwd, &["reset", "-q"]);
+            run_git(cwd, &["reset", "-q"])?;
+            let pathspecs = status_pathspecs(paths);
             let mut args = vec!["add", "-A", "--"];
-            args.extend(paths.iter().map(String::as_str));
+            args.extend(pathspecs.iter().map(String::as_str));
             run_git(cwd, &args).map(|_| ())
         }
         _ => run_git(cwd, &["add", "-A"]).map(|_| ()),
     }
 }
 
+/// Pathspecs naming exactly the [`read_status`] paths, which are relative to
+/// the repository root whatever directory of it `cwd` is: `top` anchors them
+/// there and `literal` keeps a `*` or `[` in a file name from matching others
+/// (gitglossary(7), "pathspec").
+fn status_pathspecs(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| format!(":(top,literal){path}"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tcode_core::git::GitFileEntry;
 
     fn run(root: &Path, args: &[&str]) {
         let output = crate::process::command("git")
@@ -800,6 +836,123 @@ mod tests {
         assert_eq!(result.texts[0].old.as_deref(), Some("before\n"));
         assert_eq!(result.texts[0].new.as_deref(), Some("after\n"));
         assert_eq!(result.texts.len(), result.changes.len());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// From a subdirectory, status names every change by its path from the
+    /// repository root, unquoted, with the line counts git gives for it, and a
+    /// commit of a selection takes exactly those paths.
+    #[test]
+    fn status_from_a_subdirectory_names_paths_that_commit_selects() {
+        let (temp, root) = scratch_repo("tcode-status-subdirectory-test");
+        let subdirectory = root.join("sub");
+        std::fs::create_dir(&subdirectory).unwrap();
+        std::fs::write(subdirectory.join("nested.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(root.join("binary.dat"), b"\0one").unwrap();
+        run(&root, &["add", "."]);
+        run(&root, &["commit", "-m", "files"]);
+        std::fs::write(subdirectory.join("nested.txt"), "one\n2\n3\n").unwrap();
+        std::fs::write(root.join("binary.dat"), b"\0two").unwrap();
+        std::fs::write(subdirectory.join("é q.txt"), "a\nb\n").unwrap();
+        std::fs::write(subdirectory.join("a[b].txt"), "glob\n").unwrap();
+        std::fs::write(subdirectory.join("ab.txt"), "plain\n").unwrap();
+        run(&root, &["add", "sub/é q.txt"]);
+        run(&root, &["mv", "tracked.txt", "moved.txt"]);
+
+        let status = read_status(&subdirectory).unwrap();
+
+        let entry = |path: &str, insertions, deletions| GitFileEntry {
+            path: path.into(),
+            insertions,
+            deletions,
+        };
+        assert_eq!(
+            status.changed_files,
+            [
+                entry("binary.dat", 0, 0),
+                entry("moved.txt", 0, 0),
+                entry("sub/a[b].txt", 0, 0),
+                entry("sub/ab.txt", 0, 0),
+                entry("sub/nested.txt", 2, 1),
+                entry("sub/é q.txt", 2, 0),
+            ]
+        );
+        assert_eq!(status.branch.as_deref(), Some("main"));
+
+        let included = ["sub/a[b].txt".to_string(), "sub/é q.txt".to_string()];
+        perform_action(
+            &subdirectory,
+            GitAction::Commit,
+            Some("selection"),
+            Some(&included),
+            None,
+            Some("main"),
+        )
+        .unwrap();
+        let remaining: Vec<String> = read_status(&subdirectory)
+            .unwrap()
+            .changed_files
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        // Staging the selection resets the index first, so the unselected
+        // rename is back to a deletion and an untracked file.
+        assert_eq!(
+            remaining,
+            [
+                "binary.dat",
+                "moved.txt",
+                "sub/ab.txt",
+                "sub/nested.txt",
+                "tracked.txt"
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// The branch counts as the default one only when `origin/HEAD` names it:
+    /// a remote that names none leaves it unknown, whatever the branch is called.
+    #[test]
+    fn status_tracks_the_upstream_and_the_branch_origin_head_names() {
+        let (temp, root) = scratch_repo("tcode-status-upstream-test");
+        let remote = temp.join("remote.git");
+        run(
+            &temp,
+            &["init", "--bare", "-b", "main", remote.to_str().unwrap()],
+        );
+        run(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        run(&root, &["push", "-u", "origin", "main"]);
+        std::fs::write(root.join("tracked.txt"), "ahead\n").unwrap();
+        run(&root, &["commit", "-am", "ahead"]);
+
+        let status = read_status(&root).unwrap();
+        assert!(status.has_origin_remote && status.has_upstream);
+        assert_eq!((status.ahead, status.behind), (1, 0));
+        assert_eq!(status.branch.as_deref(), Some("main"));
+        assert!(!status.is_default_branch);
+
+        run(&root, &["remote", "set-head", "origin", "main"]);
+        assert!(read_status(&root).unwrap().is_default_branch);
+        run(&root, &["checkout", "-b", "feature"]);
+        assert!(!read_status(&root).unwrap().is_default_branch);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// A repository whose status git cannot read is git's error, not a clean tree.
+    #[test]
+    fn a_status_git_cannot_read_is_its_error() {
+        let (temp, root) = scratch_repo("tcode-status-unreadable-test");
+        std::fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+        std::fs::write(root.join(".git/index"), b"not an index").unwrap();
+
+        assert!(read_status(&root).is_err());
+        assert!(commit_diff_context(&root, None).is_err());
 
         let _ = std::fs::remove_dir_all(temp);
     }

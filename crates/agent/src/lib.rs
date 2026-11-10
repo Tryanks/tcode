@@ -213,7 +213,6 @@ pub struct RewindControl {
     pub steer_targets: bool,
     pub later_history: LaterHistory,
     pub preview: RewindPreviewKind,
-    pub running_turn: RunningTurnPolicy,
     /// Files the agent changed by running commands are restored too, not only
     /// those its own edit tools wrote.
     pub restores_command_edits: bool,
@@ -254,16 +253,6 @@ pub enum RewindPreviewKind {
     /// The files a restore would change, and those changed outside the agent
     /// since, which the restore would overwrite.
     Conflicts,
-}
-
-/// What a rewind does to a turn that is running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunningTurnPolicy {
-    /// The harness stops the turn first, as its own rewind does.
-    Interrupt,
-    /// A rewind waits until no turn runs.
-    Refuse,
 }
 
 /// What a harness lets a client do with its standing goal.
@@ -354,7 +343,6 @@ impl ProviderKind {
                     // `rewind_files` with `dry_run`.
                     preview: RewindPreviewKind::Files,
                     // `rewind_conversation`'s `interrupt_if_running`.
-                    running_turn: RunningTurnPolicy::Interrupt,
                     // File history tracks the edit tools' writes only.
                     restores_command_edits: false,
                 }),
@@ -414,7 +402,6 @@ impl ProviderKind {
                     steer_targets: false,
                     later_history: LaterHistory::Truncated,
                     preview: RewindPreviewKind::None,
-                    running_turn: RunningTurnPolicy::Interrupt,
                     restores_command_edits: false,
                 }),
                 manual_compaction: true,
@@ -499,7 +486,6 @@ impl ProviderKind {
                     steer_targets: false,
                     later_history: LaterHistory::Branch,
                     preview: RewindPreviewKind::None,
-                    running_turn: RunningTurnPolicy::Interrupt,
                     restores_command_edits: false,
                 }),
                 manual_compaction: true,
@@ -546,7 +532,6 @@ impl ProviderKind {
                     steer_targets: false,
                     later_history: LaterHistory::HiddenUntilNextSend,
                     preview: RewindPreviewKind::None,
-                    running_turn: RunningTurnPolicy::Interrupt,
                     restores_command_edits: true,
                 }),
                 manual_compaction: true,
@@ -626,7 +611,6 @@ impl ProviderKind {
                     steer_targets: false,
                     later_history: LaterHistory::Truncated,
                     preview: RewindPreviewKind::Conflicts,
-                    running_turn: RunningTurnPolicy::Interrupt,
                     restores_command_edits: false,
                 }),
                 manual_compaction: false,
@@ -1794,24 +1778,58 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
     )
 }
 
-/// Text without its terminal escape sequences (`ESC [ … letter`).
+/// Text without its ECMA-48 control sequences (`ESC [`) and operating
+/// system commands (`ESC ]`).
 pub fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
+    let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            if chars.next() == Some('[') {
+        if ch != '\u{1b}' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            // A control sequence ends at its final byte, 0x40..=0x7E.
+            Some('[') => {
                 for next in chars.by_ref() {
-                    if next.is_ascii_alphabetic() {
+                    if ('\u{40}'..='\u{7e}').contains(&next) {
                         break;
                     }
                 }
             }
-            continue;
+            // An operating system command, such as an OSC 8 hyperlink,
+            // ends at BEL or at the string terminator ESC \.
+            Some(']') => {
+                while let Some(next) = chars.next() {
+                    if next == '\u{7}' {
+                        break;
+                    }
+                    if next == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
         }
-        out.push(ch);
     }
     out
+}
+
+#[cfg(test)]
+mod strip_ansi_tests {
+    /// Claude Code 2.1.322 prints its sign-in URL as an OSC 8 hyperlink
+    /// (`ESC ]8;; url BEL text ESC ]8;; BEL`) whenever it judges the
+    /// terminal to support links, which it does from TERM_PROGRAM and the
+    /// like even when its stdout is a pipe.
+    #[test]
+    fn a_hyperlinked_sign_in_url_reads_as_the_url() {
+        let printed = "If the browser didn't open, visit: \u{1b}]8;;https://example.invalid/oauth?code=1\u{7}\u{1b}[94mhttps://example.invalid/oauth?code=1\u{1b}[39m\u{1b}]8;;\u{7}\n";
+        assert_eq!(
+            super::strip_ansi(printed),
+            "If the browser didn't open, visit: https://example.invalid/oauth?code=1\n"
+        );
+    }
 }
 
 /// The executable extensions to try for a bare name: `PATHEXT` on Windows
@@ -1920,7 +1938,8 @@ pub enum UserInputDelivery {
     Blocking,
     /// The agent keeps working on the turn and reads the answer when it is
     /// delivered (Codex `request_user_input_async`). The request stays open
-    /// until answered or the turn ends; the composer stays usable meanwhile.
+    /// until the provider reports it resolved; the composer stays usable
+    /// meanwhile.
     Async,
 }
 
@@ -2167,9 +2186,8 @@ pub enum SessionCommand {
     },
     /// Ask the provider to restore one of its own message checkpoints. The
     /// provider remains the sole owner of both the checkpoint and the restore
-    /// semantics; adapters without a native implementation reject this. Where
-    /// [`RewindControl::running_turn`] interrupts, the adapter stops a running
-    /// turn first the way its harness does. Answered by
+    /// semantics; adapters without a native implementation reject this. The
+    /// adapter stops a running turn first the way its harness does. Answered by
     /// [`AgentEvent::RewindCompleted`] or [`AgentEvent::RewindFailed`].
     Rewind {
         checkpoint_id: String,
@@ -2551,22 +2569,28 @@ pub enum AgentEvent {
         kind: DeltaKind,
         text: String,
     },
+    /// A turn ending does not settle it; [`AgentEvent::ApprovalResolved`] does.
     ApprovalRequested(ApprovalRequest),
+    /// A pending approval has been settled: the user's decision, or
+    /// [`ApprovalDecision::Cancel`] when it ended without one (the harness
+    /// withdrew it, or an interrupt cancelled it).
     ApprovalResolved {
         request_id: String,
         decision: ApprovalDecision,
     },
     /// The agent is asking the user one or more structured questions.
     /// `delivery` says whether it waits for the matching
-    /// [`SessionCommand::RespondUserInput`] or keeps working meanwhile.
+    /// [`SessionCommand::RespondUserInput`] or keeps working meanwhile. A turn
+    /// ending does not settle it; [`AgentEvent::UserInputResolved`] does.
     UserInputRequested {
         request_id: String,
         questions: Vec<UserInputQuestion>,
         #[serde(default, skip_serializing_if = "UserInputDelivery::is_blocking")]
         delivery: UserInputDelivery,
     },
-    /// A pending user-input request has been settled (answered, or cancelled on
-    /// teardown — in which case `answers` is empty).
+    /// A pending user-input request has been settled: answered, or ended
+    /// without an answer (the harness withdrew it, an interrupt or teardown
+    /// cancelled it), in which case `answers` is empty.
     UserInputResolved {
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,

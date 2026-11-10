@@ -12,13 +12,28 @@ use crate::provider_auth::{
     parse_opencode_auth,
 };
 
-/// Return trimmed stdout on success, falling back to stderr when stdout is empty.
-pub async fn run_capture(program: &str, args: &[&str]) -> Option<String> {
-    run_capture_env(program, args, &[]).await
+/// Trimmed stdout of a run that succeeded.
+pub async fn run_capture_env(
+    program: &str,
+    args: &[&str],
+    env: &[(String, String)],
+) -> Option<String> {
+    let output = provider_command(program, env)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
 }
 
-/// [`run_capture`] with extra environment variables applied to the child.
-pub async fn run_capture_env(
+/// [`run_capture_env`], reading stderr when stdout is empty: which stream
+/// `cursor-agent status` and `grok models` answer on has not been checked
+/// against either CLI.
+async fn run_capture_either_env(
     program: &str,
     args: &[&str],
     env: &[(String, String)],
@@ -35,14 +50,12 @@ pub async fn run_capture_env(
     if !text.is_empty() {
         return Some(text);
     }
-    // Some CLIs (pi among them) print `--version` output to stderr; a clean
-    // exit with empty stdout is still a successful run.
     let text = String::from_utf8_lossy(&output.stderr).trim().to_string();
     (!text.is_empty()).then_some(text)
 }
 
-/// `<program> --version`'s answer, or what it printed when it failed: its
-/// exit status and the last lines of its error output, as the CLI wrote them.
+/// `<program> --version`'s answer on stdout, or what it printed otherwise:
+/// its exit status and its error output, as the CLI wrote them.
 async fn run_version(program: &str, env: &[(String, String)]) -> Result<String, Option<String>> {
     let output = provider_command(program, env)
         .arg("--version")
@@ -52,17 +65,17 @@ async fn run_version(program: &str, env: &[(String, String)]) -> Result<String, 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if output.status.success() {
-        // Some CLIs (pi among them) print `--version` output to stderr.
-        let text = if stdout.is_empty() { stderr } else { stdout };
-        return if text.is_empty() { Err(None) } else { Ok(text) };
+        return if stdout.is_empty() {
+            Err((!stderr.is_empty()).then_some(stderr))
+        } else {
+            Ok(stdout)
+        };
     }
     let printed = if stderr.is_empty() { stdout } else { stderr };
-    let tail: Vec<&str> = printed.lines().rev().take(8).collect();
-    let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
-    Err(Some(if tail.is_empty() {
+    Err(Some(if printed.is_empty() {
         output.status.to_string()
     } else {
-        format!("{}: {tail}", output.status)
+        format!("{}: {printed}", output.status)
     }))
 }
 
@@ -158,11 +171,13 @@ pub async fn probe_provider(
         .await
         .as_deref()
         .and_then(parse_opencode_auth),
-        ProviderKind::Cursor => run_capture_env(&program, &["status", "--format", "json"], &env)
-            .await
-            .as_deref()
-            .and_then(|json| parse_cursor_auth(json, cursor_key_configured(&env))),
-        ProviderKind::Grok => run_capture_env(&program, &["models"], &env)
+        ProviderKind::Cursor => {
+            run_capture_either_env(&program, &["status", "--format", "json"], &env)
+                .await
+                .as_deref()
+                .and_then(|json| parse_cursor_auth(json, cursor_key_configured(&env)))
+        }
+        ProviderKind::Grok => run_capture_either_env(&program, &["models"], &env)
             .await
             .as_deref()
             .and_then(parse_grok_models_auth),

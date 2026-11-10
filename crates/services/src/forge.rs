@@ -12,7 +12,7 @@ mod rate_limit;
 mod viewed;
 
 use crate::settings::SettingsStore;
-pub(crate) use http::{Step, answered, in_order, media, run_cli, same_origin};
+pub(crate) use http::{CliFailure, Step, answered, in_order, media, run_cli, same_origin};
 pub(crate) use rate_limit::RateLimits;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -26,7 +26,7 @@ use tcode_core::{
     },
     pull_request_watch::{PullRequestRemark, PullRequestWatchRead},
     session::ReviewSide,
-    settings::{HostSettings, HostStatus, TokenCheck},
+    settings::{HostProblem, HostSettings, HostStatus, TokenCheck},
 };
 use tcode_protocol::{
     PullRequestAction, PullRequestActionResult as Outcome, PullRequestCapabilities,
@@ -51,8 +51,8 @@ pub fn connect(
     let gitlab = crate::gitlab::GitLab::new(store.clone(), environment.clone(), viewed.clone());
     let bitbucket =
         crate::bitbucket::Bitbucket::new(store.clone(), environment.clone(), viewed.clone());
-    let azure = crate::azure::Azure::new(store, environment, viewed);
-    Hosts::new(github, forgejo, gitlab, bitbucket, azure)
+    let azure = crate::azure::Azure::new(store.clone(), environment, viewed);
+    Hosts::new(store, github, forgejo, gitlab, bitbucket, azure)
 }
 
 /// A pull request host. Each entry answers for the host the key names.
@@ -218,6 +218,12 @@ pub enum ForgeErrorKind {
     InvalidInput,
     /// Media whose type is not an image, video or audio, or an image that does not decode.
     UnsupportedMedia,
+    /// The credentials Tcode saved could not be read, so nothing was sent.
+    CredentialsUnreadable,
+    /// The host's CLI failed when asked for its login; the description is its own words.
+    CliFailed {
+        tool: String,
+    },
 }
 
 impl std::fmt::Display for ForgeError {
@@ -228,6 +234,24 @@ impl std::fmt::Display for ForgeError {
 impl std::error::Error for ForgeError {}
 
 impl ForgeError {
+    /// The problem a host's status names when its CLI failed to give a login.
+    pub(crate) fn cli_problem(&self) -> Option<HostProblem> {
+        match &self.kind {
+            ForgeErrorKind::CliFailed { tool } => Some(HostProblem::CliFailed {
+                tool: tool.clone(),
+                error: self.description.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn credentials_unreadable(error: std::io::Error) -> Self {
+        Self {
+            kind: ForgeErrorKind::CredentialsUnreadable,
+            description: error.to_string(),
+        }
+    }
+
     /// When a rate limit or the pause after one ends.
     pub fn retry_at(&self) -> Option<SystemTime> {
         match self.kind {
@@ -367,6 +391,7 @@ fn offered(capabilities: &PullRequestCapabilities, action: &PullRequestAction) -
 /// Routes each key and host to the implementation of its kind: the kind settings give it, else
 /// the one its name says, else GitHub, as every host was before hosts had kinds.
 struct Hosts {
+    store: SettingsStore,
     github: Arc<dyn Forge>,
     forgejo: Arc<dyn Forge>,
     gitlab: Arc<dyn Forge>,
@@ -377,6 +402,7 @@ struct Hosts {
 
 impl Hosts {
     fn new(
+        store: SettingsStore,
         github: Arc<dyn Forge>,
         forgejo: Arc<dyn Forge>,
         gitlab: Arc<dyn Forge>,
@@ -384,6 +410,7 @@ impl Hosts {
         azure: Arc<dyn Forge>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            store,
             github,
             forgejo,
             gitlab,
@@ -476,6 +503,14 @@ impl Forge for Hosts {
         for (host, github) in self.github.credential_status() {
             if self.kind(&host) == HostKind::Github {
                 status.insert(host, github);
+            }
+        }
+        // Every kind reads its saved token from the one file.
+        if let Some(error) = self.store.secrets_unreadable() {
+            for found in status.values_mut() {
+                found.problem = Some(HostProblem::CredentialsUnreadable {
+                    error: error.clone(),
+                });
             }
         }
         let mut kinds = self.kinds.write().unwrap();

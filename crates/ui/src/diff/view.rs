@@ -2136,9 +2136,8 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump = link.clone();
-        let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            pump.pump_with_timer(|delay| executor.timer(delay)).await;
+            pump.pump().await;
         });
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(

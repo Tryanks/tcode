@@ -2,12 +2,13 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::backend::RootInfo;
 use crate::outline::{
-    MAX_MODEL_BYTES, MAX_MODEL_LINES, PAGE_BYTES, PREVIEW_BYTES, UiNode, assign_refs,
-    assign_refs_from_previous, canonical_role, output_exceeds_limit, safe_prefix,
+    MAX_MODEL_BYTES, PAGE_BYTES, PREVIEW_BYTES, UiNode, assign_refs, assign_refs_from_previous,
+    canonical_role, safe_prefix,
 };
 
 pub const OBSERVATION_CAPACITY: usize = 8;
@@ -16,18 +17,13 @@ pub const OUTPUT_CAPACITY: usize = 32;
 const RECENT_ACTION_CAPACITY: usize = 8;
 const CANDIDATE_TARGET_CAPACITY: usize = 64;
 const DELTA_ENTRY_CAPACITY: usize = 16;
-const STABLE_LABEL_CAPACITY: usize = 3_000;
-const STABLE_LABEL_MAX_BYTES: usize = 512;
 const DISPLAY_LABEL_MAX_CHARS: usize = 160;
 const DISPLAY_LABEL_MAX_BYTES: usize = 200;
-const ROLE_MAX_BYTES: usize = 48;
-const ACTION_DESCRIPTION_MAX_BYTES: usize = 256;
 
 #[derive(Debug)]
 pub struct Observation {
     pub state_id: String,
     pub root: RootInfo,
-    pub root_epoch: u64,
     pub tree: UiNode,
     pub harness_annotation: String,
 }
@@ -49,11 +45,6 @@ struct HarnessHistory {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateError {
     Evicted(String),
-    Stale {
-        state_id: String,
-        state_epoch: u64,
-        current_epoch: u64,
-    },
     UnknownElement(String),
     UnknownOutput(String),
     OutputOwnerMismatch {
@@ -70,14 +61,6 @@ impl fmt::Display for StateError {
             Self::Evicted(state_id) => write!(
                 formatter,
                 "state {state_id} was evicted from the observation cache; call observe_ui again"
-            ),
-            Self::Stale {
-                state_id,
-                state_epoch,
-                current_epoch,
-            } => write!(
-                formatter,
-                "state {state_id} is stale (root epoch {state_epoch}, current {current_epoch}); call observe_ui again"
             ),
             Self::UnknownElement(ref_id) => write!(
                 formatter,
@@ -124,31 +107,20 @@ pub struct OutputPage {
     pub eof: bool,
 }
 
-#[derive(Debug)]
+/// State and output ids are unique across every session's store, so an id a
+/// model still holds from another registration of its thread never names a
+/// different state.
+static NEXT_STATE: AtomicU64 = AtomicU64::new(1);
+static NEXT_OUTPUT: AtomicU64 = AtomicU64::new(1);
+
+/// One session's observations and output pages.
+#[derive(Debug, Default)]
 pub struct StateStore {
-    next_state: u64,
-    next_output: u64,
     observations: HashMap<String, Arc<Observation>>,
     observation_lru: VecDeque<String>,
-    root_epochs: HashMap<String, u64>,
     harness_histories: HashMap<String, HarnessHistory>,
     outputs: HashMap<String, OutputEntry>,
     output_lru: VecDeque<String>,
-}
-
-impl Default for StateStore {
-    fn default() -> Self {
-        Self {
-            next_state: 1,
-            next_output: 1,
-            observations: HashMap::new(),
-            observation_lru: VecDeque::new(),
-            root_epochs: HashMap::new(),
-            harness_histories: HashMap::new(),
-            outputs: HashMap::new(),
-            output_lru: VecDeque::new(),
-        }
-    }
 }
 
 impl StateStore {
@@ -169,14 +141,10 @@ impl StateStore {
 
         let harness_annotation = self.record_harness_observation(&root, &tree);
 
-        let epoch = self.root_epochs.entry(identity.clone()).or_default();
-        *epoch += 1;
-        let state_id = format!("S{}", self.next_state);
-        self.next_state += 1;
+        let state_id = format!("S{}", NEXT_STATE.fetch_add(1, Ordering::Relaxed));
         let observation = Arc::new(Observation {
             state_id: state_id.clone(),
             root,
-            root_epoch: *epoch,
             tree,
             harness_annotation,
         });
@@ -200,9 +168,7 @@ impl StateStore {
     ) {
         let history = self.harness_histories.entry(root.identity()).or_default();
         for description in descriptions {
-            history
-                .recent_actions
-                .push_back(truncate_plain(&description, ACTION_DESCRIPTION_MAX_BYTES));
+            history.recent_actions.push_back(description);
             while history.recent_actions.len() > RECENT_ACTION_CAPACITY {
                 history.recent_actions.pop_front();
             }
@@ -250,31 +216,13 @@ impl StateStore {
         Ok(observation)
     }
 
-    pub fn validate_for_action(&mut self, state_id: &str) -> Result<Arc<Observation>, StateError> {
-        let observation = self.get(state_id)?;
-        let current_epoch = self
-            .root_epochs
-            .get(&observation.root.identity())
-            .copied()
-            .unwrap_or_default();
-        if current_epoch != observation.root_epoch {
-            return Err(StateError::Stale {
-                state_id: state_id.to_string(),
-                state_epoch: observation.root_epoch,
-                current_epoch,
-            });
-        }
-        Ok(observation)
-    }
-
     pub fn register_output(
         &mut self,
         owner_state: Option<&str>,
         text: impl Into<Arc<str>>,
         initial_offset: usize,
     ) -> String {
-        let output_ref = format!("@o{}", self.next_output);
-        self.next_output += 1;
+        let output_ref = format!("@o{}", NEXT_OUTPUT.fetch_add(1, Ordering::Relaxed));
         self.outputs.insert(
             output_ref.clone(),
             OutputEntry {
@@ -293,10 +241,10 @@ impl StateStore {
     }
 
     pub fn bound_model_text(&mut self, owner_state: Option<&str>, text: String) -> String {
-        if !output_exceeds_limit(&text) {
+        if text.len() <= MAX_MODEL_BYTES {
             return text;
         }
-        let (preview, offset) = safe_prefix(&text, PREVIEW_BYTES, MAX_MODEL_LINES);
+        let (preview, offset) = safe_prefix(&text, PREVIEW_BYTES);
         let preview = preview.to_string();
         let output_ref = self.register_output(owner_state, Arc::<str>::from(text), offset);
         format!(
@@ -371,7 +319,7 @@ pub(crate) fn harness_action_description(
             description.push('"');
         }
     }
-    truncate_plain(&description, ACTION_DESCRIPTION_MAX_BYTES)
+    description
 }
 
 fn harness_annotation(
@@ -409,27 +357,19 @@ fn harness_annotation(
     lines.extend(harness_delta_lines(current_labels, Some(initial_labels)));
     lines.push("</state_delta>".to_string());
     lines.push("</computer_use_harness>".to_string());
-    let annotation = lines.join("\n");
-    debug_assert!(annotation.len() <= MAX_MODEL_BYTES);
-    annotation
+    lines.join("\n")
 }
 
 fn stable_labels(root: &UiNode) -> Vec<StableLabel> {
     fn visit(node: &UiNode, seen: &mut HashSet<String>, labels: &mut Vec<StableLabel>) {
-        if labels.len() >= STABLE_LABEL_CAPACITY {
-            return;
-        }
         if let Some(display) = stable_label(node) {
-            let key = truncate_plain(&display.to_lowercase(), STABLE_LABEL_MAX_BYTES);
+            let key = display.to_lowercase();
             if seen.insert(key.clone()) {
                 labels.push(StableLabel { key, display });
             }
         }
         for child in &node.children {
             visit(child, seen, labels);
-            if labels.len() >= STABLE_LABEL_CAPACITY {
-                break;
-            }
         }
     }
 
@@ -468,8 +408,7 @@ fn choose_label(title: &str, description: &str, value: Option<&str>) -> Option<S
 }
 
 fn normalize_label(value: &str) -> String {
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    truncate_plain(&normalized, STABLE_LABEL_MAX_BYTES)
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn candidate_target_lines(root: &UiNode) -> Vec<String> {
@@ -478,12 +417,14 @@ fn candidate_target_lines(root: &UiNode) -> Vec<String> {
             return;
         }
         if node.is_interactive() {
-            let ref_id = truncate_plain(&node.ref_id, 32);
-            let role = truncate_plain(&canonical_role(&node.role), ROLE_MAX_BYTES);
             let label = candidate_label(node)
                 .map(|label| display_label(&label))
                 .unwrap_or_default();
-            lines.push(format!("- {ref_id} {role} \"{label}\""));
+            lines.push(format!(
+                "- {} {} \"{label}\"",
+                node.ref_id,
+                canonical_role(&node.role)
+            ));
         }
         for child in &node.children {
             visit(child, lines);
@@ -495,6 +436,10 @@ fn candidate_target_lines(root: &UiNode) -> Vec<String> {
 
     let mut lines = Vec::new();
     visit(root, &mut lines);
+    let total = crate::outline::interactive_count(root);
+    if total > lines.len() {
+        lines.push(format!("- ... {} more", total - lines.len()));
+    }
     lines
 }
 
@@ -599,7 +544,7 @@ fn page(
         return Err(StateError::InvalidOffset(offset));
     }
     let remaining = &text[offset..];
-    let (content, consumed) = safe_prefix(remaining, PAGE_BYTES, MAX_MODEL_LINES);
+    let (content, consumed) = safe_prefix(remaining, PAGE_BYTES);
     let next_offset = offset + consumed;
     Ok(OutputPage {
         output_ref: output_ref.to_string(),
@@ -617,12 +562,6 @@ fn touch(lru: &mut VecDeque<String>, key: &str) {
         lru.remove(index);
     }
     lru.push_back(key.to_string());
-}
-
-static STORE: OnceLock<Mutex<StateStore>> = OnceLock::new();
-
-pub fn global() -> &'static Mutex<StateStore> {
-    STORE.get_or_init(|| Mutex::new(StateStore::default()))
 }
 
 #[cfg(test)]
@@ -659,108 +598,77 @@ mod tests {
     fn lru_evicts_least_recently_used_observation() {
         let mut store = StateStore::default();
         let first = store.insert_observation(root(1), tree("one"));
-        for window_id in 2..=OBSERVATION_CAPACITY as u32 {
+        let second = store.insert_observation(root(2), tree("Window 2"));
+        for window_id in 3..=OBSERVATION_CAPACITY as u32 {
             store.insert_observation(root(window_id), tree(&format!("Window {window_id}")));
         }
         store.get(&first.state_id).unwrap();
         let newest =
             store.insert_observation(root(OBSERVATION_CAPACITY as u32 + 1), tree("newest"));
         assert!(store.get(&first.state_id).is_ok());
-        assert!(store.get("S2").is_err());
         assert!(store.get(&newest.state_id).is_ok());
-        assert!(matches!(store.get("S2"), Err(StateError::Evicted(_))));
+        assert!(matches!(
+            store.get(&second.state_id),
+            Err(StateError::Evicted(_))
+        ));
         assert!(store.harness_histories.contains_key(&root(1).identity()));
         assert!(!store.harness_histories.contains_key(&root(2).identity()));
         assert_eq!(store.harness_histories.len(), OBSERVATION_CAPACITY);
     }
 
     #[test]
-    fn newer_root_epoch_rejects_actions_from_old_state() {
-        let mut store = StateStore::default();
-        let first = store.insert_observation(root(1), tree("one"));
-        let second = store.insert_observation(root(1), tree("one changed"));
-        assert!(matches!(
-            store.validate_for_action(&first.state_id),
-            Err(StateError::Stale { .. })
-        ));
-        assert!(store.validate_for_action(&second.state_id).is_ok());
-        let other = store.insert_observation(root(2), tree("other"));
-        assert!(store.validate_for_action(&second.state_id).is_ok());
-        assert!(store.validate_for_action(&other.state_id).is_ok());
-        assert!(first.harness_annotation.contains("observation_sequence: 1"));
-        assert!(
-            second
-                .harness_annotation
-                .contains("observation_sequence: 2")
-        );
-        assert!(other.harness_annotation.contains("observation_sequence: 1"));
-    }
-
-    #[test]
     fn bounded_output_continuation_round_trips_without_mutation() {
-        for (original, line_limited) in [
-            ("0123456789α中文😀\n".repeat(4_000), false),
-            ("β\n".repeat(4_001), true),
-        ] {
-            let mut store = StateStore::default();
-            let visible = store.bound_model_text(Some("S9"), original.clone());
-            assert!(visible.len() < 20 * 1024);
-            let output_ref = visible
-                .split_whitespace()
-                .find(|part| part.starts_with("@o"))
-                .unwrap();
-            assert!(matches!(
-                store.read_output(output_ref, Some("other-state"), None),
-                Err(StateError::OutputOwnerMismatch { .. })
-            ));
-            let split_character = original
-                .char_indices()
-                .find(|(_, ch)| ch.len_utf8() > 1)
-                .unwrap()
-                .0
-                + 1;
-            for offset in [split_character, original.len() + 1] {
-                assert!(
-                    matches!(store.read_output(output_ref, Some("S9"), Some(offset)), Err(StateError::InvalidOffset(actual)) if actual == offset)
-                );
-            }
-            let mut rebuilt = visible
-                .split("\n\n[output truncated")
-                .next()
-                .unwrap()
-                .to_string();
-            assert!(rebuilt.len() <= PREVIEW_BYTES);
-            assert!(rebuilt.lines().count() <= MAX_MODEL_LINES);
-            if line_limited {
-                assert_eq!(rebuilt, "β\n".repeat(2_000));
-            }
-            let mut offset = rebuilt.len();
-            loop {
-                let page = store
-                    .read_output(output_ref, Some("S9"), Some(offset))
-                    .unwrap();
-                assert!(page.text.len() <= PAGE_BYTES);
-                assert!(page.text.lines().count() <= MAX_MODEL_LINES);
-                assert!(page.next_offset > page.offset || page.eof);
-                if line_limited && !page.eof {
-                    assert!(page.text.ends_with('\n'));
-                }
-                rebuilt.push_str(&page.text);
-                if page.eof {
-                    break;
-                }
-                offset = page.next_offset;
-            }
-            assert_eq!(rebuilt, original);
-
-            let repeated = store
-                .read_output(output_ref, Some("S9"), Some(offset))
-                .unwrap();
-            let repeated_again = store
-                .read_output(output_ref, Some("S9"), Some(offset))
-                .unwrap();
-            assert_eq!(repeated, repeated_again);
+        let original = "0123456789α中文😀\n".repeat(4_000);
+        let mut store = StateStore::default();
+        let visible = store.bound_model_text(Some("S9"), original.clone());
+        assert!(visible.len() < 20 * 1024);
+        let output_ref = visible
+            .split_whitespace()
+            .find(|part| part.starts_with("@o"))
+            .unwrap();
+        assert!(matches!(
+            store.read_output(output_ref, Some("other-state"), None),
+            Err(StateError::OutputOwnerMismatch { .. })
+        ));
+        let split_character = original
+            .char_indices()
+            .find(|(_, ch)| ch.len_utf8() > 1)
+            .unwrap()
+            .0
+            + 1;
+        for offset in [split_character, original.len() + 1] {
+            assert!(
+                matches!(store.read_output(output_ref, Some("S9"), Some(offset)), Err(StateError::InvalidOffset(actual)) if actual == offset)
+            );
         }
+        let mut rebuilt = visible
+            .split("\n\n[output truncated")
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(rebuilt.len() <= PREVIEW_BYTES);
+        let mut offset = rebuilt.len();
+        loop {
+            let page = store
+                .read_output(output_ref, Some("S9"), Some(offset))
+                .unwrap();
+            assert!(page.text.len() <= PAGE_BYTES);
+            assert!(page.next_offset > page.offset || page.eof);
+            rebuilt.push_str(&page.text);
+            if page.eof {
+                break;
+            }
+            offset = page.next_offset;
+        }
+        assert_eq!(rebuilt, original);
+
+        let repeated = store
+            .read_output(output_ref, Some("S9"), Some(offset))
+            .unwrap();
+        let repeated_again = store
+            .read_output(output_ref, Some("S9"), Some(offset))
+            .unwrap();
+        assert_eq!(repeated, repeated_again);
     }
 
     #[test]

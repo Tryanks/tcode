@@ -13,8 +13,9 @@ pub struct SettleEffects {
     /// Open terminals inspected; the ones at an idle shell are closed.
     pub terminals_checked: usize,
     pub unpinned: bool,
-    /// Pending non-blocking input answered with empty answers.
-    pub input_answered: bool,
+    /// A non-blocking question was open; it closes with the provider,
+    /// unanswered.
+    pub input_closed: bool,
 }
 
 /// Sessions viewed by clients and sessions retained for in-flight work or re-adoption.
@@ -713,7 +714,7 @@ impl AppState {
 
     /// Scan supported external-agent histories without exposing the import
     /// service or application stores to callers.
-    pub fn scan_external_history(&self, executor: &HostCx) -> HostTask<Vec<RecentDir>> {
+    pub fn scan_external_history(&self, executor: &HostCx) -> HostTask<ExternalHistory> {
         let exclude: Vec<_> = self
             .projects
             .iter()
@@ -722,13 +723,13 @@ impl AppState {
         let sessions = self.sessions.clone();
         executor.unblock(move || {
             let known = existing_external_ids(&sessions);
-            let mut recent = scan_recent_dirs(&ExternalRoots::detect(), &exclude);
-            for dir in &mut recent {
+            let mut history = scan_recent_dirs(&ExternalRoots::detect(), &exclude);
+            for dir in &mut history.dirs {
                 dir.threads
                     .retain(|thread| !known.contains(&thread.external_id));
             }
-            recent.retain(|dir| !dir.threads.is_empty());
-            recent
+            history.dirs.retain(|dir| !dir.threads.is_empty());
+            history
         })
     }
 
@@ -787,14 +788,17 @@ impl AppState {
         cx.unblock(move || {
             let mut imported = 0;
             let mut skipped = 0;
+            let mut failed = Vec::new();
             let mut existing = existing_external_ids(&metas);
             for (index, thread) in threads.into_iter().enumerate() {
                 let tool = thread.source.display_name().to_string();
                 match import_thread(&store, &project, &thread, &mut existing) {
                     ImportOutcome::Imported => imported += 1,
-                    ImportOutcome::SkippedDuplicate
-                    | ImportOutcome::SkippedEmpty
-                    | ImportOutcome::Failed(_) => skipped += 1,
+                    ImportOutcome::SkippedDuplicate | ImportOutcome::SkippedEmpty => skipped += 1,
+                    ImportOutcome::Failed(error) => failed.push(ImportFailure {
+                        file: thread.file.clone(),
+                        error,
+                    }),
                 }
                 let (id, done) = (id.clone(), index + 1);
                 updates.enqueue(move |state, cx| {
@@ -807,7 +811,7 @@ impl AppState {
                 });
             }
             updates.enqueue(move |state, cx| {
-                state.complete_external_import(&id, run_id, imported, skipped, cx);
+                state.complete_external_import(&id, run_id, imported, skipped, failed, cx);
             });
         })
         .detach();
@@ -848,6 +852,7 @@ impl AppState {
         run_id: u64,
         imported: usize,
         skipped: usize,
+        failed: Vec<ImportFailure>,
         cx: &mut HostCx,
     ) {
         if self
@@ -864,7 +869,11 @@ impl AppState {
             state.advance_external_import(
                 &project_id,
                 run_id,
-                ExternalImportState::Finished { imported, skipped },
+                ExternalImportState::Finished {
+                    imported,
+                    skipped,
+                    failed,
+                },
                 cx,
             );
         });
@@ -904,7 +913,7 @@ impl AppState {
         query: String,
         limit: u32,
         executor: &HostCx,
-    ) -> HostTask<Vec<SessionSearchHit>> {
+    ) -> HostTask<SessionContentHits> {
         let limit = usize::try_from(limit).unwrap_or(usize::MAX).min(50);
         let sessions = self
             .sessions
@@ -1197,8 +1206,10 @@ impl AppState {
         if settlement_changed {
             self.evaluate_all_settlement(cx);
         }
-        self.providers.provider_secret_names =
-            provider_secret_names(&self.settings, &self.settings_store);
+        match provider_secret_names(&self.settings, &self.settings_store) {
+            Ok(names) => self.providers.provider_secret_names = names,
+            Err(error) => self.report_error(RuntimeError::External(error.to_string()), cx),
+        }
         // Keep the live computer-use MCP config in step with the persisted
         // settings on every change (the server outlives any one snapshot).
         computer_use_mcp::config::set(self.settings.computer_use.clone());
@@ -1308,7 +1319,7 @@ impl AppState {
                 })
                 .map_or(0, |workspace| workspace.terminals.len()),
             unpinned: meta.as_ref().is_some_and(|meta| meta.pinned_at.is_some()),
-            input_answered: resident
+            input_closed: resident
                 .and_then(|session| session.timeline.pending_user_input.as_ref())
                 .is_some_and(|input| !input.delivery.is_blocking()),
         }
@@ -1328,21 +1339,6 @@ impl AppState {
         let effects = self.settle_effects(id);
         if !meta.is_settled() {
             meta.settled_at = Some(timestamp);
-        }
-        if let Some(input) = self
-            .resident(id)
-            .and_then(|session| session.timeline.pending_user_input.as_ref())
-            .filter(|input| !input.delivery.is_blocking())
-        {
-            let request_id = input.request_id.clone();
-            self.on_event(
-                id,
-                AgentEvent::UserInputResolved {
-                    request_id,
-                    answers: Default::default(),
-                },
-                cx,
-            );
         }
         meta.settled_override = Some(SettledOverride::Settled);
         meta.unsettled_at = None;
@@ -1951,7 +1947,6 @@ impl AppState {
                                 RuntimeEvent::Notice(RuntimeNotice::WorktreeSeeded {
                                     copied_files: created.seed_summary.copied_files,
                                     skipped: created.seed_summary.skipped,
-                                    limit_reached: created.seed_summary.limit_reached,
                                 }),
                             );
                         }

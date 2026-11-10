@@ -7,19 +7,14 @@ use serde_json::Value;
 
 use super::{InstallSource, npm_package};
 
-/// A plan is bound to the binary and manager evidence observed when it was made.
-/// Re-resolve it before executing: a PATH or configuration change can replace its owner.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Installation {
     pub source: InstallSource,
     pub update: Option<UpdateCommand>,
-    binary: PathBuf,
-    canonical: PathBuf,
-    identity: Vec<String>,
     latest: LatestQuery,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct UpdateCommand {
     pub(super) program: PathBuf,
     pub(super) args: Vec<String>,
@@ -131,7 +126,7 @@ const DISPLAY_ENV: &[&str] = &[
     "CLAUDE_CONFIG_DIR",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) enum LatestQuery {
     None,
     Registry(String),
@@ -168,10 +163,7 @@ impl SystemProbe {
     }
 
     pub(super) fn read(&self, path: &Path) -> Option<String> {
-        let metadata = std::fs::metadata(path).ok()?;
-        (metadata.len() <= 1024 * 1024)
-            .then(|| std::fs::read_to_string(path).ok())
-            .flatten()
+        std::fs::read_to_string(path).ok()
     }
 
     pub(super) fn which(&self, name: &str, env: &[(String, String)]) -> Option<PathBuf> {
@@ -222,18 +214,11 @@ async fn run_process(command: &UpdateCommand, timeout: Duration) -> Option<Strin
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     let mut child = process.spawn().ok()?;
-    let stdout = child.stdout.take()?;
+    let mut stdout = child.stdout.take()?;
     smol::future::race(
         async {
             let mut output = Vec::new();
-            stdout
-                .take(4 * 1024 * 1024 + 1)
-                .read_to_end(&mut output)
-                .await
-                .ok()?;
-            if output.len() > 4 * 1024 * 1024 {
-                return None;
-            }
+            stdout.read_to_end(&mut output).await.ok()?;
             child
                 .status()
                 .await
@@ -289,7 +274,7 @@ impl Context<'_> {
     }
 
     pub fn managed(&self, source: InstallSource, update: Option<UpdateCommand>) -> Installation {
-        self.installation(source, update, LatestQuery::None, Vec::new())
+        self.installation(source, update, LatestQuery::None)
     }
 
     pub fn installation(
@@ -297,15 +282,11 @@ impl Context<'_> {
         source: InstallSource,
         update: Option<UpdateCommand>,
         latest: LatestQuery,
-        identity: Vec<String>,
     ) -> Installation {
         Installation {
             source,
             update,
-            binary: self.binary.clone(),
-            canonical: self.canonical.clone(),
             latest,
-            identity,
         }
     }
 
@@ -391,35 +372,12 @@ async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Option<String> {
                 .call()
                 .ok()?;
             let mut bytes = Vec::new();
-            response
-                .into_reader()
-                .take(1024 * 1024 + 1)
-                .read_to_end(&mut bytes)
-                .ok()?;
-            if bytes.len() > 1024 * 1024 {
-                return None;
-            }
+            response.into_reader().read_to_end(&mut bytes).ok()?;
             let json: Value = serde_json::from_slice(&bytes).ok()?;
             json.get("version")?.as_str().map(str::to_string)
         }
         LatestQuery::Package { command, yarn } => {
-            let output = probe.output(command).await?;
-            if *yarn {
-                output
-                    .lines()
-                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                    .find_map(|value| {
-                        value
-                            .get("data")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    })
-            } else {
-                serde_json::from_str::<Value>(&output)
-                    .ok()?
-                    .as_str()
-                    .map(str::to_string)
-            }
+            package_latest(&probe.output(command).await?, *yarn)
         }
         LatestQuery::Claude { channel, maximum } => {
             let url = format!("https://downloads.claude.ai/claude-code-releases/{channel}");
@@ -428,11 +386,7 @@ async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Option<String> {
                 .call()
                 .ok()?;
             let mut version = String::new();
-            response
-                .into_reader()
-                .take(256)
-                .read_to_string(&mut version)
-                .ok()?;
+            response.into_reader().read_to_string(&mut version).ok()?;
             let parsed = super::parse_version(&version)?;
             if maximum.is_some_and(|maximum| parsed > maximum) {
                 return None;
@@ -458,26 +412,36 @@ async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Option<String> {
             cask,
         } => {
             let json: Value = serde_json::from_str(&probe.output(command).await?).ok()?;
-            let records = json
-                .get(if *cask { "casks" } else { "formulae" })?
-                .as_array()?;
-            let record = records
-                .iter()
-                .find(|record| brew_name(record, *cask) == Some(target.as_str()))?;
-            if record.get("pinned").and_then(Value::as_bool) == Some(true) {
-                return None;
-            }
-            if *cask {
-                record.get("version")?.as_str().map(str::to_string)
-            } else {
-                record
-                    .get("versions")?
-                    .get("stable")?
-                    .as_str()
-                    .map(str::to_string)
-            }
+            brew_latest(&json, target, *cask)
         }
         LatestQuery::System(query) => super::system_managers::latest(probe, query).await,
+    }
+}
+
+/// The version a package manager's `view`/`info <package>@latest version --json`
+/// printed. npm 12.2.2 prints the one matching version as a one-element array
+/// (`lib/commands/view.js`), and pnpm 10.34.9's `view` prints the same; bun
+/// 1.4.4's `info` prints the bare string; yarn's `info --json` prints lines of
+/// `{"type":"inspect","data":...}`.
+fn package_latest(output: &str, yarn: bool) -> Option<String> {
+    if yarn {
+        return output
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find_map(|value| {
+                value
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+    }
+    match serde_json::from_str::<Value>(output).ok()? {
+        Value::String(version) => Some(version),
+        Value::Array(versions) => match versions.as_slice() {
+            [Value::String(version)] => Some(version.clone()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -583,8 +547,7 @@ async fn mise(context: &Context<'_>) -> Option<Installation> {
                 .and_then(Value::as_str);
             let requested = record.get("requested_version").and_then(Value::as_str);
             let current = record.get("version").and_then(Value::as_str);
-            let (Some(source), Some(requested), Some(current)) = (source, requested, current)
-            else {
+            let (Some(_), Some(requested), Some(current)) = (source, requested, current) else {
                 return Some(context.managed(InstallSource::Mise, None));
             };
             // External path/ref aliases are not a release channel that can be upgraded safely.
@@ -601,13 +564,6 @@ async fn mise(context: &Context<'_>) -> Option<Installation> {
                     tool: tool.clone(),
                     current: current.to_string(),
                 },
-                vec![
-                    tool.clone(),
-                    backend,
-                    source.to_string(),
-                    requested.to_string(),
-                    selected.to_string_lossy().into_owned(),
-                ],
             ));
         }
     }
@@ -643,11 +599,8 @@ fn provider_backend(provider: ProviderKind, backend: &str) -> bool {
         (provider, repository),
         (ProviderKind::ClaudeCode, "anthropics/claude-code")
             | (ProviderKind::Codex, "openai/codex")
-            | (ProviderKind::Pi, "earendil-works/pi" | "badlogic/pi-mono")
-            | (
-                ProviderKind::OpenCode,
-                "anomalyco/opencode" | "sst/opencode"
-            )
+            | (ProviderKind::Pi, "earendil-works/pi")
+            | (ProviderKind::OpenCode, "anomalyco/opencode")
     )
 }
 
@@ -689,12 +642,7 @@ async fn version_managers(context: &Context<'_>) -> Option<Installation> {
                 LatestQuery::None
             };
             let update = context.at(which.program, &["install", &target]);
-            return Some(context.installation(
-                InstallSource::Volta,
-                Some(update),
-                latest,
-                vec![package.name, actual.to_string_lossy().into_owned()],
-            ));
+            return Some(context.installation(InstallSource::Volta, Some(update), latest));
         }
         return Some(context.managed(InstallSource::Volta, None));
     }
@@ -709,6 +657,28 @@ async fn version_managers(context: &Context<'_>) -> Option<Installation> {
         return Some(context.managed(InstallSource::Asdf, None));
     }
     None
+}
+
+/// The version `brew info --json=v2` offers `target`, unless the formula is
+/// pinned: a formula's `versions.stable`, a cask's `version`.
+fn brew_latest(info: &Value, target: &str, cask: bool) -> Option<String> {
+    let record = info
+        .get(if cask { "casks" } else { "formulae" })?
+        .as_array()?
+        .iter()
+        .find(|record| brew_name(record, cask) == Some(target))?;
+    if record.get("pinned").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    if cask {
+        record.get("version")?.as_str().map(str::to_string)
+    } else {
+        record
+            .get("versions")?
+            .get("stable")?
+            .as_str()
+            .map(str::to_string)
+    }
 }
 
 fn brew_name(record: &Value, cask: bool) -> Option<&str> {
@@ -787,7 +757,6 @@ async fn brew(context: &Context<'_>) -> Option<Installation> {
                     target: target.to_string(),
                     cask,
                 },
-                vec![target.to_string(), prefix.to_string_lossy().into_owned()],
             ));
         }
     }
@@ -810,9 +779,7 @@ struct Package {
 }
 
 fn recognized_package(provider: ProviderKind, name: &str) -> bool {
-    name == npm_package(provider)
-        || (provider == ProviderKind::OpenCode && name == "@opencode/cli")
-        || (provider == ProviderKind::Pi && name == "@mariozechner/pi-coding-agent")
+    !name.is_empty() && name == npm_package(provider)
 }
 
 /// A node_modules component alone proves nothing. The owning manifest must
@@ -915,7 +882,6 @@ async fn javascript(context: &Context<'_>) -> Option<Installation> {
                     command: latest,
                     yarn: false,
                 },
-                vec![package.name, package.root.to_string_lossy().into_owned()],
             ));
         }
     }
@@ -1044,10 +1010,6 @@ async fn javascript_plan(
             command: query,
             yarn: source == InstallSource::Yarn,
         },
-        vec![
-            package.name.clone(),
-            package.root.to_string_lossy().into_owned(),
-        ],
     ))
 }
 
@@ -1061,17 +1023,10 @@ async fn javascript_windows(context: &Context<'_>) -> Option<Installation> {
         return None;
     }
     let wrapper = context.probe.read(&context.canonical)?;
-    let candidates: &[&str] = match context.provider {
-        ProviderKind::ClaudeCode => &["@anthropic-ai/claude-code"],
-        ProviderKind::Codex => &["@openai/codex"],
-        ProviderKind::Pi => &[
-            "@earendil-works/pi-coding-agent",
-            "@mariozechner/pi-coding-agent",
-        ],
-        ProviderKind::OpenCode => &["opencode-ai", "@opencode/cli"],
-        ProviderKind::Grok => &["@xai-official/grok"],
-        ProviderKind::Cursor | ProviderKind::Acp => return None,
-    };
+    let name = npm_package(context.provider);
+    if name.is_empty() {
+        return None;
+    }
     for (manager, source, args, bin_args) in [
         (
             "pnpm",
@@ -1110,52 +1065,50 @@ async fn javascript_windows(context: &Context<'_>) -> Option<Installation> {
         if !context.same(context.canonical.parent()?, &bin) {
             continue;
         }
-        for name in candidates {
-            let package_root = root.join(name);
-            let Some(json) = context.probe.read(&package_root.join("package.json")) else {
-                continue;
-            };
-            let Ok(manifest) = serde_json::from_str::<Value>(&json) else {
-                continue;
-            };
-            if manifest.get("name").and_then(Value::as_str) != Some(name) {
-                continue;
-            }
-            let Some(declared) = manifest.get("bin").and_then(|bin| {
-                bin.as_str().or_else(|| {
-                    bin.get(binary_name(context.provider))
-                        .and_then(Value::as_str)
-                })
-            }) else {
-                continue;
-            };
-            let target = package_root.join(declared);
-            if context.probe.canonical(&target).is_none() {
-                continue;
-            }
-            let Some(relative) = windows_relative(&bin, &target) else {
-                continue;
-            };
-            // A wrapper that merely mentions the bin could run anything.
-            if !agent::CmdShim::parse(&wrapper).is_some_and(|shim| shim.target == relative) {
-                continue;
-            }
-            let package = Package {
-                name: (*name).to_string(),
-                root: package_root,
-            };
-            if let Some(installation) = javascript_plan(
-                context,
-                source,
-                query.program.clone(),
-                &root,
-                &package,
-                true,
-            )
-            .await
-            {
-                return Some(installation);
-            }
+        let package_root = root.join(name);
+        let Some(json) = context.probe.read(&package_root.join("package.json")) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<Value>(&json) else {
+            continue;
+        };
+        if manifest.get("name").and_then(Value::as_str) != Some(name) {
+            continue;
+        }
+        let Some(declared) = manifest.get("bin").and_then(|bin| {
+            bin.as_str().or_else(|| {
+                bin.get(binary_name(context.provider))
+                    .and_then(Value::as_str)
+            })
+        }) else {
+            continue;
+        };
+        let target = package_root.join(declared);
+        if context.probe.canonical(&target).is_none() {
+            continue;
+        }
+        let Some(relative) = windows_relative(&bin, &target) else {
+            continue;
+        };
+        // A wrapper that merely mentions the bin could run anything.
+        if !agent::CmdShim::parse(&wrapper).is_some_and(|shim| shim.target == relative) {
+            continue;
+        }
+        let package = Package {
+            name: name.to_string(),
+            root: package_root,
+        };
+        if let Some(installation) = javascript_plan(
+            context,
+            source,
+            query.program.clone(),
+            &root,
+            &package,
+            true,
+        )
+        .await
+        {
+            return Some(installation);
         }
     }
     None
@@ -1198,28 +1151,24 @@ fn native(context: &Context<'_>) -> Option<Installation> {
             {
                 return Some(context.managed(InstallSource::Native, None));
             }
-            let (latest, identity) =
-                claude_channel(context, &home).unwrap_or((LatestQuery::None, Vec::new()));
             Some(context.installation(
                 InstallSource::Native,
                 Some(context.at(context.binary.clone(), &["update"])),
-                latest,
-                identity,
+                claude_channel(context, &home).unwrap_or(LatestQuery::None),
             ))
         }
         ProviderKind::OpenCode if context.canonical == home.join(".opencode/bin/opencode") => {
             Some(context.installation(
                 InstallSource::Native,
                 Some(context.at(context.binary.clone(), &["upgrade", "--method", "curl"])),
-                LatestQuery::Registry("opencode-ai".into()),
-                Vec::new(),
+                LatestQuery::Registry(npm_package(ProviderKind::OpenCode).into()),
             ))
         }
         _ => None,
     }
 }
 
-fn claude_channel(context: &Context<'_>, home: &Path) -> Option<(LatestQuery, Vec<String>)> {
+fn claude_channel(context: &Context<'_>, home: &Path) -> Option<LatestQuery> {
     let config = env_value(context.env, "CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".claude"));
@@ -1233,7 +1182,6 @@ fn claude_channel(context: &Context<'_>, home: &Path) -> Option<(LatestQuery, Ve
     };
     let mut channel = "latest".to_string();
     let mut maximum = None;
-    let mut identity = Vec::new();
     for path in [
         config.join("settings.json"),
         context.cwd.join(".claude/settings.json"),
@@ -1253,15 +1201,56 @@ fn claude_channel(context: &Context<'_>, home: &Path) -> Option<(LatestQuery, Ve
         if let Some(value) = json.get("requiredMaximumVersion") {
             maximum = Some(super::parse_version(value.as_str()?)?);
         }
-        identity.push(path.to_string_lossy().into_owned());
-        identity.push(format!("{channel}:{maximum:?}"));
     }
-    Some((LatestQuery::Claude { channel, maximum }, identity))
+    Some(LatestQuery::Claude { channel, maximum })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// npm 12.2.2 and pnpm 10.34.9 answer `view <package>@latest version
+    /// --json` with a one-element array, bun 1.4.4's `info` with the bare
+    /// string; the version is invented.
+    /// `brew info --json=v2` as Homebrew 7.0.13 builds it (`cmd/info.rb`
+    /// wraps `Formula#to_hash` and `Cask#to_h`); names and versions invented.
+    #[test]
+    fn brew_offers_a_formulas_stable_or_a_casks_version() {
+        let info = serde_json::json!({
+            "formulae": [{
+                "name": "codex",
+                "full_name": "codex",
+                "tap": "homebrew/core",
+                "versions": {"stable": "9.8.7", "head": null, "bottle": true},
+                "installed": [{"version": "9.8.6", "installed_on_request": true}],
+                "pinned": false
+            }],
+            "casks": [{
+                "token": "claude-code",
+                "full_token": "claude-code",
+                "tap": "homebrew/cask",
+                "version": "6.5.4",
+                "installed": "6.5.3"
+            }]
+        });
+        assert_eq!(brew_latest(&info, "codex", false).as_deref(), Some("9.8.7"));
+        assert_eq!(
+            brew_latest(&info, "claude-code", true).as_deref(),
+            Some("6.5.4")
+        );
+    }
+
+    #[test]
+    fn a_package_managers_latest_version_is_read_in_its_own_shape() {
+        assert_eq!(
+            package_latest("[\n  \"9.8.7\"\n]\n", false).as_deref(),
+            Some("9.8.7")
+        );
+        assert_eq!(
+            package_latest("\"9.8.7\"\n", false).as_deref(),
+            Some("9.8.7")
+        );
+    }
 
     #[test]
     fn display_quotes_paths_and_preserves_ownership_context_without_secrets() {

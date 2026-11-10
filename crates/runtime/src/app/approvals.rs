@@ -13,14 +13,6 @@ impl AppState {
             AgentEvent::ApprovalResolved { request_id, .. } => {
                 self.clear_approval(session_id, request_id);
             }
-            AgentEvent::TurnCompleted { .. } => {
-                if let Some(requests) = self.approvals.get_mut(session_id) {
-                    requests.retain(|request| request.parent_item_id.is_some());
-                    if requests.is_empty() {
-                        self.approvals.remove(session_id);
-                    }
-                }
-            }
             _ => {}
         }
     }
@@ -181,15 +173,6 @@ mod tests {
             );
             assert!(state.approval_requests("child").is_empty());
             assert!(!state.approval_requests("parent").is_empty());
-            state.record_approval_event(
-                "parent",
-                &AgentEvent::TurnCompleted {
-                    turn_id: "turn".into(),
-                    status: TurnStatus::Completed,
-                    usage: None,
-                },
-            );
-            assert!(state.approval_requests("parent").is_empty());
         }
     }
 }

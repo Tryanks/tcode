@@ -5,7 +5,7 @@ use super::{
     api::{Request, Response},
     reads::{Mr, PULL_REQUEST, award_name, merge_methods, nodes, text},
 };
-use crate::forge::{ForgeError, ForgeErrorKind, Step, answered, in_order};
+use crate::forge::{ForgeError, Step, answered, in_order};
 use serde_json::{Value, json};
 use tcode_core::{
     pull_request::{PullRequestMergeMethod, PullRequestReviewDraftComment},
@@ -15,6 +15,13 @@ use tcode_protocol::{
     PullRequestAction, PullRequestActionResult as Outcome, PullRequestFile, PullRequestPatch,
     PullRequestRejection as Rejection, PullRequestReviewVerdict,
 };
+
+/// A note id. A note write names the merge request in its path as well, and GitLab looks the
+/// note up among that merge request's (`noteable.notes.find` in `lib/api/helpers/notes_helpers.rb`
+/// and `awardable.notes.find` in `lib/api/helpers/award_emoji.rb`), so another's is not found.
+fn note_id(id: &str) -> Result<u64, Rejection> {
+    id.parse().map_err(|_| Rejection::Invalid)
+}
 
 impl Mr<'_> {
     fn write(
@@ -40,23 +47,11 @@ impl Mr<'_> {
         Ok(mr)
     }
 
-    /// A note id among this merge request's: the path names the merge request, so GitLab
-    /// answers not found for another's.
-    fn own_note(&self, id: &str) -> Result<u64, Rejection> {
-        let id: u64 = id.parse().map_err(|_| Rejection::Invalid)?;
-        self.get(self.path(&format!("/notes/{id}")), "Note")
-            .map_err(|error| match error.kind {
-                ForgeErrorKind::NotFound => Rejection::ForeignSubject,
-                _ => error.rejection(),
-            })?;
-        Ok(id)
-    }
-
     fn react(&self, subject: &str, name: &str, reacted: bool) -> Result<Outcome, Rejection> {
         let awards = if subject == PULL_REQUEST {
             self.path("/award_emoji")
         } else {
-            self.path(&format!("/notes/{}/award_emoji", self.own_note(subject)?))
+            self.path(&format!("/notes/{}/award_emoji", note_id(subject)?))
         };
         if reacted {
             return Ok(answered(self.write(
@@ -140,12 +135,10 @@ impl Mr<'_> {
             return Err(Rejection::Invalid);
         }
         let squash = method == PullRequestMergeMethod::Squash;
-        // Asked for in both of GitLab's names; a merge that is not to wait must say so, or
-        // GitLab may keep it for the pipeline.
+        // A merge that is not to wait must say so, or GitLab may keep it for the pipeline.
         let mut body = json!({
             "sha": head,
             "squash": squash,
-            "merge_when_pipeline_succeeds": auto,
             "auto_merge": auto,
         });
         // Rebasing keeps each commit's own message.
@@ -289,7 +282,7 @@ pub(super) fn act(mr: &Mr<'_>, action: &PullRequestAction) -> Outcome {
                 if blank(body) || comment_id == PULL_REQUEST {
                     return Err(Rejection::Invalid);
                 }
-                let id = mr.own_note(comment_id)?;
+                let id = note_id(comment_id)?;
                 answered(mr.write(
                     "PUT",
                     mr.path(&format!("/notes/{id}")),

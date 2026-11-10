@@ -139,46 +139,16 @@ pub fn evaluate(expression: &str) -> String {
     format!("(() => {{ return ({expression}); }})()")
 }
 
-/// Decode the string an engine's evaluation callback yields into JSON.
-///
-/// WKWebView may hand back the value already JSON-encoded, or double-encoded
-/// (a JSON string whose contents are themselves JSON). We try to parse, and
-/// if we land on a string that itself looks like JSON, parse one more level
-/// so callers see structured data rather than an opaque string.
+/// Decode the JSON an engine's evaluation callback yields; anything that is
+/// not JSON, such as wry's empty string for `undefined`, is returned as text.
 pub fn parse_result(raw: &str) -> Value {
-    match serde_json::from_str::<Value>(raw) {
-        Ok(Value::String(inner)) => {
-            let trimmed = inner.trim_start();
-            if trimmed.starts_with('{') || trimmed.starts_with('[') {
-                serde_json::from_str::<Value>(&inner).unwrap_or(Value::String(inner))
-            } else {
-                Value::String(inner)
-            }
-        }
-        Ok(value) => value,
-        Err(_) => Value::String(raw.to_string()),
-    }
+    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn webview_results_decode_once_or_twice_without_losing_plain_strings() {
-        for (raw, expected) in [
-            (
-                r#"{"url":"https://x","loading":false}"#,
-                json!({"url":"https://x","loading":false}),
-            ),
-            (r#""{\"ok\":true}""#, json!({"ok":true})),
-            (r#""hello""#, json!("hello")),
-            ("undefined", json!("undefined")),
-        ] {
-            assert_eq!(parse_result(raw), expected, "{raw}");
-        }
-    }
 
     /// What an agent passes reaches the page agent as data: a selector or
     /// text cannot end the call and run as script.
@@ -197,7 +167,12 @@ mod tests {
         );
     }
 
-    /// The messages agent.js posts, as it writes them.
+    /// Every message agent.js posts. Shapes are agent.js's own: `send` adds `n` and
+    /// `doc` to each; `ready` is the last statement, `reply` is the `reply` helper's
+    /// two objects, `input` is sent from `userActed`, `url` from `checkUrl`, and
+    /// `console` from `relay`, whose `location` is optional. Contents are invented.
+    /// Only a real engine shows that the script still sends these: the preview
+    /// smoke run (`--preview-smoke`).
     #[test]
     fn agent_messages_parse() {
         let cases = [
@@ -230,11 +205,25 @@ mod tests {
                 Message::Input { generation: 1 },
             ),
             (
+                r#"{"t":"url","url":"http://localhost:5173/#settings","n":"k","doc":"d1"}"#,
+                Message::Url {
+                    url: "http://localhost:5173/#settings".into(),
+                },
+            ),
+            (
                 r#"{"t":"console","level":"error","text":"boom","location":"http://x/app.js:3","n":"k","doc":"d1"}"#,
                 Message::Console(ConsoleEntry {
                     level: "error".into(),
                     text: "boom".into(),
                     location: Some("http://x/app.js:3".into()),
+                }),
+            ),
+            (
+                r#"{"t":"console","level":"error","text":"Unhandled promise rejection: x","n":"k","doc":"d1"}"#,
+                Message::Console(ConsoleEntry {
+                    level: "error".into(),
+                    text: "Unhandled promise rejection: x".into(),
+                    location: None,
                 }),
             ),
         ];

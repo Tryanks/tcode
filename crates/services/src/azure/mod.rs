@@ -26,8 +26,8 @@ use std::{
 };
 use tcode_core::{
     pull_request::{
-        AZURE, HostKind, HostTerms, Mergeability, PullRequestKey, PullRequestMergeMethod,
-        PullRequestReviewDraftComment, PullRequestStackState, PullRequestState,
+        AZURE, HostKind, HostTerms, PullRequestKey, PullRequestMergeMethod,
+        PullRequestReviewDraftComment, PullRequestStackState,
     },
     pull_request_watch::{CheckStatus, PullRequestRemark, PullRequestWatchRead},
     session::ReviewSide,
@@ -148,14 +148,6 @@ impl Azure {
         format!("{}:{}", key.host, viewer.unwrap_or(ANONYMOUS))
     }
 
-    /// The trial merge; a pull request no longer open has none to read.
-    fn mergeability(pr: &Value) -> Mergeability {
-        if reads::state(pr) != Some(PullRequestState::Open) {
-            return Mergeability::Unknown;
-        }
-        reads::mergeability(pr)
-    }
-
     /// Every push, oldest first. Azure keeps them from anonymous reads.
     fn iterations(&self, key: &PullRequestKey) -> Result<Vec<Iteration>, ForgeError> {
         let mut iterations: Vec<_> = self
@@ -249,12 +241,9 @@ impl Azure {
                 reads
                     .into_iter()
                     .map(|handle| {
-                        handle.join().unwrap_or_else(|_| {
-                            Err(error(
-                                ForgeErrorKind::Uncertain,
-                                "Azure DevOps diff unbuilt",
-                            ))
-                        })
+                        handle
+                            .join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
                     })
                     .collect()
             });
@@ -563,7 +552,7 @@ impl Azure {
         let pr = self.pr(key);
         let read = pr.pr()?;
         let checks = pr.checks(&read)?;
-        let mergeability = Self::mergeability(&read);
+        let mergeability = reads::mergeability(&read);
         let signed_in = self.api.credential(&key.host)?.is_some();
         Ok(PullRequestActionState {
             merge_state: reads::merge_state(&read, mergeability, &checks),
@@ -688,7 +677,9 @@ impl Forge for Azure {
             .into_iter()
             .map(|(host, added)| {
                 let enabled = configured.get(&host).is_none_or(|choice| choice.enabled);
-                let credential = self.api.credential(&host).ok().flatten();
+                let read = self.api.credential(&host);
+                let failed = read.as_ref().err().and_then(ForgeError::cli_problem);
+                let credential = read.ok().flatten();
                 let source = credential
                     .as_ref()
                     .map(|credential| credential.source.clone());
@@ -698,6 +689,7 @@ impl Forge for Azure {
                     .unwrap_or_default();
                 let problem = match &credential {
                     None if !enabled => None,
+                    None if failed.is_some() => failed,
                     None if az => Some(HostProblem::NotSignedIn {
                         tool: "az".into(),
                         command: Some("az login".into()),
@@ -772,7 +764,7 @@ impl Forge for Azure {
         let read = pr.pr()?;
         let checks = pr.checks(&read)?;
         Ok(Summary {
-            snapshot: reads::snapshot(&read, &checks, Self::mergeability(&read), Self::now())
+            snapshot: reads::snapshot(&read, &checks, reads::mergeability(&read), Self::now())
                 .ok_or_else(|| {
                     error(
                         ForgeErrorKind::Uncertain,
@@ -965,7 +957,7 @@ impl Forge for Azure {
             state: reads::state(&read)
                 .ok_or_else(|| error(ForgeErrorKind::Uncertain, "Azure DevOps state unreadable"))?,
             checks: pr.checks(&read)?,
-            mergeability: Self::mergeability(&read),
+            mergeability: reads::mergeability(&read),
             head_sha: reads::head(&read),
             base_branch: read["targetRefName"]
                 .as_str()

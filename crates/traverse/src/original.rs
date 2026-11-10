@@ -1,4 +1,4 @@
-use std::{io, time::Duration};
+use std::io;
 
 use iroh::endpoint::{Connection, SendStream};
 use tcode_client::original::{OpenedOriginal, OriginalFuture, OriginalReader, error};
@@ -12,7 +12,6 @@ use crate::{
     wire::{self, LineReader},
 };
 
-pub(crate) const IDLE: Duration = Duration::from_secs(60);
 const CANCEL: u32 = 0x100;
 const BROKEN: u32 = 0x104;
 
@@ -32,7 +31,7 @@ pub(crate) async fn serve(
             _ => Err(io::Error::other("original cancelled")),
         },
         result = async {
-            let admitted = match timed(mux.open_original(device, principal, target, policy)).await? {
+            let admitted = match mux.open_original(device, principal, target, policy).await {
                 Ok(source) => source,
                 Err(error) => {
                     wire::write_line(&mut send, &OriginalReply::OriginalFailed { error }).await?;
@@ -41,21 +40,21 @@ pub(crate) async fn serve(
                 }
             };
             let source = &admitted.source;
-            timed(wire::write_line(&mut send, &OriginalReply::OriginalReady { len: source.metadata.len, mime: source.metadata.mime.clone(), dimensions: source.metadata.dimensions })).await??;
+            wire::write_line(&mut send, &OriginalReply::OriginalReady { len: source.metadata.len, mime: source.metadata.mime.clone(), dimensions: source.metadata.dimensions }).await?;
             write_progress(&mut send, &source.metadata.len.to_be_bytes()).await?;
             let mut sent = 0_u64;
             loop {
-                let block = timed(source.blocks.recv()).await?.map_err(io::Error::other)?.map_err(|err| io::Error::other(err.message))?;
+                let block = source.blocks.recv().await.map_err(io::Error::other)?.map_err(|err| io::Error::other(err.message))?;
                 if block.is_empty() { break; }
                 sent += block.len() as u64;
                 if sent > source.metadata.len { return Err(io::Error::other("original exceeded its length")); }
                 write_progress(&mut send, &block).await?;
             }
             if sent != source.metadata.len { return Err(io::Error::other("original ended short")); }
-            timed(wire::write_line(&mut send, &OriginalReply::OriginalComplete)).await??;
+            wire::write_line(&mut send, &OriginalReply::OriginalComplete).await?;
             send.finish()?;
             // Keep admission until QUIC acknowledges completion or the peer cancels.
-            if timed(send.stopped()).await?.map_err(io::Error::other)?.is_some() {
+            if send.stopped().await.map_err(io::Error::other)?.is_some() {
                 return Err(io::Error::other("original cancelled"));
             }
             Ok(())
@@ -67,18 +66,9 @@ pub(crate) async fn serve(
     result
 }
 
-async fn timed<T>(future: impl std::future::Future<Output = T>) -> io::Result<T> {
-    tokio::time::timeout(IDLE, future).await.map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            "original made no progress for 60 seconds",
-        )
-    })
-}
-
 pub(crate) async fn write_progress(send: &mut SendStream, mut bytes: &[u8]) -> io::Result<()> {
     while !bytes.is_empty() {
-        let count = timed(send.write(bytes)).await?.map_err(io::Error::other)?;
+        let count = send.write(bytes).await.map_err(io::Error::other)?;
         if count == 0 {
             return Err(io::Error::other("original write stopped"));
         }
@@ -113,21 +103,13 @@ pub(crate) async fn open(
     connection: &Connection,
     target: OriginalTarget,
 ) -> Result<OpenedOriginal, ProtocolError> {
-    let (mut send, recv) = timed(connection.open_bi())
+    let (mut send, recv) = connection.open_bi().await.map_err(error)?;
+    wire::write_line(&mut send, &OriginalRequest::Original { target })
         .await
-        .map_err(error)?
         .map_err(error)?;
-    timed(wire::write_line(
-        &mut send,
-        &OriginalRequest::Original { target },
-    ))
-    .await
-    .map_err(error)?
-    .map_err(error)?;
     let mut reader = wire::reader(recv);
-    let line = timed(wire::read_line(&mut reader, wire::MAX_CONTROL_LINE))
+    let line = wire::read_line(&mut reader, wire::MAX_CONTROL_LINE)
         .await
-        .map_err(error)?
         .map_err(error)?
         .ok_or_else(|| error("original ended before metadata"))?;
     let metadata = match serde_json::from_str(&line).map_err(error)? {
@@ -143,10 +125,7 @@ pub(crate) async fn open(
         OriginalReply::OriginalFailed { error } => return Err(error),
         _ => return Err(error("unexpected original reply")),
     };
-    let prefix = timed(reader.read_u64())
-        .await
-        .map_err(error)?
-        .map_err(error)?;
+    let prefix = reader.read_u64().await.map_err(error)?;
     if prefix != metadata.len {
         return Err(error("original length prefix disagrees with metadata"));
     }
@@ -177,7 +156,7 @@ pub(crate) async fn open(
 async fn read_block(reader: &mut LineReader, remaining: &mut u64) -> io::Result<Option<Vec<u8>>> {
     if *remaining > 0 {
         let mut block = vec![0; (*remaining).min(64 * 1024) as usize];
-        let count = timed(reader.read(&mut block)).await??;
+        let count = reader.read(&mut block).await?;
         if count == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -188,8 +167,8 @@ async fn read_block(reader: &mut LineReader, remaining: &mut u64) -> io::Result<
         *remaining -= count as u64;
         return Ok(Some(block));
     }
-    let line = timed(wire::read_line(reader, wire::MAX_CONTROL_LINE))
-        .await??
+    let line = wire::read_line(reader, wire::MAX_CONTROL_LINE)
+        .await?
         .ok_or_else(|| io::Error::other("missing original completion"))?;
     if !matches!(
         serde_json::from_str::<OriginalReply>(&line)?,
@@ -197,7 +176,7 @@ async fn read_block(reader: &mut LineReader, remaining: &mut u64) -> io::Result<
     ) {
         return Err(io::Error::other("invalid original completion"));
     }
-    if timed(reader.read(&mut [0])).await?? != 0 {
+    if reader.read(&mut [0]).await? != 0 {
         return Err(io::Error::other("bytes after original completion"));
     }
     Ok(None)

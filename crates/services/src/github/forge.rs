@@ -50,6 +50,12 @@ impl From<GitHubError> for ForgeError {
         let description = error.to_string();
         let kind = match error {
             GitHubError::Credential(CredentialError::Disabled) => ForgeErrorKind::HostDisabled,
+            GitHubError::Credential(CredentialError::SavedUnreadable) => {
+                ForgeErrorKind::CredentialsUnreadable
+            }
+            GitHubError::Credential(CredentialError::CliFailed(_)) => {
+                ForgeErrorKind::CliFailed { tool: "gh".into() }
+            }
             GitHubError::Credential(_) => ForgeErrorKind::NoCredential,
             GitHubError::Unauthorized => ForgeErrorKind::Unauthorized,
             GitHubError::Paused { retry_at } => ForgeErrorKind::Paused { retry_at },

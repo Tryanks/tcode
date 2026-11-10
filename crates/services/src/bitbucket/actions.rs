@@ -5,7 +5,7 @@ use super::{
     api::{Request, Response},
     reads::{PULL_REQUEST, Pr, head, text},
 };
-use crate::forge::{ForgeError, ForgeErrorKind, Step, answered, in_order};
+use crate::forge::{ForgeError, Step, answered, in_order};
 use serde_json::{Value, json};
 use tcode_core::{
     pull_request::{PullRequestMergeMethod, PullRequestReviewDraftComment},
@@ -35,18 +35,6 @@ impl Pr<'_> {
             return Err(Rejection::StaleHead { head: current });
         }
         Ok(pr)
-    }
-
-    /// A comment id among this pull request's: the path names the pull request, so Bitbucket
-    /// answers not found for another's.
-    fn own_comment(&self, id: &str) -> Result<u64, Rejection> {
-        let id: u64 = id.parse().map_err(|_| Rejection::Invalid)?;
-        self.get(self.path(&format!("/comments/{id}?fields=id")), "Comment")
-            .map_err(|error| match error.kind {
-                ForgeErrorKind::NotFound => Rejection::ForeignSubject,
-                _ => error.rejection(),
-            })?;
-        Ok(id)
     }
 
     /// Bitbucket writes the reviewers whole, so the change applies to the set it holds now; the
@@ -83,15 +71,9 @@ impl Pr<'_> {
 
     fn merge(&self, at: &str, method: PullRequestMergeMethod) -> Result<Outcome, Rejection> {
         let pr = self.at_head(at)?;
-        let strategy = match method {
-            PullRequestMergeMethod::Merge => "merge_commit",
-            PullRequestMergeMethod::Squash => "squash",
-            // The linear history GitHub calls rebase and merge.
-            PullRequestMergeMethod::Rebase => "rebase_fast_forward",
-        };
         let body = json!({
             "type": "pullrequest",
-            "merge_strategy": strategy,
+            "merge_strategy": super::reads::merge_strategy(method),
             "close_source_branch": pr["close_source_branch"].as_bool().unwrap_or(false),
         });
         Ok(
@@ -188,7 +170,8 @@ pub(super) fn act(pr: &Pr<'_>, action: &PullRequestAction) -> Outcome {
                 if blank(body) || comment_id == PULL_REQUEST {
                     return Err(Rejection::Invalid);
                 }
-                let id = pr.own_comment(comment_id)?;
+                // The path names the pull request as well as the comment.
+                let id: u64 = comment_id.parse().map_err(|_| Rejection::Invalid)?;
                 answered(pr.write(
                     "PUT",
                     pr.path(&format!("/comments/{id}")),

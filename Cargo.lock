@@ -4112,7 +4112,6 @@ dependencies = [
  "gpui-mobile-pacing",
  "gpui-mobile-touch",
  "jni 0.22.4",
- "libc",
  "log",
  "ndk",
  "parking_lot",
@@ -9355,6 +9354,7 @@ dependencies = [
  "serde_json",
  "tcode-protocol",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -9537,6 +9537,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tcode-core",
+ "tokio-util",
 ]
 
 [[package]]
@@ -12161,7 +12162,6 @@ name = "tcode-client"
 version = "0.1.0"
 dependencies = [
  "async-channel",
- "async-io",
  "base64 0.23.1",
  "block2 0.6.2",
  "cpal",
@@ -12180,7 +12180,6 @@ dependencies = [
  "url",
  "uuid",
  "wasm-bindgen",
- "web-time",
  "windows 0.62.2",
 ]
 
@@ -12281,6 +12280,7 @@ dependencies = [
  "dirs 7.0.0",
  "flate2",
  "futures-lite",
+ "ignore",
  "image",
  "imara-diff",
  "jpeg-decoder",

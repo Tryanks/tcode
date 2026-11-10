@@ -1,9 +1,8 @@
 //! Moving and copying directory trees without following links.
 //!
 //! A move is a rename where the filesystem allows one. Across filesystems the
-//! tree is copied, every file read back and compared byte for byte with its
-//! source, and only then is the source deleted; a failed or mismatched copy is
-//! discarded and the source kept.
+//! tree is copied, every file synced, and only then is the source deleted; a
+//! failed copy is discarded and the source kept.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -41,16 +40,12 @@ pub fn move_tree(source: &Path, destination: &Path) -> io::Result<()> {
     remove_if_present(source)
 }
 
-/// Copy `source` to `destination`, which must not exist, verifying every file.
+/// Copy `source` to `destination`, which must not exist, syncing every file.
 pub fn copy_tree(source: &Path, destination: &Path, on_bytes: &mut OnBytes) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     let kind = metadata.file_type();
     if kind.is_symlink() {
-        let target = fs::read_link(source)?;
-        symlink(source, &target, destination)?;
-        if fs::read_link(destination)? != target {
-            return Err(mismatch(source, destination));
-        }
+        symlink(source, &fs::read_link(source)?, destination)?;
     } else if kind.is_dir() {
         fs::create_dir(destination)?;
         let mut names = fs::read_dir(source)?
@@ -89,40 +84,7 @@ fn copy_file(source: &Path, destination: &Path, on_bytes: &mut OnBytes) -> io::R
         writer.write_all(&buffer[..read])?;
         on_bytes(read as u64)?;
     }
-    writer.sync_all()?;
-    drop(writer);
-    verify_file(source, destination)
-}
-
-/// Read the copy back and compare it with its source, length and bytes.
-fn verify_file(source: &Path, destination: &Path) -> io::Result<()> {
-    if fs::metadata(source)?.len() != fs::metadata(destination)?.len() {
-        return Err(mismatch(source, destination));
-    }
-    let (mut original, mut copy) = (File::open(source)?, File::open(destination)?);
-    let (mut expected, mut actual) = (vec![0; CHUNK_BYTES], vec![0; CHUNK_BYTES]);
-    loop {
-        let read = original.read(&mut expected)?;
-        if read == 0 {
-            return if copy.read(&mut actual[..1])? == 0 {
-                Ok(())
-            } else {
-                Err(mismatch(source, destination))
-            };
-        }
-        copy.read_exact(&mut actual[..read])?;
-        if expected[..read] != actual[..read] {
-            return Err(mismatch(source, destination));
-        }
-    }
-}
-
-fn mismatch(source: &Path, destination: &Path) -> io::Error {
-    io::Error::other(format!(
-        "the copy {} differs from {}; the source is kept",
-        destination.display(),
-        source.display()
-    ))
+    writer.sync_all()
 }
 
 /// Bytes of every file under `path`, not following links.

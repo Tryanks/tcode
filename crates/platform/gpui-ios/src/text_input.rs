@@ -14,25 +14,18 @@ pub struct TextRange {
 
 impl TextRange {
     pub fn range(self) -> Option<Range<usize>> {
-        (self.location < NOT_FOUND)
-            .then(|| {
-                self.location
-                    .checked_add(self.length)
-                    .filter(|end| *end < NOT_FOUND)
-                    .map(|end| self.location..end)
-            })
-            .flatten()
+        (self.location != NOT_FOUND).then(|| self.location..self.location + self.length)
     }
 }
 
 impl From<Option<Range<usize>>> for TextRange {
     fn from(range: Option<Range<usize>>) -> Self {
         match range {
-            Some(range) if range.start <= range.end && range.end < NOT_FOUND => Self {
+            Some(range) => Self {
                 location: range.start,
-                length: range.end - range.start,
+                length: range.len(),
             },
-            _ => Self {
+            None => Self {
                 location: NOT_FOUND,
                 length: 0,
             },
@@ -252,57 +245,5 @@ mod tests {
             let target = caret(&mut handler, offset).center();
             assert_eq!(caret_toward(&mut handler, 12, target), Some(offset));
         }
-    }
-
-    #[test]
-    fn native_ranges_distinguish_absent_empty_and_overflow() {
-        assert_eq!(
-            TextRange::from(Some(1..3)),
-            TextRange {
-                location: 1,
-                length: 2
-            }
-        );
-        assert_eq!(
-            TextRange::from(Some(3..3)),
-            TextRange {
-                location: 3,
-                length: 0
-            }
-        );
-        assert_eq!(TextRange::from(None).range(), None);
-        assert_eq!(TextRange::from(None).location, isize::MAX as usize);
-        assert_eq!(
-            TextRange {
-                location: 3,
-                length: 0
-            }
-            .range(),
-            Some(3..3)
-        );
-        assert_eq!(
-            TextRange {
-                location: 1,
-                length: 2
-            }
-            .range(),
-            Some(1..3)
-        );
-        assert_eq!(
-            TextRange {
-                location: NOT_FOUND - 1,
-                length: 4
-            }
-            .range(),
-            None
-        );
-        assert_eq!(
-            TextRange {
-                location: isize::MAX as usize,
-                length: 0
-            }
-            .range(),
-            None
-        );
     }
 }

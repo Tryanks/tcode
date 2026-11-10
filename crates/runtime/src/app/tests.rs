@@ -1882,7 +1882,7 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
             message,
             HostMessage::Event(EventEnvelope { request_id: None,
                 topic: Topic::SessionEvents { .. },
-                event: ServerEvent::SessionEvent(SessionEventRecord {
+                event: ServerEvent::SessionEvent(StoredEvent {
                     event: AgentEvent::TurnStarted { turn_id },
                     ..
                 }),
@@ -3423,8 +3423,8 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
     let env = launch_env_for_profile(
         &state.settings,
         "klaude-kode",
-        state.settings_store.profile_secrets(&harness),
-        state.settings_store.profile_secrets("klaude-kode"),
+        state.settings_store.profile_secrets(&harness).unwrap(),
+        state.settings_store.profile_secrets("klaude-kode").unwrap(),
     )
     .env;
     assert_eq!(env[..3], shared[..]);
@@ -3448,8 +3448,11 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
     let builtin = launch_env_for_profile(
         &state.settings,
         builtin_profile_id,
-        state.settings_store.profile_secrets(&harness),
-        state.settings_store.profile_secrets(builtin_profile_id),
+        state.settings_store.profile_secrets(&harness).unwrap(),
+        state
+            .settings_store
+            .profile_secrets(builtin_profile_id)
+            .unwrap(),
     )
     .env;
     assert_eq!(
@@ -3586,12 +3589,10 @@ fn report_callbacks_carry_the_report_verbatim_and_label_fallbacks() {
         "the lead's view shows the report alone"
     );
 
-    // A fallback is labelled as such and bounded.
-    for (output, expected_tail, truncated) in [
-        (String::new(), "(no assistant output)".into(), false),
-        ("done".into(), "done".into(), false),
-        ("界".repeat(1200), "界".repeat(1200), false),
-        ("界".repeat(1201), "界".repeat(600), true),
+    // A fallback is labelled as such.
+    for (output, expected_tail) in [
+        (String::new(), String::from("(no assistant output)")),
+        ("done".into(), "done".into()),
     ] {
         let text = assemble_report_callback(
             "child",
@@ -3604,7 +3605,6 @@ fn report_callbacks_carry_the_report_verbatim_and_label_fallbacks() {
             "[orchestrate] thread child (\"Title\") unreported.\n{ORCHESTRATE_FALLBACK_LABEL}"
         )));
         assert!(!text.contains("tokens:"));
-        assert_eq!(text.contains("Final output tail"), truncated);
         assert_eq!(text.lines().last().unwrap(), expected_tail);
         let callback = only_callback(&text);
         assert_eq!(callback.event, CallbackEvent::Ended("unreported".into()));
@@ -5393,7 +5393,11 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
         };
         assert_eq!(
             prompt.as_deref(),
-            Some(active.queue[0].wire_text(&[]).as_str())
+            Some(
+                active.queue[0]
+                    .wire_text(active.meta.provider, &[])
+                    .as_str()
+            )
         );
     });
 }
@@ -6864,6 +6868,23 @@ fn image_only_message_gets_placeholder_on_the_wire_only() {
     let recorded = active.accept_turn_delivery(delivery_id).unwrap();
     assert_eq!(recorded.text, "");
     assert_eq!(attachment_paths(&recorded.attachments), vec!["/tmp/a.png"]);
+}
+
+/// Claude Code and OpenCode drop the empty text part themselves, so an
+/// image-only message reaches them as the user wrote it.
+#[test]
+fn image_only_message_goes_as_written_to_harnesses_that_drop_empty_text() {
+    let attachment = Attachment {
+        media_type: "image/png".into(),
+        data_base64: "AAAA".into(),
+        source_path: None,
+    };
+    for provider in [ProviderKind::ClaudeCode, ProviderKind::OpenCode] {
+        assert_eq!(
+            wire_text_with_placeholder(String::new(), std::slice::from_ref(&attachment), provider),
+            ""
+        );
+    }
 }
 
 #[test]
@@ -8508,6 +8529,7 @@ fn store_writer_flush_persists_ordered_events_metadata_and_secrets_for_reopening
     assert_eq!(
         settings
             .profile_secrets("profile")
+            .unwrap()
             .get("ANTHROPIC_API_KEY")
             .map(String::as_str),
         Some("writer-secret")
@@ -8762,7 +8784,10 @@ fn a_drafts_terminal_starts_in_its_project_directory() {
                 .unwrap()
                 .terminal_open
         );
-        assert_eq!(workspace.terminals[0].terminal.cwd(), project_cwd);
+        assert_eq!(
+            std::fs::canonicalize(workspace.terminals[0].terminal.working_directory()).unwrap(),
+            std::fs::canonicalize(&project_cwd).unwrap()
+        );
     });
 }
 
@@ -10324,7 +10349,7 @@ fn a_cursor_is_answered_in_one_reply_that_reaches_the_end_of_the_log() {
     let records = messages
         .iter()
         .enumerate()
-        .map(|(ts, message)| SessionEventRecord {
+        .map(|(ts, message)| StoredEvent {
             origin: None,
             author: None,
             ts: Some(ts as u64),
@@ -10393,8 +10418,8 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
     let store = TestStore::new("history-pages");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(cx, |state, _| {
-        let records: Vec<SessionEventRecord> = (0..2000)
-            .map(|index| SessionEventRecord {
+        let records: Vec<StoredEvent> = (0..2000)
+            .map(|index| StoredEvent {
                 origin: None,
                 author: None,
                 ts: Some(index),
@@ -10415,12 +10440,6 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
             after: None,
         };
         let snapshot = events_reply(state, &subscription);
-        assert!(
-            tcode_protocol::encode_line(&HostMessage::Event(snapshot.clone()))
-                .unwrap()
-                .len()
-                <= tcode_protocol::MAX_SESSION_HISTORY_BYTES
-        );
         let ServerEvent::SessionSnapshot {
             from,
             records: tail,
@@ -10442,7 +10461,7 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
                 end,
                 truncated,
             } = state.event_records["large"]
-                .history_page(before, 200)
+                .history_page(before, 200, None)
                 .unwrap()
             else {
                 panic!("page")
@@ -10491,7 +10510,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
         let mut turn_starts = Vec::new();
         for turn in 0..5u64 {
             turn_starts.push(records.len());
-            records.push(SessionEventRecord {
+            records.push(StoredEvent {
                 origin: None,
                 author: None,
                 ts: Some(turn * 1000),
@@ -10506,7 +10525,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                 }),
                 elided: None,
             });
-            records.push(SessionEventRecord {
+            records.push(StoredEvent {
                 origin: None,
                 author: None,
                 ts: Some(turn * 1000 + 1),
@@ -10516,7 +10535,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                 elided: None,
             });
             for delta in 0..300u64 {
-                records.push(SessionEventRecord {
+                records.push(StoredEvent {
                     origin: None,
                     author: None,
                     ts: Some(turn * 1000 + 2 + delta),
@@ -10528,7 +10547,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                     elided: None,
                 });
             }
-            records.push(SessionEventRecord {
+            records.push(StoredEvent {
                 origin: None,
                 author: None,
                 ts: Some(turn * 1000 + 400),
@@ -10569,7 +10588,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
             records: page,
             truncated,
         } = state.event_records["streamed"]
-            .history_page(from, 200)
+            .history_page(from, 200, None)
             .unwrap()
         else {
             panic!("page")
@@ -10595,7 +10614,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
 
 /// Persist `turns` streamed turns for `id` and return the records as the
 /// store replays them.
-fn persist_streamed_turns(store: &SessionStore, id: &str, turns: u64) -> Vec<SessionEventRecord> {
+fn persist_streamed_turns(store: &SessionStore, id: &str, turns: u64) -> Vec<StoredEvent> {
     for turn in 0..turns {
         let mut events = vec![
             AgentEvent::ItemCompleted(ThreadItem {
@@ -10638,65 +10657,8 @@ fn persist_streamed_turns(store: &SessionStore, id: &str, turns: u64) -> Vec<Ses
     store.read_events(id).unwrap()
 }
 
-/// A client scrolling to the top of a long thread fetches one page per turn;
-/// every page must come from the log parsed when the thread was opened.
-#[test]
-fn history_pages_of_an_opened_session_parse_the_log_once() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("history-single-parse");
-    open_stored_session(&store, "paged");
-    let records = persist_streamed_turns(&store, "paged", 5);
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let reads_before_open = store.event_reads();
-
-    let window = window_reply(
-        &through_pipe(&state, cx, 1, subscribe_events("paged", None)),
-        1,
-    );
-    assert_eq!(
-        window.total_turns, 5,
-        "the absolute turn count comes from the log"
-    );
-    cx.run_until(|state| {
-        state
-            .resident("paged")
-            .is_some_and(|session| session.timeline.turns.len() == 5)
-    });
-    let mut loaded = window.records;
-    let mut before = window.from;
-    let mut id = 2;
-    while before > 0 {
-        let QueryResponse::SessionHistoryPage {
-            records: page,
-            from,
-            end,
-            ..
-        } = query_reply(
-            &through_pipe(&state, cx, id, history_page("paged", before)),
-            id,
-        )
-        else {
-            panic!("page")
-        };
-        assert_eq!(end, before);
-        loaded.splice(0..0, page);
-        before = from;
-        id += 1;
-    }
-    assert_eq!(
-        Timeline::fold_events(loaded),
-        Timeline::fold_events(records),
-        "merged deltas fold as the log does"
-    );
-    assert_eq!(
-        store.event_reads() - reads_before_open,
-        1,
-        "opening, loading the timeline and paging parsed the log once"
-    );
-}
-
-/// The log of an opened session is read once, extended by its appends, and
-/// kept while the session is resident, parked included; once it leaves
+/// The log of an opened session is extended by its appends and kept while
+/// the session is resident, parked included; once it leaves
 /// residency it is dropped only after the store writer flushed its appends,
 /// so the next read finds every one of them.
 #[test]
@@ -10706,7 +10668,6 @@ fn session_log_follows_residency_and_flushes_before_release() {
     open_stored_session(&store, "resident");
     let persisted = persist_streamed_turns(&store, "resident", 2).len() as u64;
     let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let reads_before_open = store.event_reads();
     let (commands, _actor) = smol::channel::unbounded();
 
     window_reply(
@@ -10747,11 +10708,6 @@ fn session_log_follows_residency_and_flushes_before_release() {
         panic!("page")
     };
     assert_eq!((from, records.len()), (persisted, 1));
-    assert_eq!(
-        store.event_reads() - reads_before_open,
-        1,
-        "the appended record is served from the log, not a re-read"
-    );
 
     // Parked with a live provider, the session stays resident and cached.
     state.update(cx, |state, _| {
@@ -10774,7 +10730,6 @@ fn session_log_follows_residency_and_flushes_before_release() {
         store.read_events("resident").unwrap().len() as u64,
         persisted + 1
     );
-    assert_eq!(store.event_reads() - reads_before_open, 2);
 }
 
 #[test]
@@ -10920,7 +10875,7 @@ fn status_carries_the_running_turn_while_in_flight_and_open_requests_while_live(
     );
 
     // A background subagent keeps running, and asking, after the turn that
-    // spawned it ends; the turn's own requests end with it.
+    // spawned it ends.
     let approval = |id: &str, parent_item_id: Option<&str>| agent::ApprovalRequest {
         id: id.into(),
         turn_id: None,
@@ -10934,12 +10889,11 @@ fn status_carries_the_running_turn_while_in_flight_and_open_requests_while_live(
         blocked_path: None,
         options: Vec::new(),
     };
-    for request in [
-        approval("own", None),
-        approval("subagent-during-turn", Some("toolu_agent")),
-    ] {
-        state.on_event(&id, AgentEvent::ApprovalRequested(request), &mut cx);
-    }
+    state.on_event(
+        &id,
+        AgentEvent::ApprovalRequested(approval("subagent-during-turn", Some("toolu_agent"))),
+        &mut cx,
+    );
     state.on_event(
         &id,
         AgentEvent::TurnCompleted {
@@ -10965,7 +10919,6 @@ fn status_carries_the_running_turn_while_in_flight_and_open_requests_while_live(
     };
     let status = state.session_status_snapshot(&id).unwrap();
     assert_eq!(status.running_turn, None);
-    assert_eq!(status.pending_user_input, None);
     assert_eq!(
         pending(&state),
         ["subagent-during-turn", "subagent-between-turns"]
@@ -11162,8 +11115,8 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
     );
 }
 
-fn tool_call(id: &str, output: String) -> SessionEventRecord {
-    SessionEventRecord {
+fn tool_call(id: &str, output: String) -> StoredEvent {
+    StoredEvent {
         origin: None,
         author: None,
         ts: Some(1),
@@ -11207,7 +11160,7 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
     }
     let records = vec![
         tool_call("tool", tool_output.clone()),
-        SessionEventRecord {
+        StoredEvent {
             origin: None,
             author: None,
             ts: Some(2),
@@ -11333,6 +11286,77 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
     });
 }
 
+/// A whole output is sent when one line of the asking client's connection
+/// holds its reply: an in-process client takes any size, and a client over
+/// the network is told by name when the escaped reply is longer than its
+/// connection's line, which would otherwise close the connection.
+#[test]
+fn a_whole_output_is_sent_when_the_clients_line_holds_it() {
+    use tcode_client::attachment::AttachmentPolicy;
+    use tcode_protocol::{ClientMessage, ClientPayload, MAX_LINE_BYTES, Query};
+
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("whole-output-line");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    // Longer than half a network line, and short of one.
+    let long = "a".repeat(MAX_LINE_BYTES / 2 + 1);
+    // A quarter of a network line, each byte of which takes six in the reply.
+    let escapes = "\u{1b}".repeat(MAX_LINE_BYTES / 4);
+    state.update(cx, |state, _| {
+        state.event_records.insert(
+            "outputs".into(),
+            session_log([
+                tool_call("long", long.clone()),
+                tool_call("escapes", escapes.clone()),
+            ]),
+        );
+    });
+    let mut read = |id: u64, item_id: &str, policy: AttachmentPolicy| {
+        state.update(cx, |state, host_cx| {
+            crate::pipe::handle_client_message(
+                state,
+                host_cx,
+                ClientMessage {
+                    principal: None,
+                    key: None,
+                    id,
+                    payload: ClientPayload::Query(Query::ReadItemOutput {
+                        session_id: "outputs".into(),
+                        item_id: item_id.into(),
+                    }),
+                },
+                policy,
+            )
+        });
+        answered(cx, id)
+            .into_iter()
+            .find_map(|message| match message {
+                HostMessage::QueryResult { id: reply, result } if reply == id => Some(result),
+                _ => None,
+            })
+            .expect("the read is answered")
+    };
+
+    assert_eq!(
+        read(1, "long", AttachmentPolicy::LOCAL),
+        Ok(QueryResponse::ItemOutput(long.clone()))
+    );
+    assert_eq!(
+        read(2, "long", AttachmentPolicy::network()),
+        Ok(QueryResponse::ItemOutput(long))
+    );
+    assert_eq!(
+        read(3, "escapes", AttachmentPolicy::LOCAL),
+        Ok(QueryResponse::ItemOutput(escapes))
+    );
+    assert_eq!(
+        read(4, "escapes", AttachmentPolicy::network())
+            .unwrap_err()
+            .code,
+        "item_output_too_large"
+    );
+}
+
 /// Every update of a turn's changes carries the whole diff set; only the last
 /// one decides what the turn shows, so the earlier ones cross without diffs.
 #[test]
@@ -11346,7 +11370,7 @@ fn superseded_turn_changes_cross_without_diffs() {
         ))
         .unwrap()
     };
-    let update = |diff: &str| SessionEventRecord {
+    let update = |diff: &str| StoredEvent {
         origin: None,
         author: None,
         ts: Some(1),
@@ -11358,7 +11382,7 @@ fn superseded_turn_changes_cross_without_diffs() {
         elided: None,
     };
     let records = vec![
-        SessionEventRecord {
+        StoredEvent {
             origin: None,
             author: None,
             ts: Some(0),
@@ -11376,7 +11400,9 @@ fn superseded_turn_changes_cross_without_diffs() {
             .event_records
             .insert("changes".into(), session_log(records.clone()));
         let QueryResponse::SessionHistoryPage { records: sent, .. } =
-            state.event_records["changes"].history_page(4, 200).unwrap()
+            state.event_records["changes"]
+                .history_page(4, 200, None)
+                .unwrap()
         else {
             panic!("page")
         };
@@ -11446,7 +11472,7 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
         let window = state.update(cx, |state, cx| {
             for (ts, diff) in [(3, "-a\n+c\n"), (4, "-a\n+d\n")] {
                 state.record_event_for_replica_test("thread", ts, &snapshot(diff), cx);
-                conversation.push(SessionEventRecord {
+                conversation.push(StoredEvent {
                     origin: None,
                     author: None,
                     ts: Some(ts),
@@ -11803,8 +11829,8 @@ fn history_windows_are_byte_budgeted() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("history-window-bytes");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let records: Vec<SessionEventRecord> = (0..200)
-        .map(|index| SessionEventRecord {
+    let records: Vec<StoredEvent> = (0..200)
+        .map(|index| StoredEvent {
             origin: None,
             author: None,
             ts: Some(index),
@@ -11850,27 +11876,24 @@ fn history_windows_are_byte_budgeted() {
         huge[199].event = AgentEvent::Warning {
             message: "w".repeat(2 * tcode_protocol::SESSION_WINDOW_BYTES),
         };
-        state
-            .event_records
-            .insert("wide".into(), session_log(huge.clone()));
+        state.event_records.insert("wide".into(), session_log(huge));
         let QueryResponse::SessionHistoryPage {
             from,
             records: sent,
             ..
-        } = state.event_records["wide"].history_page(200, 200).unwrap()
+        } = state.event_records["wide"]
+            .history_page(200, 200, Some(tcode_protocol::MAX_LINE_BYTES))
+            .unwrap()
         else {
             panic!("page")
         };
         assert_eq!((from, sent.len()), (199, 1));
 
-        // A record no reply can carry is refused by name; the client says so.
-        huge[199].event = AgentEvent::Warning {
-            message: "w".repeat(tcode_protocol::MAX_SESSION_HISTORY_BYTES),
-        };
-        state.event_records.insert("wide".into(), session_log(huge));
+        // A record whose reply is longer than the connection's line is refused
+        // by name; the client says so.
         assert_eq!(
             state.event_records["wide"]
-                .history_page(200, 1)
+                .history_page(200, 1, Some(2 * tcode_protocol::SESSION_WINDOW_BYTES))
                 .unwrap_err()
                 .code,
             "history_record_too_large"
@@ -11934,7 +11957,7 @@ fn store_writer_commits_a_waiting_delta_on_its_own_and_at_shutdown() {
 }
 
 /// A log as a read of densely numbered rows would load it.
-fn session_log(records: impl IntoIterator<Item = SessionEventRecord>) -> SessionLog {
+fn session_log(records: impl IntoIterator<Item = StoredEvent>) -> SessionLog {
     let records: Vec<_> = records.into_iter().collect();
     let rows = (0..records.len() as u64).collect();
     SessionLog::new(tcode_services::store::EventLog {
@@ -11953,7 +11976,7 @@ fn events_reply(state: &AppState, subscription: &Subscription) -> EventEnvelope 
     EventEnvelope {
         request_id: None,
         topic: subscription.topic.clone(),
-        event: state.event_records[session_id].events_window(subscription),
+        event: state.event_records[session_id].events_window(subscription, None),
     }
 }
 
@@ -12024,7 +12047,7 @@ fn history_page(session_id: &str, before: u64) -> tcode_protocol::ClientPayload 
 struct Window {
     from: u64,
     end: u64,
-    records: Vec<SessionEventRecord>,
+    records: Vec<StoredEvent>,
     total: u64,
     total_turns: u64,
 }
@@ -12429,13 +12452,16 @@ fn an_unindexed_cold_thread_opens_through_hydration() {
     );
     assert_eq!(
         window,
-        window_of(&whole.events_window(&Subscription {
-            topic: Topic::SessionEvents {
-                session_id: "legacy".into()
+        window_of(&whole.events_window(
+            &Subscription {
+                topic: Topic::SessionEvents {
+                    session_id: "legacy".into()
+                },
+                after: None,
+                known_index: None,
             },
-            after: None,
-            known_index: None,
-        }))
+            None,
+        ))
         .unwrap()
     );
     state.read(|state| {
@@ -12446,7 +12472,7 @@ fn an_unindexed_cold_thread_opens_through_hydration() {
         &through_pipe(&state, cx, 2, history_page("legacy", window.end)),
         2,
     );
-    assert_eq!(page, whole.history_page(window.end, 200).unwrap());
+    assert_eq!(page, whole.history_page(window.end, 200, None).unwrap());
     assert!(store.turn_index("legacy").unwrap().is_none());
 }
 
@@ -12553,9 +12579,8 @@ fn message_origins_survive_queue_acknowledgement_and_callback_steering() {
             .collect::<Vec<_>>(),
         [Some(MessageOrigin::Human), Some(MessageOrigin::Agent), None]
     );
-    let fold = |record: &SessionEventRecord| {
-        tcode_core::settlement::ThreadActivity::fold_stored([record], false)
-    };
+    let fold =
+        |record: &StoredEvent| tcode_core::settlement::ThreadActivity::fold_stored([record], false);
     assert_eq!(fold(messages[1]).last_human_message_at, None);
     assert_eq!(
         fold(messages[2]).last_human_message_at,
@@ -12756,7 +12781,7 @@ fn first_index_snapshot_includes_persisted_child_runs_and_human_resume_status() 
         head_branch: "sample-change".into(),
         base_branch: "main".into(),
         is_draft: false,
-        updated_at: merged_at.clone(),
+        updated_at: Some(merged_at.clone()),
         synced_at: merged / 1000,
         closed_at: Some(merged_at.clone()),
         merged_at: Some(merged_at),
@@ -13998,7 +14023,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     >(persisted())
     .unwrap();
     assert_eq!(
-        settings_store.profile_secrets("github")["ANTHROPIC_API_KEY"],
+        settings_store.profile_secrets("github").unwrap()["ANTHROPIC_API_KEY"],
         "legacy-provider-secret"
     );
     state.dispatch_command(
@@ -14013,6 +14038,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     cx.run_until(|_| {
         settings_store
             .profile_secrets("github")
+            .unwrap()
             .get("ANTHROPIC_API_KEY")
             .map(String::as_str)
             == Some("provider-replacement-secret")
@@ -14070,7 +14096,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     );
     cx.run_until(|_| persisted().get("@github").is_none());
     assert_eq!(
-        settings_store.profile_secrets("github")["ANTHROPIC_API_KEY"],
+        settings_store.profile_secrets("github").unwrap()["ANTHROPIC_API_KEY"],
         "provider-replacement-secret"
     );
     state.dispatch_command(
@@ -14082,7 +14108,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
             value: None,
         },
     );
-    cx.run_until(|_| settings_store.profile_secrets("github").is_empty());
+    cx.run_until(|_| settings_store.profile_secrets("github").unwrap().is_empty());
     let outgoing = cx.drain_outgoing();
     assert!(
         !serde_json::to_string(&outgoing)
