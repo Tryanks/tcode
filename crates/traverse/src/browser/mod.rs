@@ -626,10 +626,6 @@ where
                         continue;
                     }
                     if let Some(key) = value.get("key").and_then(serde_json::Value::as_str) {
-                        if !crate::host::valid_key(key) {
-                            let _ = websocket.close(None).await;
-                            break;
-                        }
                         value["key"] = format!("{scope}:{key}").into();
                     }
                     let mut line = value.to_string();

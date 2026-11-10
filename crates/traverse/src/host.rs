@@ -2846,12 +2846,6 @@ impl StreamTask {
                     }
                 }
                 if let Some(key) = value.get("key").and_then(serde_json::Value::as_str) {
-                    if !valid_key(key) {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "client line carries an invalid key",
-                        ));
-                    }
                     value["key"] = format!("{scope}:{key}").into();
                 }
                 let mut line = value.to_string();
@@ -2925,18 +2919,6 @@ async fn refuse(mut send: SendStream, reason: &str) -> io::Result<()> {
     .await?;
     send.finish()?;
     Ok(())
-}
-
-/// A client-minted key is one UUID; the host adds the device scope itself.
-pub(crate) fn valid_key(key: &str) -> bool {
-    key.len() == 36
-        && key.bytes().enumerate().all(|(index, byte)| {
-            if matches!(index, 8 | 13 | 18 | 23) {
-                byte == b'-'
-            } else {
-                byte.is_ascii_hexdigit()
-            }
-        })
 }
 
 fn timed_out(what: &str) -> io::Error {
