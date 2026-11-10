@@ -59,15 +59,17 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Vec
         let Some((cwd, id, entrypoint, head_ts)) = head else {
             continue;
         };
+        // `entrypoint` is the CLAUDE_CODE_ENTRYPOINT the session ran under:
+        // T3 Code sets "t3-code"; "sdk-ts" is any Agent SDK application.
         let joined = desktop.get(&id);
         let source = if joined.is_some() {
             SourceTool::ClaudeDesktop
-        } else if entrypoint.as_deref() == Some("sdk-ts") {
-            SourceTool::T3Code
-        } else if entrypoint.as_deref() == Some("claude-desktop") {
-            SourceTool::ClaudeDesktop
         } else {
-            SourceTool::ClaudeCode
+            match entrypoint.as_deref() {
+                Some("t3-code") => SourceTool::T3Code,
+                Some("claude-desktop") => SourceTool::ClaudeDesktop,
+                _ => SourceTool::ClaudeCode,
+            }
         };
         found.push((
             cwd,
