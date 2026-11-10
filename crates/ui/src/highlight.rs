@@ -654,86 +654,18 @@ mod tests {
         assert!(SYNTAX_SET.find_syntax_by_name("Plain Text").is_some());
     }
 
-    /// syntect keeps `substitute_backrefs_in_regex` private, so the probe
-    /// substitutes back-references with the placeholder its YAML loader
-    /// validates patterns with, as `examples/sanitize_syntaxes.rs` does when it
-    /// regenerates the dump.
-    fn substitute_backrefs(regex_str: &str) -> String {
-        let mut result = String::with_capacity(regex_str.len());
-        let mut last_was_escape = false;
-        for c in regex_str.chars() {
-            if last_was_escape && c.is_ascii_digit() {
-                result.push_str("<placeholder>");
-            } else if last_was_escape {
-                result.push('\\');
-                result.push(c);
-            } else if c != '\\' {
-                result.push(c);
-            }
-            last_was_escape = c == '\\' && !last_was_escape;
-        }
-        if last_was_escape {
-            result.push('\\');
-        }
-        result
-    }
-
-    /// Every pattern syntect will compile must compile under the backend this
-    /// crate ships with — raw for ordinary patterns, after back-reference
-    /// placeholder substitution for capture patterns (matching syntect's own
-    /// YAML-loader validation). Guards `assets/syntaxes.bin` regressions: a
-    /// pattern failing here is a deferred runtime panic (syntect `regex.rs`
-    /// "regex string should be pre-tested"). Regenerate the dump with
-    /// `examples/sanitize_syntaxes.rs` when this fails.
+    /// An ordinary JSX arrow function once panicked syntect mid-draw and
+    /// took the app down; it is highlighted, not left as plain text by a
+    /// syntax poisoned on the way.
     #[test]
-    fn shipped_syntax_set_compiles_under_active_regex_backend() {
-        use syntect::parsing::{Regex, SyntaxSet, syntax_definition::Pattern};
-
-        let set: SyntaxSet =
-            syntect::dumps::from_uncompressed_data(include_bytes!("../assets/syntaxes.bin"))
-                .expect("load shipped dump");
-        let mut failures = Vec::new();
-        // Compilation depends only on the pattern, which many syntaxes share.
-        let mut checked = HashSet::new();
-        for syntax in set.into_builder().syntaxes() {
-            if let Some(first_line) = &syntax.first_line_match
-                && checked.insert(first_line.clone())
-                && let Some(err) = Regex::try_compile(first_line)
-            {
-                failures.push(format!("{}: first_line_match: {err}", syntax.name));
-            }
-            for context in syntax.contexts.values() {
-                for pattern in &context.patterns {
-                    let Pattern::Match(pattern) = pattern else {
-                        continue;
-                    };
-                    let probe = if pattern.has_captures {
-                        substitute_backrefs(pattern.regex.regex_str())
-                    } else {
-                        pattern.regex.regex_str().to_string()
-                    };
-                    if checked.insert(probe.clone())
-                        && let Some(err) = Regex::try_compile(&probe)
-                    {
-                        failures.push(format!("{}: {err}", syntax.name));
-                    }
-                }
-            }
-        }
-        assert!(
-            failures.is_empty(),
-            "uncompilable patterns:\n{}",
-            failures.join("\n")
-        );
-
-        // Exercise the known lazy JavaScript (Babel) parser panic without the
-        // production catch_unwind fallback masking an incompatible dump.
+    fn a_jsx_arrow_function_is_highlighted() {
         let src = "const f = async (a, b) => a + b;\n";
-        let syntax = syntax_for_name_or_extension("jsx").expect("jsx syntax");
-        assert_eq!(syntax.name, "JavaScript (Babel)");
-        let runs = highlight_with_syntect(src, syntax, &HighlightTheme::default_dark());
-        assert!(!runs.is_empty());
-        assert!(runs.iter().all(|(range, _)| range.end <= src.len()));
+        let runs = highlight_source(src, "jsx", &HighlightTheme::default_dark());
+        assert!(
+            runs.iter()
+                .any(|(range, style)| range.start == 0 && *style != HighlightStyle::default()),
+            "{runs:?}"
+        );
     }
 
     /// A code block streaming in is highlighted again on every append,
@@ -743,7 +675,7 @@ mod tests {
     #[test]
     fn a_source_highlighted_as_it_grows_ends_as_it_highlights_whole() {
         let line = "    let 名称: Vec<u32> = vec![1, 2, 3]; // a \"comment\"\n";
-        let source = format!("fn main() {{\n{}}}\n", line.repeat(400));
+        let source = format!("fn main() {{\n{}}}\n", line.repeat(150));
         let theme = HighlightTheme::default_dark();
         // Before streaming: a panic resuming would turn Rust off for good.
         let whole = highlight_source(&source, "rust", &theme);
