@@ -5,8 +5,3 @@ leak-timeout = { period = "200ms", result = "fail" }
 # the job until CI's limit cancels every result; the slowest passing tests on
 # CI take under three.
 slow-timeout = { period = "60s", terminate-after = 5 }
-
-[[profile.default.overrides]]
-# This otherwise starts near the end and leaves the other test workers idle.
-filter = 'test(=highlight::tests::shipped_syntax_set_compiles_under_active_regex_backend)'
-priority = 100
