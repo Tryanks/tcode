@@ -42,11 +42,8 @@ pub const OFFICIAL_MANIFEST_URL: &str = "https://raw.githubusercontent.com/Tryan
 #[cfg(debug_assertions)]
 pub const MANIFEST_URL_ENV: &str = "TCODE_TRAVERSE_MANIFEST_URL";
 const BUNDLED: &str = include_str!("traverse_manifest.json");
-/// How long a fetched manifest stays fresh.
-pub const TTL_MS: u64 = 60 * 60 * 1000;
-/// Minimum gap between attempts after a failure, so an offline machine does
-/// not pay a network timeout on every check.
-pub const RETRY_MS: u64 = 5 * 60 * 1000;
+/// How often a running loader fetches its manifest again.
+pub const REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
@@ -239,20 +236,17 @@ pub struct CacheFile {
     pub manifest: Value,
 }
 
-/// In-memory manifest plus the fetch bookkeeping that paces refreshes.
+/// In-memory manifest and where it came from.
 pub struct ManifestState {
     /// `None` for a self-hosted instance with nothing cached yet.
     manifest: Option<Arc<Manifest>>,
     /// Wall-clock millis of the fetch that produced `manifest`; `None` for
-    /// the bundle. Persisted with the disk cache so a restart does not
-    /// refetch.
+    /// the bundle. Persisted with the disk cache.
     fetched_at_ms: Option<u64>,
     /// `manifest` was fetched by this process rather than read from disk.
     fetched_live: bool,
     /// Why the last fetch failed, until one succeeds.
     last_error: Option<String>,
-    pub(crate) last_attempt_ms: Option<u64>,
-    disk_loaded: bool,
 }
 
 impl ManifestState {
@@ -266,8 +260,6 @@ impl ManifestState {
             fetched_at_ms: None,
             fetched_live: false,
             last_error: None,
-            last_attempt_ms: None,
-            disk_loaded: false,
         }
     }
 
@@ -275,11 +267,8 @@ impl ManifestState {
         self.manifest.clone()
     }
 
-    /// Adopt the disk cache once, unless the bundle is newer by `updatedAt`.
+    /// Adopt the disk cache, unless the bundle is newer by `updatedAt`.
     pub fn load_cache(&mut self, path: &Path) {
-        if std::mem::replace(&mut self.disk_loaded, true) {
-            return;
-        }
         let Some(cache) = fs::read_to_string(path)
             .ok()
             .and_then(|text| serde_json::from_str::<CacheFile>(&text).ok())
@@ -299,20 +288,6 @@ impl ManifestState {
             Ok(_) => log::info!("bundled Traverse manifest is newer than the cache"),
             Err(error) => log::warn!("ignoring cached Traverse manifest: {error}"),
         }
-    }
-
-    /// Whether a fetch is due now; records the attempt when it is.
-    pub fn begin_fetch(&mut self, now_ms: u64) -> bool {
-        // A timestamp in the future means the wall clock moved backwards;
-        // treat it as expired so the refetch rewrites both timestamps.
-        let within = |since: Option<u64>, window: u64| {
-            since.is_some_and(|since| now_ms >= since && now_ms - since < window)
-        };
-        if within(self.fetched_at_ms, TTL_MS) || within(self.last_attempt_ms, RETRY_MS) {
-            return false;
-        }
-        self.last_attempt_ms = Some(now_ms);
-        true
     }
 
     /// Replace the manifest with a fetched one; an undecodable or invalid
@@ -454,18 +429,11 @@ impl ManifestLoader {
         self.current()
     }
 
-    /// Fetch when the TTL and retry gap allow, on a blocking thread. Returns
-    /// the new manifest when the fetch produced one different from the copy
-    /// in effect.
+    /// Fetch now, on a blocking thread. Returns the new manifest when the
+    /// fetch produced one different from the copy in effect.
     pub async fn refresh(&self) -> Option<Arc<Manifest>> {
         let now = now_ms();
-        let (due, previous) = {
-            let mut state = self.state();
-            (state.begin_fetch(now), state.current())
-        };
-        if !due {
-            return None;
-        }
+        let previous = self.state().current();
         let url = self.inner.source.url();
         // The lock is not held across the fetch: `current()` must stay
         // instant while a 10 s timeout plays out.
@@ -507,21 +475,26 @@ impl ManifestLoader {
         }
     }
 
-    /// Keep refreshing every [`RETRY_MS`] (the TTL paces actual fetches);
-    /// `apply` runs after each pass, with the manifest when a fetch changed
-    /// it. Aborted when the returned handle is dropped by its owner.
+    /// Fetch once the copy in effect is [`REFRESH_INTERVAL`] old (at once
+    /// for the bundle or nothing), then every interval; `apply` runs after
+    /// each fetch, with the manifest when it changed. Aborted when the
+    /// returned handle is dropped by its owner.
     pub fn spawn_refresh<F, Fut>(&self, apply: F) -> tokio::task::AbortHandle
     where
         F: Fn(Option<Arc<Manifest>>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let loader = self.clone();
+        let mut wait = loader.state().fetched_at_ms.map_or(Duration::ZERO, |at| {
+            REFRESH_INTERVAL.saturating_sub(Duration::from_millis(now_ms().saturating_sub(at)))
+        });
         crate::runtime::runtime()
             .spawn(async move {
                 loop {
+                    tokio::time::sleep(wait).await;
                     let manifest = loader.refresh().await;
                     apply(manifest).await;
-                    tokio::time::sleep(Duration::from_millis(RETRY_MS)).await;
+                    wait = REFRESH_INTERVAL;
                 }
             })
             .abort_handle()
@@ -976,15 +949,6 @@ mod tests {
         assert_eq!(first_relay(&state), "https://cached.example/");
         assert_eq!(state.fetched_at_ms, Some(42));
 
-        // Loaded once: a later cache write is not re-read.
-        write_cache(
-            &path,
-            43,
-            &manifest_json("2999-01-01T00:00:00Z", "https://later.example/"),
-        );
-        state.load_cache(&path);
-        assert_eq!(first_relay(&state), "https://cached.example/");
-
         // Invalid cache: bundle stays.
         for broken in [
             "{}",
@@ -1034,21 +998,6 @@ mod tests {
     }
 
     #[test]
-    fn fetches_are_paced_by_ttl_and_retry_gap() {
-        let mut state = ManifestState::new(ManifestSource::Official);
-        assert!(state.begin_fetch(1_000));
-        assert!(!state.begin_fetch(1_000 + RETRY_MS - 1), "retry gap");
-        assert!(state.begin_fetch(1_000 + RETRY_MS));
-        state.fetched_at_ms = Some(10_000);
-        assert!(!state.begin_fetch(10_000 + TTL_MS - 1), "fresh");
-        assert!(state.begin_fetch(10_000 + TTL_MS));
-        // A future timestamp (clock moved backwards) counts as expired.
-        state.fetched_at_ms = Some(u64::MAX);
-        state.last_attempt_ms = Some(u64::MAX);
-        assert!(state.begin_fetch(5));
-    }
-
-    #[test]
     fn a_fetched_manifest_replaces_the_copy_in_hand_unless_invalid() {
         let mut state = ManifestState::new(ManifestSource::Official);
         assert!(state.install(1_000, b"{ not json").is_err());
@@ -1086,19 +1035,13 @@ mod tests {
         let started = crate::block_on(loader.startup()).unwrap();
         assert_eq!(started.relays[0].url.as_str(), "https://first.example/");
         assert!(base.cache_path(&dir).is_file(), "the fetch is cached");
-        // Fresh: no fetch, so no change reported even though the file changed.
         fs::write(
             &path,
             manifest_json("2000-01-01T00:00:00Z", "https://second.example/"),
         )
         .unwrap();
-        assert!(crate::block_on(loader.refresh()).is_none());
-        loader.state().fetched_at_ms = None;
-        loader.state().last_attempt_ms = None;
         let changed = crate::block_on(loader.refresh()).unwrap();
         assert_eq!(changed.relays[0].url.as_str(), "https://second.example/");
-        loader.state().fetched_at_ms = None;
-        loader.state().last_attempt_ms = None;
         assert!(
             crate::block_on(loader.refresh()).is_none(),
             "an unchanged manifest is not reported"
