@@ -734,11 +734,11 @@ impl PiActor {
                         ensure_success(&message)?;
                         return Ok(message);
                     }
-                    // Extensions load before this handshake completes, so the
-                    // one notification that explains a broken extension arrives
-                    // while we are still here. Everything else that lands early
-                    // belongs to the mapper, not to startup.
-                    if let Some(warning) = extension_warning(&message) {
+                    // Extensions load before this handshake completes, so a
+                    // notification such as one explaining a broken extension
+                    // arrives while we are still here. Everything else that
+                    // lands early belongs to the mapper, not to startup.
+                    if let Some(warning) = extension_notice(&message) {
                         self.events
                             .emit(AgentEvent::Warning { message: warning })
                             .await;
@@ -1046,7 +1046,7 @@ impl PiActor {
             return;
         }
         if method != "confirm" {
-            if let Some(warning) = extension_warning(message) {
+            if let Some(warning) = extension_notice(message) {
                 self.events
                     .emit(AgentEvent::Warning { message: warning })
                     .await;
@@ -1666,22 +1666,14 @@ fn tool_item(id: &str, tool: &PiTool, status: ItemStatus) -> ThreadItem {
     }
 }
 
-/// The text of a warning-or-worse `notify` from a pi extension.
+/// The text of a `notify` from a pi extension, at any of its levels.
 ///
 /// pi's fire-and-forget UI methods expect no response, so an extension that
-/// reports trouble this way is otherwise invisible to the user — including a
-/// user's own installed extension explaining why it could not start.
-fn extension_warning(message: &Value) -> Option<String> {
+/// tells the user something this way is otherwise invisible to them.
+fn extension_notice(message: &Value) -> Option<String> {
     if message.get("type").and_then(Value::as_str) != Some("extension_ui_request")
         || message.get("method").and_then(Value::as_str) != Some("notify")
     {
-        return None;
-    }
-    let level = message
-        .get("notifyType")
-        .and_then(Value::as_str)
-        .unwrap_or("info");
-    if !matches!(level, "warning" | "error") {
         return None;
     }
     let text = message.get("message").and_then(Value::as_str)?.trim();
@@ -1971,34 +1963,34 @@ mod tests {
         }
     }
 
-    /// The `notify` request of pi 1.5.1's `docs/rpc-extension-ui.md`.
+    /// The `notify` request of pi 1.5.1's `docs/rpc-extension-ui.md`, whose
+    /// `notifyType` is "info", "warning" or "error", "info" when omitted.
     #[test]
-    fn only_warning_notifications_become_session_warnings() {
-        let notify = |level: &str| {
-            json!({
-                "type":"extension_ui_request",
-                "id":"1",
-                "method":"notify",
-                "message":"my-extension could not start",
-                "notifyType":level
-            })
-        };
+    fn notifications_reach_the_user_at_every_level() {
+        let mut notify = json!({
+            "type":"extension_ui_request",
+            "id":"1",
+            "method":"notify",
+            "message":"my-extension synced 3 files"
+        });
         assert_eq!(
-            extension_warning(&notify("warning")).as_deref(),
-            Some("my-extension could not start")
+            extension_notice(&notify).as_deref(),
+            Some("my-extension synced 3 files")
         );
-        assert_eq!(
-            extension_warning(&notify("error")).as_deref(),
-            Some("my-extension could not start")
-        );
-        assert!(extension_warning(&notify("info")).is_none());
+        for level in ["info", "warning", "error"] {
+            notify["notifyType"] = json!(level);
+            assert_eq!(
+                extension_notice(&notify).as_deref(),
+                Some("my-extension synced 3 files"),
+                "{level}"
+            );
+        }
         assert!(
-            extension_warning(&json!({
-                "type":"extension_ui_request","id":"1","method":"setStatus","statusText":"busy"
+            extension_notice(&json!({
+                "type":"extension_ui_request","id":"1","method":"setStatus","statusKey":"sync","statusText":"busy"
             }))
             .is_none()
         );
-        assert!(extension_warning(&json!({"type":"agent_start"})).is_none());
     }
 
     /// The `select`, `input` and `editor` requests of pi 1.5.1's
