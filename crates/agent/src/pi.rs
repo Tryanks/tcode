@@ -1401,17 +1401,6 @@ impl PiMapper {
                     AgentEvent::ItemStarted(item)
                 }];
             }
-            Some("error") => {
-                self.failed = event.get("reason").and_then(Value::as_str) != Some("aborted");
-                return vec![AgentEvent::Error {
-                    message: event
-                        .get("error")
-                        .and_then(Value::as_str)
-                        .unwrap_or("pi assistant stream failed")
-                        .to_owned(),
-                    fatal: false,
-                }];
-            }
             _ => return Vec::new(),
         };
         let delta = event.get("delta").and_then(Value::as_str).unwrap_or("");
@@ -1466,9 +1455,21 @@ impl PiMapper {
                 })]
             }
             Some("assistant") => {
-                if message.get("stopReason").and_then(Value::as_str) == Some("error") {
+                // pi ends a failed provider request with this message, its
+                // `errorMessage` saying why; no `message_update` reports it.
+                let failure = if message.get("stopReason").and_then(Value::as_str) == Some("error")
+                {
                     self.failed = true;
-                }
+                    message
+                        .get("errorMessage")
+                        .and_then(Value::as_str)
+                        .map(|text| AgentEvent::Error {
+                            message: text.to_owned(),
+                            fatal: false,
+                        })
+                } else {
+                    None
+                };
                 let Some(id) = self.assistant_id(message) else {
                     return Vec::new();
                 };
@@ -1513,6 +1514,7 @@ impl PiMapper {
                     self.turn_usage.get_or_insert_default().merge(usage);
                     events.push(AgentEvent::TokenUsage(usage));
                 }
+                events.extend(failure);
                 events
             }
             _ => Vec::new(),
@@ -2165,6 +2167,51 @@ mod tests {
                 content: ItemContent::Other { provider_kind, summary },
                 ..
             })] if provider_kind == "my-extension" && summary == "first\nsecond"
+        ));
+    }
+
+    /// A provider request that failed, as pi 1.5.1 reports it: pi-agent-core's
+    /// `streamAssistantResponse` turns the stream's `error` event into the
+    /// `message_end` of an `AssistantMessage` (pi-ai `dist/types.d.ts`) whose
+    /// `stopReason` is "error" and whose `errorMessage` the provider set
+    /// (e.g. pi-ai `dist/api/openai-responses.js`), and the run ends.
+    #[test]
+    fn a_failed_provider_request_reaches_the_user_with_its_reason() {
+        let mut mapper = PiMapper::new();
+        let message = json!({
+            "role":"assistant",
+            "content":[],
+            "api":"openai-responses",
+            "provider":"openai",
+            "model":"gpt-test",
+            "usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,
+                     "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},
+            "stopReason":"error",
+            "errorMessage":"429 rate limit reached for gpt-test",
+            "timestamp":1785400000000_u64
+        });
+        let mut events = Vec::new();
+        for line in [
+            json!({"type":"agent_start"}),
+            json!({"type":"message_start","message":message}),
+            json!({"type":"message_end","message":message}),
+            json!({"type":"turn_end","message":message,"toolResults":[]}),
+            json!({"type":"agent_end","messages":[message]}),
+            json!({"type":"agent_settled","aborted":false}),
+        ] {
+            events.extend(mapper.on_message(&line));
+        }
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Error { message, fatal: false }
+                if message == "429 rate limit reached for gpt-test"
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted {
+                status: TurnStatus::Failed,
+                ..
+            })
         ));
     }
 
