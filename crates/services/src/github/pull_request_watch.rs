@@ -49,7 +49,7 @@ fn query(
 }
 
 fn repository_variables(key: &PullRequestKey) -> Result<BTreeMap<String, Value>, GitHubError> {
-    let repository = Repository::from_key(key).ok_or(GitHubError::Request)?;
+    let repository = Repository::from_key(key).ok_or(GitHubError::InvalidInput)?;
     Ok(BTreeMap::from([
         ("owner".into(), json!(repository.owner)),
         ("name".into(), json!(repository.name)),
@@ -108,7 +108,7 @@ fn read_fingerprints<'a>(
             })
         })
         .collect();
-    let items = items.ok_or(GitHubError::Request)?;
+    let items = items.ok_or(GitHubError::InvalidInput)?;
     let selection = if items.len() > 1 {
         "...WatchFingerprint"
     } else {
@@ -128,7 +128,7 @@ fn read_fingerprints<'a>(
         },
         |fields| fields,
     )
-    .ok_or(GitHubError::Request)?;
+    .ok_or(GitHubError::InvalidInput)?;
     if items.len() > 1 {
         document.query.push_str(&format!(
             "\nfragment WatchFingerprint on PullRequest {{ {FINGERPRINT_SELECTION} }}"
@@ -304,7 +304,7 @@ fn unreported_required(
     base_ref: &Value,
     contexts: &[Value],
 ) -> Result<Vec<PullRequestCheck>, GitHubError> {
-    let repository = Repository::from_key(key).ok_or(GitHubError::Request)?;
+    let repository = Repository::from_key(key).ok_or(GitHubError::InvalidInput)?;
     let path = format!(
         "/repos/{}/{}/branches/{}",
         repository.owner,

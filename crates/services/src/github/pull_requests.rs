@@ -138,7 +138,7 @@ impl PullRequests {
             "query",
             "PullRequestSummaries",
             "s",
-            &items.ok_or(GitHubError::Request)?,
+            &items.ok_or(GitHubError::InvalidInput)?,
             &Variables::new(),
             |v| {
                 format!(
@@ -148,7 +148,7 @@ impl PullRequests {
             },
             |fields| fields,
         )
-        .ok_or(GitHubError::Request)?;
+        .ok_or(GitHubError::InvalidInput)?;
         let response: Value = self.api.graphql(host, &document, options)?.json()?;
         Ok((0..keys.len())
             .map(|index| decode_summary(&response["data"][format!("s{index}")]["pullRequest"]))
@@ -192,7 +192,7 @@ impl PullRequests {
         if key.host != "github.com" {
             return Ok(PullRequestStackState::Unknown);
         }
-        let repository = Repository::from_key(key).ok_or(GitHubError::Request)?;
+        let repository = Repository::from_key(key).ok_or(GitHubError::InvalidInput)?;
         let path = format!(
             "/repos/{}/{}/stacks?pull_request={}",
             repository.owner, repository.name, key.number
