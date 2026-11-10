@@ -8,7 +8,7 @@ use std::{
 };
 
 use tcode_client::host::{
-    ClientHost, ClientPreferences, DeviceFailure, HostFuture, PickedFile, Transport,
+    ClientHost, ClientPreferences, DeviceFailure, FileFailure, HostFuture, PickedFile, Transport,
 };
 use tcode_client::pairing::{PairInvite, PairedHost};
 
@@ -190,13 +190,11 @@ impl NativeClientHost {
     }
 
     fn prefs_path(&self) -> PathBuf {
-        self.data_dir.join("mobile.json")
+        self.data_dir.join(PREFS_FILE)
     }
 
-    /// The saved preferences; a missing file is none. `ClientHost` gives
-    /// reads no way to report a failure, so one is logged and the caller
-    /// sees the defaults.
-    fn prefs(&self) -> Option<serde_json::Value> {
+    /// The saved preferences; a missing file is none.
+    fn prefs(&self) -> Result<serde_json::Value, FileFailure> {
         let read = match fs::read(self.prefs_path()) {
             Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
                 .map_err(io::Error::other)
@@ -210,25 +208,23 @@ impl NativeClientHost {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(serde_json::json!({})),
             Err(error) => Err(error),
         };
-        read.inspect_err(|error| log::error!("could not read mobile.json: {error}"))
-            .ok()
+        read.map_err(|error| FileFailure::new(PREFS_FILE, error))
     }
 
     /// Change the saved preferences. A file that cannot be read is left as
     /// it is rather than replaced by the change alone.
-    fn update_prefs(&self, update: impl FnOnce(&mut serde_json::Value)) {
-        let Some(mut prefs) = self.prefs() else {
-            return;
-        };
+    fn update_prefs(&self, update: impl FnOnce(&mut serde_json::Value)) -> Result<(), FileFailure> {
+        let mut prefs = self.prefs()?;
         update(&mut prefs);
-        let result = serde_json::to_vec_pretty(&prefs)
+        serde_json::to_vec_pretty(&prefs)
             .map_err(io::Error::other)
-            .and_then(|bytes| write_private(&self.data_dir, &self.prefs_path(), &bytes));
-        if let Err(error) = result {
-            log::error!("could not write mobile.json: {error}");
-        }
+            .and_then(|bytes| write_private(&self.data_dir, &self.prefs_path(), &bytes))
+            .map_err(|error| FileFailure::new(PREFS_FILE, error))
     }
 }
+
+const PREFS_FILE: &str = "mobile.json";
+const HOSTS_FILE: &str = "hosts.json";
 
 impl ClientHost for NativeClientHost {
     fn speech_recognizer(&self) -> Option<std::rc::Rc<dyn tcode_client::speech::SpeechRecognizer>> {
@@ -239,9 +235,12 @@ impl ClientHost for NativeClientHost {
         self.words.clone().or_else(tcode_client::words::system)
     }
 
+    /// The default name while the preferences cannot be read; the window
+    /// reports that file.
     fn device_name(&self) -> String {
         self.load_preferences()
-            .device_name
+            .ok()
+            .and_then(|preferences| preferences.device_name)
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| self.default_device_name.clone())
     }
@@ -261,12 +260,10 @@ impl ClientHost for NativeClientHost {
         self.platform.clone()
     }
 
-    fn load_preferences(&self) -> ClientPreferences {
-        let Some(prefs) = self.prefs() else {
-            return ClientPreferences::default();
-        };
+    fn load_preferences(&self) -> Result<ClientPreferences, FileFailure> {
+        let prefs = self.prefs()?;
         let value = |key: &str| prefs.get(key).and_then(|v| v.as_str()).map(str::to_owned);
-        ClientPreferences {
+        Ok(ClientPreferences {
             appearance: value("appearance"),
             language: value("language"),
             device_name: value("device_name"),
@@ -289,10 +286,10 @@ impl ClientHost for NativeClientHost {
             workspace: prefs
                 .get("workspace")
                 .and_then(|value| serde_json::from_value(value.clone()).ok()),
-        }
+        })
     }
 
-    fn save_preferences(&self, preferences: &ClientPreferences) {
+    fn save_preferences(&self, preferences: &ClientPreferences) -> Result<(), FileFailure> {
         self.update_prefs(|prefs| {
             prefs["appearance"] = serde_json::json!(preferences.appearance);
             prefs["language"] = serde_json::json!(preferences.language);
@@ -304,7 +301,7 @@ impl ClientHost for NativeClientHost {
             prefs["sidebar_collapsed"] = serde_json::json!(preferences.sidebar_collapsed);
             prefs["sidebar_layout"] = serde_json::json!(preferences.sidebar_layout);
             prefs["workspace"] = serde_json::json!(preferences.workspace);
-        });
+        })
     }
 
     fn outbox_storage(&self, host_id: &str) -> Option<Arc<dyn tcode_client::outbox::Storage>> {
@@ -320,40 +317,38 @@ impl ClientHost for NativeClientHost {
         }))
     }
 
-    fn load_hosts(&self) -> Vec<PairedHost> {
-        crate::hosts::load_hosts(&self.data_dir).unwrap_or_else(|error| {
-            log::error!("could not read hosts.json: {error}");
-            Vec::new()
-        })
+    fn load_hosts(&self) -> Result<Vec<PairedHost>, FileFailure> {
+        crate::hosts::load_hosts(&self.data_dir)
+            .map_err(|error| FileFailure::new(HOSTS_FILE, error))
     }
 
-    fn save_hosts(&self, hosts: &[PairedHost]) {
-        if let Err(error) = crate::hosts::save_hosts(&self.data_dir, hosts) {
-            log::error!("could not write hosts.json: {error}");
-        }
+    fn save_hosts(&self, hosts: &[PairedHost]) -> Result<(), FileFailure> {
+        let saved = crate::hosts::save_hosts(&self.data_dir, hosts)
+            .map_err(|error| FileFailure::new(HOSTS_FILE, error));
         self.hosts_changed();
+        saved
     }
 
     fn saved_hosts_changes(&self) -> Option<async_channel::Receiver<()>> {
         Some(crate::hosts::watch(&self.data_dir))
     }
 
-    fn remember_host(&self, host: PairedHost) {
-        if let Err(error) = crate::hosts::update_hosts(&self.data_dir, |hosts| {
+    fn remember_host(&self, host: PairedHost) -> Result<(), FileFailure> {
+        let saved = crate::hosts::update_hosts(&self.data_dir, |hosts| {
             tcode_client::pairing::remember_host(hosts, host);
-        }) {
-            log::error!("could not save paired machine: {error}");
-        }
+        })
+        .map_err(|error| FileFailure::new(HOSTS_FILE, error));
         self.hosts_changed();
+        saved
     }
 
-    fn remove_host(&self, host_id: &str) {
-        if let Err(error) = crate::hosts::update_hosts(&self.data_dir, |hosts| {
+    fn remove_host(&self, host_id: &str) -> Result<(), FileFailure> {
+        let removed = crate::hosts::update_hosts(&self.data_dir, |hosts| {
             hosts.retain(|host| host.host_id != host_id);
-        }) {
-            log::error!("could not remove paired machine: {error}");
-        }
+        })
+        .map_err(|error| FileFailure::new(HOSTS_FILE, error));
         self.hosts_changed();
+        removed
     }
 
     fn stamp_connected(&self, host_id: &str, timestamp: u64) {
@@ -370,20 +365,25 @@ impl ClientHost for NativeClientHost {
         crate::identity::existing_machine_id(&self.data_dir).map(|id| id.to_string())
     }
 
+    /// None while mobile.json cannot be read; the window reports that file.
     fn last_host_id(&self) -> Option<String> {
-        self.prefs()?
+        self.prefs()
+            .ok()?
             .get("last_host_id")
             .and_then(|value| value.as_str())
             .map(str::to_owned)
     }
 
     fn set_last_host_id(&self, host_id: Option<&str>) {
-        self.update_prefs(|prefs| {
+        let saved = self.update_prefs(|prefs| {
             prefs["last_host_id"] = match host_id {
                 Some(id) => serde_json::Value::String(id.to_owned()),
                 None => serde_json::Value::Null,
             };
         });
+        if let Err(error) = saved {
+            log::error!("could not save the machine to reopen: {error}");
+        }
     }
 
     /// Pairing runs on the Traverse runtime; the UI executor only awaits the
@@ -703,17 +703,19 @@ mod tests {
     fn connection_stamp_preserves_an_address_update_already_in_progress() {
         let dir = TestDir::new();
         let client = NativeClientHost::new(dir.0.clone(), "phone");
-        client.remember_host(PairedHost {
-            space_id: None,
-            space_name: None,
-            host_id: MACHINE_ID.into(),
-            name: "Machine".into(),
-            traverse: Vec::new(),
-            relay: None,
-            addrs: vec!["192.168.31.5:47420".into()],
-            last_connected_unix: None,
-            group_id: None,
-        });
+        client
+            .remember_host(PairedHost {
+                space_id: None,
+                space_name: None,
+                host_id: MACHINE_ID.into(),
+                name: "Machine".into(),
+                traverse: Vec::new(),
+                relay: None,
+                addrs: vec!["192.168.31.5:47420".into()],
+                last_connected_unix: None,
+                group_id: None,
+            })
+            .unwrap();
         let (locked, received) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel();
         let transport_dir = dir.0.clone();
@@ -737,7 +739,7 @@ mod tests {
         release.send(()).unwrap();
         transport.join().unwrap();
         stamp.join().unwrap();
-        let saved = client.load_hosts().remove(0);
+        let saved = client.load_hosts().unwrap().remove(0);
         assert_eq!(
             saved.addrs,
             vec!["192.168.1.161:47420", "192.168.31.5:47420"]
@@ -829,13 +831,44 @@ mod tests {
         let damaged = br#"{"appearance": "dark","#;
         fs::write(dir.0.join("mobile.json"), damaged).unwrap();
         let host = NativeClientHost::new(dir.0.clone(), "fallback");
-        assert_eq!(host.load_preferences(), ClientPreferences::default());
-        host.save_preferences(&ClientPreferences {
-            appearance: Some("light".into()),
-            ..Default::default()
-        });
+        let unreadable = host.load_preferences().unwrap_err();
+        assert_eq!(unreadable.file, "mobile.json");
+        assert_eq!(
+            host.save_preferences(&ClientPreferences {
+                appearance: Some("light".into()),
+                ..Default::default()
+            }),
+            Err(unreadable)
+        );
         host.set_last_host_id(Some(MACHINE_ID));
         assert_eq!(fs::read(dir.0.join("mobile.json")).unwrap(), damaged);
+    }
+
+    /// A hosts.json this build cannot read is reported, not shown as no
+    /// machines, and neither pairing nor forgetting writes over it.
+    #[test]
+    fn unreadable_saved_machines_are_reported_and_kept() {
+        let dir = TestDir::new();
+        let damaged = br#"[{"host_id": 7}]"#;
+        fs::write(dir.0.join("hosts.json"), damaged).unwrap();
+        let host = NativeClientHost::new(dir.0.clone(), "phone");
+        let unreadable = host.load_hosts().unwrap_err();
+        assert_eq!(unreadable.file, "hosts.json");
+        let machine = PairedHost {
+            space_id: None,
+            space_name: None,
+            host_id: MACHINE_ID.into(),
+            name: "Machine".into(),
+            traverse: Vec::new(),
+            relay: None,
+            addrs: Vec::new(),
+            last_connected_unix: None,
+            group_id: None,
+        };
+        assert_eq!(host.remember_host(machine).unwrap_err().file, "hosts.json");
+        assert_eq!(host.remove_host(MACHINE_ID).unwrap_err().file, "hosts.json");
+        host.stamp_connected(MACHINE_ID, 1);
+        assert_eq!(fs::read(dir.0.join("hosts.json")).unwrap(), damaged);
     }
 
     #[test]
@@ -855,7 +888,7 @@ mod tests {
         let host = NativeClientHost::new(dir.0.clone(), "fallback").with_platform("Android 15");
 
         assert_eq!(
-            host.load_preferences(),
+            host.load_preferences().unwrap(),
             ClientPreferences {
                 appearance: Some("dark".into()),
                 language: Some("zh-CN".into()),
@@ -897,7 +930,8 @@ mod tests {
                 ],
                 left: vec!["attic".into()],
             }),
-        });
+        })
+        .unwrap();
 
         let saved: serde_json::Value =
             serde_json::from_slice(&fs::read(dir.0.join("mobile.json")).unwrap()).unwrap();
@@ -905,19 +939,28 @@ mod tests {
         assert_eq!(saved["future_field"]["preserve"], true);
         assert_eq!(saved["appearance"], "light");
         assert_eq!(
-            host.load_preferences().navigation.unwrap()["history"],
+            host.load_preferences().unwrap().navigation.unwrap()["history"],
             serde_json::json!(["hosts", "threads"])
         );
         assert!(saved["language"].is_null());
         assert_eq!(saved["remote_attachment_limit_mib"], 4);
-        assert_eq!(host.load_preferences().remote_attachment_limit_mib, Some(4));
+        assert_eq!(
+            host.load_preferences().unwrap().remote_attachment_limit_mib,
+            Some(4)
+        );
         assert_eq!(saved["right_panel_width"], 480);
-        assert_eq!(host.load_preferences().right_panel_width, Some(480));
+        assert_eq!(
+            host.load_preferences().unwrap().right_panel_width,
+            Some(480)
+        );
         assert_eq!(saved["sidebar_collapsed"], true);
         assert_eq!(saved["sidebar_layout"], "grouped");
-        assert_eq!(host.load_preferences().sidebar_collapsed, Some(true));
         assert_eq!(
-            host.load_preferences().sidebar_layout.as_deref(),
+            host.load_preferences().unwrap().sidebar_collapsed,
+            Some(true)
+        );
+        assert_eq!(
+            host.load_preferences().unwrap().sidebar_layout.as_deref(),
             Some("grouped")
         );
         assert_eq!(
@@ -929,6 +972,7 @@ mod tests {
         );
         assert_eq!(
             host.load_preferences()
+                .unwrap()
                 .workspace
                 .map(|workspace| workspace.hosts.len()),
             Some(2)

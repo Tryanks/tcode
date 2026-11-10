@@ -24,7 +24,7 @@ use gpui::{
 };
 use gpui_base::{InteractiveElementExt as _, h_flex, v_flex};
 use serde::Deserialize;
-use tcode_client::host::ClientHost;
+use tcode_client::host::{ClientHost, FileFailure};
 use tcode_client::pairing::PairedHost;
 
 use crate::icon::{Icon, IconName};
@@ -165,12 +165,12 @@ impl ClientAttachment {
         self.request.clone()
     }
 
-    pub fn save_host(&self, host: PairedHost) {
-        self.host.remember_host(host);
+    pub fn save_host(&self, host: PairedHost) -> Result<(), FileFailure> {
+        self.host.remember_host(host)
     }
 
-    pub fn remove_host(&self, host_id: &str) {
-        self.host.remove_host(host_id);
+    pub fn remove_host(&self, host_id: &str) -> Result<(), FileFailure> {
+        self.host.remove_host(host_id)
     }
 }
 
@@ -779,7 +779,20 @@ impl RemotePanel {
                 window.push_notification(Notification::success(message), cx);
             }
             let attachment = cx.global::<ClientAttachment>();
-            attachment.save_host(host.clone());
+            if let Err(error) = attachment.save_host(host.clone()) {
+                window.push_notification(
+                    Notification::error(
+                        crate::tr!(
+                            "hosts.pair.unsaved",
+                            name = host.name.as_str(),
+                            error = error.to_string()
+                        )
+                        .into_owned(),
+                    ),
+                    cx,
+                );
+            }
+            let attachment = cx.global::<ClientAttachment>();
             let request = attachment.requester();
             request(
                 HostRequest::Open(AttachmentTarget::Remote(Box::new(host))),
@@ -1117,10 +1130,11 @@ impl RemotePanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
-        let hosts = self
-            .client(cx)
-            .map(|client| client.load_hosts())
-            .unwrap_or_default();
+        let (hosts, unreadable) = match self.client(cx).map(|client| client.load_hosts()) {
+            Some(Ok(hosts)) => (hosts, None),
+            Some(Err(error)) => (Vec::new(), Some(error)),
+            None => (Vec::new(), None),
+        };
         let mut column = v_flex().gap(section_gap(cx));
 
         let mut this_machine: Vec<AnyElement> = Vec::new();
@@ -1156,7 +1170,12 @@ impl RemotePanel {
                 .unwrap_or(self.stores.len())
         });
         let saved: Vec<(SharedString, Option<(PairedHost, bool)>)> = if hosts.is_empty() {
-            vec![("hosts-empty".into(), None)]
+            let key = if unreadable.is_some() {
+                "hosts-unreadable"
+            } else {
+                "hosts-empty"
+            };
+            vec![(key.into(), None)]
         } else {
             hosts
                 .into_iter()
@@ -1179,9 +1198,16 @@ impl RemotePanel {
             cx,
             |_, row, window, cx| match row {
                 Some((host, current)) => self.host_row(host, *current, compact, window, cx),
-                None => crate::material::empty_row(crate::tr!("hosts.empty"), cx)
-                    .text_secondary(compact, cx)
-                    .into_any_element(),
+                None => match &unreadable {
+                    Some(error) => crate::material::empty_row(
+                        crate::tr!("errors.file_unreadable", error = error.to_string()),
+                        cx,
+                    )
+                    .debug_selector(|| "hosts-unreadable".into()),
+                    None => crate::material::empty_row(crate::tr!("hosts.empty"), cx),
+                }
+                .text_secondary(compact, cx)
+                .into_any_element(),
             },
         );
         column = column.child(settings_group(
@@ -1736,6 +1762,7 @@ impl RemotePanel {
             .and_then(|client| {
                 client
                     .load_hosts()
+                    .ok()?
                     .into_iter()
                     .find(|host| host.host_id == id)
             })
@@ -1744,12 +1771,25 @@ impl RemotePanel {
             return;
         };
         let panel = cx.entity().downgrade();
+        let title = crate::tr!("hosts.forget_title", name = name.as_str()).into_owned();
         confirm_destructive(
-            crate::tr!("hosts.forget_title", name = name).into_owned(),
+            title,
             crate::tr!("hosts.forget_description").into_owned(),
             crate::tr!("hosts.forget").into_owned(),
-            move |_, cx| {
-                cx.global::<ClientAttachment>().remove_host(&id);
+            move |window, cx| {
+                if let Err(error) = cx.global::<ClientAttachment>().remove_host(&id) {
+                    window.push_notification(
+                        Notification::error(
+                            crate::tr!(
+                                "hosts.forget_failed",
+                                name = name.as_str(),
+                                error = error.to_string()
+                            )
+                            .into_owned(),
+                        ),
+                        cx,
+                    );
+                }
                 let _ = panel.update(cx, |_, cx| cx.notify());
             },
             window,
@@ -2018,8 +2058,8 @@ mod tests {
             fn device_platform(&self) -> Option<String> {
                 None
             }
-            fn load_hosts(&self) -> Vec<PairedHost> {
-                vec![PairedHost {
+            fn load_hosts(&self) -> Result<Vec<PairedHost>, FileFailure> {
+                Ok(vec![PairedHost {
                     host_id: "served-by".into(),
                     name: "Build server".into(),
                     traverse: Vec::new(),
@@ -2029,13 +2069,11 @@ mod tests {
                     group_id: None,
                     space_id: None,
                     space_name: None,
-                }]
+                }])
             }
-            fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
-                Default::default()
+            fn save_hosts(&self, _: &[PairedHost]) -> Result<(), FileFailure> {
+                Ok(())
             }
-            fn save_preferences(&self, _: &tcode_client::host::ClientPreferences) {}
-            fn save_hosts(&self, _: &[PairedHost]) {}
             fn last_host_id(&self) -> Option<String> {
                 Some("served-by".into())
             }
@@ -2077,6 +2115,36 @@ mod tests {
         );
     }
 
+    /// Saved machines that cannot be read are not "no machines": the list
+    /// says the file could not be read, and why.
+    #[gpui::test]
+    fn unreadable_saved_machines_say_so_on_the_hosts_page(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let root = crate::store::tests::scratch_root("hosts-page-unreadable");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("hosts.json"), br#"[{"host_id": 7}]"#).unwrap();
+        let client = Rc::new(tcode_traverse::NativeClientHost::new(root.clone(), "phone"));
+        struct HostsProbe(Entity<RemotePanel>);
+        impl Render for HostsProbe {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                v_flex().size_full().child(
+                    self.0
+                        .update(cx, |panel, cx| panel.render_hosts(window, cx)),
+                )
+            }
+        }
+        cx.update(crate::theme::init);
+        cx.update(|cx| cx.set_global(ClientAttachment::new(client, false, |_, _, _| {})));
+        let window = cx.open_window(gpui::size(px(1024.), px(768.)), |window, cx| {
+            let state = cx.new(|_| WindowState::default());
+            HostsProbe(cx.new(|cx| RemotePanel::new(state, window, cx)))
+        });
+        let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("hosts-unreadable").is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// Forgetting a saved machine: its row folds away where it was, taking no
     /// press, and the machine below it slides up as it goes rather than
     /// jumping into its place; a machine paired afterwards folds in.
@@ -2095,15 +2163,12 @@ mod tests {
             fn device_platform(&self) -> Option<String> {
                 None
             }
-            fn load_hosts(&self) -> Vec<PairedHost> {
-                self.0.borrow().clone()
+            fn load_hosts(&self) -> Result<Vec<PairedHost>, FileFailure> {
+                Ok(self.0.borrow().clone())
             }
-            fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
-                Default::default()
-            }
-            fn save_preferences(&self, _: &tcode_client::host::ClientPreferences) {}
-            fn save_hosts(&self, hosts: &[PairedHost]) {
+            fn save_hosts(&self, hosts: &[PairedHost]) -> Result<(), FileFailure> {
                 *self.0.borrow_mut() = hosts.to_vec();
+                Ok(())
             }
             fn last_host_id(&self) -> Option<String> {
                 None
@@ -2164,7 +2229,7 @@ mod tests {
             probe.update(cx, |probe, cx| probe.0.update(cx, |_, cx| cx.notify()));
             crate::test_frames::draw(cx);
         };
-        change(cx, &|hosts| hosts.remove_host("studio"));
+        change(cx, &|hosts| hosts.remove_host("studio").unwrap());
         let leaving = cx
             .debug_bounds("host-studio")
             .expect("a forgotten machine is drawn while it leaves");
@@ -2190,7 +2255,9 @@ mod tests {
                 .top()
         };
         let before = below(cx);
-        change(cx, &|hosts| hosts.save_host(host("studio", "Studio")));
+        change(cx, &|hosts| {
+            hosts.save_host(host("studio", "Studio")).unwrap()
+        });
         cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
         crate::test_frames::draw(cx);
         assert!(
@@ -2222,14 +2289,12 @@ mod tests {
             fn device_platform(&self) -> Option<String> {
                 None
             }
-            fn load_hosts(&self) -> Vec<PairedHost> {
-                Vec::new()
+            fn load_hosts(&self) -> Result<Vec<PairedHost>, FileFailure> {
+                Ok(Vec::new())
             }
-            fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
-                Default::default()
+            fn save_hosts(&self, _: &[PairedHost]) -> Result<(), FileFailure> {
+                Ok(())
             }
-            fn save_preferences(&self, _: &tcode_client::host::ClientPreferences) {}
-            fn save_hosts(&self, _: &[PairedHost]) {}
             fn last_host_id(&self) -> Option<String> {
                 None
             }
@@ -2315,15 +2380,12 @@ mod tests {
             fn device_platform(&self) -> Option<String> {
                 None
             }
-            fn load_hosts(&self) -> Vec<PairedHost> {
-                self.hosts.borrow().clone()
+            fn load_hosts(&self) -> Result<Vec<PairedHost>, FileFailure> {
+                Ok(self.hosts.borrow().clone())
             }
-            fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
-                Default::default()
-            }
-            fn save_preferences(&self, _: &tcode_client::host::ClientPreferences) {}
-            fn save_hosts(&self, hosts: &[PairedHost]) {
+            fn save_hosts(&self, hosts: &[PairedHost]) -> Result<(), FileFailure> {
                 *self.hosts.borrow_mut() = hosts.to_vec();
+                Ok(())
             }
             fn last_host_id(&self) -> Option<String> {
                 None
@@ -2433,7 +2495,10 @@ mod tests {
             (invite.clone(), Some("192.168.1.20".parse().unwrap())),
             "the same invitation, with the typed address"
         );
-        assert_eq!(phone.load_hosts(), [invite.paired("Studio".into())]);
+        assert_eq!(
+            phone.load_hosts().unwrap(),
+            [invite.paired("Studio".into())]
+        );
         assert!(cx.debug_bounds("hosts-pair-address").is_none());
     }
 
@@ -2602,7 +2667,7 @@ mod tests {
                     cx,
                 );
                 assert!(panel.form.error.is_none());
-                assert!(client.load_hosts().is_empty());
+                assert!(client.load_hosts().unwrap().is_empty());
                 panel.finish_pair(
                     current,
                     Err(tcode_client::pairing::PairError::Invalid),
@@ -2613,13 +2678,13 @@ mod tests {
                     panel.form.error.as_deref(),
                     Some(crate::tr!("hosts.pair.rejected").as_ref())
                 );
-                assert!(client.load_hosts().is_empty());
+                assert!(client.load_hosts().unwrap().is_empty());
                 let current = panel.form.restart();
                 panel.finish_pair(current, Ok(host("current pairing")), window, cx);
                 panel.finish_pair(old, Ok(host("superseded pairing")), window, cx);
             });
         });
-        assert_eq!(client.load_hosts(), vec![host("current pairing")]);
+        assert_eq!(client.load_hosts().unwrap(), vec![host("current pairing")]);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

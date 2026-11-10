@@ -4,8 +4,8 @@
 
 use std::rc::Rc;
 
-use gpui::{App, AppContext as _, Entity, Global, Window};
-use tcode_client::host::{ClientHost, ClientPreferences, WorkspacePreference};
+use gpui::{App, AppContext as _, Entity, EventEmitter, Global, Window};
+use tcode_client::host::{ClientHost, ClientPreferences, FileFailure, WorkspacePreference};
 use tcode_core::settings::{Settings, SidebarLayout, ThemeMode};
 
 use crate::store::HostKey;
@@ -13,7 +13,19 @@ use crate::store::HostKey;
 pub(crate) struct DevicePreferences {
     client: Option<Rc<dyn ClientHost>>,
     saved: ClientPreferences,
+    /// Why what the client saved could not be read. This device then runs on
+    /// the defaults, changes them for as long as it runs, and saves nothing
+    /// over the file.
+    unreadable: Option<FileFailure>,
 }
+
+/// What the window tells the user about this device's preferences.
+pub(crate) enum PreferencesFailure {
+    Unreadable(FileFailure),
+    Unsaved(FileFailure),
+}
+
+impl EventEmitter<PreferencesFailure> for DevicePreferences {}
 
 struct Installed(Entity<DevicePreferences>);
 
@@ -22,12 +34,24 @@ impl Global for Installed {}
 impl DevicePreferences {
     /// Make what `client` saved the preferences every view reads.
     pub(crate) fn install(client: Rc<dyn ClientHost>, cx: &mut App) {
-        let saved = client.load_preferences();
+        let loaded = client.load_preferences();
         Self::entity(cx).update(cx, |this, cx| {
             this.client = Some(client);
-            this.saved = saved;
+            match loaded {
+                Ok(saved) => {
+                    this.saved = saved;
+                    this.unreadable = None;
+                }
+                Err(error) => this.refuse(error, cx),
+            }
             cx.notify();
         });
+    }
+
+    fn refuse(&mut self, error: FileFailure, cx: &mut gpui::Context<Self>) {
+        log::error!("running on default device preferences: {error}");
+        self.unreadable = Some(error.clone());
+        cx.emit(PreferencesFailure::Unreadable(error));
     }
 
     /// The owner, holding nothing saved until a shell installs its client.
@@ -38,6 +62,7 @@ impl DevicePreferences {
         let entity = cx.new(|_| Self {
             client: None,
             saved: ClientPreferences::default(),
+            unreadable: None,
         });
         cx.set_global(Installed(entity.clone()));
         entity
@@ -51,16 +76,25 @@ impl DevicePreferences {
         Self::entity(cx).update(cx, |this, cx| {
             // Read again rather than from `saved`: a space's store writes its
             // member settings into the same preferences.
-            let mut preferences = match &this.client {
-                Some(client) => client.load_preferences(),
-                None => this.saved.clone(),
+            let mut preferences = match (&this.client, &this.unreadable) {
+                (Some(client), None) => match client.load_preferences() {
+                    Ok(preferences) => preferences,
+                    Err(error) => {
+                        this.refuse(error, cx);
+                        this.saved.clone()
+                    }
+                },
+                _ => this.saved.clone(),
             };
             let loaded = preferences.clone();
             change(&mut preferences);
             if preferences != loaded
+                && this.unreadable.is_none()
                 && let Some(client) = &this.client
+                && let Err(error) = client.save_preferences(&preferences)
             {
-                client.save_preferences(&preferences);
+                log::error!("could not save device preferences: {error}");
+                cx.emit(PreferencesFailure::Unsaved(error));
             }
             if preferences != this.saved {
                 this.saved = preferences;

@@ -166,7 +166,9 @@ fn pair_command(args: &[String], client_host: &NativeClientHost) -> Result<Strin
     let invite = tcode_client::pairing::parse_pair_url(invite).ok_or("invalid invite link")?;
     let host = smol::block_on(client_host.pair(invite, None)).map_err(|error| error.to_string())?;
     let host_id = host.host_id.clone();
-    client_host.remember_host(host);
+    client_host
+        .remember_host(host)
+        .map_err(|error| format!("paired, but the machine could not be saved: {error}"))?;
     Ok(host_id)
 }
 
@@ -687,11 +689,11 @@ fn main() {
         let data_dir = data_dir.clone();
         move || match connect {
             Some(host_id) => {
-                let Some(host) = native_client
-                    .load_hosts()
-                    .into_iter()
-                    .find(|host| host.host_id == host_id)
-                else {
+                let saved = native_client.load_hosts().unwrap_or_else(|error| {
+                    eprintln!("tcode: could not read {}/{error}", data_dir.display());
+                    std::process::exit(1);
+                });
+                let Some(host) = saved.into_iter().find(|host| host.host_id == host_id) else {
                     eprintln!(
                         "tcode: no added machine with id {host_id:?} in {}/hosts.json; add it first (the sidebar's Machines row, or tcode --pair <tcode://pair?...>)",
                         data_dir.display()
@@ -757,7 +759,12 @@ fn main() {
             cx.bind_keys([gpui::KeyBinding::new("cmd-0", ShowMainWindow, None)]);
         }
         cx.on_action(|_: &ShowMainWindow, cx| MainWindow::show(cx));
-        let appearance = native_client.load_preferences().appearance;
+        // Preferences that cannot be read leave the migration dialog in the
+        // system appearance; the window after it says why.
+        let appearance = native_client
+            .load_preferences()
+            .ok()
+            .and_then(|preferences| preferences.appearance);
         cx.on_action::<Quit>(move |action, cx| {
             if migration::quit(cx) {
                 return;

@@ -8497,7 +8497,11 @@ mod tests {
         cx.simulate_click(toggle.center(), gpui::Modifiers::default());
         draw(cx);
         assert_eq!(
-            device().load_preferences().sidebar_layout.as_deref(),
+            device()
+                .load_preferences()
+                .unwrap()
+                .sidebar_layout
+                .as_deref(),
             Some("grouped"),
             "the actual header action persists this device's choice"
         );

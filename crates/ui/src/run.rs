@@ -38,7 +38,9 @@ pub fn flattened_theme_json() -> String {
 /// on, if that record still exists.
 pub fn last_host_target(host: &dyn ClientHost) -> Option<AttachmentTarget> {
     let id = host.last_host_id()?;
+    // Saved machines that cannot be read are none here; the window says why.
     host.load_hosts()
+        .ok()?
         .into_iter()
         .find(|saved| saved.host_id == id)
         .map(|host| AttachmentTarget::Remote(Box::new(host)))
@@ -132,7 +134,10 @@ pub fn init_client(cx: &mut App, host: &dyn ClientHost, options: &ShellOptions) 
         )));
     }
     crate::i18n::set_platform_system_locale(options.system_locale.as_deref());
-    crate::i18n::apply_locale(crate::device::language(&host.load_preferences()));
+    // Preferences that cannot be read are the system's language; the window
+    // says why.
+    let preferences = host.load_preferences().unwrap_or_default();
+    crate::i18n::apply_locale(crate::device::language(&preferences));
     cx.text_system()
         .add_fonts(options.fonts.clone())
         .expect("failed to register bundled application fonts");

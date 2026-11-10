@@ -711,14 +711,17 @@ impl WorkspaceStore {
         if self.member_settings_unreadable {
             return;
         }
-        if let Some(host) = &self.client_host {
-            let mut preferences = host.load_preferences();
+        if let Some(host) = &self.client_host
+            && let Ok(mut preferences) = host.load_preferences()
+        {
             let navigation = preferences
                 .navigation
                 .get_or_insert_with(|| serde_json::json!({}));
             navigation["member_settings"][self.member_settings_key()] =
                 serde_json::to_value(&self.settings_replica).unwrap();
-            host.save_preferences(&preferences);
+            if let Err(error) = host.save_preferences(&preferences) {
+                log::error!("could not save member settings: {error}");
+            }
         }
     }
 
@@ -805,7 +808,7 @@ impl WorkspaceStore {
                     let saved = self
                         .client_host
                         .as_ref()
-                        .and_then(|host| host.load_preferences().navigation)
+                        .and_then(|host| host.load_preferences().ok()?.navigation)
                         .and_then(|navigation| {
                             navigation
                                 .get("member_settings")?
@@ -4807,16 +4810,24 @@ pub(crate) mod tests {
             fn device_platform(&self) -> Option<String> {
                 None
             }
-            fn load_preferences(&self) -> ClientPreferences {
-                self.0.borrow().clone()
+            fn load_preferences(
+                &self,
+            ) -> Result<ClientPreferences, tcode_client::host::FileFailure> {
+                Ok(self.0.borrow().clone())
             }
-            fn save_preferences(&self, preferences: &ClientPreferences) {
+            fn save_preferences(
+                &self,
+                preferences: &ClientPreferences,
+            ) -> Result<(), tcode_client::host::FileFailure> {
                 *self.0.borrow_mut() = preferences.clone();
+                Ok(())
             }
-            fn load_hosts(&self) -> Vec<PairedHost> {
-                Vec::new()
+            fn load_hosts(&self) -> Result<Vec<PairedHost>, tcode_client::host::FileFailure> {
+                Ok(Vec::new())
             }
-            fn save_hosts(&self, _: &[PairedHost]) {}
+            fn save_hosts(&self, _: &[PairedHost]) -> Result<(), tcode_client::host::FileFailure> {
+                Ok(())
+            }
             fn last_host_id(&self) -> Option<String> {
                 None
             }
@@ -5289,7 +5300,7 @@ pub(crate) mod tests {
             space_id: None,
             space_name: None,
         };
-        client.remember_host(host.clone());
+        client.remember_host(host.clone()).unwrap();
         struct NoTunnels;
         impl tcode_client::host::TunnelOpener for NoTunnels {
             fn open(
@@ -5317,7 +5328,10 @@ pub(crate) mod tests {
         host.addrs = vec!["192.168.1.161:47420".into()];
         current_host.authenticated(&host);
         cx.update(|cx| assert_eq!(store.read(cx).preview_proxy().unwrap().unwrap().0, host));
-        assert_eq!(client.load_hosts()[0].addrs, ["192.168.31.5:47420"]);
+        assert_eq!(
+            client.load_hosts().unwrap()[0].addrs,
+            ["192.168.31.5:47420"]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

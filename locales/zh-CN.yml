@@ -1355,6 +1355,7 @@ errors:
   terminal_restart: "重新启动终端失败：%{error}"
   persist_project: "保存项目失败：%{error}"
   persist_settings: "保存设置失败：%{error}"
+  device_preferences_unsaved: "保存本设备的偏好失败：%{error}"
   settings_unreadable: "Tcode 读不了 settings.json（%{error}），现在使用默认设置，也不会把任何设置写进这个文件。它可能是更新版本的 Tcode 写的，请改用那个版本打开。"
   file_unreadable: "Tcode 读不了自己的一个文件（%{error}），现在不使用其中的内容运行，也不会把任何内容写进这个文件。它可能是更新版本的 Tcode 写的，请改用那个版本打开。"
   outbox_unreadable: "Tcode 读不了这台设备尚未发往 %{host} 的消息（%{error}），因此没有打开这台主机，也没有改动这些消息。"
@@ -1614,6 +1615,7 @@ hosts:
   move_down: "下移"
   forget_title: "移除「%{name}」？"
   forget_description: "本设备将不再保存这台主机，再次连接需要新的邀请。"
+  forget_failed: "无法移除「%{name}」：%{error}"
   actions: "%{name} 的操作"
   pair_again: "重新配对"
   in_group: "主机组成员"
@@ -1650,6 +1652,7 @@ hosts:
     address_unreachable: "%{address} 没有响应，请检查地址，并确认主机的 UDP 端口在当前网络中可访问。"
     retry: "重试"
     failed: "添加失败：%{reason}"
+    unsaved: "已连接「%{name}」，但本设备没能保存它（%{error}），下次打开 Tcode 时它不会出现在列表里。"
 
 device:
   scan_hint: "将二维码置于取景框内"

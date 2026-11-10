@@ -849,8 +849,34 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let device = DevicePreferences::entity(cx);
+        let preferences_failures = cx.subscribe_in(
+            &device,
+            window,
+            |_, _, failure: &crate::device::PreferencesFailure, window, cx| {
+                let message = match failure {
+                    crate::device::PreferencesFailure::Unreadable(error) => {
+                        crate::tr!("errors.file_unreadable", error = error.to_string())
+                    }
+                    crate::device::PreferencesFailure::Unsaved(error) => crate::tr!(
+                        "errors.device_preferences_unsaved",
+                        error = error.to_string()
+                    ),
+                };
+                window.push_notification(Notification::error(message.into_owned()), cx);
+            },
+        );
         if let Some(client) = setup.client_host.clone() {
-            DevicePreferences::install(client, cx);
+            DevicePreferences::install(client.clone(), cx);
+            // The window lists no saved machines while they cannot be read.
+            // Said once the window holds its overlays.
+            if let Err(error) = client.load_hosts() {
+                let message =
+                    crate::tr!("errors.file_unreadable", error = error.to_string()).into_owned();
+                cx.defer_in(window, move |_, window, cx| {
+                    window.push_notification(Notification::error(message), cx);
+                });
+            }
         }
         if let Some(settings) = &setup.local_settings
             && DevicePreferences::adopt(settings, cx)
@@ -886,6 +912,7 @@ impl AppShell {
                     if let Some(saved) = setup.client_host.as_ref().and_then(|client| {
                         client
                             .load_hosts()
+                            .ok()?
                             .into_iter()
                             .find(|saved| saved.host_id == *host_id)
                     }) {
@@ -897,7 +924,7 @@ impl AppShell {
         // A host whose outbox cannot be read opens first too: opening it
         // says why.
         if let Some(host) = setup.client_host.as_ref().and_then(|client| {
-            client.load_hosts().into_iter().find(|host| {
+            client.load_hosts().ok()?.into_iter().find(|host| {
                 client.outbox_storage(&host.host_id).is_some_and(|storage| {
                     storage.load().map_or(true, |entries| !entries.is_empty())
                 })
@@ -914,6 +941,7 @@ impl AppShell {
             state.set_compact(compact, cx);
         });
         let subscriptions = vec![
+            preferences_failures,
             // The one place navigation reaches the stack: whoever moved the
             // history — a nav bar, the sidebar, the palette, Android Back —
             // gets the same push or pop out of it.
@@ -1225,7 +1253,9 @@ impl AppShell {
                 .into_iter()
                 .collect();
         };
-        let saved = client.load_hosts();
+        // Saved machines that cannot be read are none; opening the window
+        // said why.
+        let saved = client.load_hosts().unwrap_or_default();
         let preference = DevicePreferences::workspace(cx);
         let last_host_id = client.last_host_id();
         let local_machine_id = client.local_machine_id();
@@ -1246,6 +1276,13 @@ impl AppShell {
         change: impl FnOnce(&mut tcode_client::host::WorkspacePreference),
         cx: &mut App,
     ) {
+        // Arranged from saved machines that cannot be read, the workspace
+        // would lose every one of them.
+        if let Some(client) = &self.setup.client_host
+            && client.load_hosts().is_err()
+        {
+            return;
+        }
         let members: Vec<HostKey> = self.members(cx).iter().map(AttachmentTarget::key).collect();
         DevicePreferences::arrange_workspace(cx, |workspace| {
             let mut arranged = crate::workspace::arranged(workspace.as_ref(), &members);
@@ -6685,24 +6722,39 @@ pub(crate) mod tests {
             None
         }
 
-        fn load_hosts(&self) -> Vec<tcode_client::pairing::PairedHost> {
-            if self.machine_exists {
+        fn load_hosts(
+            &self,
+        ) -> Result<Vec<tcode_client::pairing::PairedHost>, tcode_client::host::FileFailure>
+        {
+            Ok(if self.machine_exists {
                 vec![self.saved.clone()]
             } else {
                 Vec::new()
-            }
+            })
         }
 
-        fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
-            self.preferences.borrow().clone()
+        fn load_preferences(
+            &self,
+        ) -> Result<tcode_client::host::ClientPreferences, tcode_client::host::FileFailure>
+        {
+            Ok(self.preferences.borrow().clone())
         }
 
-        fn save_preferences(&self, preferences: &tcode_client::host::ClientPreferences) {
+        fn save_preferences(
+            &self,
+            preferences: &tcode_client::host::ClientPreferences,
+        ) -> Result<(), tcode_client::host::FileFailure> {
             *self.preferences.borrow_mut() = preferences.clone();
             self.saves.set(self.saves.get() + 1);
+            Ok(())
         }
 
-        fn save_hosts(&self, _: &[tcode_client::pairing::PairedHost]) {}
+        fn save_hosts(
+            &self,
+            _: &[tcode_client::pairing::PairedHost],
+        ) -> Result<(), tcode_client::host::FileFailure> {
+            Ok(())
+        }
 
         fn last_host_id(&self) -> Option<String> {
             Some(self.saved.host_id.clone())
@@ -6871,23 +6923,37 @@ pub(crate) mod tests {
             None
         }
 
-        fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
-            self.preferences.borrow().clone()
+        fn load_preferences(
+            &self,
+        ) -> Result<tcode_client::host::ClientPreferences, tcode_client::host::FileFailure>
+        {
+            Ok(self.preferences.borrow().clone())
         }
 
-        fn save_preferences(&self, preferences: &tcode_client::host::ClientPreferences) {
+        fn save_preferences(
+            &self,
+            preferences: &tcode_client::host::ClientPreferences,
+        ) -> Result<(), tcode_client::host::FileFailure> {
             *self.preferences.borrow_mut() = preferences.clone();
+            Ok(())
         }
 
-        fn load_hosts(&self) -> Vec<tcode_client::pairing::PairedHost> {
-            self.saved.borrow().clone()
+        fn load_hosts(
+            &self,
+        ) -> Result<Vec<tcode_client::pairing::PairedHost>, tcode_client::host::FileFailure>
+        {
+            Ok(self.saved.borrow().clone())
         }
 
-        fn save_hosts(&self, hosts: &[tcode_client::pairing::PairedHost]) {
+        fn save_hosts(
+            &self,
+            hosts: &[tcode_client::pairing::PairedHost],
+        ) -> Result<(), tcode_client::host::FileFailure> {
             *self.saved.borrow_mut() = hosts.to_vec();
             for watcher in self.watchers.borrow().iter() {
                 let _ = watcher.try_send(());
             }
+            Ok(())
         }
 
         fn saved_hosts_changes(&self) -> Option<async_channel::Receiver<()>> {
@@ -7301,7 +7367,11 @@ pub(crate) mod tests {
         assert_eq!(linked(&shell, cx), std::slice::from_ref(&key_b));
         assert_eq!(store_of(&shell, cx), b);
         assert_eq!(drafted(&hosts[&key_b]), ["on-b"]);
-        let workspace = client.load_preferences().workspace.expect("arranged");
+        let workspace = client
+            .load_preferences()
+            .unwrap()
+            .workspace
+            .expect("arranged");
         assert_eq!(workspace.left, ["host-a"]);
         assert!(workspace.hosts.iter().all(|host| host.host_id != "host-a"));
     }
@@ -7484,7 +7554,7 @@ pub(crate) mod tests {
         hosts[&key_a].come_up(&a, Vec::new(), None, cx);
 
         let _b = WorkspaceHost::offer(&client, "host-b", cx);
-        client.remember_host(saved_machine("host-b", true));
+        client.remember_host(saved_machine("host-b", true)).unwrap();
         draw(cx);
         assert_eq!(
             linked(&shell, cx),
@@ -9124,7 +9194,7 @@ pub(crate) mod tests {
             });
             cx.executor().advance_clock(Duration::from_millis(151));
             draw(cx);
-            let preferences = client.load_preferences();
+            let preferences = client.load_preferences().unwrap();
             assert_eq!(
                 preferences.navigation.unwrap()["history"],
                 serde_json::json!(["threads"])
@@ -9208,9 +9278,12 @@ pub(crate) mod tests {
             client.preferences.borrow_mut().language = Some("zh-CN".into());
             cx.executor().advance_clock(Duration::from_millis(151));
             draw(cx);
-            assert_eq!(client.load_preferences().language.as_deref(), Some("zh-CN"));
             assert_eq!(
-                client.load_preferences().navigation.unwrap()["panel"],
+                client.load_preferences().unwrap().language.as_deref(),
+                Some("zh-CN")
+            );
+            assert_eq!(
+                client.load_preferences().unwrap().navigation.unwrap()["panel"],
                 saved_panel
             );
         }
@@ -9232,7 +9305,7 @@ pub(crate) mod tests {
         draw(cx);
         assert_eq!(client.saves.get(), 1);
         assert_eq!(
-            client.load_preferences().navigation.unwrap(),
+            client.load_preferences().unwrap().navigation.unwrap(),
             serde_json::json!({
                 "history": ["threads", "thread"],
                 "thread": { "host": "last-host", "session_id": "thread-b" },
@@ -9251,7 +9324,7 @@ pub(crate) mod tests {
         cx.executor().advance_clock(Duration::from_millis(151));
         draw(cx);
         assert_eq!(client.saves.get(), 2);
-        let navigation = client.load_preferences().navigation.unwrap();
+        let navigation = client.load_preferences().unwrap().navigation.unwrap();
         assert_eq!(
             navigation["thread"],
             serde_json::json!({ "host": "last-host", "session_id": "thread-c" })
@@ -9264,9 +9337,12 @@ pub(crate) mod tests {
         cx.update(|window, cx| {
             DevicePreferences::set_theme(tcode_core::settings::ThemeMode::Light, window, cx)
         });
-        assert_eq!(client.load_preferences().navigation, Some(navigation));
         assert_eq!(
-            client.load_preferences().appearance.as_deref(),
+            client.load_preferences().unwrap().navigation,
+            Some(navigation)
+        );
+        assert_eq!(
+            client.load_preferences().unwrap().appearance.as_deref(),
             Some("light")
         );
     }
@@ -14687,7 +14763,7 @@ pub(crate) mod tests {
             SidebarLayout::Grouped,
         );
         assert_eq!(device_preferences(cx), adopted);
-        let persisted = saved().load_preferences();
+        let persisted = saved().load_preferences().unwrap();
         assert_eq!(
             (
                 persisted.appearance.as_deref(),
@@ -14735,10 +14811,54 @@ pub(crate) mod tests {
         });
         draw(cx);
         assert_eq!(device_preferences(cx), adopted);
-        assert_eq!(saved().load_preferences(), persisted);
+        assert_eq!(saved().load_preferences().unwrap(), persisted);
         assert!(cx.update(|_, cx| cx.theme().mode.is_dark()));
         assert_eq!(&*rust_i18n::locale(), crate::LANGUAGE_JAPANESE);
         driver.shutdown(cx, &host);
+        drop(shell);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// This device's preferences and saved machines in files this build
+    /// cannot read: the window opens on the host anyway, says which files and
+    /// why, and writes over neither, though the host's preferences are
+    /// adopted and the theme changes.
+    #[gpui::test]
+    fn unreadable_device_files_are_reported_and_left_as_they_are(cx: &mut TestAppContext) {
+        use crate::store::tests::scratch_root;
+        use tcode_core::settings::ThemeMode;
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let root = scratch_root("device-files-unreadable");
+        let disk =
+            tcode_services::store::SessionStore::open_at(root.clone()).expect("open test store");
+        let device = root.join("device");
+        std::fs::create_dir_all(&device).unwrap();
+        let preferences = br#"{"appearance": "dark","#;
+        let machines = br#"[{"host_id": 7}]"#;
+        std::fs::write(device.join("mobile.json"), preferences).unwrap();
+        std::fs::write(device.join("hosts.json"), machines).unwrap();
+        let client = tcode_traverse::NativeClientHost::new(device.clone(), "phone");
+        let (shell, store, host, mut driver, cx) = mount_on_host(cx, disk, Some(Rc::new(client)));
+        driver.wait_until(cx, &store, "the host's settings", |cx| {
+            store.read_with(cx, |store, _| store.settings_hydrated())
+        });
+        draw(cx);
+        let said = cx.update(crate::overlay::notifications_said);
+        for file in ["mobile.json", "hosts.json"] {
+            assert!(
+                said.iter().any(|said| said.contains(file)),
+                "{file} is named: {said:?}"
+            );
+        }
+        cx.update(|window, cx| DevicePreferences::set_theme(ThemeMode::Light, window, cx));
+        draw(cx);
+        assert!(cx.update(|_, cx| !cx.theme().mode.is_dark()));
+        assert_eq!(
+            std::fs::read(device.join("mobile.json")).unwrap(),
+            preferences
+        );
+        assert_eq!(std::fs::read(device.join("hosts.json")).unwrap(), machines);
+        driver.shutdown(cx, &store, &host);
         drop(shell);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -15063,10 +15183,18 @@ pub(crate) mod tests {
             fn device_platform(&self) -> Option<String> {
                 None
             }
-            fn load_hosts(&self) -> Vec<tcode_client::pairing::PairedHost> {
-                vec![self.saved.clone()]
+            fn load_hosts(
+                &self,
+            ) -> Result<Vec<tcode_client::pairing::PairedHost>, tcode_client::host::FileFailure>
+            {
+                Ok(vec![self.saved.clone()])
             }
-            fn save_hosts(&self, _: &[tcode_client::pairing::PairedHost]) {}
+            fn save_hosts(
+                &self,
+                _: &[tcode_client::pairing::PairedHost],
+            ) -> Result<(), tcode_client::host::FileFailure> {
+                Ok(())
+            }
             fn last_host_id(&self) -> Option<String> {
                 None
             }

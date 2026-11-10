@@ -1,5 +1,6 @@
 use tcode_client::host::{
-    ClientHost, ClientPreferences, HostFuture, PickedFile, Transport, persistent_device_id,
+    ClientHost, ClientPreferences, FileFailure, HostFuture, PickedFile, Transport,
+    persistent_device_id,
 };
 use tcode_client::pairing::PairedHost;
 use wasm_bindgen::{JsCast as _, JsValue, closure::Closure};
@@ -21,49 +22,58 @@ fn storage() -> Option<web_sys::Storage> {
     window().local_storage().ok().flatten()
 }
 
-/// Site data this build cannot read. `ClientHost` gives reads no way to
-/// report it, so it goes to the console, and the data is neither used nor
-/// replaced.
-fn unreadable(key: &str, error: serde_json::Error) {
-    web_sys::console::error_1(&format!("could not read {key}: {error}").into());
-}
+const HOSTS_KEY: &str = "tcode.hosts";
+const PREFERENCES_KEY: &str = "tcode.preferences";
 
 /// `tcode.hosts` as the login page writes it: one record per machine with
 /// the bearer token the browser presents in hello and the origin that
 /// issued it, which the login page checks before skipping the form. The
 /// shared [`PairedHost`] carries neither, so the raw records are kept here
 /// and merged back on every save. Nothing stored is no machines.
-fn raw_hosts() -> Result<Vec<serde_json::Value>, ()> {
-    let Some(json) = storage().and_then(|storage| storage.get_item("tcode.hosts").ok().flatten())
-    else {
-        return Ok(Vec::new());
-    };
-    serde_json::from_str(&json).map_err(|error| unreadable("tcode.hosts", error))
+fn raw_hosts() -> Result<Vec<serde_json::Value>, FileFailure> {
+    match read_item(HOSTS_KEY)? {
+        Some(json) => {
+            serde_json::from_str(&json).map_err(|error| FileFailure::new(HOSTS_KEY, error))
+        }
+        None => Ok(Vec::new()),
+    }
 }
 
 /// The saved machines, if every record of `tcode.hosts` is one.
-fn paired_hosts() -> Result<Vec<PairedHost>, ()> {
+fn paired_hosts() -> Result<Vec<PairedHost>, FileFailure> {
     raw_hosts()?
         .into_iter()
         .map(serde_json::from_value)
         .collect::<Result<_, _>>()
-        .map_err(|error| unreadable("tcode.hosts", error))
+        .map_err(|error| FileFailure::new(HOSTS_KEY, error))
 }
 
 /// The saved preferences; nothing stored is the defaults.
-fn preferences() -> Result<ClientPreferences, ()> {
-    let Some(json) =
-        storage().and_then(|storage| storage.get_item("tcode.preferences").ok().flatten())
-    else {
-        return Ok(ClientPreferences::default());
-    };
-    serde_json::from_str(&json).map_err(|error| unreadable("tcode.preferences", error))
+fn preferences() -> Result<ClientPreferences, FileFailure> {
+    match read_item(PREFERENCES_KEY)? {
+        Some(json) => {
+            serde_json::from_str(&json).map_err(|error| FileFailure::new(PREFERENCES_KEY, error))
+        }
+        None => Ok(ClientPreferences::default()),
+    }
 }
 
-fn write_raw_hosts(hosts: &[serde_json::Value]) {
-    if let (Some(storage), Ok(json)) = (storage(), serde_json::to_string(hosts)) {
-        let _ = storage.set_item("tcode.hosts", &json);
-    }
+/// `key` of the site's storage.
+fn read_item(key: &str) -> Result<Option<String>, FileFailure> {
+    let storage = window()
+        .local_storage()
+        .map_err(|error| FileFailure::new(key, js_error(error)))?
+        .ok_or_else(|| FileFailure::new(key, "localStorage unavailable"))?;
+    storage
+        .get_item(key)
+        .map_err(|error| FileFailure::new(key, js_error(error)))
+}
+
+fn write_item(key: &str, json: &str) -> Result<(), FileFailure> {
+    let storage = storage().ok_or_else(|| FileFailure::new(key, "localStorage unavailable"))?;
+    storage
+        .set_item(key, json)
+        .map_err(|error| FileFailure::new(key, js_error(error)))
 }
 
 /// The token the browser holds for `host_id`, if it logged in there.
@@ -135,17 +145,15 @@ impl ClientHost for WebHost {
         browser_platform(&user_agent()).map(str::to_owned)
     }
 
-    fn load_preferences(&self) -> ClientPreferences {
-        preferences().unwrap_or_default()
+    fn load_preferences(&self) -> Result<ClientPreferences, FileFailure> {
+        preferences()
     }
 
-    fn save_preferences(&self, preferences: &ClientPreferences) {
-        if self::preferences().is_err() {
-            return;
-        }
-        if let (Some(storage), Ok(json)) = (storage(), serde_json::to_string(preferences)) {
-            let _ = storage.set_item("tcode.preferences", &json);
-        }
+    fn save_preferences(&self, preferences: &ClientPreferences) -> Result<(), FileFailure> {
+        self::preferences()?;
+        let json = serde_json::to_string(preferences)
+            .map_err(|error| FileFailure::new(PREFERENCES_KEY, error))?;
+        write_item(PREFERENCES_KEY, &json)
     }
 
     fn outbox_storage(
@@ -157,17 +165,13 @@ impl ClientHost for WebHost {
         ))))
     }
 
-    fn load_hosts(&self) -> Vec<PairedHost> {
-        paired_hosts().unwrap_or_default()
+    fn load_hosts(&self) -> Result<Vec<PairedHost>, FileFailure> {
+        paired_hosts()
     }
 
-    fn save_hosts(&self, hosts: &[PairedHost]) {
-        if paired_hosts().is_err() {
-            return;
-        }
-        let Ok(existing) = raw_hosts() else {
-            return;
-        };
+    fn save_hosts(&self, hosts: &[PairedHost]) -> Result<(), FileFailure> {
+        let existing = raw_hosts()?;
+        paired_hosts()?;
         let records: Vec<serde_json::Value> = hosts
             .iter()
             .filter_map(|host| {
@@ -185,7 +189,9 @@ impl ClientHost for WebHost {
                 Some(record)
             })
             .collect();
-        write_raw_hosts(&records);
+        let json =
+            serde_json::to_string(&records).map_err(|error| FileFailure::new(HOSTS_KEY, error))?;
+        write_item(HOSTS_KEY, &json)
     }
 
     fn last_host_id(&self) -> Option<String> {

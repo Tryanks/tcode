@@ -1362,6 +1362,7 @@ errors:
   terminal_restart: "ターミナルを再起動できませんでした：%{error}"
   persist_project: "プロジェクトを保存できませんでした：%{error}"
   persist_settings: "設定を保存できませんでした：%{error}"
+  device_preferences_unsaved: "このデバイスの設定を保存できませんでした：%{error}"
   settings_unreadable: "Tcode は settings.json を読み込めなかったため（%{error}）、既定の設定で動作しており、このファイルには何も書き込みません。新しいバージョンの Tcode がこのファイルを書き込んだ可能性があります。そのバージョンで開いてください。"
   file_unreadable: "Tcode は自身のファイルを読み込めなかったため（%{error}）、その内容を使わずに動作しており、このファイルには何も書き込みません。新しいバージョンの Tcode がこのファイルを書き込んだ可能性があります。そのバージョンで開いてください。"
   outbox_unreadable: "このデバイスから %{host} へまだ送っていないメッセージを読み込めなかったため（%{error}）、Tcode はそのホストを開かず、メッセージもそのままにしました。"
@@ -1621,6 +1622,7 @@ hosts:
   move_down: "下に移動"
   forget_title: "「%{name}」を削除しますか？"
   forget_description: "このデバイスからホストの情報が削除されます。もう一度接続するには新しい招待が必要です。"
+  forget_failed: "「%{name}」を削除できませんでした：%{error}"
   actions: "%{name} の操作"
   pair_again: "再ペアリング"
   in_group: "ホストグループに所属"
@@ -1657,6 +1659,7 @@ hosts:
     address_unreachable: "%{address} から応答がありません。アドレスと、このネットワークでホストの UDP ポートが開いていることを確認してください。"
     retry: "再試行"
     failed: "ホストを追加できませんでした：%{reason}"
+    unsaved: "「%{name}」に接続しましたが、このデバイスに保存できなかったため（%{error}）、次に Tcode を開いたときには一覧に表示されません。"
 
 device:
   scan_hint: "QR コードを枠内に収めてください"
