@@ -241,37 +241,13 @@ fn provision_at(
     let seed_plan = read_seed_plan(root)?;
     std::fs::create_dir_all(worktrees_root).map_err(io_error)?;
     let branch = available_branch(root, &requested_branch)?;
-    if registered_worktree(root, &path)?.is_some() {
-        return Err(WorktreeError(format!(
-            "worktree target is already registered: {}",
-            path.display()
-        )));
-    }
-    if path.exists() {
-        prune(root)?;
-    }
-
-    let failure =
-        |output: &std::process::Output| String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let mut output = add(root, &path, &branch, base)?;
-    if !output.status.success() && registered_worktree(root, &path)?.is_none() {
-        let first = failure(&output);
-        // `worktree add -b` makes the branch before it checks it out, so a
-        // failed add can leave the branch behind and the retry would only
-        // say it already exists.
-        delete_branch_without_own_commits(root, &branch);
-        prune(root)?;
-        output = add(root, &path, &branch, base)?;
-        if !output.status.success() {
-            delete_branch_without_own_commits(root, &branch);
-            return Err(WorktreeError(format!(
-                "{first} (again after pruning: {})",
-                failure(&output)
-            )));
-        }
-    }
+    let output = add(root, &path, &branch, base)?;
     if !output.status.success() {
-        return Err(WorktreeError(failure(&output)));
+        // `worktree add -b` makes the branch before it checks it out.
+        delete_branch_without_own_commits(root, &branch);
+        return Err(WorktreeError(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
     }
 
     let seed_summary = match seed(&path, seed_plan, seed_limit) {
