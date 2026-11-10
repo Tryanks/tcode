@@ -1788,6 +1788,7 @@ spaces:
     project: "Share project «%{name}»"
     new: "New space and share…"
     badge: "Shared in %{names}"
+    loading: "Loading spaces…"
   shared:
     title: "«%{name}» is ready"
     description: "Send this link to collaborators; they will see «%{project}» and its threads."

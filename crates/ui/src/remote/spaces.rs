@@ -763,6 +763,14 @@ pub(crate) fn share_items(
             false,
         );
     }
+    // Before the machine's first answer its spaces are unknown, not none.
+    if target.spaces.read(cx).state.is_none() {
+        menu = menu.menu_with_enable(
+            crate::tr!("spaces.share.loading").into_owned(),
+            Box::new(gpui::NoAction),
+            false,
+        );
+    }
     for space in target.spaces.read(cx).spaces() {
         menu = menu.menu_with_check(
             quoted("spaces.share.to", &space.name),

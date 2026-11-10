@@ -1781,6 +1781,7 @@ spaces:
     project: "分享项目「%{name}」"
     new: "新建共享空间并分享…"
     badge: "已分享到 %{names}"
+    loading: "正在加载共享空间…"
   shared:
     title: "「%{name}」已就绪"
     description: "把此链接发给协作者，他们将看到「%{project}」及其线程。"

@@ -1788,6 +1788,7 @@ spaces:
     project: "プロジェクト「%{name}」を共有"
     new: "新しい共有スペースを作成して共有…"
     badge: "%{names} で共有中"
+    loading: "共有スペースを読み込み中…"
   shared:
     title: "「%{name}」の準備ができました"
     description: "このリンクを共同作業者に送ってください。「%{project}」とそのスレッドが表示されます。"
