@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::backend::RootInfo;
 use crate::outline::{
-    MAX_MODEL_BYTES, MAX_MODEL_LINES, PAGE_BYTES, PREVIEW_BYTES, UiNode, assign_refs,
-    assign_refs_from_previous, canonical_role, output_exceeds_limit, safe_prefix,
+    MAX_MODEL_BYTES, PAGE_BYTES, PREVIEW_BYTES, UiNode, assign_refs, assign_refs_from_previous,
+    canonical_role, safe_prefix,
 };
 
 pub const OBSERVATION_CAPACITY: usize = 8;
@@ -293,10 +293,10 @@ impl StateStore {
     }
 
     pub fn bound_model_text(&mut self, owner_state: Option<&str>, text: String) -> String {
-        if !output_exceeds_limit(&text) {
+        if text.len() <= MAX_MODEL_BYTES {
             return text;
         }
-        let (preview, offset) = safe_prefix(&text, PREVIEW_BYTES, MAX_MODEL_LINES);
+        let (preview, offset) = safe_prefix(&text, PREVIEW_BYTES);
         let preview = preview.to_string();
         let output_ref = self.register_output(owner_state, Arc::<str>::from(text), offset);
         format!(
@@ -599,7 +599,7 @@ fn page(
         return Err(StateError::InvalidOffset(offset));
     }
     let remaining = &text[offset..];
-    let (content, consumed) = safe_prefix(remaining, PAGE_BYTES, MAX_MODEL_LINES);
+    let (content, consumed) = safe_prefix(remaining, PAGE_BYTES);
     let next_offset = offset + consumed;
     Ok(OutputPage {
         output_ref: output_ref.to_string(),
@@ -698,69 +698,57 @@ mod tests {
 
     #[test]
     fn bounded_output_continuation_round_trips_without_mutation() {
-        for (original, line_limited) in [
-            ("0123456789α中文😀\n".repeat(4_000), false),
-            ("β\n".repeat(4_001), true),
-        ] {
-            let mut store = StateStore::default();
-            let visible = store.bound_model_text(Some("S9"), original.clone());
-            assert!(visible.len() < 20 * 1024);
-            let output_ref = visible
-                .split_whitespace()
-                .find(|part| part.starts_with("@o"))
-                .unwrap();
-            assert!(matches!(
-                store.read_output(output_ref, Some("other-state"), None),
-                Err(StateError::OutputOwnerMismatch { .. })
-            ));
-            let split_character = original
-                .char_indices()
-                .find(|(_, ch)| ch.len_utf8() > 1)
-                .unwrap()
-                .0
-                + 1;
-            for offset in [split_character, original.len() + 1] {
-                assert!(
-                    matches!(store.read_output(output_ref, Some("S9"), Some(offset)), Err(StateError::InvalidOffset(actual)) if actual == offset)
-                );
-            }
-            let mut rebuilt = visible
-                .split("\n\n[output truncated")
-                .next()
-                .unwrap()
-                .to_string();
-            assert!(rebuilt.len() <= PREVIEW_BYTES);
-            assert!(rebuilt.lines().count() <= MAX_MODEL_LINES);
-            if line_limited {
-                assert_eq!(rebuilt, "β\n".repeat(2_000));
-            }
-            let mut offset = rebuilt.len();
-            loop {
-                let page = store
-                    .read_output(output_ref, Some("S9"), Some(offset))
-                    .unwrap();
-                assert!(page.text.len() <= PAGE_BYTES);
-                assert!(page.text.lines().count() <= MAX_MODEL_LINES);
-                assert!(page.next_offset > page.offset || page.eof);
-                if line_limited && !page.eof {
-                    assert!(page.text.ends_with('\n'));
-                }
-                rebuilt.push_str(&page.text);
-                if page.eof {
-                    break;
-                }
-                offset = page.next_offset;
-            }
-            assert_eq!(rebuilt, original);
-
-            let repeated = store
-                .read_output(output_ref, Some("S9"), Some(offset))
-                .unwrap();
-            let repeated_again = store
-                .read_output(output_ref, Some("S9"), Some(offset))
-                .unwrap();
-            assert_eq!(repeated, repeated_again);
+        let original = "0123456789α中文😀\n".repeat(4_000);
+        let mut store = StateStore::default();
+        let visible = store.bound_model_text(Some("S9"), original.clone());
+        assert!(visible.len() < 20 * 1024);
+        let output_ref = visible
+            .split_whitespace()
+            .find(|part| part.starts_with("@o"))
+            .unwrap();
+        assert!(matches!(
+            store.read_output(output_ref, Some("other-state"), None),
+            Err(StateError::OutputOwnerMismatch { .. })
+        ));
+        let split_character = original
+            .char_indices()
+            .find(|(_, ch)| ch.len_utf8() > 1)
+            .unwrap()
+            .0
+            + 1;
+        for offset in [split_character, original.len() + 1] {
+            assert!(
+                matches!(store.read_output(output_ref, Some("S9"), Some(offset)), Err(StateError::InvalidOffset(actual)) if actual == offset)
+            );
         }
+        let mut rebuilt = visible
+            .split("\n\n[output truncated")
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(rebuilt.len() <= PREVIEW_BYTES);
+        let mut offset = rebuilt.len();
+        loop {
+            let page = store
+                .read_output(output_ref, Some("S9"), Some(offset))
+                .unwrap();
+            assert!(page.text.len() <= PAGE_BYTES);
+            assert!(page.next_offset > page.offset || page.eof);
+            rebuilt.push_str(&page.text);
+            if page.eof {
+                break;
+            }
+            offset = page.next_offset;
+        }
+        assert_eq!(rebuilt, original);
+
+        let repeated = store
+            .read_output(output_ref, Some("S9"), Some(offset))
+            .unwrap();
+        let repeated_again = store
+            .read_output(output_ref, Some("S9"), Some(offset))
+            .unwrap();
+        assert_eq!(repeated, repeated_again);
     }
 
     #[test]
