@@ -773,7 +773,12 @@ impl SettingsPage {
             let store = store.clone();
             cx.new(|cx| crate::local_permissions::LocalPermissions::new(store, window, cx))
         });
-        let auto_settle_input = cx.new(|cx| InputState::new(window, cx).step(1.).min(1.).max(90.));
+        let auto_settle_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .step(1.)
+                .min(*tcode_core::settings::AUTO_SETTLE_DAYS.start())
+                .max(*tcode_core::settings::AUTO_SETTLE_DAYS.end())
+        });
         let source_control_panel = cx.new(|cx| {
             crate::source_control_settings::SourceControlPanel::new(
                 store.clone(),
@@ -941,7 +946,10 @@ impl SettingsPage {
         let settings = self.store.read(cx).settings();
         if !self.auto_settle_input.dirty {
             self.auto_settle_input.push(
-                settings.auto_settle_after_days.unwrap_or(3.).to_string(),
+                settings
+                    .auto_settle_after_days
+                    .unwrap_or(tcode_core::settings::AUTO_SETTLE_DEFAULT_DAYS)
+                    .to_string(),
                 window,
                 cx,
             );

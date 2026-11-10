@@ -2,7 +2,10 @@ use super::*;
 use tcode_core::{
     control::SettlementAutomation,
     project::Project,
-    settings::{DEFAULT_NEW_PROJECT_DIR, ProjectSettlementSettings, ProjectStart, Settings},
+    settings::{
+        AUTO_SETTLE_DAYS, AUTO_SETTLE_DEFAULT_DAYS, DEFAULT_NEW_PROJECT_DIR,
+        ProjectSettlementSettings, ProjectStart, Settings,
+    },
 };
 
 /// How long a value drawn here takes to glide to a new one.
@@ -58,7 +61,7 @@ impl SettingsPage {
             .read(cx)
             .settings()
             .auto_settle_after_days
-            .unwrap_or(3.);
+            .unwrap_or(AUTO_SETTLE_DEFAULT_DAYS);
         let parsed = self
             .auto_settle_input
             .state
@@ -68,7 +71,7 @@ impl SettingsPage {
             .parse::<f64>()
             .ok()
             .filter(|value| value.is_finite())
-            .map(|value| value.clamp(1., 90.));
+            .map(|value| value.clamp(*AUTO_SETTLE_DAYS.start(), *AUTO_SETTLE_DAYS.end()));
         let value = parsed.unwrap_or(stored);
         self.auto_settle_input.dirty = false;
         self.auto_settle_input.push(value.to_string(), window, cx);
@@ -453,9 +456,12 @@ impl SettingsPage {
     ) -> Vec<AnyElement> {
         let reset = crate::settings_rows::reset_action(
             "reset-auto-settle",
-            settings.auto_settle_after_days != Some(3.),
+            settings.auto_settle_after_days != Some(AUTO_SETTLE_DEFAULT_DAYS),
             cx.listener(|this, _, _, cx| {
-                this.dispatch_settings(|store| store.set_auto_settle_after_days(Some(3.)), cx)
+                this.dispatch_settings(
+                    |store| store.set_auto_settle_after_days(Some(AUTO_SETTLE_DEFAULT_DAYS)),
+                    cx,
+                )
             }),
         );
         let mut rows = vec![self.settlement_automation_row(settings, cx)];
@@ -466,7 +472,9 @@ impl SettingsPage {
             settings.auto_settle_after_days.is_some(),
             reset,
             cx,
-            |store, checked| store.set_auto_settle_after_days(checked.then_some(3.)),
+            |store, checked| {
+                store.set_auto_settle_after_days(checked.then_some(AUTO_SETTLE_DEFAULT_DAYS))
+            },
         ));
         // The days apply only while auto-settle is on, and fold with it.
         rows.push(
@@ -787,12 +795,12 @@ impl ProjectRulesEditor {
             .auto_settle_after_days
             .flatten()
             .or(settings.auto_settle_after_days)
-            .unwrap_or(3.);
+            .unwrap_or(AUTO_SETTLE_DEFAULT_DAYS);
         let days = cx.new(|cx| {
             InputState::new(window, cx)
                 .step(1.)
-                .min(1.)
-                .max(90.)
+                .min(*AUTO_SETTLE_DAYS.start())
+                .max(*AUTO_SETTLE_DAYS.end())
                 .default_value(value.to_string())
         });
         let subscriptions = vec![
@@ -822,7 +830,11 @@ impl ProjectRulesEditor {
     }
 
     fn commit_days(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let stored = self.draft.auto_settle_after_days.flatten().unwrap_or(3.);
+        let stored = self
+            .draft
+            .auto_settle_after_days
+            .flatten()
+            .unwrap_or(AUTO_SETTLE_DEFAULT_DAYS);
         let parsed = self
             .days
             .read(cx)
@@ -831,7 +843,7 @@ impl ProjectRulesEditor {
             .parse::<f64>()
             .ok()
             .filter(|value| value.is_finite())
-            .map(|value| value.clamp(1., 90.));
+            .map(|value| value.clamp(*AUTO_SETTLE_DAYS.start(), *AUTO_SETTLE_DAYS.end()));
         let value = parsed.unwrap_or(stored);
         self.days.update(cx, |input, cx| {
             input.set_value(value.to_string(), window, cx)
@@ -872,7 +884,10 @@ impl Render for ProjectRulesEditor {
             ),
             (
                 Some(Some(
-                    self.draft.auto_settle_after_days.flatten().unwrap_or(3.),
+                    self.draft
+                        .auto_settle_after_days
+                        .flatten()
+                        .unwrap_or(AUTO_SETTLE_DEFAULT_DAYS),
                 )),
                 crate::tr!("settings.auto_settle.after_days").into_owned(),
             ),

@@ -1054,14 +1054,20 @@ pub struct Settings {
     pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
+/// How many idle days auto-settle waits when it is turned on.
+pub const AUTO_SETTLE_DEFAULT_DAYS: f64 = 3.0;
+
+/// The idle days auto-settle may wait.
+pub const AUTO_SETTLE_DAYS: std::ops::RangeInclusive<f64> = 1.0..=90.0;
+
 const fn default_auto_settle_after_days() -> Option<f64> {
-    Some(3.0)
+    Some(AUTO_SETTLE_DEFAULT_DAYS)
 }
 
-/// Auto-settle after 1 to 90 days, or never.
+/// Auto-settle after one of [`AUTO_SETTLE_DAYS`], or never.
 fn auto_settle_days(days: Option<f64>) -> Result<Option<f64>, &'static str> {
     match days {
-        Some(days) if !(1.0..=90.0).contains(&days) => {
+        Some(days) if !AUTO_SETTLE_DAYS.contains(&days) => {
             Err("Auto-settle days must be between 1 and 90.")
         }
         days => Ok(days),
