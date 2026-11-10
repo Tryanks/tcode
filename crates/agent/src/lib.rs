@@ -262,8 +262,6 @@ pub enum RewindPreviewKind {
 pub enum RunningTurnPolicy {
     /// The harness stops the turn first, as its own rewind does.
     Interrupt,
-    /// A rewind waits until no turn runs.
-    Refuse,
 }
 
 /// What a harness lets a client do with its standing goal.
