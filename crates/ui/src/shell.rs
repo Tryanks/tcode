@@ -4098,16 +4098,18 @@ impl AppShell {
         let host = store.read(cx).host_key();
         let toast_id = match presented.disposition {
             RuntimeToastDisposition::Push => self.take_toast_id(),
-            RuntimeToastDisposition::Start(operation) => {
-                let toast_id = self.take_toast_id();
-                self.operation_toasts.insert((host, operation), toast_id);
-                toast_id
-            }
-            RuntimeToastDisposition::Update(operation) => {
-                let Some(id) = self.operation_toasts.get(&(host, operation)) else {
-                    return;
-                };
-                *id
+            // A window that opened after an operation started hears of it
+            // first from its progress.
+            RuntimeToastDisposition::Start(operation)
+            | RuntimeToastDisposition::Update(operation) => {
+                match self.operation_toasts.get(&(host.clone(), operation)) {
+                    Some(id) => *id,
+                    None => {
+                        let toast_id = self.take_toast_id();
+                        self.operation_toasts.insert((host, operation), toast_id);
+                        toast_id
+                    }
+                }
             }
             RuntimeToastDisposition::Finish(operation) => self
                 .operation_toasts
@@ -8052,14 +8054,31 @@ pub(crate) mod tests {
             },
             cx,
         );
+        let said_now = said(cx);
+        assert!(
+            said_now
+                .iter()
+                .any(|toast| toast.starts_with("host-b: Updating"))
+                && !said_now
+                    .iter()
+                    .any(|toast| toast.starts_with("host-a: Updating")),
+            "A's update finished and B's goes on: {said_now:?}"
+        );
+
+        // An update this window did not see start shows from its progress.
+        toast(
+            &key_a,
+            RuntimeToast::ProviderUpdateProgress {
+                operation: RuntimeOperationId(2),
+                run: run(0),
+            },
+            cx,
+        );
         let said = said(cx);
         assert!(
             said.iter()
-                .any(|toast| toast.starts_with("host-b: Updating"))
-                && !said
-                    .iter()
-                    .any(|toast| toast.starts_with("host-a: Updating")),
-            "A's update finished and B's goes on: {said:?}"
+                .any(|toast| toast.starts_with("host-a: Updating")),
+            "A's second update shows from its progress: {said:?}"
         );
     }
 
