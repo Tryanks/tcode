@@ -1410,7 +1410,6 @@ editor:
 notice:
   switched_branch: "%{branch} に切り替えました"
   worktree_seeded: "ワークツリーにファイルをコピーしました：%{copied} 件をコピー、%{skipped} 件をスキップ"
-  worktree_seeded_limit: "%{copied} 件のファイルをコピーした時点で、ワークツリーへのコピーの上限に達しました。スキップ：%{skipped}"
   worktree_merged_fast_forward: "ワークツリーのブランチをファストフォワードでプロジェクトディレクトリにマージしました"
   worktree_merged_commit: "ワークツリーのブランチをマージコミットでプロジェクトディレクトリにマージしました"
   worktree_merge_missing: "このスレッドのワークツリーはもう存在しません"

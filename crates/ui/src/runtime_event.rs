@@ -124,26 +124,12 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeNotice::WorktreeSeeded {
                     copied_files,
                     skipped,
-                    limit_reached,
-                } => {
-                    let skipped_count = skipped.len();
-                    let skipped = skipped.join(", ");
-                    if *limit_reached {
-                        crate::tr!(
-                            "notice.worktree_seeded_limit",
-                            copied = copied_files,
-                            skipped = skipped
-                        )
-                        .into_owned()
-                    } else {
-                        crate::tr!(
-                            "notice.worktree_seeded",
-                            copied = copied_files,
-                            skipped = skipped_count
-                        )
-                        .into_owned()
-                    }
-                }
+                } => crate::tr!(
+                    "notice.worktree_seeded",
+                    copied = copied_files,
+                    skipped = skipped.len()
+                )
+                .into_owned(),
                 RuntimeNotice::WorktreeMergedFastForward => {
                     crate::tr!("notice.worktree_merged_fast_forward").into_owned()
                 }

@@ -1410,7 +1410,6 @@ editor:
 notice:
   switched_branch: "Switched to %{branch}"
   worktree_seeded: "Worktree seeded: %{copied} files copied, %{skipped} skipped"
-  worktree_seeded_limit: "Worktree seed limit reached after %{copied} files; skipped: %{skipped}"
   worktree_merged_fast_forward: "Merged the worktree branch back with a fast-forward"
   worktree_merged_commit: "Merged the worktree branch back with a merge commit"
   worktree_merge_missing: "This thread's worktree no longer exists"

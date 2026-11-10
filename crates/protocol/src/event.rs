@@ -1275,7 +1275,6 @@ pub enum RuntimeNotice {
     WorktreeSeeded {
         copied_files: usize,
         skipped: Vec<String>,
-        limit_reached: bool,
     },
     WorktreeMergedFastForward,
     WorktreeMergedCommit,

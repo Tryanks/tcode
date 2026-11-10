@@ -13,8 +13,6 @@ use sha2::{Digest as _, Sha256};
 use crate::git::run_git;
 use crate::store::SessionStore;
 
-const WORKTREE_SEED_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
-
 /// How much of a repository's directory name its worktrees' directory keeps.
 const REPOSITORY_NAME_CHARS: usize = 24;
 
@@ -32,7 +30,6 @@ pub struct WorktreeSeedSummary {
     pub manifest_found: bool,
     pub copied_files: usize,
     pub skipped: Vec<String>,
-    pub limit_reached: bool,
 }
 
 /// The complete identity of a newly provisioned worktree.
@@ -157,14 +154,7 @@ pub fn provision(
             .to_string(),
     };
     let bucket = worktrees_root(data_dir).join(repository_key(&checkout)?);
-    provision_at(
-        &checkout,
-        &path_safe(name),
-        &base,
-        &bucket,
-        WORKTREE_SEED_LIMIT_BYTES,
-    )
-    .map_err(Into::into)
+    provision_at(&checkout, &path_safe(name), &base, &bucket).map_err(Into::into)
 }
 
 /// Where [`provision`] puts a worktree called `name` for the repository
@@ -234,7 +224,6 @@ fn provision_at(
     name: &str,
     base: &str,
     worktrees_root: &Path,
-    seed_limit: u64,
 ) -> Result<ProvisionedWorktree, WorktreeError> {
     let path = worktrees_root.join(name);
     let requested_branch = format!("{BRANCH_PREFIX}{name}");
@@ -250,7 +239,7 @@ fn provision_at(
         ));
     }
 
-    let seed_summary = match seed(&path, seed_plan, seed_limit) {
+    let seed_summary = match seed(&path, seed_plan) {
         Ok(summary) => summary,
         Err(error) => {
             if let Err(cleanup_error) = remove(root, &path) {
@@ -891,7 +880,7 @@ fn may_hold_selected(patterns: &[&str], directory: &str) -> bool {
     })
 }
 
-fn seed(worktree: &Path, plan: SeedPlan, limit: u64) -> Result<WorktreeSeedSummary, WorktreeError> {
+fn seed(worktree: &Path, plan: SeedPlan) -> Result<WorktreeSeedSummary, WorktreeError> {
     let canonical_worktree = worktree.canonicalize().map_err(|error| {
         WorktreeError(format!(
             "cannot resolve new worktree {}: {error}",
@@ -903,23 +892,8 @@ fn seed(worktree: &Path, plan: SeedPlan, limit: u64) -> Result<WorktreeSeedSumma
         skipped: plan.unusable,
         ..WorktreeSeedSummary::default()
     };
-    let mut copied_bytes = 0_u64;
     for path in plan.files {
-        copy_seed_file(
-            &plan.root,
-            &canonical_worktree,
-            &path,
-            limit,
-            &mut copied_bytes,
-            &mut summary,
-        )?;
-    }
-    if summary.limit_reached {
-        log::warn!(
-            "worktree seed limit reached for {}; skipped: {}",
-            worktree.display(),
-            summary.skipped.join(", ")
-        );
+        copy_seed_file(&plan.root, &canonical_worktree, &path, &mut summary)?;
     }
     Ok(summary)
 }
@@ -929,8 +903,6 @@ fn copy_seed_file(
     source_root: &Path,
     destination_root: &Path,
     path: &str,
-    limit: u64,
-    copied_bytes: &mut u64,
     summary: &mut WorktreeSeedSummary,
 ) -> Result<(), WorktreeError> {
     let source = source_root.join(path);
@@ -962,16 +934,10 @@ fn copy_seed_file(
         summary.skipped.push(path.to_string());
         return Ok(());
     }
-    if summary.limit_reached || copied_bytes.saturating_add(metadata.len()) > limit {
-        summary.limit_reached = true;
-        summary.skipped.push(path.to_string());
-        return Ok(());
-    }
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(io_error)?;
     }
     std::fs::copy(&canonical_source, destination).map_err(io_error)?;
-    *copied_bytes += metadata.len();
     summary.copied_files += 1;
     Ok(())
 }
@@ -1261,21 +1227,6 @@ mod tests {
             std::fs::read_to_string(created.path.join("tracked.txt")).unwrap(),
             "initial\n"
         );
-        remove(&root, &created.path).unwrap();
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn seed_stops_at_total_size_limit() {
-        let (temp, root) = scratch_repo("tcode-worktree-seed-limit-test");
-        std::fs::write(root.join(".gitignore"), "*.bin\n").unwrap();
-        std::fs::write(root.join("first.bin"), b"1234").unwrap();
-        std::fs::write(root.join("second.bin"), b"5678").unwrap();
-        std::fs::write(root.join(".worktreeinclude"), "first.bin\nsecond.bin\n").unwrap();
-        let created = provision_at(&root, "limit", "main", &temp.join("worktrees"), 4).unwrap();
-        assert_eq!(created.seed_summary.copied_files, 1);
-        assert!(created.seed_summary.limit_reached);
-        assert_eq!(created.seed_summary.skipped, ["second.bin"]);
         remove(&root, &created.path).unwrap();
         let _ = std::fs::remove_dir_all(temp);
     }

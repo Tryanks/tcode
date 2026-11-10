@@ -1939,7 +1939,6 @@ impl AppState {
                                 RuntimeEvent::Notice(RuntimeNotice::WorktreeSeeded {
                                     copied_files: created.seed_summary.copied_files,
                                     skipped: created.seed_summary.skipped,
-                                    limit_reached: created.seed_summary.limit_reached,
                                 }),
                             );
                         }

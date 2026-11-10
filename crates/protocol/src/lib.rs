@@ -313,6 +313,7 @@ pub use wire::{
 // nothing stands in for it (a principal, scope or space without a policy was
 // read as unrestricted). HostingAction no longer reads new_code. HostProblem's
 // credentials_unreadable.
+// RuntimeNotice::WorktreeSeeded has no limit_reached.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

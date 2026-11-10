@@ -1403,7 +1403,6 @@ editor:
 notice:
   switched_branch: "已切换到 %{branch}"
   worktree_seeded: "worktree 已填充：复制了 %{copied} 个文件，跳过了 %{skipped} 个"
-  worktree_seeded_limit: "worktree 填充已达到大小上限（已复制 %{copied} 个文件）；已跳过：%{skipped}"
   worktree_merged_fast_forward: "已通过快进将 worktree 分支合并回项目目录"
   worktree_merged_commit: "已通过合并提交将 worktree 分支合并回项目目录"
   worktree_merge_missing: "此线程的 worktree 已不存在"
