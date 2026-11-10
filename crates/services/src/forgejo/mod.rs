@@ -126,6 +126,20 @@ impl Forgejo {
         Ok((!response.truncated).then(|| String::from_utf8_lossy(&response.body).into_owned()))
     }
 
+    /// The whole diff's files, whose hunks place a comment's lines. Past the read limit the
+    /// listing withholds every file's hunks, so no line can be placed.
+    fn diff_files(&self, key: &PullRequestKey) -> Result<PullRequestFiles, ForgeError> {
+        let files = self.files(key, None)?;
+        if files
+            .files
+            .iter()
+            .any(|file| file.patch == PullRequestPatch::Withheld)
+        {
+            return Err(error(ForgeErrorKind::TooLarge, "Forgejo diff too large"));
+        }
+        Ok(files)
+    }
+
     /// `page` is the page and the size the first page came back with, which a later one is
     /// full at.
     fn files(
@@ -955,7 +969,7 @@ impl Forge for Forgejo {
         lines: (u32, u32),
     ) -> Result<Anchoring, ForgeError> {
         Ok(crate::forge::anchors::anchoring(
-            &self.files(key, None)?,
+            &self.diff_files(key)?,
             head,
             path,
             side,
@@ -968,7 +982,7 @@ impl Forge for Forgejo {
         key: &PullRequestKey,
         comments: &[PullRequestReviewDraftComment],
     ) -> Result<(String, Vec<Moved>), ForgeError> {
-        crate::forge::anchors::reanchor(self.files(key, None)?, comments, |revision, path| {
+        crate::forge::anchors::reanchor(self.diff_files(key)?, comments, |revision, path| {
             self.file_text(key, revision, path)
         })
     }

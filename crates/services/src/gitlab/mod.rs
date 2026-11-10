@@ -155,6 +155,21 @@ impl GitLab {
         })
     }
 
+    /// Every page of the diffs, for what has to find a file's lines wherever it is listed.
+    fn all_files(&self, key: &PullRequestKey) -> Result<PullRequestFiles, ForgeError> {
+        let mut files = self.files(key, None)?;
+        while let Some(next) = files.next_cursor.take() {
+            let page = next
+                .parse()
+                .map_err(|_| error(ForgeErrorKind::Uncertain, "GitLab page unreadable"))?;
+            let rest = self.files(key, Some(page))?;
+            files.files.extend(rest.files);
+            files.next_cursor = rest.next_cursor;
+            files.complete = rest.complete;
+        }
+        Ok(files)
+    }
+
     fn file_text(
         &self,
         key: &PullRequestKey,
@@ -741,7 +756,7 @@ impl Forge for GitLab {
         let files = if comments.is_empty() {
             Vec::new()
         } else {
-            match self.files(key, None) {
+            match self.all_files(key) {
                 Ok(files) => files.files,
                 Err(error) => return Outcome::Rejected(error.rejection()),
             }
@@ -760,7 +775,7 @@ impl Forge for GitLab {
         lines: (u32, u32),
     ) -> Result<Anchoring, ForgeError> {
         Ok(crate::forge::anchors::anchoring(
-            &self.files(key, None)?,
+            &self.all_files(key)?,
             head,
             path,
             side,
@@ -773,7 +788,7 @@ impl Forge for GitLab {
         key: &PullRequestKey,
         comments: &[PullRequestReviewDraftComment],
     ) -> Result<(String, Vec<Moved>), ForgeError> {
-        crate::forge::anchors::reanchor(self.files(key, None)?, comments, |revision, path| {
+        crate::forge::anchors::reanchor(self.all_files(key)?, comments, |revision, path| {
             self.file_text(key, revision, path)
         })
     }
