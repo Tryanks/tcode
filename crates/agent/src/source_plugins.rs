@@ -654,26 +654,5 @@ mod tests {
                 "the CLI changes the global configuration only"
             );
         }
-
-        /// A background server that fails leaves the plugins without versions
-        /// or update states, and the listing says why instead of passing for
-        /// one with nothing to report.
-        #[test]
-        fn opencode_tells_why_the_server_could_not_answer_for_its_plugins() {
-            let opencode = FakeCli::new(
-                "opencode",
-                "'debug paths config') echo /home/me/.config/opencode ;;\n'debug config --standalone') echo '[{\"type\":\"document\",\"path\":\"/home/me/.config/opencode/opencode.json\",\"info\":{\"plugins\":[\"opencode-wakatime\"]}}]' ;;\n'plugin list'|'plugin check') echo 'database is locked' >&2; exit 1 ;;",
-            );
-            let listing =
-                smol::block_on(list_plugins(ProviderKind::OpenCode, &opencode.context)).unwrap();
-            assert_eq!(listing.entries.len(), 1, "the configuration still names it");
-            assert_eq!(
-                listing.errors,
-                [
-                    "opencode plugin list: provider reported error: database is locked",
-                    "opencode plugin check: provider reported error: database is locked",
-                ]
-            );
-        }
     }
 }

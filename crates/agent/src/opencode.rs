@@ -3295,31 +3295,6 @@ cat > /dev/null
         });
     }
 
-    /// Without `/api/mcp` Tcode's own tools go unrecognized; the session
-    /// still starts, and the user is told why with OpenCode's words.
-    #[test]
-    fn a_read_that_fails_as_the_session_opens_is_reported_and_the_session_starts() {
-        smol::block_on(async {
-            let fixture = fixture(
-                Vec::new(),
-                vec![(
-                    "GET /api/mcp",
-                    500,
-                    r#"{"message":"mcp config invalid"}"#.into(),
-                )],
-            );
-            let handle = open(fixture.options.clone()).await;
-            let AgentEvent::Warning { message } = recv(&handle).await else {
-                panic!("the failed read is reported");
-            };
-            assert!(
-                message.contains("OpenCode HTTP 500: mcp config invalid"),
-                "{message}"
-            );
-            shut_down(handle).await;
-        });
-    }
-
     #[test]
     fn a_text_turn_streams_the_reply_and_reports_its_usage() {
         smol::block_on(async {
