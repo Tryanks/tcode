@@ -124,7 +124,7 @@ impl PopupMenu {
         cx.new(|cx| {
             let menu = Self::new(cx);
             let mut menu = builder(menu, window, cx);
-            menu.place_zed_items(cx);
+            menu.place_path_items(cx);
             menu
         })
     }
@@ -217,16 +217,24 @@ impl PopupMenu {
         }
         self
     }
-    /// Give each Open in Zed item that names no host the current pane's:
-    /// a press anywhere in a pane makes it current before the menu it opens
-    /// is built. The item takes that host's wording, and goes where the host
-    /// offers no editor.
-    fn place_zed_items(&mut self, cx: &App) {
+    /// Fit the path items to the current pane's host: a press anywhere in a
+    /// pane makes it current before the menu it opens is built. Each Open in
+    /// Zed item that names no host takes that host's wording, and goes where
+    /// the host offers no editor. On another machine a path is not on this
+    /// client, so its Open and Reveal go, and the separators they leave
+    /// unpaired with them.
+    fn place_path_items(&mut self, cx: &App) {
         let entry = crate::remote::ZedEntry::current(cx);
+        let elsewhere =
+            crate::shell::current_store(cx).is_some_and(|store| store.read(cx).is_remote());
         self.items.retain_mut(|item| {
             let MenuItem::Item { label, action, .. } = item else {
                 return true;
             };
+            if elsewhere && (action.as_any().is::<OpenPath>() || action.as_any().is::<RevealPath>())
+            {
+                return false;
+            }
             let Some(open) = action.as_any().downcast_ref::<OpenPathInZed>() else {
                 return true;
             };
@@ -243,6 +251,15 @@ impl PopupMenu {
             });
             true
         });
+        self.items.dedup_by(|next, kept| {
+            matches!((kept, next), (MenuItem::Separator, MenuItem::Separator))
+        });
+        if matches!(self.items.first(), Some(MenuItem::Separator)) {
+            self.items.remove(0);
+        }
+        if matches!(self.items.last(), Some(MenuItem::Separator)) {
+            self.items.pop();
+        }
     }
     /// What a file path offers wherever one appears: open it, open it in
     /// Zed, reveal it, and copy it absolute or relative to `base_dir`.
