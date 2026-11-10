@@ -277,22 +277,23 @@ impl AppState {
                             format!("{} is not a directory on this host", destination.display()),
                         ));
                     }
-                    if let Err(error) = tcode_services::worktree::repair(&destination, &worktrees) {
-                        log::warn!(
-                            "could not repair the worktrees of {}: {error}",
-                            destination.display()
-                        );
-                    }
-                    Ok(())
+                    Ok(tcode_services::worktree::repair(&destination, &worktrees))
                 })
                 .await;
-            changed.map_err(project_root_error)?;
-            host.enqueue_and_wait(move |app, cx| app.apply_project_root(&project_id, root, cx))
-                .await
-                .map_err(|_| ProtocolError {
-                    code: "transport_closed".into(),
-                    message: "Host stopped before the project root changed.".into(),
-                })?
+            let repaired = changed.map_err(project_root_error)?;
+            host.enqueue_and_wait(move |app, cx| {
+                // The directory is in place whether or not Git took the
+                // worktrees along, so the root changes either way.
+                if let Err(error) = repaired {
+                    app.report_error(RuntimeError::External(error.to_string()), cx);
+                }
+                app.apply_project_root(&project_id, root, cx)
+            })
+            .await
+            .map_err(|_| ProtocolError {
+                code: "transport_closed".into(),
+                message: "Host stopped before the project root changed.".into(),
+            })?
         })
     }
 
