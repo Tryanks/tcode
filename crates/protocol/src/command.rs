@@ -286,7 +286,8 @@ pub enum Command {
     },
     ResetSettings,
     WriteRelaunchMarker {
-        session_id: String,
+        /// The thread to reopen; absent when none is on screen.
+        session_id: Option<String>,
         reopen_settings: String,
     },
     ClearRelaunchMarker,

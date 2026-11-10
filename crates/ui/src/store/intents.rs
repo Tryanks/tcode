@@ -322,7 +322,11 @@ impl WorkspaceStore {
     pub fn reset_settings(&mut self) {
         self.dispatch(Command::ResetSettings);
     }
-    pub fn write_relaunch_marker_for(&mut self, session_id: String, reopen_settings: String) {
+    pub fn write_relaunch_marker_for(
+        &mut self,
+        session_id: Option<String>,
+        reopen_settings: String,
+    ) {
         self.dispatch(Command::WriteRelaunchMarker {
             session_id,
             reopen_settings,

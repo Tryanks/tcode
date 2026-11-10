@@ -865,8 +865,22 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::WriteRelaunchMarker {
             session_id,
             reopen_settings,
-        } => app.write_relaunch_marker(&session_id, &reopen_settings),
-        Command::ClearRelaunchMarker => app.clear_relaunch_marker(),
+        } => {
+            if let Err(error) = app.write_relaunch_marker(session_id.as_deref(), &reopen_settings) {
+                return CommandOutcome::Immediate(Err(ProtocolError {
+                    code: "relaunch_marker".into(),
+                    message: format!("could not write the relaunch marker: {error}"),
+                }));
+            }
+        }
+        Command::ClearRelaunchMarker => {
+            if let Err(error) = app.clear_relaunch_marker() {
+                return CommandOutcome::Immediate(Err(ProtocolError {
+                    code: "relaunch_marker".into(),
+                    message: format!("could not clear the relaunch marker: {error}"),
+                }));
+            }
+        }
         Command::SetTerminalHeight { session_id, height } => {
             app.set_terminal_height(&session_id, height, cx)
         }

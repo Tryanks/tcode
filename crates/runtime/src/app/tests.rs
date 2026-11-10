@@ -12922,6 +12922,29 @@ fn forking_a_thread_that_cannot_be_forked_is_refused_with_the_reason() {
 }
 
 #[test]
+fn a_relaunch_marker_the_host_cannot_write_is_refused_with_the_reason() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("relaunch-unwritable");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    // A directory where the marker goes: the write fails as a full or
+    // read-only disk would.
+    std::fs::create_dir_all(store.root().join("relaunch.json")).unwrap();
+    let answered = through_pipe(
+        &state,
+        cx,
+        1,
+        tcode_protocol::ClientPayload::Command(Command::WriteRelaunchMarker {
+            session_id: None,
+            reopen_settings: "computer_use".into(),
+        }),
+    );
+    assert!(answered.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack { id: 1, result: Err(error) } if error.code == "relaunch_marker"
+    )));
+}
+
+#[test]
 fn archiving_a_thread_with_a_turn_in_flight_is_refused() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("archive-busy");

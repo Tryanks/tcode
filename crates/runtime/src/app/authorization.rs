@@ -419,7 +419,10 @@ impl AppState {
                 | Command::CheckoutBranch { session_id, .. }
                 | Command::MergeWorktree { session_id }
                 | Command::SetDraftWorkspace { session_id, .. }
-                | Command::WriteRelaunchMarker { session_id, .. } => session(session_id),
+                | Command::WriteRelaunchMarker {
+                    session_id: Some(session_id),
+                    ..
+                } => session(session_id),
                 Command::ForkThread { id, .. } => session(id),
                 // A space may move its threads only between its own projects.
                 Command::MoveSession {
@@ -457,6 +460,9 @@ impl AppState {
                 | Command::OpenLatestSession
                 | Command::ShutdownAllAndFlush
                 | Command::ApplyPendingRelaunch
+                | Command::WriteRelaunchMarker {
+                    session_id: None, ..
+                }
                 | Command::PatchSettings { .. }
                 | Command::SetControlGrant { .. }
                 | Command::RespondControlGrant { .. }

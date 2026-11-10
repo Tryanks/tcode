@@ -332,6 +332,7 @@ pub use wire::{
 // ThreadWakes' pull_requests are PullRequestKeys, not numbers.
 // GitDiffResult's default_base is base, the one a branch diff was read against.
 // SessionActivity gains settle_blocked.
+// WriteRelaunchMarker's session_id is absent rather than empty for no thread.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

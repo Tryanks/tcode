@@ -1230,23 +1230,22 @@ impl AppState {
     /// Persist a restart-continuity marker naming the Settings page to reopen and
     /// the session that is active now. Written before a Screen Recording request
     /// or an explicit relaunch, so an externally-initiated quit reopens cleanly.
-    pub fn write_relaunch_marker(&self, target_id: &str, reopen_settings: &str) {
+    pub fn write_relaunch_marker(
+        &self,
+        target_id: Option<&str>,
+        reopen_settings: &str,
+    ) -> std::io::Result<()> {
         let marker = tcode_services::relaunch::RelaunchMarker {
             reopen_settings: reopen_settings.to_string(),
-            active_session: self
-                .resident(target_id)
-                .map(|session| session.meta.id.as_str())
-                .map(str::to_string),
+            active_session: target_id
+                .and_then(|id| self.resident(id))
+                .map(|session| session.meta.id.clone()),
         };
-        if let Err(err) = tcode_services::relaunch::write(self.store.root(), &marker) {
-            log::warn!("failed to write relaunch marker: {err}");
-        }
+        tcode_services::relaunch::write(self.store.root(), &marker)
     }
 
-    pub fn clear_relaunch_marker(&self) {
-        if let Err(err) = tcode_services::relaunch::clear(self.store.root()) {
-            log::warn!("failed to clear relaunch marker: {err}");
-        }
+    pub fn clear_relaunch_marker(&self) -> std::io::Result<()> {
+        tcode_services::relaunch::clear(self.store.root())
     }
 
     /// Apply a marker taken at launch: reopen the recorded session and open
