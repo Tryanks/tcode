@@ -1,4 +1,4 @@
-//! Client-side terminal emulation, rendering snapshots, scrollback, and selection.
+//! Host-side terminal emulation and rendering snapshots with their scrollback.
 
 use std::{
     collections::HashMap,
@@ -13,34 +13,19 @@ use std::{
 // on wasm; mixing in `std::time::Instant` would not compile there.
 use rio_vt::time::Instant;
 use rio_vt::{
-    ansi::{CursorShape as RioCursorShape, KeyboardModes},
+    ansi::CursorShape as RioCursorShape,
     clipboard::ClipboardType,
     config::colors::{ColorRgb, NamedColor},
     crosswords::{
         Crosswords, CrosswordsSize,
-        grid::{Dimensions, Scroll},
-        pos::{Column, Line, Pos, Side as RioSide},
+        grid::Dimensions,
+        pos::{Column, Line, Pos},
     },
     event::{EventListener, RioEvent, TerminalDamage, WindowId, WindowSize, sync::FairMutex},
     performer::handler::Processor,
-    selection::{Selection, SelectionType},
 };
 
-use crate::{
-    DEFAULT_CELL_HEIGHT_PX, DEFAULT_CELL_WIDTH_PX, SelectedText, SelectionKind, SelectionSide,
-    TermSnapshot, hyperlinks, sync::MutexExt as _,
-};
-#[cfg(test)]
-use crate::{DEFAULT_COLS, DEFAULT_ROWS};
-
-impl From<SelectionSide> for RioSide {
-    fn from(side: SelectionSide) -> Self {
-        match side {
-            SelectionSide::Left => Self::Left,
-            SelectionSide::Right => Self::Right,
-        }
-    }
-}
+use crate::{DEFAULT_CELL_HEIGHT_PX, DEFAULT_CELL_WIDTH_PX, TermSnapshot, sync::MutexExt as _};
 
 /// Data emitted by terminal emulation.
 ///
@@ -56,7 +41,8 @@ pub enum GridEvent {
     ClipboardStore { kind: ClipboardType, text: String },
 }
 
-/// Client-side terminal state machine.
+/// The host's terminal state machine. Selection and the scrolled viewport are
+/// each client's own; this grid always shows the bottom of its scrollback.
 ///
 /// This type accepts raw output bytes and owns all terminal grid state. It has
 /// no PTY, child-process, or platform process types in its public API.
@@ -255,19 +241,8 @@ impl GridSize {
 }
 
 impl GridEmulator {
-    /// Create an 80×24 emulator with 1,000 lines of scrollback.
-    #[cfg(test)]
-    pub(crate) fn new() -> Self {
-        Self::with_size(DEFAULT_COLS, DEFAULT_ROWS)
-    }
-
-    /// Create an emulator with an explicit initial grid size.
-    pub fn with_size(cols: usize, rows: usize) -> Self {
-        Self::with_size_and_title(cols, rows, String::new())
-    }
-
-    /// [`Self::with_size`], keeping `history` lines of scrollback rather than
-    /// 1,000: for output read back whole, not a live terminal.
+    /// An emulator keeping `history` lines of scrollback rather than a live
+    /// terminal's 1,000: for output read back whole.
     pub fn with_scrollback(cols: usize, rows: usize, history: usize) -> Self {
         Self::build(cols, rows, String::new(), history)
     }
@@ -325,20 +300,8 @@ impl GridEmulator {
         let (expired_sync, wakeup, sync_deadline) = {
             let mut state = self.core.state.lock();
             let expired_sync = stop_expired_sync(&mut state);
-            let old_selection = state
-                .term
-                .selection
-                .as_ref()
-                .and_then(|selection| selection.to_range(&state.term));
             let GridState { term, parser } = &mut *state;
             parser.advance(term, bytes);
-            let new_selection = term
-                .selection
-                .as_ref()
-                .and_then(|selection| selection.to_range(term));
-            if new_selection != old_selection {
-                term.update_selection_damage(new_selection, term.display_offset());
-            }
             let wakeup = parser.sync_bytes_count() < bytes.len();
             let sync_deadline = parser.sync_timeout().sync_timeout();
             (expired_sync, wakeup, sync_deadline)
@@ -361,43 +324,6 @@ impl GridEmulator {
     /// out from there when multiple consumers are needed.
     pub fn events(&self) -> async_channel::Receiver<GridEvent> {
         self.events.clone()
-    }
-
-    /// Apply the local viewport behavior associated with user input.
-    ///
-    /// This scrolls to the bottom and clears any selection; the bytes
-    /// themselves must still be sent to the host PTY.
-    pub fn prepare_input(&self) {
-        self.prepare_input_if_changed();
-    }
-
-    pub(crate) fn prepare_input_if_changed(&self) -> bool {
-        let mut state = self.core.state.lock();
-        let display_offset = state.term.display_offset();
-        let had_selection = state.term.selection.take().is_some();
-        state.term.scroll_display(Scroll::Bottom);
-        if had_selection {
-            state.term.update_selection_damage(None, display_offset);
-        }
-        if state.term.display_offset() != display_offset {
-            state.term.mark_fully_damaged();
-        }
-        let changed = had_selection || state.term.display_offset() != display_offset;
-        drop(state);
-        if changed {
-            let _ = self.core.notifications.try_send(GridEvent::Wakeup);
-        }
-        changed
-    }
-
-    pub fn resize_if_changed(&self, cols: usize, rows: usize) -> bool {
-        let current = self.core.size.load();
-        self.resize_with_cell_size_if_changed(
-            cols,
-            rows,
-            current.cell_width_px,
-            current.cell_height_px,
-        )
     }
 
     pub fn resize_with_cell_size_if_changed(
@@ -431,104 +357,6 @@ impl GridEmulator {
         self.core.size.window_size()
     }
 
-    pub fn scroll(&self, lines: i32) {
-        let mut state = self.core.state.lock();
-        let display_offset = state.term.display_offset();
-        state.term.scroll_display(Scroll::Delta(lines));
-        let changed = state.term.display_offset() != display_offset;
-        if changed {
-            state.term.mark_fully_damaged();
-        }
-        drop(state);
-        if changed {
-            let _ = self.core.notifications.try_send(GridEvent::Wakeup);
-        }
-    }
-
-    /// Start or update a simple selection using zero-based visible grid coordinates.
-    pub fn select(&self, start: (usize, usize), end: (usize, usize)) {
-        self.select_kind(start, end, SelectionKind::Simple);
-    }
-
-    /// Start or update a selection of the requested kind.
-    fn select_kind(&self, start: (usize, usize), end: (usize, usize), kind: SelectionKind) {
-        let mut state = self.core.state.lock();
-        let offset = state.term.display_offset() as i32;
-        let point = |(row, col): (usize, usize)| {
-            Pos::new(
-                Line(row as i32 - offset),
-                Column(col.min(state.term.columns() - 1)),
-            )
-        };
-        let selection_type = selection_type(kind);
-        let mut selection = Selection::new(selection_type, point(start), RioSide::Left);
-        selection.update(point(end), RioSide::Right);
-        state.term.selection = Some(selection);
-        update_selection_damage(&mut state.term);
-        drop(state);
-        let _ = self.core.notifications.try_send(GridEvent::Wakeup);
-    }
-
-    /// Start an interactive selection at an empty anchor in visible grid coordinates.
-    pub fn start_selection(&self, kind: SelectionKind, point: (usize, usize), side: SelectionSide) {
-        let mut state = self.core.state.lock();
-        let offset = state.term.display_offset() as i32;
-        let point = Pos::new(
-            Line(point.0 as i32 - offset),
-            Column(point.1.min(state.term.columns() - 1)),
-        );
-        state.term.selection = Some(Selection::new(selection_type(kind), point, side.into()));
-        update_selection_damage(&mut state.term);
-        drop(state);
-        let _ = self.core.notifications.try_send(GridEvent::Wakeup);
-    }
-
-    /// Update the existing interactive selection using visible grid coordinates.
-    pub fn update_selection(&self, point: (usize, usize), side: SelectionSide) {
-        let mut state = self.core.state.lock();
-        let offset = state.term.display_offset() as i32;
-        let point = Pos::new(
-            Line(point.0 as i32 - offset),
-            Column(point.1.min(state.term.columns() - 1)),
-        );
-        if let Some(selection) = state.term.selection.as_mut() {
-            selection.update(point, side.into());
-        }
-        update_selection_damage(&mut state.term);
-        drop(state);
-        let _ = self.core.notifications.try_send(GridEvent::Wakeup);
-    }
-
-    pub fn clear_selection(&self) {
-        let mut state = self.core.state.lock();
-        let display_offset = state.term.display_offset();
-        let changed = state.term.selection.take().is_some();
-        if changed {
-            state.term.update_selection_damage(None, display_offset);
-        }
-        drop(state);
-        if changed {
-            let _ = self.core.notifications.try_send(GridEvent::Wakeup);
-        }
-    }
-
-    pub fn select_all(&self) {
-        let mut state = self.core.state.lock();
-        let mut selection = Selection::new(
-            SelectionType::Simple,
-            Pos::new(Line(-(state.term.history_size() as i32)), Column(0)),
-            RioSide::Left,
-        );
-        selection.update(
-            Pos::new(state.term.bottommost_line(), state.term.last_column()),
-            RioSide::Right,
-        );
-        state.term.selection = Some(selection);
-        update_selection_damage(&mut state.term);
-        drop(state);
-        let _ = self.core.notifications.try_send(GridEvent::Wakeup);
-    }
-
     pub fn clear(&self) {
         let mut state = self.core.state.lock();
         state.term.clear_saved_history();
@@ -549,38 +377,9 @@ impl GridEmulator {
         if state.term.screen_lines() > 1 {
             state.term.grid.reset_region(Line(1)..);
         }
-        state.term.selection = None;
         state.term.mark_fully_damaged();
         drop(state);
         let _ = self.core.notifications.try_send(GridEvent::Wakeup);
-    }
-
-    pub fn selected_text(&self) -> Option<SelectedText> {
-        let state = self.core.state.lock();
-        let range = state.term.selection.as_ref()?.to_range(&state.term)?;
-        let history = state.term.history_size() as i32;
-        let line_number = |line: Line| (history + line.0 + 1).max(1) as usize;
-        let text = state
-            .term
-            .selection_to_string()?
-            .trim_matches('\n')
-            .to_string();
-        if text.is_empty() {
-            return None;
-        }
-        Some(SelectedText {
-            line_start: line_number(range.start.row),
-            line_end: line_number(range.end.row),
-            text,
-        })
-    }
-
-    pub fn mode(&self) -> rio_vt::crosswords::Mode {
-        self.core.state.lock().term.mode()
-    }
-
-    pub fn keyboard_mode(&self) -> KeyboardModes {
-        self.core.state.lock().term.keyboard_mode()
     }
 
     pub fn modify_other_keys(&self) -> Option<u8> {
@@ -590,14 +389,6 @@ impl GridEmulator {
     pub fn dimensions(&self) -> (usize, usize) {
         let size = self.core.size.load();
         (size.cols, size.rows)
-    }
-
-    pub fn history_size(&self) -> usize {
-        self.core.state.lock().term.history_size()
-    }
-
-    pub fn snapshot(&self) -> TermSnapshot {
-        self.snapshot_since(0, 0)
     }
 
     /// Lines that have ever scrolled out of the screen, including those already
@@ -639,11 +430,6 @@ impl GridEmulator {
         } else {
             None
         };
-        let selection = state
-            .term
-            .selection
-            .as_ref()
-            .and_then(|selection| selection.to_range(&state.term));
         let damage = state
             .term
             .peek_damage_event()
@@ -727,25 +513,14 @@ impl GridEmulator {
             title: self.title(),
             exited,
             exit_code,
-            display_offset,
             history_size,
             lines_evicted,
             mode,
             keyboard_mode,
-            selection,
             styles,
             zero_width,
             links,
         }
-    }
-
-    /// The host's own viewport is always pinned to the bottom; see
-    /// [`Self::snapshot_since`].
-    pub fn hyperlink_at(&self, row: usize, col: usize) -> Option<crate::HyperlinkMatch> {
-        let state = self.core.state.lock();
-        (row < state.term.screen_lines() && col < state.term.columns())
-            .then(|| hyperlinks::find(&state.term, row, col))
-            .flatten()
     }
 
     /// Set the non-OSC title used when the emulated terminal has no title.
@@ -764,11 +539,6 @@ impl GridEmulator {
     /// Return the title set by terminal output, excluding the fallback title.
     pub fn osc_title(&self) -> Option<String> {
         self.core.osc_title.lock_recover().clone()
-    }
-
-    /// Read lifecycle state without consuming renderer damage.
-    pub fn exited(&self) -> bool {
-        self.core.lifecycle.lock_recover().exited
     }
 
     /// Apply a host-side exit data event to this client-side snapshot.
@@ -810,22 +580,6 @@ fn schedule_sync_timeout(core: Weak<GridCore>, deadline: Instant) {
         });
 }
 
-fn selection_type(kind: SelectionKind) -> SelectionType {
-    match kind {
-        SelectionKind::Simple => SelectionType::Simple,
-        SelectionKind::Semantic => SelectionType::Semantic,
-        SelectionKind::Lines => SelectionType::Lines,
-    }
-}
-
-fn update_selection_damage<T: EventListener>(term: &mut Crosswords<T>) {
-    let selection = term
-        .selection
-        .as_ref()
-        .and_then(|selection| selection.to_range(term));
-    term.update_selection_damage(selection, term.display_offset());
-}
-
 fn query_color(index: usize) -> ColorRgb {
     const ANSI: [u32; 16] = [
         0x1f2329, 0xe45649, 0x50a14f, 0xc18401, 0x4078f2, 0xa626a4, 0x0184bc, 0xabb2bf, 0x5c6370,
@@ -856,56 +610,37 @@ fn query_color(index: usize) -> ColorRgb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rio_vt::crosswords::Mode;
+    use crate::{DEFAULT_COLS, DEFAULT_ROWS};
+
+    fn emulator() -> GridEmulator {
+        GridEmulator::with_size_and_title(DEFAULT_COLS, DEFAULT_ROWS, String::new())
+    }
 
     #[test]
-    fn snapshots_consume_damage_but_reads_and_selection_preserve_it() {
-        let emulator = GridEmulator::new();
-        emulator.snapshot();
-        emulator.feed(b"\x1b[?1002h\x1b[?1006h\x1b[>1uwritten");
-        assert_eq!(
-            emulator.keyboard_mode(),
-            KeyboardModes::DISAMBIGUATE_ESC_CODES
-        );
-        assert!(emulator.mode().contains(Mode::MOUSE_DRAG | Mode::SGR_MOUSE));
+    fn snapshots_consume_damage_but_peeks_preserve_it() {
+        let emulator = emulator();
+        emulator.snapshot_since(0, 0);
+        emulator.feed(b"written");
         assert!(emulator.peek_snapshot().row_damage[0]);
 
-        let snapshot = emulator.snapshot();
+        let snapshot = emulator.snapshot_since(0, 0);
         assert!(snapshot.row_damage[0]);
         assert!(snapshot.row_damage[1..].iter().all(|damaged| !damaged));
         assert_eq!(snapshot.damage, TerminalDamage::Partial);
-        let idle = emulator.snapshot();
+        let idle = emulator.snapshot_since(0, 0);
         assert_eq!(idle.damage, TerminalDamage::Noop);
         assert!(idle.row_damage.iter().all(|damaged| !damaged));
 
-        emulator.feed(b"\r\nsecond");
-        emulator.snapshot();
-        emulator.select((0, 0), (1, 5));
-        assert_eq!(emulator.selected_text().unwrap().text, "written\nsecond");
-        let selected = emulator.snapshot();
-        assert!(selected.row_damage[0] && selected.row_damage[1]);
-        emulator.clear_selection();
-        let cleared = emulator.snapshot();
-        assert!(cleared.row_damage[0] && cleared.row_damage[1]);
-        assert_eq!(emulator.selected_text(), None);
-
-        emulator.start_selection(SelectionKind::Simple, (0, 0), SelectionSide::Left);
-        assert_eq!(emulator.selected_text(), None);
-        emulator.update_selection((0, 6), SelectionSide::Right);
-        assert_eq!(emulator.selected_text().unwrap().text, "written");
-        emulator.select_all();
-        assert!(emulator.selected_text().unwrap().text.contains("second"));
         emulator.clear();
-        let cleared = emulator.snapshot();
+        let cleared = emulator.snapshot_since(0, 0);
         assert_eq!(cleared.damage, TerminalDamage::Full);
         assert!(cleared.row_damage.iter().all(|damaged| *damaged));
         assert_eq!(cleared.history_size, 0);
-        assert_eq!(emulator.selected_text(), None);
     }
 
     #[test]
     fn emulator_routes_events_size_queries_and_clipboard_policy() {
-        let emulator = GridEmulator::new();
+        let emulator = emulator();
         let events = emulator.events();
         emulator.feed(b"\x07\x1b]2;client title\x07\x1b[c");
 

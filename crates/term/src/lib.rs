@@ -12,20 +12,17 @@ pub use rio_vt;
 use rio_vt::{
     ansi::KeyboardModes,
     clipboard::ClipboardType,
-    config::colors::{AnsiColor, ColorRgb},
     crosswords::{
         Mode,
-        grid::{Indexed, row::Row},
-        pos::{Column, CursorState, Line, Pos},
+        grid::row::Row,
+        pos::CursorState,
         square::{ContentTag, Square, Wide},
         style::Style,
     },
     event::TerminalDamage,
-    selection::SelectionRange,
 };
 
 mod grid_emulator;
-mod hyperlinks;
 pub mod project;
 #[cfg(feature = "pty")]
 mod pty;
@@ -33,7 +30,6 @@ mod pty;
 mod pty_info;
 mod sync;
 
-pub use hyperlinks::HyperlinkMatch;
 pub use project::Projector;
 
 pub use grid_emulator::GridEmulator;
@@ -156,13 +152,11 @@ pub struct TermSnapshot {
     pub title: String,
     pub exited: bool,
     pub exit_code: Option<i32>,
-    pub display_offset: usize,
     pub history_size: usize,
     /// Lines evicted from rio's scrollback ring before the retained history.
     pub lines_evicted: u64,
     pub mode: Mode,
     pub keyboard_mode: KeyboardModes,
-    pub selection: Option<SelectionRange>,
     /// Snapshot of rio's interned style table, indexed by `Square::style_id`.
     pub styles: Vec<Style>,
     /// Zero-width continuations for snapshotted squares, indexed by rio extras id.
@@ -174,28 +168,6 @@ pub struct TermSnapshot {
 impl TermSnapshot {
     pub fn cell(&self, row: usize, col: usize) -> Option<&Square> {
         self.visible_rows.get(row)?.inner.get(col)
-    }
-
-    pub fn style(&self, row: usize, col: usize) -> Option<Style> {
-        let square = *self.cell(row, col)?;
-        Some(match square.content_tag() {
-            ContentTag::Codepoint => self
-                .styles
-                .get(square.style_id() as usize)
-                .copied()
-                .unwrap_or_default(),
-            ContentTag::BgPalette => Style {
-                bg: AnsiColor::Indexed(square.bg_palette_index()),
-                ..Style::default()
-            },
-            ContentTag::BgRgb => {
-                let (r, g, b) = square.bg_rgb();
-                Style {
-                    bg: AnsiColor::Spec(ColorRgb { r, g, b }),
-                    ..Style::default()
-                }
-            }
-        })
     }
 
     /// The cell's base character followed by its rio zero-width continuation.
@@ -210,21 +182,6 @@ impl TermSnapshot {
             text.extend(extra.iter().copied().map(display_char));
         }
         Some(text)
-    }
-
-    pub fn is_selected(&self, row: usize, col: usize) -> bool {
-        let Some(selection) = self.selection else {
-            return false;
-        };
-        let Some(square) = self.cell(row, col) else {
-            return false;
-        };
-        let pos = Pos::new(Line(row as i32 - self.display_offset as i32), Column(col));
-        selection.contains_square(
-            &Indexed { pos, square },
-            self.cursor_state.pos,
-            self.cursor_state.content,
-        )
     }
 
     pub fn text(&self) -> String {
@@ -250,19 +207,6 @@ impl TermSnapshot {
 
 fn display_char(ch: char) -> char {
     if ch == '\0' { ' ' } else { ch }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SelectionKind {
-    Simple,
-    Semantic,
-    Lines,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SelectionSide {
-    Left,
-    Right,
 }
 
 #[cfg(feature = "pty")]
@@ -292,30 +236,6 @@ impl Terminal {
 
     fn from_pty(pty: PtyHandle) -> io::Result<Self> {
         let emulator = GridEmulator::with_size_and_title(DEFAULT_COLS, DEFAULT_ROWS, pty.label());
-        Self::from_parts(pty, emulator, None)
-    }
-
-    pub fn grid(&self) -> &GridEmulator {
-        &self.emulator
-    }
-
-    /// Spawn with a single raw-output consumer, installed before any output is read.
-    pub fn spawn_with_output(
-        cwd: impl AsRef<Path>,
-    ) -> io::Result<(Self, async_channel::Receiver<Vec<u8>>)> {
-        let pty = PtyHandle::spawn(cwd)?;
-        let emulator = GridEmulator::with_size_and_title(DEFAULT_COLS, DEFAULT_ROWS, pty.label());
-        let (tx, rx) = async_channel::unbounded();
-        Ok((Self::from_parts(pty, emulator, Some(tx))?, rx))
-    }
-
-    fn from_parts(
-        pty: PtyHandle,
-        emulator: GridEmulator,
-        output: Option<async_channel::Sender<Vec<u8>>>,
-    ) -> io::Result<Self> {
-        emulator.set_fallback_title(pty.label());
-
         let (notifications, events) = async_channel::unbounded();
         let pty_events = pty.events();
         let output_emulator = emulator.clone();
@@ -325,21 +245,13 @@ impl Terminal {
             .spawn(move || {
                 while let Ok(event) = pty_events.recv_blocking() {
                     match event {
-                        PtyEvent::Output(bytes) => {
-                            output_emulator.feed(&bytes);
-                            if let Some(output) = &output {
-                                let _ = output.try_send(bytes);
-                            }
-                        }
+                        PtyEvent::Output(bytes) => output_emulator.feed(&bytes),
                         PtyEvent::ProcessInfoChanged { name, .. } => {
                             output_emulator.set_fallback_title(name);
                             let _ = pty_notifications.try_send(TermEvent::Wakeup);
                         }
                         PtyEvent::Exited { exit_code } => {
                             output_emulator.set_exited(exit_code);
-                            if let Some(output) = &output {
-                                let _ = output.try_send(Vec::new());
-                            }
                             let _ = pty_notifications.try_send(TermEvent::Exited);
                             let _ = pty_notifications.try_send(TermEvent::Wakeup);
                         }
@@ -382,6 +294,10 @@ impl Terminal {
         })
     }
 
+    pub fn grid(&self) -> &GridEmulator {
+        &self.emulator
+    }
+
     pub fn cwd(&self) -> &Path {
         self.pty.cwd()
     }
@@ -405,21 +321,8 @@ impl Terminal {
     }
 
     pub fn write_input(&self, bytes: impl Into<Vec<u8>>) {
-        let bytes = bytes.into();
-        self.emulator.prepare_input();
-        if self.pty.write_input_inner(bytes).unwrap_or(false) {
+        if self.pty.write_input_inner(bytes.into()).unwrap_or(false) {
             let _ = self.notifications.try_send(TermEvent::Wakeup);
-        }
-    }
-
-    /// Send terminal protocol bytes to the PTY without changing viewport or selection state.
-    pub fn write_raw(&self, bytes: impl Into<Vec<u8>>) {
-        let _ = self.pty.write_raw(bytes);
-    }
-
-    pub fn resize(&self, cols: usize, rows: usize) {
-        if self.emulator.resize_if_changed(cols, rows) {
-            let _ = self.pty.resize(self.emulator.window_size());
         }
     }
 
@@ -437,56 +340,13 @@ impl Terminal {
         let _ = self.pty.kill();
     }
 
-    pub fn scroll(&self, lines: i32) {
-        self.emulator.scroll(lines);
-    }
-
-    pub fn select(&self, start: (usize, usize), end: (usize, usize)) {
-        self.emulator.select(start, end);
-    }
-
-    pub fn start_selection(&self, kind: SelectionKind, point: (usize, usize), side: SelectionSide) {
-        self.emulator.start_selection(kind, point, side);
-    }
-
-    pub fn update_selection(&self, point: (usize, usize), side: SelectionSide) {
-        self.emulator.update_selection(point, side);
-    }
-
-    pub fn clear_selection(&self) {
-        self.emulator.clear_selection();
-    }
-
-    pub fn select_all(&self) {
-        self.emulator.select_all();
-    }
-
     pub fn clear(&self) {
         self.emulator.clear();
-    }
-
-    pub fn selected_text(&self) -> Option<SelectedText> {
-        self.emulator.selected_text()
-    }
-
-    /// Read terminal modes without consuming renderer damage.
-    pub fn mode(&self) -> Mode {
-        self.emulator.mode()
-    }
-
-    /// Read kitty keyboard protocol flags without consuming renderer damage.
-    pub fn keyboard_mode(&self) -> KeyboardModes {
-        self.emulator.keyboard_mode()
     }
 
     /// Read the active xterm modifyOtherKeys level without consuming damage.
     pub fn modify_other_keys(&self) -> Option<u8> {
         self.emulator.modify_other_keys()
-    }
-
-    /// Read scrollback size without consuming renderer damage.
-    pub fn history_size(&self) -> usize {
-        self.emulator.history_size()
     }
 
     /// A counter that grows with every input and output, for telling whether
@@ -506,10 +366,6 @@ impl Terminal {
         self.pty.exited()
     }
 
-    pub fn snapshot(&self) -> TermSnapshot {
-        self.snapshot_since(0, 0)
-    }
-
     /// See [`GridEmulator::snapshot_since`].
     pub fn snapshot_since(&self, scrolled_before: u64, budget: usize) -> TermSnapshot {
         let mut snapshot = self.emulator.snapshot_since(scrolled_before, budget);
@@ -522,10 +378,6 @@ impl Terminal {
         let mut snapshot = self.emulator.peek_snapshot();
         snapshot.title = self.label();
         snapshot
-    }
-
-    pub fn hyperlink_at(&self, row: usize, col: usize) -> Option<HyperlinkMatch> {
-        self.emulator.hyperlink_at(row, col)
     }
 }
 
@@ -557,7 +409,7 @@ mod tests {
     fn wait_until(terminal: &Terminal, predicate: impl Fn(&TermSnapshot) -> bool) -> TermSnapshot {
         let start = Instant::now();
         loop {
-            let state = terminal.snapshot();
+            let state = terminal.peek_snapshot();
             if predicate(&state) {
                 return state;
             }
@@ -586,7 +438,7 @@ mod tests {
             "stty -echo; printf 'ready\\n'; read line; stty size; printf 'received:%s\\n' \"$line\"; read proceed; i=1; while [ \"$i\" -le 5000 ]; do printf 'output-%s\\n' \"$i\"; i=$((i + 1)); done; exit 37",
         );
         wait_until(&terminal, |state| state.text().contains("ready"));
-        terminal.resize(42, 9);
+        terminal.resize_with_cell_size(42, 9, DEFAULT_CELL_WIDTH_PX, DEFAULT_CELL_HEIGHT_PX);
         terminal.write_input(b"tcode-term-ok\r".to_vec());
         let response = wait_until(&terminal, |state| {
             state.text().contains("received:tcode-term-ok")
@@ -597,10 +449,6 @@ mod tests {
         assert_eq!(state.exit_code, Some(37), "{}", state.text());
         assert_eq!((state.cols, state.screen_lines), (42, 9));
         assert!(state.text().contains("output-5000"), "{}", state.text());
-        terminal.scroll(i32::MAX);
-        let beginning = terminal.snapshot();
-        assert!(beginning.display_offset > 0);
-        assert!(!beginning.text().contains("output-5000"));
     }
 
     #[cfg(unix)]
@@ -667,7 +515,7 @@ mod tests {
                 }
             }
         }
-        let state = terminal.snapshot();
+        let state = terminal.peek_snapshot();
         assert_eq!(state.title, "wire-title");
         assert!(state.exited);
     }
