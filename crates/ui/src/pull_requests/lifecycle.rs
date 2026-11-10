@@ -306,7 +306,7 @@ impl Offer {
             && action.can_update_branch
             && action.capabilities.update_branch
         {
-            if merges_base(Some(action)) {
+            if merges_base(action) {
                 menu = write(
                     menu,
                     "pull_requests.actions.update_branch",
@@ -1873,7 +1873,8 @@ pub(super) fn primary_element(
             super::stack::operation_chip(Some(target.clone()), operation, &links, compact, cx)
         }
         // A host that only rebases offers its rebase, which asks first.
-        Primary::UpdateBranch if !merges_base(target.offer.action.as_ref()) => button(
+        // `primary` offers an update only from a read action state.
+        Primary::UpdateBranch if !target.offer.action.as_ref().is_some_and(merges_base) => button(
             IconName::ArrowUpDown,
             crate::tr!("pull_requests.actions.update_rebase_menu").into_owned(),
         )
@@ -1922,8 +1923,7 @@ pub(super) fn primary_element(
     }
 }
 
-/// Whether the host brings the base in by a merge commit as well as by a rebase; an unread
-/// state is taken as yes, as before hosts said.
-pub(super) fn merges_base(action: Option<&PullRequestActionState>) -> bool {
-    action.is_none_or(|action| action.capabilities.update_merge)
+/// Whether the host brings the base in by a merge commit as well as by a rebase.
+pub(super) fn merges_base(action: &PullRequestActionState) -> bool {
+    action.capabilities.update_merge
 }

@@ -1305,7 +1305,7 @@ impl PullRequestView {
             )
             .into_owned()
         };
-        let merges = super::lifecycle::merges_base(Some(state));
+        let merges = super::lifecycle::merges_base(state);
         let tooltip = crate::tr!(
             if merges {
                 "pull_requests.actions.update_tooltip"
