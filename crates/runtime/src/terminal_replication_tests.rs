@@ -546,12 +546,12 @@ fn projection_sends_changed_rows_and_defers_bursty_history_until_a_stable_gap() 
         })
         .unwrap();
     session.resize(100, 30);
-    let mut projection = TerminalProjection::new();
-    let mut replica = projection.reset(&session.terminal);
+    // The projection is handed the host's time; these are moments of it.
     let start = Instant::now();
+    let mut projection = TerminalProjection::new();
+    let mut replica = projection.reset(&session.terminal, start);
     session.terminal.grid().feed(b"one row\r\n");
-    projection.last_projected = start;
-    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal, start) else {
         panic!("changed content must produce a delta");
     };
     assert!(!delta.rows_replaced.is_empty());
@@ -561,20 +561,20 @@ fn projection_sends_changed_rows_and_defers_bursty_history_until_a_stable_gap() 
     );
     replica.apply(&delta);
     assert!(difference(&replica, &host_frame(&session.terminal)).is_none());
-    projection.last_projected = start + Duration::from_millis(16);
+    let frame = start + Duration::from_millis(16);
     assert!(
-        projection.update(&session.terminal).is_none(),
+        projection.update(&session.terminal, frame).is_none(),
         "a quiet grid has no content to send"
     );
     // A full screen that scrolls by a line moves the subscriber's rows up
     // rather than sending each of them again.
     session.terminal.grid().feed(&b"filler\r\n".repeat(40));
-    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal, frame) else {
         panic!("changed content must produce a delta");
     };
     replica.apply(&delta);
     session.terminal.grid().feed(b"one more row\r\n");
-    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal, frame) else {
         panic!("changed content must produce a delta");
     };
     assert_eq!(delta.scrolled, 1);
@@ -595,8 +595,7 @@ fn projection_sends_changed_rows_and_defers_bursty_history_until_a_stable_gap() 
             session.terminal.grid().feed(&chunk);
             last_output = now;
         }
-        projection.last_projected = now;
-        match projection.update(&session.terminal) {
+        match projection.update(&session.terminal, now) {
             Some(TerminalUpdate::Delta(delta)) => {
                 assert!(
                     delta.history.is_none(),
@@ -618,8 +617,8 @@ fn projection_sends_changed_rows_and_defers_bursty_history_until_a_stable_gap() 
     // where the earlier burst belongs, and must restart the quiet interval.
     session.terminal.grid().feed(b"tail\r\n");
     last_output += Duration::from_millis(32);
-    projection.last_projected = last_output;
-    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal, last_output)
+    else {
         panic!("the tail must update the visible screen");
     };
     assert!(delta.history.is_none());
@@ -630,10 +629,14 @@ fn projection_sends_changed_rows_and_defers_bursty_history_until_a_stable_gap() 
     .unwrap()
     .len();
     replica.apply(&delta);
-    projection.last_projected = last_output + Duration::from_millis(99);
-    assert!(projection.update(&session.terminal).is_none());
-    projection.last_projected = last_output + Duration::from_millis(100);
-    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+    assert!(
+        projection
+            .update(&session.terminal, last_output + Duration::from_millis(99))
+            .is_none()
+    );
+    let Some(TerminalUpdate::Delta(delta)) =
+        projection.update(&session.terminal, last_output + Duration::from_millis(100))
+    else {
         panic!("a stable gap must flush the retained history");
     };
     assert!(

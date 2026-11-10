@@ -38,7 +38,7 @@ impl AppState {
             .terminal_projections
             .entry(terminal_id)
             .or_insert_with(TerminalProjection::new);
-        projection.reset(&terminal);
+        projection.reset(&terminal, std::time::Instant::now());
     }
 
     pub(crate) fn terminal_frame(&self, terminal_id: u64) -> Option<tcode_protocol::TerminalFrame> {
@@ -87,7 +87,9 @@ impl AppState {
         if projection.scheduled {
             return;
         }
-        let elapsed = projection.last_projected.elapsed();
+        let elapsed = projection
+            .last_projected
+            .map_or(crate::terminal::FRAME_INTERVAL, |at| at.elapsed());
         if elapsed >= crate::terminal::FRAME_INTERVAL {
             self.project_terminal(terminal_id, cx);
             return;
@@ -118,12 +120,7 @@ impl AppState {
         let Some(projection) = self.terminal_projections.get_mut(&terminal_id) else {
             return;
         };
-        projection.last_projected = std::time::Instant::now();
-        let update = if projection.styles_exhausted() {
-            Some(TerminalUpdate::Frame(projection.reset(&terminal)))
-        } else {
-            projection.update(&terminal)
-        };
+        let update = projection.project(&terminal, std::time::Instant::now());
         // A burst that outran the scrollback budget owes the client its
         // history, and the terminal may now be idle with no wakeup left to give.
         let owes_history = projection.owes_history();
