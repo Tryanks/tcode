@@ -9,7 +9,7 @@ Captured on 2026-10-03 from the real binary while signed out, through Tcode's
 production path (`cargo run -p agent --example probe -- --list-models cursor`
 and `probe cursor …`, with a wrapper that copied the stdio), in a sandbox
 (`HOME` redirected, `AGENT_CLI_CREDENTIAL_STORE=file`, `NO_OPEN_BROWSER=1`).
-Nothing was edited.
+The only edit: the JSON-RPC request ids are zero UUIDs with a serial number.
 
 - `recorded_signed_out.jsonl` — what the binary wrote: the `initialize` result
   (line 1), then `-32000 Authentication required` for

@@ -1689,7 +1689,7 @@ mod tests {
     fn a_turn_grok_starts_itself_runs_between_the_sent_turns() {
         let events = replay(AGENT_STARTED_TURN);
 
-        let agent = "task-completed-01a100c2-37c5-7fc2-b92a-c0f8b2c3659b";
+        let agent = "task-completed-00000000-0000-7000-8000-000000000083";
         let at = |wanted: &dyn Fn(&AgentEvent) -> bool| {
             events
                 .iter()

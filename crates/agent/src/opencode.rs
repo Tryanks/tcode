@@ -2966,13 +2966,13 @@ mod tests {
         assert_eq!(
             replay("text_turn.jsonl", &[]),
             vec![
-                json!({"type": "turn_started", "turn_id": "evt_198aac9f5002tcru464AZ7pzsT"}),
+                json!({"type": "turn_started", "turn_id": "evt_198aac9f500200000000000325"}),
                 json!({"type": "served_model", "model": "opencode/deepseek-v4.1-flash-free", "reason": null}),
-                json!({"type": "item_started", "id": "msg_198aaca0a001IZCSKwcEekLiz8:text:0", "content": {"kind": "assistant_message", "text": ""}}),
-                json!({"type": "delta", "item_id": "msg_198aaca0a001IZCSKwcEekLiz8:text:0", "kind": "assistant_text", "text": "PONG"}),
-                json!({"type": "item_completed", "id": "msg_198aaca0a001IZCSKwcEekLiz8:text:0", "content": {"kind": "assistant_message", "text": "PONG"}}),
+                json!({"type": "item_started", "id": "msg_198aaca0a00100000000000328:text:0", "content": {"kind": "assistant_message", "text": ""}}),
+                json!({"type": "delta", "item_id": "msg_198aaca0a00100000000000328:text:0", "kind": "assistant_text", "text": "PONG"}),
+                json!({"type": "item_completed", "id": "msg_198aaca0a00100000000000328:text:0", "content": {"kind": "assistant_message", "text": "PONG"}}),
                 json!({"type": "token_usage", "freshness": "current", "turn_processed_tokens": null, "input_tokens": 6335, "cached_input_tokens": 3328, "output_tokens": 4, "used_tokens": 9667, "context_window": null, "total_processed_tokens": null, "cost_usd": null, "duration_ms": null}),
-                json!({"type": "turn_completed", "turn_id": "evt_198aac9f5002tcru464AZ7pzsT", "status": "completed", "usage": {"freshness": "current", "turn_processed_tokens": 9667, "input_tokens": 6335, "cached_input_tokens": 3328, "output_tokens": 4, "used_tokens": 9667, "context_window": null, "total_processed_tokens": null, "cost_usd": 0.0, "duration_ms": null}}),
+                json!({"type": "turn_completed", "turn_id": "evt_198aac9f500200000000000325", "status": "completed", "usage": {"freshness": "current", "turn_processed_tokens": 9667, "input_tokens": 6335, "cached_input_tokens": 3328, "output_tokens": 4, "used_tokens": 9667, "context_window": null, "total_processed_tokens": null, "cost_usd": 0.0, "duration_ms": null}}),
             ]
         );
     }
@@ -2981,15 +2981,15 @@ mod tests {
     /// the call ends with its output and exit code.
     #[test]
     fn a_shell_call_polls_its_shell_and_reports_its_exit_code() {
-        let id = "msg_198ac3fdc0015DUJhtvxNwLad4:chatcmpl-tool-91184514ce90f973";
+        let id = "msg_198ac3fdc00100000000000232:chatcmpl-tool-0000000000000009";
         assert_eq!(
             items_only(replay("shell_turn.jsonl", &[]))[..5],
             [
                 json!({"type": "item_started", "id": id, "content": {"kind": "command_execution", "command": "", "output": "", "exit_code": null, "status": "in_progress"}}),
                 json!({"type": "item_updated", "id": id, "content": {"kind": "command_execution", "command": "echo one; sleep 6; echo two", "output": "", "exit_code": null, "status": "in_progress"}}),
                 json!({"type": "item_completed", "id": id, "content": {"kind": "command_execution", "command": "echo one; sleep 6; echo two", "output": "one\ntwo\n", "exit_code": 0, "status": "completed"}}),
-                json!({"type": "item_started", "id": "msg_198ac5ee50018mgQBTDX0Qzgxm:text:0", "content": {"kind": "assistant_message", "text": ""}}),
-                json!({"type": "delta", "item_id": "msg_198ac5ee50018mgQBTDX0Qzgxm:text:0", "kind": "assistant_text", "text": "DONE"}),
+                json!({"type": "item_started", "id": "msg_198ac5ee500100000000000245:text:0", "content": {"kind": "assistant_message", "text": ""}}),
+                json!({"type": "delta", "item_id": "msg_198ac5ee500100000000000245:text:0", "kind": "assistant_text", "text": "DONE"}),
             ]
         );
         let shell: Vec<Value> = replay("shell_turn.jsonl", &[])
@@ -3000,7 +3000,7 @@ mod tests {
         assert_eq!(
             shell,
             [
-                json!({"action": "poll_shell", "item_id": id, "shell_id": "sh_198ac475f001twGtiLgjWLI7iQ", "directory": "/work/project"}),
+                json!({"action": "poll_shell", "item_id": id, "shell_id": "sh_198ac475f00100000000000238", "directory": "/work/project"}),
                 json!({"type": "item_completed", "id": id, "content": {"kind": "command_execution", "command": "echo one; sleep 6; echo two", "output": "one\ntwo\n", "exit_code": 0, "status": "completed"}}),
                 json!({"action": "stop_shell", "item_id": id}),
             ]
@@ -3011,8 +3011,8 @@ mod tests {
     /// every step that changed files has the turn's diff read again.
     #[test]
     fn file_tools_carry_their_own_diffs_todos_set_the_plan_and_changed_steps_read_the_turn_diff() {
-        let write = "msg_198b17ffc001GbWFSCOl8PceDQ:chatcmpl-tool-900118863147ca5c";
-        let edit = "msg_198b183de001BRg89zKzkJddrX:chatcmpl-tool-abdddfec25b4b5cb";
+        let write = "msg_198b17ffc00100000000000031:chatcmpl-tool-0000000000000002";
+        let edit = "msg_198b183de00100000000000040:chatcmpl-tool-0000000000000003";
         let fetch_diff = json!({"action": "fetch_diff"});
         let events: Vec<Value> = replay("files_turn.jsonl", &[])
             .into_iter()
@@ -3026,10 +3026,10 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                json!({"type": "item_started", "id": "msg_198b17729001BfnSeHTUEw26zm:text:0", "content": {"kind": "assistant_message", "text": ""}}),
-                json!({"type": "delta", "item_id": "msg_198b17729001BfnSeHTUEw26zm:text:0", "kind": "assistant_text", "text": "I'll do these in order.\n\n"}),
-                json!({"type": "item_completed", "id": "msg_198b17729001BfnSeHTUEw26zm:text:0", "content": {"kind": "assistant_message", "text": "I'll do these in order.\n\n"}}),
-                json!({"type": "plan_updated", "turn_id": "evt_198b1771a001fVaE42MZK8jx3H", "explanation": null, "steps": [{"step": "Write code", "status": "inProgress"}, {"step": "Test code", "status": "pending"}]}),
+                json!({"type": "item_started", "id": "msg_198b1772900100000000000017:text:0", "content": {"kind": "assistant_message", "text": ""}}),
+                json!({"type": "delta", "item_id": "msg_198b1772900100000000000017:text:0", "kind": "assistant_text", "text": "I'll do these in order.\n\n"}),
+                json!({"type": "item_completed", "id": "msg_198b1772900100000000000017:text:0", "content": {"kind": "assistant_message", "text": "I'll do these in order.\n\n"}}),
+                json!({"type": "plan_updated", "turn_id": "evt_198b1771a00100000000000013", "explanation": null, "steps": [{"step": "Write code", "status": "inProgress"}, {"step": "Test code", "status": "pending"}]}),
                 json!({"type": "item_started", "id": write, "content": {"kind": "file_change", "changes": [], "status": "in_progress"}}),
                 json!({"type": "item_updated", "id": write, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "modify", "diff": null}], "status": "in_progress"}}),
                 json!({"type": "item_completed", "id": write, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "create", "diff": "+blue"}], "status": "completed"}}),
@@ -3038,18 +3038,18 @@ mod tests {
                 json!({"type": "item_updated", "id": edit, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "modify", "diff": null}], "status": "in_progress"}}),
                 json!({"type": "item_completed", "id": edit, "content": {"kind": "file_change", "changes": [{"path": "notes2.txt", "kind": "modify", "diff": "Index: notes2.txt\n===================================================================\n--- notes2.txt\n+++ notes2.txt\n@@ -1,1 +1,1 @@\n-blue\n+green\n"}], "status": "completed"}}),
                 fetch_diff,
-                json!({"type": "item_started", "id": "msg_198b18977001VDeVULdbXIIY47:text:0", "content": {"kind": "assistant_message", "text": ""}}),
-                json!({"type": "delta", "item_id": "msg_198b18977001VDeVULdbXIIY47:text:0", "kind": "assistant_text", "text": "DONE"}),
-                json!({"type": "item_completed", "id": "msg_198b18977001VDeVULdbXIIY47:text:0", "content": {"kind": "assistant_message", "text": "DONE"}}),
+                json!({"type": "item_started", "id": "msg_198b1897700100000000000049:text:0", "content": {"kind": "assistant_message", "text": ""}}),
+                json!({"type": "delta", "item_id": "msg_198b1897700100000000000049:text:0", "kind": "assistant_text", "text": "DONE"}),
+                json!({"type": "item_completed", "id": "msg_198b1897700100000000000049:text:0", "content": {"kind": "assistant_message", "text": "DONE"}}),
             ]
         );
     }
 
     #[test]
     fn a_subagents_activity_nests_under_the_call_that_spawned_it() {
-        let spawn = "msg_198acc1db0013V4MEKRcfmYvtt:chatcmpl-tool-b5f7774ecdb70d58";
-        let child = "msg_198accaf2001JTZdDPBbxetEk2:text:0";
-        let reply = "msg_198accd89001hG3ffj4MheRnb9:text:0";
+        let spawn = "msg_198acc1db00100000000000290:chatcmpl-tool-0000000000000011";
+        let child = "msg_198accaf200100000000000303:text:0";
+        let reply = "msg_198accd8900100000000000315:text:0";
         let out = replay("subagent_turn.jsonl", &[]);
         assert_eq!(
             out.iter()
@@ -3076,7 +3076,7 @@ mod tests {
 
     #[test]
     fn an_image_read_carries_the_image_it_read() {
-        let read = "msg_198ad1767001iy9JUcC3DFxDk1:chatcmpl-tool-9abf3cdf50e4c7d9";
+        let read = "msg_198ad176700100000000000062:chatcmpl-tool-0000000000000004";
         assert_eq!(
             items_only(replay("image_turn.jsonl", &[]))[..3],
             [
@@ -3091,7 +3091,7 @@ mod tests {
     /// call is of the `tcode_probe` server's `echo_upper`.
     #[test]
     fn an_mcp_call_names_its_server_and_tool_and_carries_its_text_and_images() {
-        let call = "msg_198d2e71d001VpxRG5X5z2lMvh:chatcmpl-tool-a75c2f7c0101d202";
+        let call = "msg_198d2e71d00100000000000123:chatcmpl-tool-0000000000000007";
         let completed: Vec<Value> = replay("mcp_turn.jsonl", &["tcode_probe"])
             .into_iter()
             .filter(|out| out["type"] == "item_completed" && out["id"] == call)
@@ -3159,7 +3159,7 @@ mod tests {
 
     #[test]
     fn an_interrupted_call_and_turn_end_interrupted() {
-        let id = "msg_198ae3e2d001J0cOFv8lV738Bg:chatcmpl-tool-be126f07a96b3c6d";
+        let id = "msg_198ae3e2d00100000000000084:chatcmpl-tool-0000000000000005";
         let out: Vec<Value> = replay("interrupt_turn.jsonl", &[])
             .into_iter()
             .filter(|out| out["type"].is_string())
@@ -3174,7 +3174,7 @@ mod tests {
             out[running + 1..],
             [
                 json!({"type": "item_completed", "id": id, "content": {"kind": "command_execution", "command": "sleep 30", "output": "", "exit_code": null, "status": "interrupted"}}),
-                json!({"type": "turn_completed", "turn_id": "evt_198ae3e27001B11JrPf6Fy7Nv1", "status": "interrupted", "usage": null}),
+                json!({"type": "turn_completed", "turn_id": "evt_198ae3e2700100000000000081", "status": "interrupted", "usage": null}),
             ]
         );
     }
@@ -3184,10 +3184,10 @@ mod tests {
         assert_eq!(
             replay("compact_turn.jsonl", &[]),
             vec![
-                json!({"type": "turn_started", "turn_id": "evt_198b05ab80022gwehZCwzMKLQq"}),
+                json!({"type": "turn_started", "turn_id": "evt_198b05ab800200000000000003"}),
                 json!({"type": "context_compacted", "in_progress": true, "trigger": "manual", "pre_tokens": null, "post_tokens": null, "dropped_tokens": null, "duration_ms": null}),
                 json!({"type": "context_compacted", "in_progress": false, "trigger": "manual", "pre_tokens": null, "post_tokens": null, "dropped_tokens": null, "duration_ms": null}),
-                json!({"type": "turn_completed", "turn_id": "evt_198b05ab80022gwehZCwzMKLQq", "status": "completed", "usage": null}),
+                json!({"type": "turn_completed", "turn_id": "evt_198b05ab800200000000000003", "status": "completed", "usage": null}),
             ]
         );
     }
@@ -3196,8 +3196,8 @@ mod tests {
     /// which is no turn; the prompt after it runs as an ordinary one.
     #[test]
     fn an_execution_that_only_moves_the_session_is_no_turn() {
-        let text = "msg_1c19cb8210017is3TIDIiyQxE8:text:0";
-        let turn_id = "evt_1c19cb817001IpfqEDCmLwzQJL";
+        let text = "msg_1c19cb82100100000000000162:text:0";
+        let turn_id = "evt_1c19cb81700100000000000159";
         assert_eq!(
             replay("move_turn.jsonl", &[]),
             vec![
