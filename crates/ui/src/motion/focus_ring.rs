@@ -7,6 +7,9 @@
 //! whose handle Tcode holds, fading over [`GLIDE`] as the keyboard brings focus
 //! to it and takes it away. The fades are kept by focus handle for the whole
 //! app: at rest it holds the one focused control, whatever the windows draw.
+//! Gap: gpui-base's `transition` keeps its clock by element path, and a
+//! control its view draws under a new parent keeps its focus handle there
+//! ([`handle`]), so a ring sampled by path would land at once where it moved.
 //!
 //! gpui-base's own controls (Button, Switch, Checkbox, Radio, Tab) draw
 //! their keyboard focus only through `focus_visible`, so Tcode's facades
