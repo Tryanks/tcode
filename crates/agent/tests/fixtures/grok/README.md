@@ -19,7 +19,7 @@ directions, in wire order, untruncated: one JSON object per line,
 
   ```sh
   cargo run -p agent --example probe -- grok "Count, edit, ask and echo" <cwd> auto_edits \
-      --resume '{"session_id":"01a10095-e65c-7983-a817-6884b010f1ae"}' --effort low \
+      --resume '{"session_id":"00000000-0000-7000-8000-000000000072"}' --effort low \
       --mcp tcode_probe http://127.0.0.1:18433/mcp tcode-secret
   ```
 
@@ -50,9 +50,13 @@ The probe then shuts the session down (`session/close`).
 
 The `initialize` result's `hostname` is `fixture-host` and its `agentId` and
 `agentInstanceId` are zero UUIDs; the scratch directory is renamed to
-`/tmp/grok-fixture` in all its forms (`/private/tmp/…`, URL-encoded). Nothing
-else was changed. The `/Users/admin/actions-runner/…` paths are Grok's own
-built-in workflow metadata.
+`/tmp/grok-fixture` in all its forms (`/private/tmp/…`, URL-encoded). Every
+other UUID — session, task, request and permission ids — is replaced by a
+zero UUID with a serial number (the version digit kept), consistently across
+the file, and the `[bg]` title's id prefix follows its task's. The path of
+Grok's built-in `deep-research` workflow, a location on Grok's own build
+machine, is replaced by `/home/user/build/grok-shell/…`. The model's turns
+were scripted, so no conversation content is recorded.
 
 ## `agent_started_turn.jsonl`
 
