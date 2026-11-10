@@ -17,27 +17,34 @@ use crate::store::{Mutation, SessionStore};
 use tcode_core::project::{Project, SessionMeta};
 pub use tcode_protocol::{ExternalThread, RecentDir, SourceTool};
 
+/// Where each tool keeps its history; `None` or empty where there is none
+/// to scan, as for a host with no home directory.
 #[derive(Debug, Clone)]
 pub struct ExternalRoots {
-    pub claude_projects: PathBuf,
-    pub claude_desktop_meta: PathBuf,
+    pub claude_projects: Option<PathBuf>,
+    pub claude_desktop_meta: Option<PathBuf>,
     pub codex_session_roots: Vec<PathBuf>,
 }
 
 impl ExternalRoots {
     pub fn detect() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let home = dirs::home_dir();
         let codex_home = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".codex"));
+            .or_else(|| home.as_ref().map(|home| home.join(".codex")));
         Self {
-            claude_projects: home.join(".claude/projects"),
+            claude_projects: home.as_ref().map(|home| home.join(".claude/projects")),
             claude_desktop_meta: home
-                .join("Library/Application Support/Claude/claude-code-sessions"),
-            codex_session_roots: vec![
-                codex_home.join("sessions"),
-                codex_home.join("archived_sessions"),
-            ],
+                .as_ref()
+                .map(|home| home.join("Library/Application Support/Claude/claude-code-sessions")),
+            codex_session_roots: codex_home
+                .map(|codex_home| {
+                    vec![
+                        codex_home.join("sessions"),
+                        codex_home.join("archived_sessions"),
+                    ]
+                })
+                .unwrap_or_default(),
         }
     }
 }

@@ -17,10 +17,19 @@ struct DesktopMeta {
 }
 
 pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Vec<RecentDir> {
-    let desktop = desktop_metadata(&roots.claude_desktop_meta);
+    let desktop = roots
+        .claude_desktop_meta
+        .as_deref()
+        .map(desktop_metadata)
+        .unwrap_or_default();
     let mut found = Vec::<(PathBuf, ExternalThread)>::new();
 
-    for path in claude_session_files(&roots.claude_projects) {
+    let claude_files = roots
+        .claude_projects
+        .as_deref()
+        .map(claude_session_files)
+        .unwrap_or_default();
+    for path in claude_files {
         let Ok(file) = File::open(&path) else {
             continue;
         };
