@@ -646,12 +646,15 @@ struct PendingApproval {
 
 struct PendingElicitation {
     rpc_id: Value,
+    questions: Vec<UserInputQuestion>,
     fields: Vec<ElicitField>,
 }
 
 struct ElicitField {
     key: String,
     kind: ElicitFieldKind,
+    /// Listed in the schema's `required`.
+    required: bool,
     /// Display label → wire value for titled enums.
     values: HashMap<String, String>,
 }
@@ -1053,13 +1056,47 @@ impl SessionActor for Actor {
                         &json!({ "id": json_rpc_id, "result": { "answers": wire_answers } }),
                     )
                     .map_err(|e| e.to_string())?;
-                } else if let Some(pending) = self.elicitations.remove(&request_id) {
-                    let result = elicitation_result(&pending.fields, &answers);
-                    send_json(
-                        &mut self.stdin,
-                        &json!({ "id": pending.rpc_id, "result": result }),
-                    )
-                    .map_err(|e| e.to_string())?;
+                } else if let Some(pending) = self.elicitations.get_mut(&request_id) {
+                    let result = match elicitation_result(&pending.fields, &answers) {
+                        Ok(result) => result,
+                        Err(unusable) => {
+                            // Nothing is sent until the answers fit the schema: a decline
+                            // would tell the server the user refused.
+                            for question in &mut pending.questions {
+                                question.prefill = answers
+                                    .get(&question.id)
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned);
+                            }
+                            let headers: Vec<&str> = pending
+                                .questions
+                                .iter()
+                                .filter(|question| unusable.contains(&question.id))
+                                .map(|question| question.header.as_str())
+                                .collect();
+                            let questions = pending.questions.clone();
+                            self.events
+                                .emit(AgentEvent::Warning {
+                                    message: format!(
+                                        "Check these answers and try again: {}",
+                                        headers.join(", ")
+                                    ),
+                                })
+                                .await;
+                            self.events
+                                .emit(AgentEvent::UserInputRequested {
+                                    request_id,
+                                    questions,
+                                    delivery: UserInputDelivery::Blocking,
+                                })
+                                .await;
+                            return Ok(());
+                        }
+                    };
+                    let rpc_id = pending.rpc_id.clone();
+                    self.elicitations.remove(&request_id);
+                    send_json(&mut self.stdin, &json!({ "id": rpc_id, "result": result }))
+                        .map_err(|e| e.to_string())?;
                 } else if self
                     .async_questions
                     .as_ref()
@@ -2499,8 +2536,14 @@ impl Actor {
             return;
         };
 
-        self.elicitations
-            .insert(request_id.clone(), PendingElicitation { rpc_id, fields });
+        self.elicitations.insert(
+            request_id.clone(),
+            PendingElicitation {
+                rpc_id,
+                questions: questions.clone(),
+                fields,
+            },
+        );
         self.events
             .emit(AgentEvent::UserInputRequested {
                 request_id,
@@ -3441,24 +3484,40 @@ fn non_empty_string(value: &Value) -> Option<String> {
         .find(|answer| !answer.is_empty())
 }
 
-fn elicitation_result(fields: &[ElicitField], answers: &serde_json::Map<String, Value>) -> Value {
+/// The reply to an elicitation, or the keys of the answers that do not fit
+/// its schema. No answer at all declines.
+fn elicitation_result(
+    fields: &[ElicitField],
+    answers: &serde_json::Map<String, Value>,
+) -> Result<Value, Vec<String>> {
     if fields.len() == 1 && matches!(fields[0].kind, ElicitFieldKind::UrlAck) {
         let action = answers
             .get(&fields[0].key)
             .and_then(non_empty_string)
             .filter(|answer| answer != ELICITATION_URL_CANCEL_LABEL)
             .map_or("cancel", |_| "accept");
-        return json!({ "action": action });
+        return Ok(json!({ "action": action }));
     }
 
     let mut content = serde_json::Map::new();
+    let mut unusable = Vec::new();
+    let mut answered = false;
     for field in fields {
-        let Some(answer) = answers.get(&field.key) else {
+        let answer = answers
+            .get(&field.key)
+            .filter(|answer| strings(Some(answer)).iter().any(|text| !text.is_empty()));
+        let Some(answer) = answer else {
+            if field.required {
+                unusable.push(field.key.clone());
+            }
             continue;
         };
+        answered = true;
         let value = match field.kind {
             ElicitFieldKind::Text => non_empty_string(answer).map(Value::String),
-            ElicitFieldKind::Enum => elicitation_enum_values(field, answer).into_iter().next(),
+            ElicitFieldKind::Enum => {
+                elicitation_enum_values(field, answer).and_then(|values| values.into_iter().next())
+            }
             ElicitFieldKind::Number => non_empty_string(answer)
                 .and_then(|answer| answer.parse::<f64>().ok())
                 .and_then(serde_json::Number::from_f64)
@@ -3473,29 +3532,32 @@ fn elicitation_result(fields: &[ElicitField], answers: &serde_json::Map<String, 
                     _ => None,
                 }
             }),
-            ElicitFieldKind::MultiEnum => {
-                let values = elicitation_enum_values(field, answer);
-                (!values.is_empty()).then_some(Value::Array(values))
-            }
+            ElicitFieldKind::MultiEnum => elicitation_enum_values(field, answer).map(Value::Array),
             ElicitFieldKind::UrlAck => None,
         };
-        if let Some(value) = value {
-            content.insert(field.key.clone(), value);
+        match value {
+            Some(value) => {
+                content.insert(field.key.clone(), value);
+            }
+            None => unusable.push(field.key.clone()),
         }
     }
 
-    if content.is_empty() {
-        json!({ "action": "decline" })
+    if !answered {
+        Ok(json!({ "action": "decline" }))
+    } else if unusable.is_empty() {
+        Ok(json!({ "action": "accept", "content": content }))
     } else {
-        json!({ "action": "accept", "content": content })
+        Err(unusable)
     }
 }
 
-fn elicitation_enum_values(field: &ElicitField, answer: &Value) -> Vec<Value> {
+/// The wire values of the chosen labels, or `None` when one is not offered.
+fn elicitation_enum_values(field: &ElicitField, answer: &Value) -> Option<Vec<Value>> {
     strings(Some(answer))
         .into_iter()
         .filter(|answer| !answer.is_empty())
-        .filter_map(|answer| {
+        .map(|answer| {
             if field.values.is_empty() {
                 Some(Value::String(answer))
             } else {
@@ -3550,6 +3612,7 @@ fn parse_elicitation_form(
         .pointer("/requestedSchema/properties")
         .and_then(Value::as_object)?;
     let message = schema_text(params, "message");
+    let required = strings(params.pointer("/requestedSchema/required"));
     let mut questions = Vec::new();
     let mut fields = Vec::new();
 
@@ -3618,6 +3681,7 @@ fn parse_elicitation_form(
         fields.push(ElicitField {
             key: key.clone(),
             kind,
+            required: required.contains(key),
             values,
         });
     }
@@ -3652,6 +3716,7 @@ fn parse_elicitation_url(
     let field = ElicitField {
         key: "url".into(),
         kind: ElicitFieldKind::UrlAck,
+        required: false,
         values: HashMap::new(),
     };
     (vec![question], vec![field])
@@ -6979,8 +7044,13 @@ mod tests {
         });
     }
 
+    /// An answer that does not fit the form's schema is not sent: the request
+    /// goes back to the user with the answers filled in, as ChatGPT.app 26.1103
+    /// keeps its form open ("Check this answer and try again"), and the
+    /// corrected answers are accepted. The request is `form` mode of
+    /// `v2/McpServerElicitationRequestParams.ts` of 0.167.0.
     #[test]
-    fn elicitation_form_empty_answers_declines() {
+    fn elicitation_answer_that_does_not_fit_goes_back_to_the_user() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
             actor
@@ -6989,13 +7059,16 @@ mod tests {
                         "id": 82,
                         "method": "mcpServer/elicitation/request",
                         "params": {
-                            "serverName": "numbers",
-                            "threadId": "thread-1",
-                            "mode": "form",
-                            "message": "Number?",
+                            "threadId": "thread-1", "turnId": "turn-1",
+                            "serverName": "numbers", "mode": "form", "_meta": null,
+                            "message": "How many?",
                             "requestedSchema": {
                                 "type": "object",
-                                "properties": {"count": {"type": "number"}}
+                                "properties": {
+                                    "count": {"type": "integer", "title": "Count"},
+                                    "note": {"type": "string", "title": "Note"}
+                                },
+                                "required": ["count"]
                             }
                         }
                     })
@@ -7004,19 +7077,52 @@ mod tests {
                 .await;
             let _ = events.try_recv().unwrap();
 
-            let mut answers = serde_json::Map::new();
-            answers.insert("count".into(), json!("not-a-number"));
-            actor
-                .handle_command(SessionCommand::RespondUserInput {
-                    request_id: "82".into(),
-                    answers,
-                })
-                .await
-                .unwrap();
-            let _ = events.try_recv().unwrap();
-            let response = sent(&mut actor).await;
-            assert_eq!(response, json!({"id": 82, "result": {"action": "decline"}}));
-            assert!(response["result"].get("content").is_none());
+            let respond = async |actor: &mut Actor, count: &str| {
+                let mut answers = serde_json::Map::new();
+                answers.insert("count".into(), json!(count));
+                answers.insert("note".into(), json!("weekly"));
+                actor
+                    .handle_command(SessionCommand::RespondUserInput {
+                        request_id: "82".into(),
+                        answers,
+                    })
+                    .await
+                    .unwrap();
+            };
+            respond(&mut actor, "1,000").await;
+            assert!(written(&mut actor).await.is_empty());
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::Warning { message } if message.contains("numbers: Count")
+            ));
+            let AgentEvent::UserInputRequested {
+                request_id,
+                questions,
+                ..
+            } = events.try_recv().unwrap()
+            else {
+                panic!("expected the request again")
+            };
+            assert_eq!(request_id, "82");
+            assert_eq!(
+                questions
+                    .iter()
+                    .map(|question| question.prefill.as_deref())
+                    .collect::<Vec<_>>(),
+                [Some("1,000"), Some("weekly")]
+            );
+            assert!(events.try_recv().is_err());
+
+            respond(&mut actor, "1000").await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::UserInputResolved { ref request_id, .. } if request_id == "82"
+            ));
+            assert_eq!(
+                sent(&mut actor).await,
+                json!({"id": 82, "result": {"action": "accept",
+                    "content": {"count": 1000, "note": "weekly"}}})
+            );
 
             let _ = actor.child.kill();
             let _ = actor.child.wait();
