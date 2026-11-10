@@ -6,7 +6,7 @@ use super::{
     graphql::Document,
     merge_message::remove_agent_credits,
     pull_request_reads::{
-        MAX_PAGES, PullRequestReads, READ_TTL, Reader, is_revision, percent_encode, reaction_name,
+        PullRequestReads, READ_TTL, Reader, is_revision, percent_encode, reaction_name,
     },
     pull_request_watch,
 };
@@ -757,21 +757,24 @@ impl PullRequestReads {
         ))
     }
 
-    /// The changed files at the pull request's current revisions, every page of them.
+    /// The changed files at the pull request's current revisions, every page GitHub lists, and
+    /// whether those are all of them: GitHub lists no more than its own maximum of files.
     fn diff(
         &self,
         key: &PullRequestKey,
-    ) -> Result<(String, String, Vec<PullRequestFile>), GitHubError> {
+    ) -> Result<(String, String, Vec<PullRequestFile>, bool), GitHubError> {
         let first = self.files(key, None)?.value;
         let (base, head) = (first.base.clone(), first.head.clone());
         let mut files = first.files.clone();
+        let mut complete = first.complete;
         let mut next = first.next_page;
-        while let Some(page) = next.filter(|page| (*page as usize) <= MAX_PAGES) {
+        while let Some(page) = next {
             let more = self.files(key, Some(page))?.value;
             files.extend(more.files.iter().cloned());
+            complete = more.complete;
             next = more.next_page;
         }
-        Ok((base, head, files))
+        Ok((base, head, files, complete))
     }
 
     /// Whether GitHub takes a review comment on these lines: the pull request is still at
@@ -784,15 +787,18 @@ impl PullRequestReads {
         side: ReviewSide,
         lines: (u32, u32),
     ) -> Result<Anchoring, GitHubError> {
-        let (_, current, files) = self.diff(key)?;
+        let (_, current, files, complete) = self.diff(key)?;
         if current != head {
             return Ok(Anchoring::Moved);
         }
-        Ok(if in_hunks(&files, path, side, lines) {
-            Anchoring::InDiff
+        if in_hunks(&files, path, side, lines) {
+            Ok(Anchoring::InDiff)
+        } else if complete || files.iter().any(|file| file.path == path) {
+            Ok(Anchoring::OutsideDiff)
         } else {
-            Anchoring::OutsideDiff
-        })
+            // A file past the ones GitHub lists may hold these lines; nothing says it does not.
+            Err(GitHubError::BodyTooLarge)
+        }
     }
 
     /// The pull request's current head, and where each comment's lines are at it: the revision
@@ -802,7 +808,14 @@ impl PullRequestReads {
         key: &PullRequestKey,
         comments: &[PullRequestReviewDraftComment],
     ) -> Result<(String, Vec<Moved>), GitHubError> {
-        let (base, head, files) = self.diff(key)?;
+        let (base, head, files, complete) = self.diff(key)?;
+        if !complete
+            && comments
+                .iter()
+                .any(|comment| !files.iter().any(|file| file.path == comment.path))
+        {
+            return Err(GitHubError::BodyTooLarge);
+        }
         let lines = |revision: &str, comment: &PullRequestReviewDraftComment| {
             let text = self.file_text(key, revision, &comment.path)?.value;
             Ok::<_, GitHubError>(match &*text {
