@@ -381,9 +381,6 @@ impl ComputerUseTools {
                 "observe-only mode is enabled in Settings → Computer Use; input actions are disabled",
             );
         }
-        if params.actions.is_empty() {
-            return tool_error("act_ui requires at least one action");
-        }
         let previous = match crate::state::global().lock().unwrap().get(&params.state_id) {
             Ok(observation) => observation,
             Err(error) => return tool_error(&error.to_string()),
