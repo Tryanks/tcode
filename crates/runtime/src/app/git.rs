@@ -69,7 +69,7 @@ impl AppState {
             return HostCx::spawn_background(cx, async { Err("no active session".to_string()) });
         };
         let binary = self.settings.provider(ProviderKind::ClaudeCode).binary_path;
-        HostCx::spawn_background(cx, async move {
+        cx.unblock(move || {
             let (stat, patch) = commit_diff_context(&cwd, included.as_deref());
             let prompt = build_commit_prompt(&stat, &patch);
             let raw = run_claude_headless(binary.as_deref(), &cwd, &prompt)?;
