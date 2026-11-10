@@ -208,28 +208,16 @@ impl Host {
 mod tests {
     use super::*;
 
-    #[test]
-    fn tokens_keep_scopes_isolated_and_revoke_independently() {
-        let registry = TokenRegistry::new(|scope| scope);
-        let first = registry.register("session-a");
-        let second = registry.register("session-b");
-        assert_ne!(first, second);
-        assert_eq!(registry.services.read().unwrap()[&first].0, "session-a");
-        registry.revoke(&first);
-        let services = registry.services.read().unwrap();
-        assert!(!services.contains_key(&first));
-        assert_eq!(services[&second].0, "session-b");
-    }
-
     #[derive(Clone)]
     struct Nothing;
 
     impl ServerHandler for Nothing {}
 
     /// A suspended scope's calls are refused at the door, its tokens kept for when it
-    /// resumes, and another scope's calls are not touched.
+    /// resumes; a revoked token is refused outright; another scope's calls are not
+    /// touched by either.
     #[test]
-    fn a_suspended_scope_is_refused_until_it_resumes() {
+    fn suspended_and_revoked_tokens_are_refused_at_the_door() {
         let tokens = TokenRegistry::new(|_| {
             StreamableHttpService::new(
                 || Ok(Nothing),
@@ -262,5 +250,8 @@ mod tests {
         assert!(admitted(status(&owner)));
         tokens.resume("member-turn");
         assert!(admitted(status(&member)));
+        tokens.revoke(&member);
+        assert_eq!(status(&member), StatusCode::UNAUTHORIZED);
+        assert!(admitted(status(&owner)));
     }
 }
