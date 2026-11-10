@@ -516,18 +516,17 @@ fn legacy_key_bytes(
                     && !modifiers.control
                     && !modifiers.platform
                     && (cfg!(not(target_os = "macos")) || option_as_meta);
-                if alt_meta && key.is_ascii() {
-                    return Some(
-                        format!(
-                            "\x1b{}",
-                            if modifiers.shift {
-                                key.to_ascii_uppercase()
-                            } else {
-                                key.to_string()
-                            }
-                        )
-                        .into_bytes(),
-                    );
+                let ch = match key {
+                    "space" => ' ',
+                    key => single_printable_char(key).filter(char::is_ascii)?,
+                };
+                if alt_meta {
+                    let ch = if modifiers.shift {
+                        ch.to_ascii_uppercase()
+                    } else {
+                        ch
+                    };
+                    return Some(format!("\x1b{ch}").into_bytes());
                 }
                 return None;
             }
@@ -771,6 +770,10 @@ mod tests {
             ("back", plain, Mode::empty(), legacy, None, None),
             ("back", plain, Mode::empty(), kitty, None, None),
             ("back", ctrl, Mode::empty(), legacy, Some(2), None),
+            // Alt as Meta prefixes the key's character, never its name.
+            ("space", alt, Mode::empty(), legacy, None, Some("\x1b ")),
+            ("forward", alt, Mode::empty(), legacy, None, None),
+            ("f21", alt, Mode::empty(), legacy, None, None),
         ] {
             assert_eq!(
                 key_bytes(key, modifiers, mode, keyboard, other_keys, true),
