@@ -85,9 +85,8 @@ fn effective_permission(result: &Value) -> String {
     }
     let sandbox = result
         .get("sandboxPolicy")
-        .or_else(|| result.get("sandbox"));
-    let sandbox = sandbox
-        .and_then(|value| value.get("type").or(Some(value)))
+        .or_else(|| result.get("sandbox"))
+        .and_then(|sandbox| sandbox.get("type"))
         .and_then(Value::as_str);
     let policy = result.get("approvalPolicy").and_then(Value::as_str);
     let reviewer = result
@@ -95,16 +94,12 @@ fn effective_permission(result: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("user");
     match (sandbox, policy, reviewer) {
-        (Some("workspaceWrite" | "workspace-write"), Some("on-request"), "user") => "ask".into(),
-        (
-            Some("workspaceWrite" | "workspace-write"),
-            Some("on-request"),
-            "auto_review" | "guardian_subagent",
-        ) => "auto_review".into(),
-        (Some("readOnly" | "read-only"), Some("on-request"), "user") => "read_only".into(),
-        (Some("dangerFullAccess" | "danger-full-access"), Some("never"), "user") => {
-            "full_access".into()
+        (Some("workspaceWrite"), Some("on-request"), "user") => "ask".into(),
+        (Some("workspaceWrite"), Some("on-request"), "auto_review" | "guardian_subagent") => {
+            "auto_review".into()
         }
+        (Some("readOnly"), Some("on-request"), "user") => "read_only".into(),
+        (Some("dangerFullAccess"), Some("never"), "user") => "full_access".into(),
         _ => format!(
             "effective:{}",
             json!({"approvalPolicy":result.get("approvalPolicy"), "approvalsReviewer":reviewer, "sandbox":result.get("sandboxPolicy").or_else(|| result.get("sandbox")), "activePermissionProfile":result.get("activePermissionProfile")})
@@ -115,15 +110,14 @@ fn effective_permission(result: &Value) -> String {
 fn current_permission_option(effective: &str, settings: &Value) -> SelectOption {
     let sandbox = settings
         .get("sandboxPolicy")
-        .or_else(|| settings.get("sandbox"));
-    let sandbox = sandbox
-        .and_then(|value| value.get("type").or(Some(value)))
+        .or_else(|| settings.get("sandbox"))
+        .and_then(|sandbox| sandbox.get("type"))
         .and_then(Value::as_str);
     let sandbox = match sandbox {
-        Some("readOnly" | "read-only") => "read-only sandbox",
-        Some("workspaceWrite" | "workspace-write") => "workspace sandbox",
-        Some("dangerFullAccess" | "danger-full-access") => "full access",
-        Some("externalSandbox" | "external-sandbox") => "external sandbox",
+        Some("readOnly") => "read-only sandbox",
+        Some("workspaceWrite") => "workspace sandbox",
+        Some("dangerFullAccess") => "full access",
+        Some("externalSandbox") => "external sandbox",
         _ => "unspecified sandbox",
     };
     let approval = match settings.get("approvalPolicy") {
