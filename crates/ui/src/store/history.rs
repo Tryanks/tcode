@@ -342,12 +342,13 @@ impl WorkspaceStore {
                     return false;
                 };
                 match result {
-                    Ok(QueryResponse::SessionHistoryPage {
-                        records, from, end, ..
-                    }) if from < before
-                            && end == before
-                            && thread.history.as_ref().map(|held| held.from) == Some(before) =>
-                    {
+                    // The log moved under the page (a rewind cut it) or a new
+                    // window replaced what it continues: that window is the
+                    // thread now, and the page is not part of it.
+                    Ok(QueryResponse::SessionHistoryPage { end, .. })
+                        if end != before
+                            || thread.history.as_ref().map(|held| held.from) != Some(before) => {}
+                    Ok(QueryResponse::SessionHistoryPage { records, from, .. }) => {
                         thread.history_pages_fetched += 1;
                         let previous_turns = thread
                             .timeline
@@ -369,9 +370,9 @@ impl WorkspaceStore {
                         log::warn!("Earlier history page failed for {session_id} before {before}: {error:?}");
                         thread.history_error = Some(error.message);
                     }
-                    _ => {
-                        log::warn!("Invalid earlier history page response for {session_id} before {before}");
-                        thread.history_error = Some("Invalid history page response".into());
+                    Ok(other) => {
+                        thread.history_error =
+                            Some(format!("unexpected history page response: {other:?}"));
                     }
                 }
                 let failed = thread.history_error.is_some();
