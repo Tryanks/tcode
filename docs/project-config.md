@@ -18,13 +18,13 @@ For example, commit this alongside an image in the repository:
 
 Tcode reads `tcode.json` first. Only if that file is absent does it read
 `t3.json` in the same directory, using the same rules. The files are never
-merged. An existing but empty, unreadable, oversized or malformed `tcode.json`
-does not fall back to `t3.json`. Neither does a primary file with no icon, or
+merged. An existing but empty, unreadable or malformed `tcode.json` does not
+fall back to `t3.json`. Neither does a primary file with no icon, or
 one pointing to an invalid image. If both files are absent, the project has
 no configured default icon.
 
-The file must be a JSON object, at most 1 MiB. Standard JSON applies: comments
-and trailing commas are not supported. Unknown fields are ignored, including
+The file holds one JSON object. Standard JSON applies: comments and trailing
+commas are not supported. Unknown fields are ignored, including
 `scripts`; Tcode does not execute anything from this file. Invalid JSON or a
 known field with the wrong type makes the configuration invalid. A bad
 configuration does not prevent the project or its threads from opening; its
