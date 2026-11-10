@@ -3891,7 +3891,7 @@ mod tests {
             assert!(custom.right() <= body.right());
             assert!(body.bottom() < px(height));
         }
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4039,7 +4039,7 @@ mod tests {
             crate::window_state::Destination::Settings
         );
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4195,7 +4195,7 @@ mod tests {
             );
         });
 
-        driver.wait_until(cx, &store, "the page to hydrate", |cx| {
+        driver.wait_until(cx, "the page to hydrate", |cx| {
             page.read_with(cx, |page, _| page.hydrated)
         });
 
@@ -4225,13 +4225,12 @@ mod tests {
         driver
             .await_with_events(
                 cx,
-                &store,
                 link.command(tcode_protocol::Command::PatchSettings {
                     patch: SettingsPatch::BrowserHomeUrl(Some("https://elsewhere.example".into())),
                 }),
             )
             .expect("patch settings");
-        driver.wait_until(cx, &store, "the later settings snapshot", |cx| {
+        driver.wait_until(cx, "the later settings snapshot", |cx| {
             store.read_with(cx, |store, _| {
                 store.settings().browser.home_url.as_deref() == Some("https://elsewhere.example")
             })
@@ -4245,7 +4244,7 @@ mod tests {
             );
         });
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 

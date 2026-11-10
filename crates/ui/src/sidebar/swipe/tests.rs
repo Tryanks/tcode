@@ -76,7 +76,7 @@ fn phone<'a>(
         )
     });
     crate::store::tests::place_shown_threads(&store, cx);
-    driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+    driver.wait_until(cx, "sidebar baseline", |cx| {
         store.read_with(cx, |store, _| store.baseline_ready())
     });
     let navigation = cx.new(|_| WindowState::default().with_compact(true));
@@ -126,7 +126,7 @@ impl Phone {
         mut ready: impl FnMut(&Phone, &mut VisualTestContext) -> bool,
     ) {
         loop {
-            self.driver.step(cx, &self.store);
+            self.driver.step(cx);
             let asked = frame(cx);
             if ready(self, cx) {
                 draw(cx);
@@ -146,17 +146,17 @@ impl Phone {
     fn round_trip(&mut self, cx: &mut VisualTestContext) {
         let link = self.driver.link.clone();
         self.driver
-            .await_with_events(cx, &self.store, link.query(tcode_protocol::Query::Ping))
+            .await_with_events(cx, link.query(tcode_protocol::Query::Ping))
             .unwrap();
-        self.driver.step(cx, &self.store);
+        self.driver.step(cx);
     }
 
     fn command(&mut self, cx: &mut VisualTestContext, command: Command) {
         let link = self.driver.link.clone();
         self.driver
-            .await_with_events(cx, &self.store, link.command(command))
+            .await_with_events(cx, link.command(command))
             .unwrap();
-        self.driver.step(cx, &self.store);
+        self.driver.step(cx);
     }
 
     fn undo(&self, cx: &mut VisualTestContext) {
@@ -229,7 +229,7 @@ impl Phone {
     }
 
     fn close(mut self, cx: &mut VisualTestContext) {
-        self.driver.shutdown(cx, &self.store, &self.host);
+        self.driver.shutdown(cx, &self.host);
         let _ = std::fs::remove_dir_all(self.root);
     }
 }

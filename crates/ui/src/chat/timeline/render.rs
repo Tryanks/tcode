@@ -2543,11 +2543,11 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, &store, "chat baseline", |cx| {
+        driver.wait_until(cx, "chat baseline", |cx| {
             store.read_with(cx, |store, cx| {
                 !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
@@ -2596,7 +2596,7 @@ mod tests {
         let mut settle = |cx: &mut VisualTestContext,
                           what: &str,
                           ready: &dyn Fn(&mut VisualTestContext) -> bool| {
-            driver.settle_until(cx, &store, what, ready);
+            driver.settle_until(cx, what, ready);
         };
         // Nothing drives this turn on the host, so its Work Log reads as
         // finished and folded: open it and the command, as a reader would.
@@ -2696,7 +2696,7 @@ mod tests {
 
         store.update(cx, |store, cx| store.show_alone(other_id, cx));
         settle(cx, "leaving the thread", &|_| output_topics().is_empty());
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
     }
 
     #[gpui::test]
@@ -2736,7 +2736,7 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
@@ -2744,7 +2744,7 @@ mod tests {
             store.send_turn_for(session_id.clone(), "Plan it first".into(), Vec::new())
         });
         while !matches!(
-            driver.recv(cx, &store, &provider_commands),
+            driver.recv(cx, &provider_commands),
             agent::SessionCommand::SendTurn { .. }
         ) {}
 
@@ -2808,7 +2808,7 @@ mod tests {
                 if let agent::SessionCommand::RespondApproval {
                     request_id,
                     decision,
-                } = driver.recv(cx, &store, &provider_commands)
+                } = driver.recv(cx, &provider_commands)
                 {
                     return (request_id, decision);
                 }
@@ -2816,7 +2816,7 @@ mod tests {
         };
         let shown = |driver: &mut crate::store::tests::LocalHostDriver,
                      cx: &mut VisualTestContext| {
-            driver.settle_until(cx, &store, "the plan's decision", |cx| {
+            driver.settle_until(cx, "the plan's decision", |cx| {
                 cx.debug_bounds("plan-decision").is_some()
             });
         };
@@ -2857,7 +2857,7 @@ mod tests {
                 agent::ApprovalDecision::Feedback("Split step one".into())
             )
         );
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
     }
 
     #[gpui::test]
@@ -2987,11 +2987,11 @@ This begins after the hard break."#;
                 cx,
             )
         });
-        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             workspace_store.read_with(cx, |store, _| store.baseline_ready())
         });
         workspace_store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, &workspace_store, "selected conversation", |cx| {
+        driver.wait_until(cx, "selected conversation", |cx| {
             workspace_store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
@@ -3044,7 +3044,7 @@ This begins after the hard break."#;
             cx.debug_bounds("markdown-block-18").is_none(),
             "offscreen tail block was painted; block virtualization did not cull it"
         );
-        driver.shutdown(cx, &workspace_store, &host);
+        driver.shutdown(cx, &host);
     }
 
     /// The rewind panel a message opens offers exactly the scopes its
@@ -3185,7 +3185,7 @@ This begins after the hard break."#;
                 if let SessionCommand::PreviewRewind {
                     checkpoint_id,
                     mode,
-                } = driver.recv(window, &store, &commands)
+                } = driver.recv(window, &commands)
                 {
                     asked.push((checkpoint_id, mode));
                 }
@@ -3224,7 +3224,7 @@ This begins after the hard break."#;
             };
             // The spinner is the selected scope's preview alone; the scopes
             // offered settle once the other scope's answer lands as well.
-            driver.settle_until(window, &store, "the previews' answers", |window| {
+            driver.settle_until(window, "the previews' answers", |window| {
                 window.debug_bounds("rewind-preview-checking").is_none() && shown(window) == offered
             });
             assert_eq!(
@@ -3377,9 +3377,7 @@ This begins after the hard break."#;
                     .find(|meta| meta.fork_origin.is_some())
                     .map(|meta| meta.id.clone())
             };
-            driver.wait_until(window, &store, "the fork", |cx| {
-                cx.update(|cx| fork(cx).is_some())
-            });
+            driver.wait_until(window, "the fork", |cx| cx.update(|cx| fork(cx).is_some()));
             let fork = window.update(|_, cx| fork(cx)).unwrap();
             let fork_id = fork.clone();
             window.update(|_, cx| store.update(cx, |store, cx| store.show_alone(fork_id, cx)));
@@ -3390,7 +3388,7 @@ This begins after the hard break."#;
             window.simulate_resize(size(px(1_024.), px(700.)));
             // The origin comes with the thread's metadata, once its status
             // reaches this window, which redraws it.
-            driver.settle_until(window, &store, "the fork's source", |window| {
+            driver.settle_until(window, "the fork's source", |window| {
                 window.debug_bounds("fork-origin").is_some()
             });
             assert_eq!(

@@ -7204,7 +7204,7 @@ mod tests {
             let store = cx.new(|cx| {
                 WorkspaceStore::new_attached(driver.link.clone(), attachment, None, None, cx)
             });
-            driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+            driver.wait_until(cx, "sidebar baseline", |cx| {
                 store.read_with(cx, |store, _| store.baseline_ready())
             });
             Self {
@@ -7239,7 +7239,7 @@ mod tests {
             self.driver
                 .link
                 .set_connection_state(tcode_client::ConnectionState::Connected { path: None });
-            self.driver.shutdown(cx, &self.store, &self.host);
+            self.driver.shutdown(cx, &self.host);
             let _ = std::fs::remove_dir_all(self.root);
         }
     }
@@ -7334,7 +7334,7 @@ mod tests {
                 sidebar.on_pin(&ThreadPin(local("oldest")), window, cx)
             })
         });
-        driver.wait_until(cx, &store, "the pin", |cx| {
+        driver.wait_until(cx, "the pin", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .thread_meta("oldest")
@@ -7360,7 +7360,7 @@ mod tests {
                 sidebar.on_follow_up(&ThreadFollowUp(local("middle"), true), window, cx)
             })
         });
-        driver.wait_until(cx, &store, "the follow-up", |cx| {
+        driver.wait_until(cx, "the follow-up", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .thread_meta("middle")
@@ -7410,7 +7410,7 @@ mod tests {
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds(header).is_none(), "and is gone once it has");
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7443,7 +7443,7 @@ mod tests {
                 sidebar.on_pin(&ThreadPin(local("oldest")), window, cx)
             })
         });
-        driver.wait_until(cx, &store, "the pin", |cx| {
+        driver.wait_until(cx, "the pin", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .thread_meta("oldest")
@@ -7478,7 +7478,7 @@ mod tests {
             );
         }
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7507,7 +7507,7 @@ mod tests {
                     sidebar.perform_lifecycle(&HostKey::Local, vec![command], None, window, cx)
                 })
             });
-            driver.wait_until(cx, &store, "the lifecycle change", |cx| {
+            driver.wait_until(cx, "the lifecycle change", |cx| {
                 store.read_with(cx, |store, _| {
                     store
                         .sidebar_sessions()
@@ -7574,7 +7574,7 @@ mod tests {
         assert_eq!(top("middle", cx), None, "reduced motion takes it at once");
         assert!(top("oldest", cx) < Some(oldest), "and closes up at once");
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7662,7 +7662,7 @@ mod tests {
         );
         assert_eq!(drawn.last(), Some(&0.));
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7698,7 +7698,7 @@ mod tests {
                 sidebar.on_pin(&ThreadPin(local("second")), window, cx)
             })
         });
-        driver.wait_until(cx, &store, "the pin", |cx| {
+        driver.wait_until(cx, "the pin", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .thread_meta("second")
@@ -7719,7 +7719,7 @@ mod tests {
                 sidebar.unpin_thread(&local("second"), window, cx)
             })
         });
-        driver.wait_until(cx, &store, "the unpin", |cx| {
+        driver.wait_until(cx, "the unpin", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .thread_meta("second")
@@ -7740,7 +7740,7 @@ mod tests {
         );
         assert!(cx.debug_bounds("arrange-pinned-empty").is_some());
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7815,7 +7815,7 @@ mod tests {
             ghosts.push(ghost("oldest", cx));
             rows.push(row("oldest", cx).top());
         }
-        driver.wait_until(cx, &store, "the move", |cx| {
+        driver.wait_until(cx, "the move", |cx| {
             store.read_with(cx, |store, _| {
                 store.flat_sessions().first().map(|meta| meta.id.as_str()) == Some("oldest")
             })
@@ -7881,7 +7881,7 @@ mod tests {
         assert_eq!(ghost("middle", cx), None, "reduced motion sets it down");
         assert_eq!(row("middle", cx).top(), first, "in its new place at once");
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7924,7 +7924,7 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+        driver.wait_until(cx, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
 
@@ -8159,7 +8159,7 @@ mod tests {
                 .expect("read host title");
         assert_eq!(title, "Original title");
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -8193,7 +8193,7 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+        driver.wait_until(cx, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         let window_state = cx.new(|_| WindowState::default());
@@ -8215,7 +8215,7 @@ mod tests {
         ];
         let wait_for_rows =
             |cx: &mut VisualTestContext, driver: &mut crate::store::tests::LocalHostDriver| loop {
-                driver.step(cx, &store);
+                driver.step(cx);
                 draw(cx);
                 let rows: Vec<_> = selectors
                     .iter()
@@ -8232,7 +8232,7 @@ mod tests {
              enabled: bool,
              driver: &mut crate::store::tests::LocalHostDriver| {
                 store.update(cx, |store, _| store.set_sidebar_provider_marks(enabled));
-                driver.wait_until(cx, &store, "the setting to replicate", |cx| {
+                driver.wait_until(cx, "the setting to replicate", |cx| {
                     store.read_with(cx, |store, _| store.settings().sidebar_provider_marks)
                         == enabled
                 });
@@ -8273,7 +8273,7 @@ mod tests {
                 "with marks off again no mark is drawn"
             );
         }
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -8313,7 +8313,7 @@ mod tests {
             )
         });
         crate::store::tests::place_shown_threads(&store, cx);
-        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+        driver.wait_until(cx, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         let navigation = cx.new(|_| WindowState::default().with_compact(true));
@@ -8324,7 +8324,7 @@ mod tests {
         draw(cx);
         // A remote host may not have sent status yet. Selection must repaint
         // from the client notification without waiting for a host event.
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         draw(cx);
         let a = cx.debug_bounds("compact-row-menu-0").unwrap();
         let b = cx.debug_bounds("compact-row-menu-10").unwrap();
@@ -8449,7 +8449,7 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+        driver.wait_until(cx, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         let window_state = cx.new(|_| WindowState::default().with_compact(true));
@@ -8521,18 +8521,13 @@ mod tests {
             for collapsed in [true, false] {
                 let header = cx.debug_bounds("compact-group-header").unwrap();
                 cx.simulate_click(header.center(), gpui::Modifiers::default());
-                driver.wait_until(
-                    cx,
-                    &store,
-                    "the project toggle to reach the replica",
-                    |cx| {
-                        store.read_with(cx, |store, _| {
-                            seeded
-                                .iter()
-                                .any(|project| store.is_project_collapsed(&project.id))
-                        }) == collapsed
-                    },
-                );
+                driver.wait_until(cx, "the project toggle to reach the replica", |cx| {
+                    store.read_with(cx, |store, _| {
+                        seeded
+                            .iter()
+                            .any(|project| store.is_project_collapsed(&project.id))
+                    }) == collapsed
+                });
                 draw_settled(cx);
                 let visible = ["compact-row-thread-0", "compact-row-thread-1"]
                     .into_iter()
@@ -8546,7 +8541,7 @@ mod tests {
             }
         }
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
         headers
     }
@@ -8604,12 +8599,12 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+        driver.wait_until(cx, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         // The host sends its index from its own threads; wait for every
         // thread, as the app's event pump would, before judging the list.
-        driver.wait_until(cx, &store, "every thread", |cx| {
+        driver.wait_until(cx, "every thread", |cx| {
             store.read_with(cx, |store, _| store.flat_sessions().len() == 60)
         });
         let window_state = cx.new(|_| WindowState::default());
@@ -8672,7 +8667,7 @@ mod tests {
                 "dragging must not activate a thread under the scrollbar"
             );
         }
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -9978,7 +9973,7 @@ mod tests {
                 }
             }
         });
-        driver.wait_until(cx, &store, "the threads", |cx| {
+        driver.wait_until(cx, "the threads", |cx| {
             store.read_with(cx, |store, _| !store.flat_sessions().is_empty())
         });
         let window_state = cx.new(|_| WindowState::default());
@@ -10038,7 +10033,7 @@ mod tests {
             sidebar.update_in(cx, |sidebar, window, cx| {
                 sidebar.on_pin(&ThreadPin(local(id)), window, cx)
             });
-            driver.wait_until(cx, &store, "pin command reaches the host", |_| {
+            driver.wait_until(cx, "pin command reaches the host", |_| {
                 !recorded.lock().unwrap().is_empty()
             });
             let pins = std::mem::take(&mut *recorded.lock().unwrap());
@@ -10052,7 +10047,7 @@ mod tests {
             meta.pinned_at = Some(2);
             meta.pin_order = Some(key.clone());
             incoming.try_send(snapshot(&sessions)).unwrap();
-            driver.wait_until(cx, &store, "the pin", |cx| {
+            driver.wait_until(cx, "the pin", |cx| {
                 store.read_with(cx, |store, _| {
                     store
                         .thread_meta(id)
@@ -10094,7 +10089,7 @@ mod tests {
         started.updated_at = 2_000;
         sessions.push(started);
         incoming.try_send(snapshot(&sessions)).unwrap();
-        driver.wait_until(cx, &store, "the new thread", |cx| {
+        driver.wait_until(cx, "the new thread", |cx| {
             store.read_with(cx, |store, _| {
                 store.thread_meta("started-elsewhere").is_some()
             })
@@ -10236,7 +10231,7 @@ mod tests {
                 }
             }
         });
-        driver.wait_until(cx, &store, "the threads", |cx| {
+        driver.wait_until(cx, "the threads", |cx| {
             store.read_with(cx, |store, _| !store.flat_sessions().is_empty())
         });
         let window_state = cx.new(|_| WindowState::default());
@@ -10253,13 +10248,13 @@ mod tests {
         let sent = |cx: &mut VisualTestContext,
                     driver: &mut crate::store::tests::LocalHostDriver,
                     expected: usize| {
-            driver.wait_until(cx, &store, "lifecycle commands reach the host", |_| {
+            driver.wait_until(cx, "lifecycle commands reach the host", |_| {
                 recorded.lock().unwrap().len() >= expected
             });
             // A FIFO reply also establishes absence after a cancelled gesture.
             let link = driver.link.clone();
             let mut barrier = std::pin::pin!(link.query(tcode_protocol::Query::Ping));
-            driver.wait_until(cx, &store, "lifecycle command barrier", |_| {
+            driver.wait_until(cx, "lifecycle command barrier", |_| {
                 let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
                 match std::future::Future::poll(barrier.as_mut(), &mut task_cx) {
                     std::task::Poll::Ready(result) => {
@@ -10579,7 +10574,7 @@ mod tests {
         cx.simulate_mouse_up(to, left, none);
         draw(cx);
         let store = a.store.clone();
-        a.driver.wait_until(cx, &store, "the move", |cx| {
+        a.driver.wait_until(cx, "the move", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .flat_sessions()
@@ -10588,8 +10583,7 @@ mod tests {
                     .eq(["a1", "a3", "a2"])
             })
         });
-        let store = b.store.clone();
-        b.driver.step(cx, &store);
+        b.driver.step(cx);
         assert_eq!(b.listed(cx), ["b1", "b2"]);
         assert!(
             b.store.read_with(cx, |store, _| store

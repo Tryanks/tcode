@@ -2460,7 +2460,7 @@ mod sheet_tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         for context in [false, true] {
@@ -2508,6 +2508,6 @@ mod sheet_tests {
                 }
             }
         }
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
     }
 }

@@ -1394,7 +1394,7 @@ pub(crate) mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| {
                 store.baseline_ready()
                     && store
@@ -1404,7 +1404,7 @@ pub(crate) mod tests {
             })
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, &store, "selected conversation", |cx| {
+        driver.wait_until(cx, "selected conversation", |cx| {
             store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
@@ -1470,7 +1470,7 @@ pub(crate) mod tests {
                 assert!(meter.size.width >= px(44.) && meter.size.height >= px(44.));
             }
         }
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
     }
 
     /// On a phone the strip over the foot of the timeline rises in with the
@@ -1947,11 +1947,11 @@ pub(crate) mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         store.update(cx, |store, cx| store.show_alone(first_id.clone(), cx));
-        driver.wait_until(cx, &store, "chat baseline", |cx| {
+        driver.wait_until(cx, "chat baseline", |cx| {
             store.read_with(cx, |store, cx| {
                 !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
@@ -1984,7 +1984,7 @@ pub(crate) mod tests {
                 chat.set_session(Some(thread.to_string()), cx)
             });
             self.driver
-                .wait_until(cx, &store, "the bound thread's history", |cx| {
+                .wait_until(cx, "the bound thread's history", |cx| {
                     store.read_with(cx, |store, cx| {
                         store
                             .with_timeline_for(store.sole_thread().as_deref(), |_| (), cx)
@@ -1998,7 +1998,7 @@ pub(crate) mod tests {
         }
 
         pub(in crate::chat) fn shutdown(mut self, cx: &mut gpui::VisualTestContext) {
-            self.driver.shutdown(cx, &self.store, &self.host);
+            self.driver.shutdown(cx, &self.host);
         }
     }
 
@@ -2073,7 +2073,7 @@ pub(crate) mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             workspace_store.read_with(cx, |store, _| store.baseline_ready())
         });
         if paged {
@@ -2081,7 +2081,6 @@ pub(crate) mod tests {
             driver
                 .await_with_events(
                     cx,
-                    &workspace_store,
                     link.query(tcode_protocol::Query::SessionHistoryPage {
                         session_id: session_id.clone(),
                         before: u64::MAX,
@@ -2091,7 +2090,7 @@ pub(crate) mod tests {
                 .expect("the seeded history is read");
         }
         workspace_store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, &workspace_store, "selected conversation", |cx| {
+        driver.wait_until(cx, "selected conversation", |cx| {
             workspace_store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
@@ -2100,7 +2099,7 @@ pub(crate) mod tests {
         workspace_store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
-        driver.wait_until(cx, &workspace_store, "Git status", |cx| {
+        driver.wait_until(cx, "Git status", |cx| {
             workspace_store.read_with(cx, |store, cx| {
                 store
                     .chat_git_controls_for(store.sole_thread().as_deref(), cx)

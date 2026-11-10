@@ -3105,11 +3105,11 @@ mod replica_tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, &store, "the draft's status", |cx| {
+        driver.wait_until(cx, "the draft's status", |cx| {
             store.read_with(cx, |store, cx| {
                 store
                     .composer_state_for(Some(&session_id), cx)
@@ -3166,7 +3166,7 @@ mod replica_tests {
         show_rail(&composer, PickerRail::Profile("second-account".into()), cx);
         cx.simulate_keystrokes("secondary-2");
         draw_settled(cx);
-        driver.wait_until(cx, &store, "the pick to reach the thread", |cx| {
+        driver.wait_until(cx, "the pick to reach the thread", |cx| {
             store.read_with(cx, |store, cx| {
                 store
                     .composer_state_for(Some(&session_id), cx)
@@ -3195,7 +3195,7 @@ mod replica_tests {
         store.update(cx, |store, _| {
             store.send_turn_for(session_id.clone(), "hello".into(), Vec::new())
         });
-        driver.wait_until(cx, &store, "the provider launch", |_| !launches.is_empty());
+        driver.wait_until(cx, "the provider launch", |_| !launches.is_empty());
         let launch = launches.try_recv().unwrap();
         assert_eq!(launch.model.as_deref(), Some("shared-model"));
         assert!(
@@ -3208,7 +3208,7 @@ mod replica_tests {
                 )),
             "the thread launches on the second account"
         );
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3239,7 +3239,7 @@ mod replica_tests {
             .debug_bounds("model-fav-1")
             .expect("the second row's star");
         cx.simulate_click(star.center(), Modifiers::default());
-        driver.wait_until(cx, &store, "the star to reach the host", |cx| {
+        driver.wait_until(cx, "the star to reach the host", |cx| {
             store.read_with(cx, |store, _| !store.settings().favorite_models.is_empty())
         });
         draw_settled(cx);
@@ -3269,7 +3269,7 @@ mod replica_tests {
             search.focus(window, cx);
         });
         cx.simulate_keystrokes("secondary-1");
-        driver.wait_until(cx, &store, "the favourite's pick", |cx| {
+        driver.wait_until(cx, "the favourite's pick", |cx| {
             store.read_with(cx, |store, cx| {
                 store
                     .composer_state_for(Some(&session_id), cx)
@@ -3280,7 +3280,7 @@ mod replica_tests {
                     })
             })
         });
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 

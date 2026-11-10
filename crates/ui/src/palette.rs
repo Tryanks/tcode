@@ -1732,7 +1732,7 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             workspace_store.read_with(cx, |store, _| store.baseline_ready())
         });
         let palette_store = workspace_store.clone();
@@ -1790,7 +1790,7 @@ mod tests {
         });
 
         drop(palette);
-        driver.shutdown(cx, &workspace_store, &host);
+        driver.shutdown(cx, &host);
         drop(workspace_store);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1978,7 +1978,7 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             workspace_store.read_with(cx, |store, _| store.baseline_ready())
         });
         let palette_store = workspace_store.clone();
@@ -2048,7 +2048,7 @@ mod tests {
         assert!(cx.debug_bounds("palette-card").is_none());
 
         drop(palette);
-        driver.shutdown(cx, &workspace_store, &host);
+        driver.shutdown(cx, &host);
         drop(workspace_store);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2201,7 +2201,7 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             workspace_store.read_with(cx, |store, _| store.baseline_ready())
         });
         let palette_store = workspace_store.clone();
@@ -2264,7 +2264,7 @@ mod tests {
         });
 
         drop(palette);
-        driver.shutdown(cx, &workspace_store, &host);
+        driver.shutdown(cx, &host);
         drop(workspace_store);
         let _ = std::fs::remove_dir_all(root);
     }

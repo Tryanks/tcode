@@ -58,11 +58,11 @@ impl StoredThread {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, &store, "the thread's history", |cx| {
+        driver.wait_until(cx, "the thread's history", |cx| {
             store.read_with(cx, |store, cx| {
                 !store.chat_loading_for(store.sole_thread().as_deref(), cx)
                     && store
@@ -154,23 +154,22 @@ impl StoredThread {
         }))
         .unwrap();
         let store = self.store.clone();
-        self.driver
-            .wait_until(cx, &store, "the provider's events", |cx| {
-                store.read_with(cx, |store, cx| {
-                    store
-                        .with_timeline_for(
-                            store.sole_thread().as_deref(),
-                            |timeline| timeline.entries.iter().any(|entry| entry.id == last),
-                            cx,
-                        )
-                        .unwrap_or(false)
-                })
-            });
+        self.driver.wait_until(cx, "the provider's events", |cx| {
+            store.read_with(cx, |store, cx| {
+                store
+                    .with_timeline_for(
+                        store.sole_thread().as_deref(),
+                        |timeline| timeline.entries.iter().any(|entry| entry.id == last),
+                        cx,
+                    )
+                    .unwrap_or(false)
+            })
+        });
         draw_settled(cx);
     }
 
     pub(in crate::chat) fn shutdown(mut self, cx: &mut VisualTestContext) {
-        self.driver.shutdown(cx, &self.store, &self.host);
+        self.driver.shutdown(cx, &self.host);
     }
 }
 
@@ -1152,8 +1151,7 @@ fn step_until(
     cx: &mut VisualTestContext,
     done: impl FnMut(&mut VisualTestContext) -> bool,
 ) {
-    let store = thread.store.clone();
-    thread.driver.settle_until(cx, &store, what, done);
+    thread.driver.settle_until(cx, what, done);
 }
 
 /// A command that printed five thousand lines, its host's screen of them in

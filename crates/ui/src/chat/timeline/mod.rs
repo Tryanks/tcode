@@ -1718,13 +1718,12 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         let link = driver.link.clone();
         let page = driver.await_with_events(
             cx,
-            &store,
             link.query(tcode_protocol::Query::SessionHistoryPage {
                 session_id: session_id.clone(),
                 before: u64::MAX,
@@ -1801,11 +1800,11 @@ mod tests {
                 let position = turn * (DELTAS + 5) + 1;
                 store.show_thread_at_position(session_id.clone(), position, cx);
             });
-            driver.settle_until(cx, &store, &expected, |cx| {
+            driver.settle_until(cx, &expected, |cx| {
                 opened(cx).as_deref() == Some(expected.as_str())
             });
         }
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
     }
 
     #[gpui::test]
@@ -2361,14 +2360,14 @@ mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+        driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         // A host still reading the thread's log answers with the window it
         // read and sends the records it accepted meanwhile live after it, so
         // the thread is all there only once its last record is.
-        driver.wait_until(cx, &store, "the seeded turns", |cx| {
+        driver.wait_until(cx, "the seeded turns", |cx| {
             store.read_with(cx, |store, cx| {
                 let thread = store.sole_thread();
                 !store.chat_loading_for(thread.as_deref(), cx)
@@ -2436,7 +2435,7 @@ mod tests {
                 kind: agent::DeltaKind::AssistantText,
                 text: format!("Paragraph {delta} of the streamed answer.\n\n"),
             }]);
-            driver.wait_until(cx, &store, "the delta", |cx| streamed(cx) != before);
+            driver.wait_until(cx, "the delta", |cx| streamed(cx) != before);
             draw_settled(cx);
         };
         let mut heights = Vec::new();
@@ -2500,7 +2499,7 @@ mod tests {
         scroll(-100_000., gpui::TouchPhase::Moved, cx);
         stream(24, cx);
         assert!(list.is_following_tail());
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
     }
 
     #[gpui::test]
@@ -2570,7 +2569,7 @@ mod tests {
             )
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, &store, "chat baseline", |cx| {
+        driver.wait_until(cx, "chat baseline", |cx| {
             store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
@@ -2637,7 +2636,7 @@ mod tests {
                 .clone()
         });
         cx.simulate_resize(gpui::size(px(393.), px(600.)));
-        driver.settle_until(cx, &store, "the inline host image to load", |_| ready.get());
+        driver.settle_until(cx, "the inline host image to load", |_| ready.get());
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
         let row = cx.debug_bounds("timeline-row-89").unwrap_or_else(|| {
             panic!(
@@ -2663,7 +2662,7 @@ mod tests {
             draw_settled(cx);
         };
         click(point(pill.center().x, pill.top() - px(40.)), cx);
-        driver.settle_until(cx, &store, "the exposed image's explicit read", |cx| {
+        driver.settle_until(cx, "the exposed image's explicit read", |cx| {
             cx.debug_bounds("image-viewer-image").is_some()
         });
         cx.simulate_keystrokes("escape");
@@ -2678,7 +2677,7 @@ mod tests {
             cx.debug_bounds("image-viewer-image").is_none(),
             "pill click opened the image underneath"
         );
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -2838,17 +2837,17 @@ mod tests {
                     cx,
                 )
             });
-            driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            driver.wait_until(cx, "workspace baseline", |cx| {
                 store.read_with(cx, |store, _| store.baseline_ready())
             });
             if case == Outcome::SettingOff {
                 store.update(cx, |store, _| store.set_scroll_to_latest_on_send(false));
-                driver.wait_until(cx, &store, "the setting off", |cx| {
+                driver.wait_until(cx, "the setting off", |cx| {
                     store.read_with(cx, |store, _| !store.settings().scroll_to_latest_on_send)
                 });
             }
             store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-            driver.wait_until(cx, &store, "the conversation", |cx| {
+            driver.wait_until(cx, "the conversation", |cx| {
                 store.read_with(cx, |store, cx| {
                     !store.chat_loading_for(store.sole_thread().as_deref(), cx)
                 })
@@ -2893,7 +2892,7 @@ mod tests {
             draw(cx);
             let send = cx.debug_bounds("send-message").expect("send button");
             cx.simulate_click(send.center(), Modifiers::default());
-            driver.wait_until(cx, &store, "the send's outcome", |cx| {
+            driver.wait_until(cx, "the send's outcome", |cx| {
                 store.read_with(cx, |store, cx| {
                     let deliveries = store.delivery_messages_for(Some(&session_id), cx);
                     match case {
@@ -2919,7 +2918,7 @@ mod tests {
                     offset()
                 );
             }
-            driver.shutdown(cx, &store, &host);
+            driver.shutdown(cx, &host);
         }
     }
 

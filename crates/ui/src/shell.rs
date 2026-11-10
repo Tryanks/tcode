@@ -7806,11 +7806,7 @@ pub(crate) mod tests {
 
     /// Both hosts of [`a_thread_of_a_beside_b`] keep its two threads in a
     /// project, as the palette lists a host's threads by project.
-    fn threads_in_a_project(
-        shell: &Entity<AppShell>,
-        hosts: &HashMap<HostKey, WorkspaceHost>,
-        cx: &mut VisualTestContext,
-    ) {
+    fn threads_in_a_project(hosts: &HashMap<HostKey, WorkspaceHost>, cx: &mut VisualTestContext) {
         let project = tcode_core::project::Project::from_root(PANES_CWD.into());
         let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
             unreachable!("an index");
@@ -7819,13 +7815,13 @@ pub(crate) mod tests {
             meta.project_id = Some(project.id.clone());
         }
         index.projects = vec![project];
-        for (key, host) in hosts {
+        for host in hosts.values() {
             send_events(
                 &host.host,
                 vec![(topic.clone(), ServerEvent::IndexSnapshot(index.clone()))],
             );
             draw(cx);
-            heard(host, &store_on(shell, key.name(), cx), cx);
+            heard(host, cx);
         }
     }
 
@@ -7856,15 +7852,12 @@ pub(crate) mod tests {
         let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
         // The device took up the system's language.
         crate::set_locale(crate::LANGUAGE_ENGLISH);
-        let (a, b) = (
-            store_on(&shell, "host-a", cx),
-            store_on(&shell, "host-b", cx),
-        );
+        let a = store_on(&shell, "host-a", cx);
         let (key_a, key_b) = (
             HostKey::Remote("host-a".into()),
             HostKey::Remote("host-b".into()),
         );
-        threads_in_a_project(&shell, &hosts, cx);
+        threads_in_a_project(&hosts, cx);
         search_palette(&shell, "thread-2", cx);
         for caption in ["Threads on host-a", "Threads on host-b"] {
             assert!(
@@ -7885,8 +7878,8 @@ pub(crate) mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         assert!(!a.read_with(cx, |store, _| store.is_thread_open("thread-2")));
 
-        heard(&hosts[&key_a], &a, cx);
-        heard(&hosts[&key_b], &b, cx);
+        heard(&hosts[&key_a], cx);
+        heard(&hosts[&key_b], cx);
         search_palette(&shell, "quick", cx);
         // A's quick thread, then B's.
         click("palette-row-1", cx);
@@ -8129,8 +8122,8 @@ pub(crate) mod tests {
         });
         crate::test_frames::draw_settled(cx);
         assert_eq!(pane_hosts(&shell, cx), std::slice::from_ref(&key_b));
-        heard(&hosts[&key_a], &a, cx);
-        heard(&hosts[&key_b], &b, cx);
+        heard(&hosts[&key_a], cx);
+        heard(&hosts[&key_b], cx);
         let patches = |host: &WorkspaceHost| {
             sent(&host.host)
                 .into_iter()
@@ -8202,7 +8195,7 @@ pub(crate) mod tests {
 
     /// `store` takes in what `host` sent it, and what it sent `host` so far
     /// is set aside.
-    fn heard(host: &WorkspaceHost, _store: &Entity<WorkspaceStore>, cx: &mut VisualTestContext) {
+    fn heard(host: &WorkspaceHost, cx: &mut VisualTestContext) {
         cx.run_until_parked();
         draw(cx);
         let _ = sent(&host.host);
@@ -8272,8 +8265,8 @@ pub(crate) mod tests {
         crate::test_frames::draw_settled(cx);
         assert_eq!(store_of(&shell, cx), a);
         assert_eq!(shell.read_with(cx, |shell, cx| shell.page_thread(cx)), None);
-        heard(&hosts[&key_a], &a, cx);
-        heard(&hosts[&key_b], &b, cx);
+        heard(&hosts[&key_a], cx);
+        heard(&hosts[&key_b], cx);
 
         let plus = cx.debug_bounds("compact-new-thread").expect("Threads' +");
         cx.simulate_click(plus.center(), gpui::Modifiers::default());
@@ -8337,7 +8330,7 @@ pub(crate) mod tests {
         );
         serve_thread(&hosts[&key_b].host, "thread-1");
         b.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
-        heard(&hosts[&key_b], &b, cx);
+        heard(&hosts[&key_b], cx);
         assert_eq!(
             shell.read_with(cx, |shell, cx| shell.page_thread(cx)),
             Some(ThreadKey {
@@ -8345,8 +8338,8 @@ pub(crate) mod tests {
                 session_id: "thread-1".into(),
             })
         );
-        heard(&hosts[&key_a], &a, cx);
-        heard(&hosts[&key_b], &b, cx);
+        heard(&hosts[&key_a], cx);
+        heard(&hosts[&key_b], cx);
 
         cx.simulate_keystrokes("secondary-d");
         draw(cx);
@@ -9495,7 +9488,7 @@ pub(crate) mod tests {
             );
             store.show_thread("thread-a".into(), cx);
         });
-        driver.wait_until(cx, &store, "selected conversation", |cx| {
+        driver.wait_until(cx, "selected conversation", |cx| {
             store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.threads_loading()
@@ -9537,13 +9530,12 @@ pub(crate) mod tests {
             driver
                 .await_with_events(
                     cx,
-                    &store,
                     host.update_state_for_test(move |state, cx| {
                         state.provider_event_for_test("thread-b", event, cx);
                     }),
                 )
                 .unwrap();
-            driver.step(cx, &store);
+            driver.step(cx);
             draw(cx);
             cx.update(|window, _| {
                 assert!(
@@ -9586,7 +9578,7 @@ pub(crate) mod tests {
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             "drafxt"
         );
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -10435,12 +10427,7 @@ pub(crate) mod tests {
     /// What the host answers a client showing `id`'s preview while no other
     /// client renders it: its pages are this client's.
     #[cfg(preview_backend)]
-    fn render_preview_here(
-        host: &MountedShell,
-        _store: &Entity<WorkspaceStore>,
-        id: &str,
-        cx: &mut VisualTestContext,
-    ) {
+    fn render_preview_here(host: &MountedShell, id: &str, cx: &mut VisualTestContext) {
         while let Ok(line) = host.outgoing.try_recv() {
             host.observed
                 .borrow_mut()
@@ -12272,7 +12259,7 @@ pub(crate) mod tests {
 
         let shows_agents_file = |cx: &mut VisualTestContext| {
             press_control("changed-file-chip-file-agent.rs", cx);
-            draw_until(&shell, cx, &host, "diff-line-new-agent.rs-1", None);
+            draw_until(cx, &host, "diff-line-new-agent.rs-1", None);
             assert_eq!(cx.debug_bounds("diff-line-new-lead.rs-1"), None);
             assert!(cx.debug_bounds("diff-subject").is_some());
             assert_eq!(panel_of(&store, "agent-1", cx), Some(RightTab::Diff));
@@ -12286,7 +12273,7 @@ pub(crate) mod tests {
             assert_eq!(drawer.right(), pane_bounds(&shell, cx)[0].right());
         };
         let shows_leads_diff = |cx: &mut VisualTestContext| {
-            draw_until(&shell, cx, &host, "diff-line-new-lead.rs-1", None);
+            draw_until(cx, &host, "diff-line-new-lead.rs-1", None);
             assert_eq!(cx.debug_bounds("diff-line-new-agent.rs-1"), None);
             assert_eq!(cx.debug_bounds("diff-subject"), None);
         };
@@ -12297,7 +12284,7 @@ pub(crate) mod tests {
         assert_eq!(cx.debug_bounds("right-panel"), None);
         assert!(cx.debug_bounds("chat-side-header").is_some(), "it stays");
         press_control("view-diff-1", cx);
-        draw_until(&shell, cx, &host, "diff-line-new-later.rs-1", None);
+        draw_until(cx, &host, "diff-line-new-later.rs-1", None);
         press_control("diff-close", cx);
         press_control("diff-panel", cx);
         shows_leads_diff(cx);
@@ -12336,7 +12323,7 @@ pub(crate) mod tests {
         crate::test_frames::draw_settled(cx);
 
         press_control("changed-file-chip-file-agent.rs", cx);
-        draw_until(&shell, cx, &host, "diff-line-new-agent.rs-1", None);
+        draw_until(cx, &host, "diff-line-new-agent.rs-1", None);
         assert_eq!(cx.debug_bounds("diff-line-new-lead.rs-1"), None);
         assert_eq!(panel_of(&store, "agent-1", cx), Some(RightTab::Diff));
         assert_eq!(panel_of(&store, "thread-1", cx), None);
@@ -12400,7 +12387,7 @@ pub(crate) mod tests {
         draw(cx);
         cx.simulate_click(left_diff, gpui::Modifiers::default());
         crate::test_frames::draw_settled(cx);
-        draw_until(&shell, cx, &host, "diff-line-new-left.rs-1", None);
+        draw_until(cx, &host, "diff-line-new-left.rs-1", None);
         let conversations = |cx: &mut VisualTestContext| {
             shell.read_with(cx, |shell, cx| {
                 let attachment = shell.column.as_ref().expect("attached");
@@ -12456,7 +12443,7 @@ pub(crate) mod tests {
             pane_threads(&shell, cx),
             [Some("thread-2".into()), Some("thread-1".into())]
         );
-        draw_until(&shell, cx, &host, "diff-line-new-left.rs-1", None);
+        draw_until(cx, &host, "diff-line-new-left.rs-1", None);
         let diff = cx
             .debug_bounds("diff-line-new-left.rs-1")
             .expect("the left thread's diff");
@@ -14684,7 +14671,7 @@ pub(crate) mod tests {
         .unwrap();
         let saved = || tcode_traverse::NativeClientHost::new(device.clone(), "phone");
         let (shell, store, host, mut driver, cx) = mount_on_host(cx, disk, Some(Rc::new(saved())));
-        driver.wait_until(cx, &store, "the host's settings", |cx| {
+        driver.wait_until(cx, "the host's settings", |cx| {
             store.read_with(cx, |store, _| store.settings_hydrated())
         });
         draw(cx);
@@ -14739,10 +14726,10 @@ pub(crate) mod tests {
             Command::SetSidebarCollapsed { collapsed: false },
         ] {
             driver
-                .await_with_events(cx, &store, link.command(command))
+                .await_with_events(cx, link.command(command))
                 .expect("the host takes the old patch");
         }
-        driver.wait_until(cx, &store, "the host's new settings", |cx| {
+        driver.wait_until(cx, "the host's new settings", |cx| {
             store.read_with(cx, |store, _| {
                 let settings = store.settings();
                 settings.theme_mode == ThemeMode::Light
@@ -14756,7 +14743,7 @@ pub(crate) mod tests {
         assert_eq!(saved().load_preferences(), persisted);
         assert!(cx.update(|_, cx| cx.theme().mode.is_dark()));
         assert_eq!(&*rust_i18n::locale(), crate::LANGUAGE_JAPANESE);
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         drop(shell);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -14791,18 +14778,13 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.start_draft("doomed".into(), root.clone(), cx)
         });
-        driver.wait_until(
-            cx,
-            &store,
-            "draft for the doomed project",
-            shows_draft_of("doomed"),
-        );
+        driver.wait_until(cx, "draft for the doomed project", shows_draft_of("doomed"));
         store.update(cx, |store, _| store.delete_project("doomed".into()));
-        driver.wait_until(cx, &store, "kept project's draft", shows_draft_of("kept"));
+        driver.wait_until(cx, "kept project's draft", shows_draft_of("kept"));
         let draft = store.read_with(cx, |store, _| store.sole_thread());
         assert_eq!(pane_threads(&shell, cx), [draft]);
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -14833,13 +14815,13 @@ pub(crate) mod tests {
 
         // Let the launch draft settle on the first project before the user
         // goes into "p" themselves.
-        driver.wait_until(cx, &store, "launch draft", |cx| {
+        driver.wait_until(cx, "launch draft", |cx| {
             store.read_with(cx, |store, _| store.sole_thread().is_some())
         });
         store.update(cx, |store, cx| {
             store.start_draft("p".into(), root.clone(), cx)
         });
-        driver.wait_until(cx, &store, "draft for the last project", |cx| {
+        driver.wait_until(cx, "draft for the last project", |cx| {
             store.read_with(cx, |store, cx| {
                 store
                     .sole_status(cx)
@@ -14854,7 +14836,7 @@ pub(crate) mod tests {
         });
 
         store.update(cx, |store, cx| store.show_thread("child".into(), cx));
-        driver.wait_until(cx, &store, "child shown", |cx| {
+        driver.wait_until(cx, "child shown", |cx| {
             store.read_with(cx, |store, cx| {
                 store
                     .sole_status(cx)
@@ -14863,7 +14845,7 @@ pub(crate) mod tests {
         });
 
         store.update(cx, |store, _| store.archive_session("parent".into()));
-        driver.wait_until(cx, &store, "the standing draft reopened", |cx| {
+        driver.wait_until(cx, "the standing draft reopened", |cx| {
             store.read_with(cx, |store, _| {
                 store.sole_thread().as_deref() == Some(draft_id.as_str())
             })
@@ -14878,7 +14860,7 @@ pub(crate) mod tests {
         assert!(archived(cx, &store, "parent"));
         assert!(archived(cx, &store, "child"));
 
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -15736,7 +15718,7 @@ pub(crate) mod tests {
                 composer.set_draft("keep this draft", window, cx);
             })
         });
-        draw_until(&shell, cx, &host, "diff-body", None);
+        draw_until(cx, &host, "diff-body", None);
         let line = "diff-line-new-a/deeply/nested/module/tree/with/an/absurdly/long/file_name.rs-1";
         for (id, mode, end_x, elapsed, commits) in [
             (3, crate::theme::ThemeMode::Light, 70., 400, false),
@@ -15957,7 +15939,7 @@ pub(crate) mod tests {
             );
             store.show_thread("first".into(), cx);
         });
-        driver.wait_until(cx, &store, "selected thread baseline", |cx| {
+        driver.wait_until(cx, "selected thread baseline", |cx| {
             store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.threads_loading()
@@ -15973,7 +15955,7 @@ pub(crate) mod tests {
             "the title is cut to {:?} in a 1600px window",
             title.size.width
         );
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -16017,7 +15999,7 @@ pub(crate) mod tests {
             );
             store.show_thread("first".into(), cx);
         });
-        driver.wait_until(cx, &store, "selected thread baseline", |cx| {
+        driver.wait_until(cx, "selected thread baseline", |cx| {
             store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.threads_loading()
@@ -16064,7 +16046,7 @@ pub(crate) mod tests {
             );
             cx.update(|window, _| assert!(!search.is_focused(window)));
         }
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -16113,7 +16095,7 @@ pub(crate) mod tests {
             );
             store.show_thread("first".into(), cx);
         });
-        driver.wait_until(cx, &store, "selected thread baseline", |cx| {
+        driver.wait_until(cx, "selected thread baseline", |cx| {
             store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.threads_loading()
@@ -16154,7 +16136,7 @@ pub(crate) mod tests {
             (first_key, "first"),
         ] {
             cx.simulate_keystrokes(keys);
-            driver.wait_until(cx, &store, "selected thread baseline", |cx| {
+            driver.wait_until(cx, "selected thread baseline", |cx| {
                 store.read_with(cx, |store, cx| {
                     store.baseline_ready()
                         && !store.threads_loading()
@@ -16199,7 +16181,7 @@ pub(crate) mod tests {
         cx.simulate_mouse_move(settle, None, gpui::Modifiers::default());
         draw(cx);
         cx.simulate_click(settle, gpui::Modifiers::default());
-        driver.wait_until(cx, &store, "thread settlement update", |cx| {
+        driver.wait_until(cx, "thread settlement update", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .sidebar_sessions()
@@ -16240,7 +16222,7 @@ pub(crate) mod tests {
         cx.update(|window, cx| window.blur(cx));
         draw(cx);
         cx.simulate_keystrokes(undo_key);
-        driver.wait_until(cx, &store, "thread settlement update", |cx| {
+        driver.wait_until(cx, "thread settlement update", |cx| {
             store.read_with(cx, |store, _| {
                 store
                     .sidebar_sessions()
@@ -16249,7 +16231,7 @@ pub(crate) mod tests {
             })
         });
         assert!(!cx.update(|window, cx| window.has_notification::<crate::sidebar::ThreadUndo>(cx)));
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -16449,7 +16431,7 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-a", tcode_core::ui::RightTab::Preview, cx);
         });
-        render_preview_here(&host, &store, "thread-a", cx);
+        render_preview_here(&host, "thread-a", cx);
         store.update(cx, |store, cx| {
             store.set_preview_url(&key, "https://example.com/".into(), cx);
         });
@@ -16865,7 +16847,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn the_phone_strip_scrolls_rather_than_narrowing_its_pills(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_crowded_thread(cx);
+        let (_shell, host, cx) = mount_crowded_thread(cx);
         as_mobile(cx);
         let pills = |cx: &mut VisualTestContext| {
             (
@@ -16875,7 +16857,7 @@ pub(crate) mod tests {
             )
         };
         resize(cx, 899.);
-        draw_until(&shell, cx, &host, "phone-strip", None);
+        draw_until(cx, &host, "phone-strip", None);
         crate::test_frames::draw_settled(cx);
         let (agents, pull_requests) = pills(cx);
         resize(cx, 393.);
@@ -17221,7 +17203,6 @@ pub(crate) mod tests {
     /// working-tree read is answered with `git_diff` when given; returns how
     /// many the client made.
     fn draw_until(
-        _shell: &Entity<AppShell>,
         cx: &mut VisualTestContext,
         host: &MountedShell,
         selector: &'static str,
@@ -17280,14 +17261,14 @@ pub(crate) mod tests {
         store_of(&shell, cx).update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
         });
-        draw_until(&shell, cx, &host, "diff-body", None);
+        draw_until(cx, &host, "diff-body", None);
         assert!(cx.debug_bounds("right-panel-tabs").is_some());
         assert!(cx.debug_bounds("diff-close").is_some());
         as_mobile(cx);
         resize(cx, 393.);
         shell.update(cx, |shell, cx| shell.open_panels(cx));
         cx.executor().advance_clock(Duration::from_millis(250));
-        draw_until(&shell, cx, &host, "diff-body", None);
+        draw_until(cx, &host, "diff-body", None);
 
         assert!(
             cx.debug_bounds("right-panel-tabs").is_none(),
@@ -17449,13 +17430,13 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
         });
-        draw_until(&shell, cx, &host, "diff-body", None);
+        draw_until(cx, &host, "diff-body", None);
         let chosen = Rc::new(Cell::new(px(560.)));
 
         let walk = |cx: &mut VisualTestContext, widths: &[f32]| {
             for &width in widths {
                 resize(cx, width);
-                draw_until(&shell, cx, &host, "diff-body", None);
+                draw_until(cx, &host, "diff-body", None);
                 crate::test_frames::draw_settled(cx);
                 let sidebar = shell.read_with(cx, |shell, cx| {
                     let attachment = shell.column.as_ref().expect("attached");
@@ -17538,7 +17519,7 @@ pub(crate) mod tests {
         });
         for width in [1600., 2000.] {
             resize(cx, width);
-            draw_until(&shell, cx, &host, "diff-body", None);
+            draw_until(cx, &host, "diff-body", None);
             crate::test_frames::draw_settled(cx);
             let sidebar = shell.read_with(cx, |shell, _| {
                 shell.column.as_ref().expect("attached").sidebar_width.get()
@@ -17564,7 +17545,7 @@ pub(crate) mod tests {
         walk(cx, &[1600., 1250., 1100., 1000., 900., 860., 720., 1600.]);
 
         resize(cx, 720.);
-        draw_until(&shell, cx, &host, "diff-body", None);
+        draw_until(cx, &host, "diff-body", None);
         let close = cx.debug_bounds("diff-close").expect("the close button");
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         draw(cx);
@@ -17670,7 +17651,7 @@ pub(crate) mod tests {
         // Terminal, tasks, then the diff.
         let diff = cx.debug_bounds("menu-item-2").expect("the diff's row");
         cx.simulate_click(diff.center(), gpui::Modifiers::default());
-        draw_until(&shell, cx, &host, "diff-body", None);
+        draw_until(cx, &host, "diff-body", None);
         assert!(store.read_with(cx, |store, _| {
             store.panel_state_for(Some("thread-1")).right_panel_open
         }));
@@ -17737,7 +17718,7 @@ pub(crate) mod tests {
             store.update(cx, |store, cx| {
                 store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Preview, cx);
             });
-            render_preview_here(&host, &store, "thread-1", cx);
+            render_preview_here(&host, "thread-1", cx);
             store.update(cx, |store, cx| {
                 store.set_preview_url(&key, "https://example.com/".into(), cx);
             });
@@ -17849,7 +17830,7 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
         });
-        draw_until(&shell, cx, &host, "diff-body", None);
+        draw_until(cx, &host, "diff-body", None);
 
         let press_expand = |cx: &mut VisualTestContext| {
             let expand = cx.debug_bounds("diff-expand").expect("the expand button");
@@ -17892,7 +17873,7 @@ pub(crate) mod tests {
         open_working_tree_panel(&shell, &host, cx);
         let store = store_of(&shell, cx);
         let clean = tcode_protocol::GitDiffResult::default();
-        assert_eq!(draw_until(&shell, cx, &host, "diff-empty", Some(&clean)), 1);
+        assert_eq!(draw_until(cx, &host, "diff-empty", Some(&clean)), 1);
         assert!(
             cx.debug_bounds("diff-body").is_none(),
             "a clean tree draws the empty state, not an empty list"
@@ -17918,7 +17899,7 @@ pub(crate) mod tests {
             store.set_right_tab_for(Some("thread-1"), RightTab::Diff, cx)
         });
         assert_eq!(
-            draw_until(&shell, cx, &host, "diff-body", Some(&changed)),
+            draw_until(cx, &host, "diff-body", Some(&changed)),
             1,
             "choosing the Diff tab reads the working tree again and lists the changed file"
         );
@@ -17943,7 +17924,7 @@ pub(crate) mod tests {
             }],
             ..Default::default()
         };
-        draw_until(&shell, cx, &host, "diff-body", Some(&changed));
+        draw_until(cx, &host, "diff-body", Some(&changed));
         crate::test_frames::draw_settled(cx);
         let tint = |mode, cx: &mut VisualTestContext| {
             cx.update(|_, cx| crate::theme::palette(mode, cx).success.opacity(0.30))
@@ -18028,11 +18009,7 @@ pub(crate) mod tests {
     /// Lets the client run and draw while the host holds every working-tree read; any other
     /// query is refused, as a workspace without a checkout would. Returns the held reads in
     /// the order the client made them.
-    fn held_git_diff_reads(
-        _shell: &Entity<AppShell>,
-        host: &MountedShell,
-        cx: &mut VisualTestContext,
-    ) -> Vec<u64> {
+    fn held_git_diff_reads(host: &MountedShell, cx: &mut VisualTestContext) -> Vec<u64> {
         let mut reads = Vec::new();
         for _ in 0..6 {
             cx.run_until_parked();
@@ -18143,14 +18120,14 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         open_working_tree_panel(&shell, &host, cx);
-        let reads = held_git_diff_reads(&shell, &host, cx);
+        let reads = held_git_diff_reads(&host, cx);
         assert_eq!(reads.len(), 1, "opening the panel reads the working tree");
         answer_git_diff(&host, reads[0], &created_files(&[("first.rs", 3)]));
-        assert!(held_git_diff_reads(&shell, &host, cx).is_empty());
+        assert!(held_git_diff_reads(&host, cx).is_empty());
         assert!(cx.debug_bounds("diff-line-new-first.rs-1").is_some());
 
         complete_turn(&host);
-        let reads = held_git_diff_reads(&shell, &host, cx);
+        let reads = held_git_diff_reads(&host, cx);
         assert_eq!(reads.len(), 1, "the finished turn reads the tree again");
         assert!(
             cx.debug_bounds("diff-line-new-first.rs-1").is_some(),
@@ -18162,7 +18139,7 @@ pub(crate) mod tests {
             reads[0],
             &created_files(&[("first.rs", 3), ("second.rs", 2)]),
         );
-        held_git_diff_reads(&shell, &host, cx);
+        held_git_diff_reads(&host, cx);
         assert!(
             cx.debug_bounds("diff-line-new-second.rs-1").is_some(),
             "the new diff replaces it once built"
@@ -18176,9 +18153,9 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         open_working_tree_panel(&shell, &host, cx);
-        let reads = held_git_diff_reads(&shell, &host, cx);
+        let reads = held_git_diff_reads(&host, cx);
         answer_git_diff(&host, reads[0], &created_files(&[("long.rs", 300)]));
-        held_git_diff_reads(&shell, &host, cx);
+        held_git_diff_reads(&host, cx);
 
         let body = cx
             .debug_bounds("diff-body")
@@ -18209,13 +18186,13 @@ pub(crate) mod tests {
         assert!(line > 20, "the reader scrolled into the file: {line}");
 
         complete_turn(&host);
-        let reads = held_git_diff_reads(&shell, &host, cx);
+        let reads = held_git_diff_reads(&host, cx);
         answer_git_diff(
             &host,
             reads[0],
             &created_files(&[("added.rs", 20), ("long.rs", 300)]),
         );
-        held_git_diff_reads(&shell, &host, cx);
+        held_git_diff_reads(&host, cx);
         assert!(
             cx.debug_bounds("diff-line-new-added.rs-1").is_none(),
             "the file listed above is out of view"
@@ -18237,18 +18214,18 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         open_working_tree_panel(&shell, &host, cx);
-        let reads = held_git_diff_reads(&shell, &host, cx);
+        let reads = held_git_diff_reads(&host, cx);
         answer_git_diff(&host, reads[0], &created_files(&[("first.rs", 3)]));
-        held_git_diff_reads(&shell, &host, cx);
+        held_git_diff_reads(&host, cx);
 
         complete_turn(&host);
-        let earlier = held_git_diff_reads(&shell, &host, cx);
+        let earlier = held_git_diff_reads(&host, cx);
         complete_turn(&host);
-        let later = held_git_diff_reads(&shell, &host, cx);
+        let later = held_git_diff_reads(&host, cx);
         assert_eq!((earlier.len(), later.len()), (1, 1));
 
         answer_git_diff(&host, earlier[0], &created_files(&[("stale.rs", 3)]));
-        held_git_diff_reads(&shell, &host, cx);
+        held_git_diff_reads(&host, cx);
         assert!(cx.debug_bounds("diff-line-new-stale.rs-1").is_none());
         assert!(
             cx.debug_bounds("diff-line-new-first.rs-1").is_some(),
@@ -18256,7 +18233,7 @@ pub(crate) mod tests {
         );
 
         answer_git_diff(&host, later[0], &created_files(&[("newest.rs", 3)]));
-        held_git_diff_reads(&shell, &host, cx);
+        held_git_diff_reads(&host, cx);
         assert!(cx.debug_bounds("diff-line-new-newest.rs-1").is_some());
         assert!(cx.debug_bounds("diff-line-new-stale.rs-1").is_none());
     }
