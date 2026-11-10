@@ -664,12 +664,22 @@ impl Target {
                     });
                     window
                         .spawn(cx, async move |cx| {
-                            let reopen = match task.await {
-                                Ok((state, _)) => Some(state.capabilities.reopen),
-                                Err(_) => None,
-                            };
-                            let _ = cx
-                                .update(|window, cx| self.confirm_close(reopen, kind, window, cx));
+                            let read = task.await;
+                            let _ = cx.update(|window, cx| {
+                                let reopen = match read {
+                                    Ok((state, _)) => Some(state.capabilities.reopen),
+                                    // The confirmation still says it does not know; the
+                                    // reason is the host's.
+                                    Err(error) => {
+                                        window.push_notification(
+                                            Notification::error(super::detail::reason(&error)),
+                                            cx,
+                                        );
+                                        None
+                                    }
+                                };
+                                self.confirm_close(reopen, kind, window, cx)
+                            });
                         })
                         .detach();
                 }
