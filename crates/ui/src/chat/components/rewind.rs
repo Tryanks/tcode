@@ -12,7 +12,7 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::{Radio, RadioGroup, h_flex, v_flex};
-use tcode_core::session::{EntryContent, Rewound};
+use tcode_core::session::{EntryContent, Rewound, TimelineEntry};
 
 use crate::scroll::ScrollableElement as _;
 use crate::sizing::Sizable as _;
@@ -536,8 +536,7 @@ pub(crate) enum DividerUndo {
 /// back (only what Tcode's own log kept; nothing is sent to the Harness),
 /// and the Harness's undo while it lasts.
 pub(crate) fn rewound_divider(
-    key: &str,
-    rewound: &Rewound,
+    entry: &TimelineEntry,
     expanded: bool,
     on_toggle: Handler,
     undo: Option<DividerUndo>,
@@ -545,7 +544,10 @@ pub(crate) fn rewound_divider(
     motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
-    let key = key.to_owned();
+    let EntryContent::Rewound(rewound) = &entry.content else {
+        unreachable!("a rewound divider is drawn for a rewind the harness made");
+    };
+    let key = entry.id.clone();
     let label = super::dividers::rewound_label(rewound, &harness);
     let tint = if rewound.incomplete.is_some() {
         cx.theme().warning
@@ -554,7 +556,7 @@ pub(crate) fn rewound_divider(
     };
     let removable = !rewound.removed.is_empty();
     let branch = rewound.later_history == LaterHistory::Branch;
-    let rewound = Arc::new(rewound.clone());
+    let rewound = Arc::new((**rewound).clone());
     let motion = motion.clone();
     crate::motion::Sampled::new(move |window, cx| {
         let label_element = if removable {

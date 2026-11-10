@@ -816,8 +816,7 @@ impl TimelineView {
             let _ = this.update(cx, |timeline, cx| timeline.toggle_expanded(turn, &key, cx));
         });
         components::rewind::rewound_divider(
-            &entry.id,
-            rewound,
+            entry,
             expanded,
             on_toggle,
             undo,
