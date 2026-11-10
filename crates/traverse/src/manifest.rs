@@ -74,7 +74,6 @@ pub enum ManifestError {
     Version(u32),
     /// A relay or pkarr URL is not `https`, or the relay URL is malformed.
     Url(String),
-    NoRelays,
 }
 
 impl std::fmt::Display for ManifestError {
@@ -83,7 +82,6 @@ impl std::fmt::Display for ManifestError {
             Self::Json(error) => write!(f, "invalid manifest: {error}"),
             Self::Version(version) => write!(f, "unsupported manifest version {version}"),
             Self::Url(url) => write!(f, "manifest URL must be https: {url}"),
-            Self::NoRelays => f.write_str("manifest lists no relays"),
         }
     }
 }
@@ -102,9 +100,6 @@ impl Manifest {
             .map_err(|error| ManifestError::Json(error.to_string()))?;
         if manifest.version != 1 {
             return Err(ManifestError::Version(manifest.version));
-        }
-        if manifest.relays.is_empty() {
-            return Err(ManifestError::NoRelays);
         }
         for url in manifest
             .relays
@@ -850,10 +845,6 @@ mod tests {
             Err(ManifestError::Version(2))
         );
         assert_eq!(
-            Manifest::parse(r#"{"version":1,"relays":[]}"#),
-            Err(ManifestError::NoRelays)
-        );
-        assert_eq!(
             Manifest::parse(r#"{"version":1,"relays":[{"url":"http://relay.example/"}]}"#),
             Err(ManifestError::Url("http://relay.example/".into()))
         );
@@ -998,11 +989,6 @@ mod tests {
     fn a_fetched_manifest_replaces_the_copy_in_hand_unless_invalid() {
         let mut state = ManifestState::new(ManifestSource::Official);
         assert!(state.install(1_000, b"{ not json").is_err());
-        assert!(
-            state
-                .install(1_000, br#"{"version":1,"relays":[]}"#)
-                .is_err()
-        );
         assert_eq!(state.current().unwrap().relay_map(), bundled().relay_map());
         assert_eq!(state.fetched_at_ms, None);
         // The remote wins even when dated before the bundle.
