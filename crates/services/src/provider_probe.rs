@@ -35,14 +35,12 @@ pub async fn run_capture_env(
     if !text.is_empty() {
         return Some(text);
     }
-    // Some CLIs (pi among them) print `--version` output to stderr; a clean
-    // exit with empty stdout is still a successful run.
     let text = String::from_utf8_lossy(&output.stderr).trim().to_string();
     (!text.is_empty()).then_some(text)
 }
 
-/// `<program> --version`'s answer, or what it printed when it failed: its
-/// exit status and its error output, as the CLI wrote them.
+/// `<program> --version`'s answer on stdout, or what it printed otherwise:
+/// its exit status and its error output, as the CLI wrote them.
 async fn run_version(program: &str, env: &[(String, String)]) -> Result<String, Option<String>> {
     let output = provider_command(program, env)
         .arg("--version")
@@ -52,9 +50,11 @@ async fn run_version(program: &str, env: &[(String, String)]) -> Result<String, 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if output.status.success() {
-        // Some CLIs (pi among them) print `--version` output to stderr.
-        let text = if stdout.is_empty() { stderr } else { stdout };
-        return if text.is_empty() { Err(None) } else { Ok(text) };
+        return if stdout.is_empty() {
+            Err((!stderr.is_empty()).then_some(stderr))
+        } else {
+            Ok(stdout)
+        };
     }
     let printed = if stderr.is_empty() { stdout } else { stderr };
     Err(Some(if printed.is_empty() {
