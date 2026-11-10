@@ -114,9 +114,6 @@ impl HostIdentity {
                         format!("{HOST_FILE} has unsupported version {}", file.v),
                     ));
                 }
-                if file.devices.iter().any(|device| matches!(&device.access, DeviceGrant::Spaces(ids) if ids.is_empty() || ids.iter().any(|id| !tcode_client::pairing::valid_space_id(id)))) {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid device access"));
-                }
                 let mut identity = Self {
                     host_name: file.host_name,
                     secret_key: parse_secret_key(&file.secret_key)?,

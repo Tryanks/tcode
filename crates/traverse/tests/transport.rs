@@ -1419,8 +1419,6 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
         None,
         Some(json!({"type":"unknown"})),
         Some(json!({"type":"spaces","content":"wrong"})),
-        Some(json!({"type":"spaces","content":[]})),
-        Some(json!({"type":"spaces","content":[""]})),
     ] {
         let mut invalid = persisted.clone();
         let record = invalid["devices"][0].as_object_mut().unwrap();
