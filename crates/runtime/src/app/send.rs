@@ -10,7 +10,11 @@ impl AppState {
         attachment_paths: Vec<PathBuf>,
         cx: &mut HostCx,
     ) {
-        let (text, attachments) = self.assemble_user_message(target_id, text, attachment_paths);
+        let Some((text, attachments)) =
+            self.assemble_user_message(target_id, text, attachment_paths, cx)
+        else {
+            return;
+        };
         self.send_turn_assembled(target_id, text, attachments, cx);
         self.clear_consumed_draft_context(target_id, cx);
     }
@@ -27,7 +31,11 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         let not_before = UNIX_EPOCH + Duration::from_secs(fire_at_unix_secs);
-        let (text, attachments) = self.assemble_user_message(target_id, text, attachment_paths);
+        let Some((text, attachments)) =
+            self.assemble_user_message(target_id, text, attachment_paths, cx)
+        else {
+            return;
+        };
 
         let commit_draft = self.resident(target_id).is_some_and(|active| {
             active.draft && !matches!(active.draft_workspace, WorkspaceMode::NewWorktree { .. })
@@ -400,7 +408,11 @@ impl AppState {
         attachment_paths: Vec<PathBuf>,
         cx: &mut HostCx,
     ) {
-        let (text, attachments) = self.assemble_user_message(target_id, text, attachment_paths);
+        let Some((text, attachments)) =
+            self.assemble_user_message(target_id, text, attachment_paths, cx)
+        else {
+            return;
+        };
         self.confirm_relay_and_send_assembled(target_id, text, attachments, cx);
         self.clear_consumed_draft_context(target_id, cx);
     }
@@ -753,7 +765,11 @@ impl AppState {
         attachment_paths: Vec<PathBuf>,
         cx: &mut HostCx,
     ) {
-        let (text, attachments) = self.assemble_user_message(target_id, text, attachment_paths);
+        let Some((text, attachments)) =
+            self.assemble_user_message(target_id, text, attachment_paths, cx)
+        else {
+            return;
+        };
         self.steer_assembled(target_id, text, attachments, cx);
         self.clear_consumed_draft_context(target_id, cx);
     }
