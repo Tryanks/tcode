@@ -12865,6 +12865,39 @@ fn first_index_snapshot_includes_persisted_child_runs_and_human_resume_status() 
 }
 
 #[test]
+fn archiving_a_thread_with_a_turn_in_flight_is_refused() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("archive-busy");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (commands, _received) = smol::channel::unbounded();
+    state.update(cx, |state, _| {
+        let mut session = live_session(ProviderKind::Codex, commands);
+        session.meta.id = "busy".into();
+        session.turn_in_flight = true;
+        state.sessions.push(session.meta.clone());
+        state.install_selected(session);
+    });
+    let answered = through_pipe(
+        &state,
+        cx,
+        1,
+        tcode_protocol::ClientPayload::Command(Command::ArchiveSession {
+            session_id: "busy".into(),
+        }),
+    );
+    assert!(answered.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack { id: 1, result: Err(error) } if error.code == "thread_busy"
+    )));
+    assert!(state.read(|state| {
+        state
+            .sessions
+            .iter()
+            .all(|meta| meta.id != "busy" || meta.archived_at.is_none())
+    }));
+}
+
+#[test]
 fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_admission() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("manual-settlement");

@@ -259,6 +259,12 @@ impl AppState {
                 "Wait for this thread to finish before settling.",
             ));
         }
+        if matches!(command, Command::ArchiveSession { .. }) && self.turn_running_for(session_id) {
+            return Err(error(
+                "thread_busy",
+                "Wait for this thread to finish before archiving.",
+            ));
+        }
         // Index mutations operate on stored sessions, without requiring a live provider.
         if matches!(
             command,

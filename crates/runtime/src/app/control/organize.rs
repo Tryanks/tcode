@@ -195,7 +195,6 @@ impl AppState {
             }
             ThreadOp::Unsettle => Command::UnsettleSession { session_id },
             ThreadOp::Archive if archived => return Err("already archived".into()),
-            ThreadOp::Archive if self.turn_running_for(&meta.id) => return Err("busy".into()),
             ThreadOp::Archive => Command::ArchiveSession { session_id },
             ThreadOp::Unarchive if !archived => return Err("not archived".into()),
             ThreadOp::Unarchive => Command::UnarchiveSession { session_id },

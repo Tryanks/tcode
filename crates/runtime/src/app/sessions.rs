@@ -1490,16 +1490,15 @@ impl AppState {
         self.persist_meta(&meta, cx);
     }
 
-    /// Archive a thread (reversible; it vanishes from the sidebar). Blocked while
-    /// its turn is running (returns without changing anything so the caller's
-    /// tooltip stands). The active thread is closed back to the empty state.
+    /// Archive a thread (reversible; it vanishes from the sidebar). The
+    /// command boundary refuses a thread with work in flight. The active
+    /// thread is closed back to the empty state.
     pub fn archive_session(&mut self, session_id: &str, cx: &mut HostCx) {
-        if self.turn_running_for(session_id)
-            || self
-                .sessions
-                .iter()
-                .find(|meta| meta.id == session_id)
-                .is_none_or(|meta| meta.archived_at.is_some())
+        if self
+            .sessions
+            .iter()
+            .find(|meta| meta.id == session_id)
+            .is_none_or(|meta| meta.archived_at.is_some())
         {
             return;
         }

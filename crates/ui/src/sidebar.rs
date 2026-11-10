@@ -2795,8 +2795,7 @@ impl SessionsSidebar {
         }
     }
 
-    /// Archive a thread, honoring the delete-confirmation setting. Blocked while
-    /// the turn runs (`archive_session` no-ops then; the caller's tooltip warns).
+    /// Archive a thread, honoring the delete-confirmation setting.
     fn archive_thread(
         &mut self,
         thread: &ThreadKey,
@@ -2808,9 +2807,6 @@ impl SessionsSidebar {
             return;
         };
         let sidebar = cx.entity().downgrade();
-        if store.read(cx).turn_running_for(&thread.session_id) {
-            return;
-        }
         let commands = |session_id: &str| {
             (
                 vec![Command::ArchiveSession {
