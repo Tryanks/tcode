@@ -323,8 +323,7 @@ fn a_subagent_is_a_child_that_owes_its_caller_a_report() {
         };
         state.handle_control_op("caller".into(), ControlOp::StartThread(params), reply, cx);
     });
-    cx.run_until(|_| !response.is_empty());
-    let refused = response.try_recv().unwrap().unwrap_err();
+    let refused = cx.run_until_recv(&response).unwrap_err();
     assert!(
         refused.contains("is not a Git repository root"),
         "{refused}"
@@ -364,8 +363,7 @@ fn an_untitled_started_thread_is_titled_from_its_first_message() {
         .as_str()
         .unwrap()
         .to_owned();
-    cx.run_until(|_| !commands.is_empty());
-    let Ok(SessionCommand::SendTurn { delivery_id, .. }) = commands.try_recv() else {
+    let SessionCommand::SendTurn { delivery_id, .. } = cx.run_until_command(&commands) else {
         panic!("expected the first message to reach the provider");
     };
     events
@@ -868,8 +866,7 @@ fn git_answers_with_the_outcome_and_refuses_unsafe_checkouts() {
                 cx,
             )
         });
-        cx.run_until(|_| !response.is_empty());
-        response.try_recv().unwrap().unwrap()
+        cx.run_until_recv(&response).unwrap()
     };
     let checkout = || GitOp::CheckoutBranch {
         branch: "topic".into(),

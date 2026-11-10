@@ -140,10 +140,9 @@ fn a_cold_rewind_answers_the_client_that_asked_and_lets_the_provider_go() {
         }),
     );
     state.dispatch_command(cx, 2, rewind_command("phone"));
-    cx.run_until(|_| !commands.is_empty());
     assert!(matches!(
-        next_command(&commands),
-        Ok(SessionCommand::Rewind { checkpoint_id, mode: RewindMode::Conversation })
+        cx.run_until_command(&commands),
+        SessionCommand::Rewind { checkpoint_id, mode: RewindMode::Conversation }
             if checkpoint_id == "checkpoint-2"
     ));
     assert!(
@@ -408,8 +407,7 @@ fn a_control_rewind_answers_with_the_harness_outcome() {
         );
     });
     // The answer goes out from a task off the host that waits for the harness's.
-    cx.run_until(|_| !answer.is_empty());
-    let outcome = answer.try_recv().unwrap().unwrap();
+    let outcome = cx.run_until_recv(&answer).unwrap();
     assert_eq!(outcome["status"], "failed");
     assert_eq!(outcome["reason"], "turn_running");
 }

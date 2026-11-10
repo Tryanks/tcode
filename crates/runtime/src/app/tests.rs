@@ -2272,8 +2272,7 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                 },
             );
         }
-        cx.run_until(|_| !scripted.commands.is_empty());
-        let prompt = match scripted.commands.try_recv().unwrap() {
+        let prompt = match cx.run_until_recv(&scripted.commands) {
             SessionCommand::SendTurn {
                 text, attachments, ..
             } => {
@@ -4068,10 +4067,9 @@ fn send_to_child_whose_cwd_was_removed_reports_the_start_failure() {
         state.on_event("child", report_result_event("rep-1", "old report"), cx);
         state.on_event("child", completed_turn("turn-1"), cx);
     });
-    cx.run_until(|_| !parent_receiver.is_empty());
     assert!(matches!(
-        parent_receiver.try_recv(),
-        Ok(SessionCommand::Steer { text, .. }) if text.ends_with("\nold report")
+        cx.run_until_recv(&parent_receiver),
+        SessionCommand::Steer { text, .. } if text.ends_with("\nold report")
     ));
 
     state.update(cx, |state, cx| {
@@ -6936,15 +6934,13 @@ fn startup_generation_rejects_stale_same_session_attempt() {
             state.select_session("same-session", cx);
             state.send_turn("same-session", "obsolete attempt".into(), Vec::new(), cx);
         });
-        cx.run_until(|_| !started.is_empty());
-        let first = started.try_recv().unwrap();
+        let first = cx.run_until_recv(&started);
         state.update(cx, |state, cx| {
             state.shutdown_active("same-session", cx);
             state.host.select_session("same-session", cx);
             state.send_turn("same-session", "current attempt".into(), Vec::new(), cx);
         });
-        cx.run_until(|_| !started.is_empty());
-        let second = started.try_recv().unwrap();
+        let second = cx.run_until_recv(&started);
         let (stale_commands, stale_actor) = smol::channel::unbounded();
         let (_stale_events, stale_events_rx) = smol::channel::unbounded();
         let stale_handle = SessionHandle {
@@ -10070,13 +10066,10 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
             after: None,
         })
         .unwrap();
-        let window = smol::block_on(smol::future::race(
-            async { link.events().recv().await.unwrap() },
-            async {
-                smol::Timer::after(Duration::from_secs(5)).await;
-                panic!("the subscription was not answered")
-            },
-        ));
+        let window = link
+            .events()
+            .recv_blocking()
+            .expect("the subscription is answered before the link closes");
         assert!(matches!(window.event, ServerEvent::SessionSnapshot { .. }));
         id
     };
@@ -10095,13 +10088,9 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         .unwrap();
     }
     let receive_turn = |commands: &smol::channel::Receiver<SessionCommand>, expected: &str| {
-        let command = smol::block_on(smol::future::race(
-            async { commands.recv().await.unwrap() },
-            async {
-                smol::Timer::after(Duration::from_secs(5)).await;
-                panic!("provider did not receive turn")
-            },
-        ));
+        let command = commands
+            .recv_blocking()
+            .expect("the provider receives the turn before its channel closes");
         let SessionCommand::SendTurn { text, .. } = command else {
             panic!("expected send")
         };
@@ -12152,35 +12141,33 @@ fn clients_opening_a_cold_thread_through_the_mux_get_each_record_once() {
     for link in &clients {
         let mut received = Vec::new();
         let events = link.events();
-        smol::block_on(smol::future::race(
-            async {
-                let mut has_window = false;
-                while received.len() < persisted.len() + 1 {
-                    let event = events.recv().await.unwrap().event;
-                    if let Some(window) = window_of(&event) {
-                        assert!(!has_window, "one baseline per client");
-                        assert_eq!(window.from, 0);
-                        received.extend(window.records);
-                        has_window = true;
-                    } else if let ServerEvent::SessionEvent(record) = event {
-                        assert!(has_window, "baseline precedes live records");
-                        received.push(record);
-                    } else {
-                        panic!("unexpected {event:?}");
-                    }
+        smol::block_on(async {
+            let mut has_window = false;
+            while received.len() < persisted.len() + 1 {
+                let event = events
+                    .recv()
+                    .await
+                    .expect("the host delivers the thread before the link closes")
+                    .event;
+                if let Some(window) = window_of(&event) {
+                    assert!(!has_window, "one baseline per client");
+                    assert_eq!(window.from, 0);
+                    received.extend(window.records);
+                    has_window = true;
+                } else if let ServerEvent::SessionEvent(record) = event {
+                    assert!(has_window, "baseline precedes live records");
+                    received.push(record);
+                } else {
+                    panic!("unexpected {event:?}");
                 }
-                // A FIFO reply proves all preceding records have reached the pump.
-                link.query(tcode_protocol::Query::Ping).await.unwrap();
-                assert!(
-                    events.try_recv().is_err(),
-                    "no duplicate records after the tail"
-                );
-            },
-            async {
-                smol::Timer::after(Duration::from_secs(5)).await;
-                panic!("the host stopped delivering the thread");
-            },
-        ));
+            }
+            // A FIFO reply proves all preceding records have reached the pump.
+            link.query(tcode_protocol::Query::Ping).await.unwrap();
+            assert!(
+                events.try_recv().is_err(),
+                "no duplicate records after the tail"
+            );
+        });
         assert_eq!(&received[..persisted.len()], persisted.as_slice());
         assert!(
             matches!(&received.last().unwrap().event, AgentEvent::Warning { message } if message == "first live")
@@ -12578,13 +12565,9 @@ fn message_origins_survive_queue_acknowledgement_and_callback_steering() {
 }
 
 fn next_host_event(events: &async_channel::Receiver<EventEnvelope>) -> EventEnvelope {
-    smol::block_on(smol::future::race(
-        async { events.recv().await.unwrap() },
-        async {
-            smol::Timer::after(Duration::from_secs(5)).await;
-            panic!("host did not publish the expected lifecycle change")
-        },
-    ))
+    events
+        .recv_blocking()
+        .expect("the host publishes the lifecycle change before it stops")
 }
 
 #[test]
@@ -13227,9 +13210,8 @@ fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one()
             }
         });
         if case == "valid" || case == "renamed" {
-            cx.run_until(|_| !parent_received.is_empty());
             assert!(
-                matches!(parent_received.try_recv().unwrap(), SessionCommand::SendTurn { text, .. } if text.contains("completion evidence"))
+                matches!(cx.run_until_recv(&parent_received), SessionCommand::SendTurn { text, .. } if text.contains("completion evidence"))
             );
             state.read(|state| assert!(!state.find_meta(&parent_id).unwrap().is_settled()));
         } else {
@@ -13344,8 +13326,7 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
         state.update(cx, |state, cx| {
             state.handle_control_op("lead".into(), op, reply, cx)
         });
-        cx.run_until(|_| !response.is_empty());
-        response.try_recv().unwrap()
+        cx.run_until_recv(&response)
     };
     let applied = |answer: Result<serde_json::Value, String>| {
         let answer = answer.unwrap();

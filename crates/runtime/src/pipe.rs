@@ -1568,11 +1568,15 @@ mod tests {
         // A process that speaks no protocol and ignores every signal but
         // SIGKILL; it imitates no harness's output.
         let stuck = root.join("ignores-signals");
+        // It says its pid through a FIFO, which the test's read waits on.
         let pid_file = root.join("ignores-signals.pid");
+        let fifo = std::ffi::CString::new(pid_file.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `fifo` is a NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         std::fs::write(
             &stuck,
             format!(
-                "#!/bin/sh\ntrap '' HUP INT TERM\necho $$ > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\nexec sleep 120\n",
+                "#!/bin/sh\ntrap '' HUP INT TERM\necho $$ > '{pid}'\nexec sleep 120\n",
                 pid = pid_file.display()
             ),
         )
@@ -1589,20 +1593,11 @@ mod tests {
         let catalog = std::thread::spawn(move || {
             smol::block_on(agent::pi::list_models(Some(stuck), Default::default()))
         });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let harness: libc::pid_t = loop {
-            if let Some(pid) = std::fs::read_to_string(&pid_file)
-                .ok()
-                .and_then(|pid| pid.trim().parse().ok())
-            {
-                break pid;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the harness never ran"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        };
+        let harness: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
 
         let (entered, busy) = async_channel::bounded(1);
         let (release, released) = async_channel::bounded::<()>(1);
@@ -1625,27 +1620,25 @@ mod tests {
             "the host was still busy"
         );
         drop(stop);
-        let exited = |pid: libc::pid_t| {
-            // SAFETY: `info` is a valid, writable siginfo; WNOWAIT leaves the
-            // exit status for the thread that owns the child.
-            unsafe {
+        // Wait for the harness to exit. WNOWAIT leaves the exit status for
+        // the thread that owns the child; one that thread has already reaped
+        // is gone too (ECHILD).
+        loop {
+            // SAFETY: `info` is a valid, writable siginfo.
+            let waited = unsafe {
                 let mut info: libc::siginfo_t = std::mem::zeroed();
                 libc::waitid(
                     libc::P_PID,
-                    pid as libc::id_t,
+                    harness as libc::id_t,
                     &mut info,
-                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                ) != 0
-                    || info.si_pid() == pid
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            let error = std::io::Error::last_os_error();
+            if waited == 0 || error.raw_os_error() == Some(libc::ECHILD) {
+                break;
             }
-        };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !exited(harness) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the harness {harness} outlived the quit"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            assert_eq!(error.kind(), std::io::ErrorKind::Interrupted, "{error}");
         }
 
         release.send_blocking(()).unwrap();
@@ -1659,23 +1652,14 @@ mod tests {
         events: &async_channel::Receiver<EventEnvelope>,
         ready: impl Fn(&EventEnvelope) -> bool,
     ) -> EventEnvelope {
-        smol::block_on(smol::future::race(
-            async {
-                loop {
-                    let envelope = events
-                        .recv()
-                        .await
-                        .expect("host event stream closed before the expected event");
-                    if ready(&envelope) {
-                        return envelope;
-                    }
-                }
-            },
-            async {
-                smol::Timer::after(std::time::Duration::from_secs(60)).await;
-                panic!("timed out waiting for host event");
-            },
-        ))
+        loop {
+            let envelope = events
+                .recv_blocking()
+                .expect("host event stream closed before the expected event");
+            if ready(&envelope) {
+                return envelope;
+            }
+        }
     }
 
     #[test]

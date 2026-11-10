@@ -150,13 +150,11 @@ impl SpaceHost {
     }
 
     fn recv(&mut self) -> HostMessage {
-        let line = smol::block_on(smol::future::race(
-            async { self.host.from_host.recv().await.unwrap() },
-            async {
-                smol::Timer::after(std::time::Duration::from_secs(10)).await;
-                panic!("host reply timeout")
-            },
-        ));
+        let line = self
+            .host
+            .from_host
+            .recv_blocking()
+            .expect("the host replies before it stops");
         let message = tcode_protocol::decode_host_line(&line).unwrap();
         if let HostMessage::Event(event) = &message {
             self.events.push(event.clone());

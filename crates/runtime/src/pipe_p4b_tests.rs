@@ -1,7 +1,6 @@
 //! Integration coverage through serialized links and the production fan-out mux.
 use super::*;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use tcode_protocol::{
     ExternalImportState, ExternalImportStatus, ExternalThread, SessionSearchHit, SourceTool,
 };
@@ -782,12 +781,7 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
 
     // Scan in arrival order: the finalized index must precede `Finished`.
     let mut imported_ids = std::collections::HashSet::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "import never finished"
-        );
         let envelope = super::tests::next_event(&events, |_| true);
         match &envelope.event {
             ServerEvent::IndexUpsertSession(meta)

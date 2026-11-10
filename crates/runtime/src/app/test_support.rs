@@ -6,10 +6,12 @@ use std::rc::{Rc, Weak};
 use crate::host::HostFn;
 use tcode_protocol::{ClientMessage, ClientPayload, Command, HostMessage, decode_host_line};
 
-/// How long a test waits on the host before giving up. It only bounds a hang:
-/// a test that drives real git processes takes several seconds on a loaded
-/// Windows runner.
-pub(super) const HOST_DEADLINE: Duration = Duration::from_secs(30);
+/// What reaches the host from work running off it.
+enum Arrival<T> {
+    Message(HostFn),
+    Line(String),
+    Other(T),
+}
 
 pub(super) struct TestStore(SessionStore);
 
@@ -89,19 +91,10 @@ impl TestAppContext {
     /// hops, timers) reports only when it finishes; a test that needs its
     /// result waits for that state with [`Self::run_until`].
     pub(super) fn run_until_parked(&mut self) {
-        let state = self
-            .state
-            .as_ref()
-            .and_then(Weak::upgrade)
-            .expect("test state must outlive its context");
-        let deadline = Instant::now() + HOST_DEADLINE;
+        let state = self.state();
         let mut store_flushed = false;
 
         loop {
-            assert!(
-                Instant::now() < deadline,
-                "test host failed to park within {HOST_DEADLINE:?}"
-            );
             let mut had_work = false;
             while let Ok(message) = self.mailbox_rx.try_recv() {
                 had_work = true;
@@ -123,7 +116,7 @@ impl TestAppContext {
                 // visible before callers assert on it. Its failure path can
                 // enqueue more work, so keep draining.
                 store_flushed = true;
-                if self.flush_store_writer(&state, deadline) {
+                if self.flush_store_writer(&state) {
                     continue;
                 }
             }
@@ -145,24 +138,15 @@ impl TestAppContext {
     }
 
     /// Park repeatedly until `done` observes the state a background chain
-    /// must reach.
+    /// must reach, waiting between parks for that work to hand something
+    /// back to the host.
     pub(super) fn run_until(&mut self, mut done: impl FnMut(&TestClientState) -> bool) {
-        let deadline = Instant::now() + HOST_DEADLINE;
         loop {
             self.run_until_parked();
-            let state = self
-                .state
-                .as_ref()
-                .and_then(Weak::upgrade)
-                .expect("test state must outlive its context");
-            if done(&state.borrow()) {
+            if done(&self.state().borrow()) {
                 return;
             }
-            assert!(
-                Instant::now() < deadline,
-                "test host condition not reached within {HOST_DEADLINE:?}"
-            );
-            std::thread::sleep(Duration::from_millis(1));
+            self.wait_for_host(std::future::pending::<()>());
         }
     }
 
@@ -173,7 +157,6 @@ impl TestAppContext {
         &mut self,
         mut pick: impl FnMut(&HostMessage) -> Option<T>,
     ) -> (T, Vec<HostMessage>) {
-        let deadline = Instant::now() + HOST_DEADLINE;
         let mut sent = Vec::new();
         loop {
             self.run_until_parked();
@@ -182,11 +165,7 @@ impl TestAppContext {
             if let Some(found) = sent[seen..].iter().find_map(&mut pick) {
                 return (found, sent);
             }
-            assert!(
-                Instant::now() < deadline,
-                "the host did not send what the test waits for within {HOST_DEADLINE:?}"
-            );
-            std::thread::sleep(Duration::from_millis(1));
+            self.wait_for_host(std::future::pending::<()>());
         }
     }
 
@@ -197,39 +176,90 @@ impl TestAppContext {
         &mut self,
         commands: &smol::channel::Receiver<SessionCommand>,
     ) -> SessionCommand {
-        let mut command = None;
-        self.run_until(|_| {
-            command = next_command(commands).ok();
-            command.is_some()
-        });
-        command.expect("run_until returned")
+        loop {
+            match self.run_until_recv(commands) {
+                SessionCommand::ReadAccountUsage { reply } => answer_usage_read(reply),
+                command => return command,
+            }
+        }
+    }
+
+    /// Run the host until `receiver` hears something, and return it with
+    /// the host parked again: work off the host (a provider's launch, a
+    /// control call's reply) sends on such channels directly.
+    pub(super) fn run_until_recv<T>(&mut self, receiver: &smol::channel::Receiver<T>) -> T {
+        loop {
+            self.run_until_parked();
+            if let Ok(value) = receiver.try_recv() {
+                return value;
+            }
+            match self.wait_for_host(receiver.recv()) {
+                None => {}
+                Some(Ok(value)) => {
+                    self.run_until_parked();
+                    return value;
+                }
+                Some(Err(_)) => panic!("the channel the test waits on closed"),
+            }
+        }
     }
 
     /// Wait for background work to queue a message on the mailbox and run
     /// that one message alone, keeping what it emitted for
     /// [`TestAppContext::drain_outgoing`].
     pub(super) fn run_next(&mut self) {
-        let state = self
-            .state
+        let message = self
+            .mailbox_rx
+            .recv_blocking()
+            .expect("the context holds the mailbox");
+        self.run_message(message);
+    }
+
+    fn state(&self) -> Rc<RefCell<TestClientState>> {
+        self.state
             .as_ref()
             .and_then(Weak::upgrade)
-            .expect("test state must outlive its context");
-        let deadline = Instant::now() + HOST_DEADLINE;
-        let message = loop {
-            if let Ok(message) = self.mailbox_rx.try_recv() {
-                break message;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "nothing reached the mailbox within {HOST_DEADLINE:?}"
-            );
-            std::thread::sleep(Duration::from_millis(1));
-        };
+            .expect("test state must outlive its context")
+    }
+
+    fn run_message(&mut self, message: HostFn) {
+        let state = self.state();
         let mut host_cx = self.host_cx();
         message(&mut state.borrow_mut(), &mut host_cx);
         self.after_input(&mut state.borrow_mut());
         while let Ok(line) = self.outgoing_rx.try_recv() {
             self.outgoing.push(line);
+        }
+    }
+
+    /// Block until work running off the host hands it a message or sends a
+    /// line, and take that in; or until `other` is ready, and return it.
+    /// This context holds the mailbox's and the output's senders, so a chain
+    /// that never arrives is ended by the test runner's timeout.
+    fn wait_for_host<T>(&mut self, other: impl std::future::Future<Output = T>) -> Option<T> {
+        let mailbox = self.mailbox_rx.clone();
+        let outgoing = self.outgoing_rx.clone();
+        let arrival = smol::block_on(smol::future::or(
+            smol::future::or(
+                async {
+                    Arrival::Message(mailbox.recv().await.expect("the context holds the mailbox"))
+                },
+                async {
+                    Arrival::Line(outgoing.recv().await.expect("the context holds the output"))
+                },
+            ),
+            async { Arrival::Other(other.await) },
+        ));
+        match arrival {
+            Arrival::Message(message) => {
+                self.run_message(message);
+                None
+            }
+            Arrival::Line(line) => {
+                self.outgoing.push(line);
+                None
+            }
+            Arrival::Other(value) => Some(value),
         }
     }
 
@@ -247,7 +277,7 @@ impl TestAppContext {
 
     /// Push a `StoreWrite::Flush` barrier through the store-writer task and
     /// wait for its echo. Returns false when no writer is running.
-    fn flush_store_writer(&self, state: &Rc<RefCell<TestClientState>>, deadline: Instant) -> bool {
+    fn flush_store_writer(&self, state: &Rc<RefCell<TestClientState>>) -> bool {
         let (tx, rx) = smol::channel::bounded(1);
         {
             let state = state.borrow();
@@ -259,13 +289,12 @@ impl TestAppContext {
                 return false;
             }
         }
-        while Instant::now() < deadline {
-            if rx.try_recv().is_ok() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        panic!("store writer failed to flush within the parked deadline");
+        // A failed write answers the barrier too; tests that make writes
+        // fail read the failure from the host.
+        let _answered = rx
+            .recv_blocking()
+            .expect("the store writer ended before it flushed");
+        true
     }
 }
 

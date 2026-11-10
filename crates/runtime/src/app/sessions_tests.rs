@@ -308,10 +308,9 @@ fn a_changed_root_waits_for_a_live_provider() {
 
     let (result, _) = acked(&state, cx, 1, send("first"));
     assert_eq!(result, Ok(CommandResponse::Unit));
-    cx.run_until(|_| !scripted.commands.is_empty());
     assert!(matches!(
-        scripted.commands.try_recv(),
-        Ok(SessionCommand::SendTurn { .. })
+        cx.run_until_recv(&scripted.commands),
+        SessionCommand::SendTurn { .. }
     ));
     assert_eq!(launched.try_recv().unwrap().cwd, original);
 

@@ -26,8 +26,7 @@ fn call(
     state.update(cx, |state, cx| {
         state.handle_control_op(caller.into(), op, reply, cx)
     });
-    cx.run_until(|_| !answer.is_empty());
-    answer.try_recv().unwrap()
+    cx.run_until_recv(&answer)
 }
 
 fn update(changes: Vec<ThreadChange>, dry_run: bool) -> ControlOp {

@@ -203,10 +203,9 @@ fn instructions_reach_the_provider_at_launch_and_no_turn_carries_them() {
         },
     );
     let commands = scripted.commands.clone();
-    cx.run_until(|_| !commands.is_empty());
-    let Ok(SessionCommand::SendTurn {
+    let SessionCommand::SendTurn {
         text, delivery_id, ..
-    }) = commands.try_recv()
+    } = cx.run_until_recv(&commands)
     else {
         panic!("expected a provider delivery")
     };
