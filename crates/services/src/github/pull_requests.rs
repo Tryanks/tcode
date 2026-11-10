@@ -316,18 +316,14 @@ pub(super) fn decode_stack(raw: &Value, repository: &Repository) -> Option<PullR
     })
 }
 
+/// GitHub's own decision; only where it gives none, as on a repository that requires no review,
+/// what the latest reviews say.
 fn review_decision(raw: &Value) -> Option<ReviewDecision> {
-    let decision = match raw["reviewDecision"].as_str() {
-        Some("APPROVED") => Some(ReviewDecision::Approved),
-        Some("CHANGES_REQUESTED") => Some(ReviewDecision::ChangesRequested),
-        Some("REVIEW_REQUIRED") => Some(ReviewDecision::Required),
-        _ => None,
-    };
-    if matches!(
-        decision,
-        Some(ReviewDecision::Approved | ReviewDecision::ChangesRequested)
-    ) {
-        return decision;
+    match raw["reviewDecision"].as_str() {
+        Some("APPROVED") => return Some(ReviewDecision::Approved),
+        Some("CHANGES_REQUESTED") => return Some(ReviewDecision::ChangesRequested),
+        Some("REVIEW_REQUIRED") => return Some(ReviewDecision::Required),
+        _ => {}
     }
     let reviews = raw["latestReviews"]["nodes"].as_array();
     if reviews.is_some_and(|rows| rows.iter().any(|row| row["state"] == "CHANGES_REQUESTED")) {
@@ -335,7 +331,7 @@ fn review_decision(raw: &Value) -> Option<ReviewDecision> {
     } else if reviews.is_some_and(|rows| rows.iter().any(|row| row["state"] == "APPROVED")) {
         Some(ReviewDecision::Approved)
     } else {
-        decision
+        None
     }
 }
 
@@ -394,5 +390,34 @@ mod tests {
         );
         // Read without the stack fields, the node names no stack.
         assert_eq!(summary.stack_number, None);
+    }
+
+    /// `reviewDecision` is the pull request's status "with respect to code review"; an
+    /// approval from someone whose review does not count leaves it `REVIEW_REQUIRED`.
+    #[test]
+    fn githubs_review_decision_stands_over_the_latest_reviews() {
+        let decision = |decision: Value, reviews: &[&str]| {
+            let mut node = node();
+            node["reviewDecision"] = decision;
+            node["latestReviews"]["nodes"] = reviews
+                .iter()
+                .map(|state| json!({ "state": state, "author": { "login": "octo-reviewer" } }))
+                .collect();
+            decode_summary(&node).unwrap().snapshot.review_decision
+        };
+        assert_eq!(
+            decision(json!("REVIEW_REQUIRED"), &["APPROVED"]),
+            Some(ReviewDecision::Required)
+        );
+        assert_eq!(
+            decision(json!("APPROVED"), &["COMMENTED"]),
+            Some(ReviewDecision::Approved)
+        );
+        // A repository that requires no review gets no decision from GitHub.
+        assert_eq!(
+            decision(Value::Null, &["APPROVED", "COMMENTED"]),
+            Some(ReviewDecision::Approved)
+        );
+        assert_eq!(decision(Value::Null, &[]), None);
     }
 }
