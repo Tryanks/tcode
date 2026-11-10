@@ -681,7 +681,6 @@ pub(crate) fn service(feedback: Arc<crate::feedback::FeedbackSession>) -> Servic
 }
 
 const DEFAULT_TIMEOUT_MS: u64 = 3_000;
-const MAX_TIMEOUT_MS: u64 = 30_000;
 const POLL_INTERVAL_MS: u64 = 100;
 
 #[derive(Default)]
@@ -963,10 +962,9 @@ async fn poll_successor(
     let timeout = Duration::from_millis(
         condition
             .and_then(|condition| condition.timeout_ms)
-            .unwrap_or(DEFAULT_TIMEOUT_MS)
-            .min(MAX_TIMEOUT_MS),
+            .unwrap_or(DEFAULT_TIMEOUT_MS),
     );
-    let deadline = Instant::now() + if wait { timeout } else { Duration::ZERO };
+    let deadline = Instant::now().checked_add(if wait { timeout } else { Duration::ZERO });
     loop {
         let mut observed = crate::backend::observe(
             &previous.root,
@@ -980,7 +978,7 @@ async fn poll_successor(
             None => Some("not_requested"),
             Some(_) if preexisting => Some("preexisting"),
             Some(condition) if condition_satisfied(&observed.tree, condition) => Some("verified"),
-            Some(_) if Instant::now() >= deadline => Some("failed"),
+            Some(_) if past(deadline) => Some("failed"),
             Some(_) => None,
         };
         if let Some(status) = status {
@@ -995,13 +993,8 @@ async fn poll_condition(
     previous: &crate::state::Observation,
     condition: &UiCondition,
 ) -> Result<(RootObservation, bool, u64), crate::backend::BackendError> {
-    let timeout = Duration::from_millis(
-        condition
-            .timeout_ms
-            .unwrap_or(DEFAULT_TIMEOUT_MS)
-            .min(MAX_TIMEOUT_MS),
-    );
-    let deadline = Instant::now() + timeout;
+    let timeout = Duration::from_millis(condition.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+    let deadline = Instant::now().checked_add(timeout);
     let mut polls = 0_u64;
     loop {
         polls += 1;
@@ -1016,11 +1009,17 @@ async fn poll_condition(
         if condition_satisfied(&observed.tree, condition) {
             return Ok((observed, true, polls));
         }
-        if Instant::now() >= deadline {
+        if past(deadline) {
             return Ok((observed, false, polls));
         }
         tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
+}
+
+/// A deadline too far to represent is never reached; the harness's
+/// cancellation ends such a wait.
+fn past(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() >= deadline)
 }
 
 fn condition_satisfied(tree: &UiNode, condition: &UiCondition) -> bool {
