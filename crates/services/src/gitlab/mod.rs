@@ -226,38 +226,30 @@ impl GitLab {
         })
     }
 
-    /// Each changed path's blob at the head, a deleted one's as a missing side; `None` when
-    /// GitLab could not say.
+    /// Each changed path's blob at the head, a deleted one's as a missing side.
     fn revisions(
         &self,
         key: &PullRequestKey,
         files: &PullRequestFiles,
-    ) -> Result<Option<BTreeMap<String, String>>, ForgeError> {
+    ) -> Result<BTreeMap<String, String>, ForgeError> {
         let (deleted, present): (Vec<_>, Vec<_>) = files
             .files
             .iter()
             .partition(|file| file.kind == agent::FileChangeKind::Delete);
         let paths: Vec<_> = present.iter().map(|file| file.path.clone()).collect();
-        let Some(mut revisions) = self.mr(key).blobs(&files.head, &paths)? else {
-            return Ok(None);
-        };
+        let mut revisions = self.mr(key).blobs(&files.head, &paths)?;
         revisions.extend(
             deleted
                 .into_iter()
                 .map(|file| (file.path.clone(), DELETED.to_owned())),
         );
-        Ok(Some(revisions))
+        Ok(revisions)
     }
 
     fn viewed_files(&self, key: &PullRequestKey) -> Result<PullRequestViewedFiles, ForgeError> {
         let viewer = self.mr(key).viewer()?;
         let files = self.files(key, None)?;
-        let Some(revisions) = self.revisions(key, &files)? else {
-            return Ok(PullRequestViewedFiles {
-                files: Vec::new(),
-                complete: false,
-            });
-        };
+        let revisions = self.revisions(key, &files)?;
         Ok(PullRequestViewedFiles {
             files: self
                 .viewed
@@ -717,9 +709,7 @@ impl Forge for GitLab {
     ) -> Result<(), ForgeError> {
         let account = self.account(key)?;
         let files = self.files(key, None)?;
-        let revisions = self
-            .revisions(key, &files)?
-            .ok_or_else(|| error(ForgeErrorKind::Uncertain, "GitLab file revisions unread"))?;
+        let revisions = self.revisions(key, &files)?;
         self.viewed
             .set(&account, key, &revisions, paths, viewed)
             .map_err(|_| error(ForgeErrorKind::Uncertain, "viewed marks not saved"))

@@ -236,13 +236,12 @@ impl Mr<'_> {
             labels["pageInfo"]["hasNextPage"].as_bool() != Some(true),
         ))
     }
-    /// Each path's blob at `revision`, 100 paths a query; `None` when GitLab did not answer
-    /// for the project at all.
+    /// Each path's blob at `revision`, 100 paths a query.
     pub(super) fn blobs(
         &self,
         revision: &str,
         paths: &[String],
-    ) -> Result<Option<std::collections::BTreeMap<String, String>>, ForgeError> {
+    ) -> Result<std::collections::BTreeMap<String, String>, ForgeError> {
         let mut blobs = std::collections::BTreeMap::new();
         for chunk in paths.chunks(100) {
             let data = self.api.graphql(
@@ -251,16 +250,17 @@ impl Mr<'_> {
                 json!({ "path": self.key.repository, "ref": revision, "paths": chunk }),
                 "Blobs",
             )?;
-            let Some(found) = data["project"]["repository"]["blobs"]["nodes"].as_array() else {
-                return Ok(None);
-            };
-            for blob in found {
+            // GraphQL answers a project the reader cannot see as null.
+            if data["project"].is_null() {
+                return Err(error(ForgeErrorKind::NotFound, "GitLab project not found"));
+            }
+            for blob in nodes(&data["project"]["repository"]["blobs"]) {
                 if let (Some(path), Some(oid)) = (text(blob, "path"), text(blob, "oid")) {
                     blobs.insert(path, oid);
                 }
             }
         }
-        Ok(Some(blobs))
+        Ok(blobs)
     }
 }
 
