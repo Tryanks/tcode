@@ -3034,11 +3034,8 @@ impl Mapper {
             "failed" | "killed" => ItemStatus::Failed,
             _ => ItemStatus::InProgress,
         };
-        if status != ItemStatus::InProgress {
-            self.tail_requests.push(TailRequest::Stop {
-                parent_id: tool_use_id.clone(),
-            });
-        }
+        // The tail is stopped by the task_notification that follows a
+        // terminal patch, so the notification's `output_file` reaches it first.
         self.update_subagent(&tool_use_id, status, None)
     }
 
@@ -7889,21 +7886,6 @@ mod tests {
         assert_no_handback_note(&events);
     }
 
-    /// The child's transcript tail can reach the nested tool_result before
-    /// stdout reaches the task_notification.
-    #[test]
-    fn a_nested_result_ahead_of_its_notification_shows_no_note() {
-        let trace = include_str!("../tests/fixtures/claude/subagent_handback_nested_trace.jsonl");
-        let notification = "\"task_notification\",\"task_id\":\"acaf13a689ed20a44\"";
-        let events =
-            replay_subagent_trace(trace.lines().filter(|line| !line.contains(notification)));
-        assert_eq!(
-            settled_summary(&events, "toolu_016TdmuRUJr9k29RQGwWCy15"),
-            None
-        );
-        assert_no_handback_note(&events);
-    }
-
     #[test]
     fn a_subagent_that_delivered_no_report_has_no_summary() {
         let trace = include_str!("../tests/fixtures/claude/subagent_withheld_trace.jsonl");
@@ -8038,6 +8020,72 @@ mod tests {
                 fallback.len(),
                 2,
                 "undiscovered tail reads the notified file"
+            );
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Claude Code 2.1.322 emits a terminal `task_updated` and then the
+    /// `task_notification` naming `output_file` (its task-state update emits
+    /// one after the other), and the actor hands the tail each line's
+    /// requests before reading the next. A tail that discovery could not
+    /// point at a transcript still reads the notified file before it stops.
+    #[test]
+    fn an_undiscovered_subagent_tail_reads_the_notified_output_file() {
+        const SPAWN: &str = "toolu_01BXJLqzyGgqst9idkvgU4Mw";
+        const RECORDED_OUTPUT: &str = "/tmp/claude-1000/-home-user-project/00000000-0000-4000-8000-000000000002/tasks/a01a6c3ef10d0f4a5.output";
+        let trace =
+            include_str!("../tests/fixtures/claude/subagent_handback_background_trace.jsonl");
+        let root =
+            std::env::temp_dir().join(format!("tcode-notified-output-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let output_file = root.join("a01a6c3ef10d0f4a5.output");
+        // The transcript holds the child's own records, which stdout also
+        // forwards with `parent_tool_use_id`.
+        let child = format!("\"parent_tool_use_id\":\"{SPAWN}\"");
+        let transcript: String = trace
+            .lines()
+            .filter(|line| line.contains(&child))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        std::fs::write(&output_file, transcript).unwrap();
+        let trace = trace.replace(RECORDED_OUTPUT, output_file.to_str().unwrap());
+
+        smol::block_on(async {
+            let mut mapper = Mapper::new();
+            let mut tailers = HashMap::new();
+            let (tail_tx, tail_rx) = smol::channel::unbounded();
+            let mut tailed = Vec::new();
+            for line in trace.lines() {
+                feed(&mut mapper, line);
+                let requests = mapper.take_tail_requests();
+                let stops_a_live_tail = tailers.contains_key(SPAWN)
+                    && requests
+                        .iter()
+                        .any(|request| matches!(request, TailRequest::Stop { .. }));
+                process_tail_requests(requests, &mut tailers, None, &tail_tx).await;
+                if !stops_a_live_tail {
+                    continue;
+                }
+                loop {
+                    let notice = tail_rx.recv().await.unwrap();
+                    tailed.extend(notice.events.iter().cloned());
+                    let stopped = notice.stopped;
+                    mapper.on_tail_notice(notice);
+                    if stopped {
+                        tailers.remove(SPAWN);
+                        break;
+                    }
+                }
+            }
+            assert!(tailers.is_empty(), "the tail was never stopped");
+            assert!(
+                tailed.iter().any(|event| matches!(
+                    event,
+                    AgentEvent::ItemCompleted(ThreadItem { id, .. })
+                        if *id == format!("{SPAWN}:toolu_01T4uuAGaM12YCPm6kBnYvH5")
+                )),
+                "the tail never read {output_file:?}: {tailed:?}"
             );
         });
         let _ = std::fs::remove_dir_all(root);
