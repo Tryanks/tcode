@@ -1459,7 +1459,11 @@ impl WorkspaceStore {
         }
         if let Some(mut event) = event {
             match (topic, &mut event) {
-                (Topic::Preview { .. }, ServerEvent::PreviewRequest { .. }) => {
+                (
+                    Topic::Preview { .. },
+                    ServerEvent::PreviewRequest { .. }
+                    | ServerEvent::PreviewRequestCancelled { .. },
+                ) => {
                     let _ = self.remote_preview.0.try_send(EventEnvelope {
                         request_id,
                         topic: envelope_topic.clone(),

@@ -1018,9 +1018,15 @@ impl PreviewPanel {
         let lifecycle = self.lifecycle().downgrade();
         let key = key.to_owned();
         cx.spawn(async move |_, cx| {
-            let result = answered
-                .recv()
-                .await
+            // A caller that stops waiting lets the page's call go with it.
+            let answer = futures_lite::future::or(async { Some(answered.recv().await) }, async {
+                reply.closed().await;
+                None
+            });
+            let Some(answer) = answer.await else {
+                return;
+            };
+            let result = answer
                 .unwrap_or_else(|_| Err("preview browser was closed".into()))
                 .map(|mut value| {
                     if let Some(object) = value.as_object_mut() {

@@ -1769,16 +1769,29 @@ impl AppShell {
             let preview = preview.clone();
             let store = store.downgrade();
             cx.spawn_in(window, async move |_, cx| {
+                // The requests still waited for, closed when the host cancels one.
+                let waiting =
+                    std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::<
+                        u64,
+                        async_channel::Receiver<_>,
+                    >::new()));
                 while let Ok(envelope) = requests.recv().await {
-                    let tcode_protocol::ServerEvent::PreviewRequest {
-                        request_id,
-                        session_id,
-                        request,
-                    } = envelope.event
-                    else {
-                        continue;
+                    let (request_id, session_id, request) = match envelope.event {
+                        tcode_protocol::ServerEvent::PreviewRequest {
+                            request_id,
+                            session_id,
+                            request,
+                        } => (request_id, session_id, request),
+                        tcode_protocol::ServerEvent::PreviewRequestCancelled { request_id } => {
+                            if let Some(receiver) = waiting.borrow_mut().remove(&request_id) {
+                                receiver.close();
+                            }
+                            continue;
+                        }
+                        _ => continue,
                     };
                     let (reply, receiver) = async_channel::bounded(1);
+                    waiting.borrow_mut().insert(request_id, receiver.clone());
                     // A request sent before the thread's page moved away
                     // would otherwise open the page here again.
                     if store
@@ -1799,10 +1812,14 @@ impl AppShell {
                     // Each operation waits independently: a slow wait_for must
                     // not block a second client's navigation or a screenshot.
                     let store = store.clone();
+                    let waiting = waiting.clone();
                     cx.spawn(async move |cx| {
-                        let response = receiver
-                            .recv()
-                            .await
+                        let response = receiver.recv().await;
+                        // Cancelled by the host, which waits for it no more.
+                        if waiting.borrow_mut().remove(&request_id).is_none() {
+                            return;
+                        }
+                        let response = response
                             .unwrap_or_else(|_| Err("preview panel dropped request".into()));
                         let _ =
                             store.update(cx, |store, _| store.preview_reply(request_id, response));

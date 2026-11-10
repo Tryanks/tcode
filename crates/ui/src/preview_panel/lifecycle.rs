@@ -33,10 +33,6 @@ use super::page_agent;
 use super::{ReplyTx, unavailable_message};
 use crate::store::WorkspaceStore;
 
-/// How long a call into a page agent may go unanswered: a page whose script
-/// is stuck, or blocked by a dialog, never answers.
-const CALL_BOUND: Duration = Duration::from_secs(15);
-
 #[cfg(any(target_os = "windows", target_os = "android"))]
 pub(super) const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly";
 
@@ -763,8 +759,18 @@ impl BrowserLifecycle {
         }
     }
 
-    /// Bound a call so a page that never answers does not hold its caller.
-    fn bound(&self, key: &str, call: u64, after: Duration, cx: &mut Context<Self>) {
+    /// Forget `call` once nobody waits for its answer: a page whose script is
+    /// stuck, or blocked by a dialog, never answers, and the call is waited
+    /// for until its caller gives up (the harness cancels it, its turn is
+    /// interrupted). A wait also ends when its own `deadline` passes.
+    fn watch(
+        &self,
+        key: &str,
+        call: u64,
+        answer: Answer,
+        deadline: Option<Duration>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(page) = self
             .slots
             .get(key)
@@ -774,7 +780,20 @@ impl BrowserLifecycle {
             return;
         };
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(after).await;
+            let abandoned = async {
+                answer.closed().await;
+                false
+            };
+            let expired = match deadline {
+                Some(after) => {
+                    futures_lite::future::or(abandoned, async {
+                        cx.background_executor().timer(after).await;
+                        true
+                    })
+                    .await
+                }
+                None => abandoned.await,
+            };
             let _ = this.update(cx, |lifecycle, _| {
                 if let Some(page) = lifecycle
                     .slots
@@ -782,7 +801,11 @@ impl BrowserLifecycle {
                     .filter_map(WebViewSlot::page_mut)
                     .find(|candidate| candidate.id == page)
                 {
-                    page.events.expire(call);
+                    if expired {
+                        page.events.expire(call);
+                    } else {
+                        page.events.forget(call);
+                    }
                 }
             });
         })
@@ -802,11 +825,11 @@ impl BrowserLifecycle {
             let _ = answer.try_send(Err("preview browser is not open".into()));
             return answered;
         };
-        let (id, outcome) = page
-            .events
-            .call(method, args, answer, cx.background_executor().now());
+        let (id, outcome) =
+            page.events
+                .call(method, args, answer.clone(), cx.background_executor().now());
         self.apply(key, outcome, cx);
-        self.bound(key, id, CALL_BOUND, cx);
+        self.watch(key, id, answer, None, cx);
         answered
     }
 
@@ -844,11 +867,11 @@ impl BrowserLifecycle {
                 url,
                 deadline: now + timeout,
             },
-            answer,
+            answer.clone(),
             now,
         );
         self.apply(key, outcome, cx);
-        self.bound(key, id, timeout, cx);
+        self.watch(key, id, answer, Some(timeout), cx);
         answered
     }
 
@@ -910,7 +933,14 @@ impl BrowserLifecycle {
         };
         let measured = self.call(key, "rect", serde_json::json!({ "ref": reference }), cx);
         cx.spawn(async move |_, cx| {
-            let element = match measured.recv().await {
+            let measured = futures_lite::future::or(async { Some(measured.recv().await) }, async {
+                reply.closed().await;
+                None
+            });
+            let Some(measured) = measured.await else {
+                return;
+            };
+            let element = match measured {
                 Ok(Ok(value)) => capture::ElementBox::from_agent(&value)
                     .ok_or_else(|| "the page agent measured no box".to_string()),
                 Ok(Err(error)) => Err(error),

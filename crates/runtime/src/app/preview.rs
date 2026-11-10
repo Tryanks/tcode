@@ -122,15 +122,40 @@ impl AppState {
                 request: broker.op,
             },
         }));
-        // The call that asked may end before the client answers; its request
-        // goes with it.
+        // The call that asked may end before the client answers, or its turn
+        // be interrupted ([`Self::cancel_previews_of`]); its request goes with
+        // it, and the client stops waiting on the page for it.
         let host = cx.clone();
         cx.spawn_detached(async move {
             caller.closed().await;
-            host.enqueue(move |state, _| {
-                state.previews.pending.remove(&request_id);
-            });
+            host.enqueue(move |state, cx| state.forget_preview(request_id, cx));
         });
+    }
+
+    fn forget_preview(&mut self, request_id: u64, cx: &mut HostCx) {
+        let Some(pending) = self.previews.pending.remove(&request_id) else {
+            return;
+        };
+        let Some((client, _)) = self.previews.clients.get(&pending.client_id) else {
+            return;
+        };
+        cx.emit(HostEvent::Domain(EventEnvelope {
+            request_id: None,
+            topic: Topic::Preview {
+                client: client.clone(),
+            },
+            event: ServerEvent::PreviewRequestCancelled { request_id },
+        }));
+    }
+
+    /// The thread's turn was interrupted: the preview calls it made are
+    /// answered no more, which closes them for the harness and the client.
+    pub(crate) fn cancel_previews_of(&mut self, session_id: &str) {
+        for pending in self.previews.pending.values() {
+            if pending.session_id == session_id {
+                pending.reply.close();
+            }
+        }
     }
 
     pub(crate) fn resolve_preview(

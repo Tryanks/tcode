@@ -266,6 +266,48 @@ fn an_agent_preview_request_reaches_only_the_client_rendering_its_thread() {
     desk.command_blocking(Command::ShutdownAllAndFlush).unwrap();
 }
 
+/// A call its harness stops waiting for, or whose turn is interrupted, is
+/// cancelled on the client rendering it, which then waits on its page no
+/// more.
+#[test]
+fn a_preview_call_given_up_is_cancelled_on_the_rendering_client() {
+    let (host, _mux, desk, session_id) = fixture();
+    let desk_events = observed_events(&desk);
+    let desk_client = preview_client(&desk, "Desk");
+    show_here(&desk, &session_id, &desk_client, false);
+
+    let answer = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
+    let asked = request_id(next(&desk_events, |event| {
+        matches!(event, ServerEvent::PreviewRequest { .. })
+    }));
+    drop(answer);
+    assert_eq!(
+        next(&desk_events, |event| {
+            matches!(event, ServerEvent::PreviewRequestCancelled { .. })
+        }),
+        ServerEvent::PreviewRequestCancelled { request_id: asked }
+    );
+
+    let answer = agent_call(&host, &session_id, preview_mcp::PreviewOp::Status);
+    let asked = request_id(next(&desk_events, |event| {
+        matches!(event, ServerEvent::PreviewRequest { .. })
+    }));
+    let interrupted = session_id.clone();
+    smol::block_on(
+        host.update_state_for_test(move |state, _| state.cancel_previews_of(&interrupted)),
+    )
+    .unwrap();
+    assert!(answer.recv_blocking().is_err(), "the harness's call ends");
+    assert_eq!(
+        next(&desk_events, |event| {
+            matches!(event, ServerEvent::PreviewRequestCancelled { .. })
+        }),
+        ServerEvent::PreviewRequestCancelled { request_id: asked }
+    );
+
+    desk.command_blocking(Command::ShutdownAllAndFlush).unwrap();
+}
+
 #[test]
 fn show_here_moves_rendering_and_the_page_with_it() {
     let (host, mux, desk, session_id) = fixture();

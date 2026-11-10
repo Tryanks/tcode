@@ -119,6 +119,12 @@ pub enum ServerEvent {
         session_id: String,
         request: crate::PreviewRequest,
     },
+    /// The [`Self::PreviewRequest`] `request_id` is no longer waited for: the
+    /// call that asked has gone, or its turn was interrupted. The client stops
+    /// waiting on its page for it and sends no reply.
+    PreviewRequestCancelled {
+        request_id: u64,
+    },
     /// The threads a [`Topic::Preview`]'s client renders, each as it stood
     /// when rendering came to that client: the answer to subscribing, and a
     /// push whenever the set changes. A thread that leaves the set is

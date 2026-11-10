@@ -93,7 +93,6 @@ const NO_PAGE: &str = "the preview has no page loaded yet; call preview_open wit
 const NO_AGENT: &str = "this page has no page agent (it is not an HTML document); \
                         preview_evaluate and preview_screenshot still work";
 const NAVIGATED: &str = "the page navigated before the call was answered; call it again";
-const SILENT: &str = "the page did not answer: it is busy, or a dialog is blocking it";
 
 /// Whether an agent's URL condition holds for the page's actual URL.
 pub(crate) type UrlMatch = Box<dyn Fn(&str) -> bool>;
@@ -526,16 +525,22 @@ impl PageEvents {
         self.register("wait", Value::Null, answer, Some(wait), now)
     }
 
-    /// The call's time is up: a wait says what is still unmet.
+    /// Nobody waits for the call's answer any more.
+    pub(crate) fn forget(&mut self, id: u64) {
+        self.calls.remove(&id);
+    }
+
+    /// The wait's time is up: it says what is still unmet.
     pub(crate) fn expire(&mut self, id: u64) {
-        let Some(call) = self.calls.remove(&id) else {
+        let Some(Call {
+            wait: Some(wait),
+            answer,
+            ..
+        }) = self.calls.remove(&id)
+        else {
             return;
         };
-        let error = match &call.wait {
-            Some(wait) => wait_timeout_message(&wait.unmet(self.url.as_deref())),
-            None => SILENT.into(),
-        };
-        let _ = call.answer.try_send(Err(error));
+        let _ = answer.try_send(Err(wait_timeout_message(&wait.unmet(self.url.as_deref()))));
     }
 
     /// Run `script` in the page's own world once no navigation is under way.

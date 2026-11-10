@@ -1011,6 +1011,7 @@ impl AppState {
                 .get_or_insert(cx.clock().unix_millis());
         }
         self.cancel_computer_use_feedback(target_id);
+        self.cancel_previews_of(target_id);
         Ok(())
     }
 

@@ -2,8 +2,6 @@
 //! document — as each engine can take them. A picture an engine cannot take
 //! is refused with the reason, never approximated.
 
-use std::time::Duration;
-
 use gpui::{App, Entity};
 #[cfg(not(any(target_os = "android", target_os = "windows")))]
 use gpui_webview::WebView;
@@ -16,9 +14,6 @@ use super::android::WebView;
 use super::webview2::WebView;
 
 use super::ReplyTx;
-
-/// How long an engine may take to hand over a picture.
-const CAPTURE_BOUND: Duration = Duration::from_secs(10);
 
 /// The largest picture taken, in pixels.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -81,21 +76,16 @@ const NO_AREA: &str = "the element has no visible area to capture";
 /// Answer `reply` with a picture of `region` of `view`'s page.
 pub(super) fn capture(view: &Entity<WebView>, region: Region, reply: ReplyTx, cx: &mut App) {
     let picture = imp::capture(view, region, cx);
-    cx.spawn(async move |cx| {
-        let timer = cx.background_executor().timer(CAPTURE_BOUND);
+    cx.spawn(async move |_| {
+        // The engine's picture is waited for until the caller stops waiting.
         let result = futures_lite::future::or(async { Some(picture.await) }, async {
-            timer.await;
+            reply.closed().await;
             None
         })
         .await;
-        let result = match result {
-            Some(result) => result.map(png),
-            None => Err(format!(
-                "preview_screenshot timed out after {} seconds",
-                CAPTURE_BOUND.as_secs()
-            )),
-        };
-        let _ = reply.send(result).await;
+        if let Some(result) = result {
+            let _ = reply.send(result.map(png)).await;
+        }
     })
     .detach();
 }
