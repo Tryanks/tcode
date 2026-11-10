@@ -1384,7 +1384,6 @@ impl SessionActor for Actor {
 
     async fn settle_shutdown(&mut self) {
         self.clear_retry().await;
-        self.settle_pending_user_inputs_on_shutdown().await;
     }
 
     async fn teardown(mut self, reason: Option<String>) -> Option<String> {
@@ -3272,27 +3271,6 @@ impl Actor {
             return;
         };
         self.events.emit(event).await;
-    }
-
-    /// Settle every outstanding native user-input request and MCP elicitation
-    /// on teardown, replying with the protocol's empty/cancel outcome.
-    async fn settle_pending_user_inputs_on_shutdown(&mut self) {
-        let pending = self
-            .user_inputs
-            .drain()
-            .map(|(request_id, rpc_id)| (request_id, rpc_id, json!({ "answers": {} })))
-            .chain(self.elicitations.drain().map(|(request_id, pending)| {
-                (request_id, pending.rpc_id, json!({ "action": "cancel" }))
-            }));
-        for (request_id, rpc_id, result) in pending {
-            let _ = send_json(&mut self.stdin, &json!({ "id": rpc_id, "result": result }));
-            self.events
-                .emit(AgentEvent::UserInputResolved {
-                    request_id,
-                    answers: serde_json::Map::new(),
-                })
-                .await;
-        }
     }
 
     async fn emit_delta(&self, params: &Value, kind: DeltaKind) {
@@ -7430,72 +7408,6 @@ mod tests {
             assert!(response.get("result").is_some());
             assert!(response.get("error").is_none());
             assert!(!response.to_string().contains("-32601"));
-
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    /// A session that stops with questions open answers each the way its
-    /// protocol allows: an elicitation is cancelled, a `requestUserInput`
-    /// gets no answers, and the timeline closes both.
-    #[test]
-    fn shutdown_settles_every_open_question() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            for request in [
-                json!({
-                    "id": 86,
-                    "method": "mcpServer/elicitation/request",
-                    "params": {
-                        "serverName": "pending",
-                        "threadId": "thread-1",
-                        "mode": "form",
-                        "message": "Wait",
-                        "requestedSchema": {
-                            "type": "object",
-                            "properties": {"value": {"type": "string"}}
-                        }
-                    }
-                }),
-                json!({
-                    "id": 77,
-                    "method": "item/tool/requestUserInput",
-                    "params": {
-                        "threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1",
-                        "questions": [{"id": "ready", "header": "", "question": "Ready?"}]
-                    }
-                }),
-            ] {
-                actor.handle_line(&request.to_string()).await;
-                assert!(matches!(
-                    events.try_recv().unwrap(),
-                    AgentEvent::UserInputRequested { .. }
-                ));
-            }
-            assert!(written(&mut actor).await.is_empty());
-            actor.settle_shutdown().await;
-
-            let mut resolved: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
-                .map(|event| match event {
-                    AgentEvent::UserInputResolved {
-                        request_id,
-                        answers,
-                    } if answers.is_empty() => request_id,
-                    other => panic!("unexpected {other:?}"),
-                })
-                .collect();
-            resolved.sort();
-            assert_eq!(resolved, ["77", "86"]);
-            let mut replies = written(&mut actor).await;
-            replies.sort_by_key(|reply| reply["id"].as_i64());
-            assert_eq!(
-                replies,
-                [
-                    json!({"id": 77, "result": {"answers": {}}}),
-                    json!({"id": 86, "result": {"action": "cancel"}}),
-                ]
-            );
 
             let _ = actor.child.kill();
             let _ = actor.child.wait();
