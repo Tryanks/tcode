@@ -177,7 +177,6 @@ mod tests {
             parent_item_id: None,
             content: ItemContent::UserMessage {
                 text: id.into(),
-                context_len: None,
                 attachments: Vec::new(),
             },
         })

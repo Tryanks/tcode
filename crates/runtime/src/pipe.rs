@@ -2245,7 +2245,6 @@ mod tests {
                     "user",
                     ItemContent::UserMessage {
                         text: "What changed?".into(),
-                        context_len: None,
                         attachments: vec![],
                     },
                 ),

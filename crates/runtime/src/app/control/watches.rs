@@ -58,12 +58,9 @@ fn last_turn_detail(timeline: &Timeline, event: WatchEvent) -> Option<String> {
         .iter()
         .filter(|entry| entry.turn == turn)
         .find_map(|entry| match &entry.content {
-            EntryContent::Item(ItemContent::UserMessage {
-                text, context_len, ..
-            }) => {
-                let own = context_len.and_then(|len| text.get(len..)).unwrap_or(text);
-                let (own, _) = tcode_services::thread_index::redact(own);
-                Some(format!(" from {}", quoted(&one_line(&own))))
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) => {
+                let (text, _) = tcode_services::thread_index::redact(text);
+                Some(format!(" from {}", quoted(&one_line(&text))))
             }
             _ => None,
         });

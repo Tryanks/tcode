@@ -33,7 +33,6 @@ pub(crate) type UserMessageArgs<'a> = (
     &'a str,
     &'a str,
     &'a Path,
-    Option<usize>,
     &'a [String],
     Option<SteeringStatus>,
     bool,

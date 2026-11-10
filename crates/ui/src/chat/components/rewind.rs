@@ -714,20 +714,9 @@ fn removed_turns(key: &str, rewound: &Rewound, harness: &str, cx: &App) -> AnyEl
     };
     for entry in &rewound.removed {
         match &entry.content {
-            EntryContent::Item(ItemContent::UserMessage {
-                text, context_len, ..
-            })
-            | EntryContent::Steer {
-                text, context_len, ..
-            } => {
-                flush(&mut work, &mut rows);
-                let visible = context_len
-                    .and_then(|len| text.get(len..))
-                    .unwrap_or(text)
-                    .trim();
-                rows.push(said(crate::tr!("rewind.you").into_owned(), visible));
-            }
-            EntryContent::Feedback { text } => {
+            EntryContent::Item(ItemContent::UserMessage { text, .. })
+            | EntryContent::Steer { text, .. }
+            | EntryContent::Feedback { text } => {
                 flush(&mut work, &mut rows);
                 rows.push(said(crate::tr!("rewind.you").into_owned(), text.trim()));
             }

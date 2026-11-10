@@ -123,7 +123,6 @@ chat:
   steered: "已追加提示"
   plan_title: "计划"
   plan_feedback_hint: "批准这份计划，或在下方回复让它继续规划。"
-  injected_context: "Tcode 添加的内容"
   orchestrate_state_completed: "已完成"
   orchestrate_state_failed: "已失败"
   orchestrate_state_reported: "已汇报"

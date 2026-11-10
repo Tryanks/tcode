@@ -23,7 +23,6 @@ fn turn(index: usize) -> [agent::AgentEvent; 3] {
             parent_item_id: None,
             content: agent::ItemContent::UserMessage {
                 text: format!("Keep reading position {index}\n").repeat(4),
-                context_len: None,
                 attachments: Vec::new(),
             },
         }),

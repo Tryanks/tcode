@@ -129,8 +129,8 @@ use self::model::{
     LimitResumeAction, RowRenderArgs, Segment, activity_run_duration_ms, displayed_error_text,
     divergent_served_model, latest_message_ids, limit_resume_action, live_edit_counts, notice_keys,
     partition_activity_run, plain_text_as_markdown, segment_entries, start_hub_projects,
-    timeline_overdraw, user_content, user_notice, user_visible_text, work_log_capsule_label,
-    work_log_counts, work_log_key, work_log_outcome,
+    timeline_overdraw, user_content, user_notice, work_log_capsule_label, work_log_counts,
+    work_log_key, work_log_outcome,
 };
 use self::timeline::rows::{
     ListSync, RowPart, TimelineContinuity, TimelineRow, TurnIndexCache, row_of_entry, rows_of_turn,
@@ -1758,7 +1758,6 @@ pub(crate) mod tests {
     pub(crate) fn user_item(text: &str) -> EntryContent {
         EntryContent::Item(ItemContent::UserMessage {
             text: text.into(),
-            context_len: None,
             attachments: Vec::new(),
         })
     }
@@ -2162,7 +2161,6 @@ pub(crate) mod tests {
             parent_item_id: None,
             content: agent::ItemContent::UserMessage {
                 text: text.into(),
-                context_len: None,
                 attachments: Vec::new(),
             },
         })

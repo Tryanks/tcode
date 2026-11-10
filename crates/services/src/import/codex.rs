@@ -76,7 +76,6 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             let content = if role == Some("user") {
                                 ItemContent::UserMessage {
                                     text,
-                                    context_len: None,
                                     attachments: Vec::new(),
                                 }
                             } else if role == Some("assistant") {

@@ -238,7 +238,6 @@ fn tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
 fn user_message(text: String) -> ItemContent {
     ItemContent::UserMessage {
         text,
-        context_len: None,
         attachments: Vec::new(),
     }
 }

@@ -57,7 +57,6 @@ impl SpaceHost {
                         parent_item_id: None,
                         content: ItemContent::UserMessage {
                             text: "needle".into(),
-                            context_len: None,
                             attachments: Vec::new(),
                         },
                     }),

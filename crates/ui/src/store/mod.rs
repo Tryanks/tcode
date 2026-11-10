@@ -5397,7 +5397,6 @@ pub(crate) mod tests {
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: "hello".into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }))
@@ -5980,7 +5979,6 @@ pub(crate) mod tests {
                             content: ItemContent::UserMessage {
                                 text: format!("Message {index}"),
                                 attachments: vec![],
-                                context_len: None,
                             },
                         })
                         .into(),
@@ -6227,7 +6225,6 @@ pub(crate) mod tests {
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: id.into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }),

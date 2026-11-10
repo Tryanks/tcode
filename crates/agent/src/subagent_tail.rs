@@ -155,7 +155,6 @@ impl TranscriptMapper {
                     format!("user-{}", self.next_user_id),
                     ItemContent::UserMessage {
                         text: text.into(),
-                        context_len: None,
                         attachments: Vec::new(),
                     },
                 )));

@@ -615,7 +615,6 @@ fn user_message(text: &str) -> AgentEvent {
         parent_item_id: None,
         content: ItemContent::UserMessage {
             text: text.into(),
-            context_len: None,
             attachments: Vec::new(),
         },
     })

@@ -497,26 +497,13 @@ fn stored_prompt(
         if entry.turn != turn || steer.is_some_and(|steer| entry.id != steer) {
             return None;
         }
-        let (text, context_len, attachments) = match &entry.content {
-            EntryContent::Item(agent::ItemContent::UserMessage {
-                text,
-                context_len,
-                attachments,
-            })
+        match &entry.content {
+            EntryContent::Item(agent::ItemContent::UserMessage { text, attachments })
             | EntryContent::Steer {
-                text,
-                context_len,
-                attachments,
-                ..
-            } => (text, context_len, attachments),
-            _ => return None,
-        };
-        let text = context_len
-            .and_then(|len| text.get(len..))
-            .unwrap_or(text)
-            .trim_start()
-            .to_owned();
-        Some((text, attachments.clone()))
+                text, attachments, ..
+            } => Some((text.clone(), attachments.clone())),
+            _ => None,
+        }
     })
 }
 

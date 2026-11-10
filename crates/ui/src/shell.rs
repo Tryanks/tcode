@@ -10787,7 +10787,6 @@ pub(crate) mod tests {
                 parent_item_id: None,
                 content: agent::ItemContent::UserMessage {
                     text: "Look around".into(),
-                    context_len: None,
                     attachments: vec![],
                 },
             }),
@@ -10940,7 +10939,6 @@ pub(crate) mod tests {
                 parent_item_id: None,
                 content: agent::ItemContent::UserMessage {
                     text: "Look around".into(),
-                    context_len: None,
                     attachments: vec![],
                 },
             }),
@@ -13011,7 +13009,6 @@ pub(crate) mod tests {
                 parent_item_id: None,
                 content: agent::ItemContent::UserMessage {
                     text: "Hello there.".into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }),
@@ -15681,7 +15678,6 @@ pub(crate) mod tests {
                         parent_item_id: None,
                         content: agent::ItemContent::UserMessage {
                             text: format!("Keep reading position {index}\n").repeat(4),
-                            context_len: None,
                             attachments: Vec::new(),
                         },
                     }),
@@ -18408,7 +18404,6 @@ pub(crate) mod tests {
                         format!("{id}-ask-{turn}"),
                         agent::ItemContent::UserMessage {
                             text: format!("What is in {id}?"),
-                            context_len: None,
                             attachments: vec![],
                         },
                     )),

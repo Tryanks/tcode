@@ -502,7 +502,6 @@ mod tests {
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: "Sample request".into(),
-                    context_len: None,
                     attachments: vec![],
                 },
             }),

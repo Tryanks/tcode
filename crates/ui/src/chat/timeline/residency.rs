@@ -451,8 +451,8 @@ fn entry_markdown(entry: &TimelineEntry) -> Option<String> {
             ItemContent::AssistantMessage { text, .. } | ItemContent::Plan { markdown: text },
         ) => Some(text.clone()),
         content => {
-            let (text, _, context_len, _) = user_content(content)?;
-            Some(plain_text_as_markdown(user_visible_text(text, context_len)))
+            let (text, _, _) = user_content(content)?;
+            Some(plain_text_as_markdown(text))
         }
     }
 }

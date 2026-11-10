@@ -123,7 +123,6 @@ chat:
   steered: "Steered"
   plan_title: "Plan"
   plan_feedback_hint: "Approve the plan, or reply below to keep planning."
-  injected_context: "Added by Tcode"
   orchestrate_state_completed: "completed"
   orchestrate_state_failed: "failed"
   orchestrate_state_reported: "reported"

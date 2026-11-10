@@ -1492,7 +1492,6 @@ mod tests {
                 EntryContent::Steer {
                     text: format!("queued steer {index}"),
                     status: SteeringStatus::Pending,
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             ));
@@ -1673,7 +1672,6 @@ mod tests {
                     parent_item_id: None,
                     content: ItemContent::UserMessage {
                         text: format!("Question {turn}"),
-                        context_len: None,
                         attachments: Vec::new(),
                     },
                 }));
@@ -2305,7 +2303,6 @@ mod tests {
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: format!("Question {turn}"),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             })

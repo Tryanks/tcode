@@ -203,16 +203,11 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
     let mut body = String::new();
     for entry in entries {
         match &entry.content {
-            EntryContent::Item(ItemContent::UserMessage {
-                text, context_len, ..
-            })
-            | EntryContent::Steer {
-                text, context_len, ..
-            } => {
-                let visible = context_len.and_then(|len| text.get(len..)).unwrap_or(text);
-                if !visible.trim().is_empty() {
+            EntryContent::Item(ItemContent::UserMessage { text, .. })
+            | EntryContent::Steer { text, .. } => {
+                if !text.trim().is_empty() {
                     body.push_str("### User\n\n");
-                    body.push_str(visible);
+                    body.push_str(text);
                     body.push_str("\n\n");
                 }
             }
@@ -447,7 +442,6 @@ mod tests {
             id,
             ItemContent::UserMessage {
                 text: text.into(),
-                context_len: None,
                 attachments: Vec::new(),
             },
         )
