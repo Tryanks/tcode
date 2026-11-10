@@ -109,7 +109,7 @@ fn http(addr: SocketAddr, method: &str, path: &str, body: &str) -> (String, Vec<
 }
 
 fn login(addr: SocketAddr, password: &str, device_name: &str) -> (String, Value) {
-    let body = json!({"password": password, "device_name": device_name, "device_id": format!("{device_name}-id"), "platform": "macOS"});
+    let body = json!({"password": password, "device_name": device_name, "device_id": format!("{device_name}-id")});
     let (status, body) = http(addr, "POST", "/auth/login", &body.to_string());
     (status, serde_json::from_slice(&body).unwrap_or_default())
 }
@@ -201,6 +201,36 @@ fn static_bundle_get_and_head_share_headers() {
         assert!(headers.contains(&format!("Content-Length: {length}")));
         assert_eq!(body.len(), length);
     }
+    server.shutdown();
+}
+
+/// The shapes the login page sends (`crates/web/static/auth.mjs`): setup
+/// with the password alone, which reaches the already-configured answer
+/// rather than a malformed one, and login with the browser's device id and
+/// name.
+#[test]
+fn setup_takes_the_password_alone_and_login_names_the_device() {
+    let dir = TestDir::new("setup");
+    configure_password(&dir.0, "secret password");
+    let silent = silent_host();
+    let server = serve(silent.mux.clone(), config(dir.0.clone())).unwrap();
+    let addr = server.local_addr();
+    let post = |path, body: Value| http(addr, "POST", path, &body.to_string()).0;
+    assert_eq!(
+        post("/auth/setup", json!({"password": "secret password"})),
+        "HTTP/1.1 409 Conflict"
+    );
+    assert_eq!(
+        post(
+            "/auth/login",
+            json!({"password": "secret password", "device_name": "Browser"})
+        ),
+        "HTTP/1.1 400 Bad Request"
+    );
+    assert_eq!(
+        login(addr, "secret password", "Browser").0,
+        "HTTP/1.1 200 OK"
+    );
     server.shutdown();
 }
 

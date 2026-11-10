@@ -98,7 +98,7 @@ async function browser(base) {
   assert.equal(font.headers.get('content-type'), 'font/otf');
   const login = async value => fetch(`${base}/auth/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ password: value, device_name: 'Container smoke' }),
+    body: JSON.stringify({ password: value, device_id: 'container-smoke', device_name: 'Container smoke' }),
   });
   assert.equal((await login('incorrect-password')).status, 403);
   const response = await login(password);

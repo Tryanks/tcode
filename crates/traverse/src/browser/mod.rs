@@ -4,9 +4,9 @@
 //! needs a password first.
 //!
 //! Wire contract with `crates/web`: `GET /auth/state` →
-//! `{"mode":"password","configured":bool}`; `POST /auth/setup` and
-//! `POST /auth/login` take JSON `{password, device_id?, device_name,
-//! platform?}` and login answers `{host_id, host_name, token}`; `/ws` opens
+//! `{"mode":"password","configured":bool}`; `POST /auth/setup` takes JSON
+//! `{password}` and `POST /auth/login` takes `{password, device_id,
+//! device_name}` and answers `{host_id, host_name, token}`; `/ws` opens
 //! with `{"type":"hello","protocol_version":5,"token":…,"device":{name,
 //! platform?}}` and is answered by `hello_ok` or `hello_rejected` with a
 //! `reason` of `token` or `protocol`. Only the current protocol version is
@@ -67,30 +67,23 @@ const UNAUTHENTICATED_DEADLINE: Duration = Duration::from_secs(5);
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 
 /// The device fields a browser sends with `/auth/login`; setup carries
-/// none. `device_id` and `platform` are optional.
+/// none. The hello reports the platform later.
 #[derive(Deserialize)]
 struct LoginClaim {
-    #[serde(default)]
     device_name: String,
-    #[serde(default)]
-    device_id: Option<String>,
-    #[serde(default)]
-    platform: Option<String>,
+    device_id: String,
 }
 
 impl LoginClaim {
     fn claim(&self) -> DeviceClaim {
         DeviceClaim {
             name: self.device_name.clone(),
-            platform: self.platform.clone(),
+            platform: None,
         }
     }
 
     fn is_valid(&self) -> bool {
-        self.device_id
-            .as_deref()
-            .is_none_or(tcode_client::host::valid_device_id)
-            && self.claim().is_valid()
+        tcode_client::host::valid_device_id(&self.device_id) && self.claim().is_valid()
     }
 
     fn details(&self) -> DeviceDetails {
@@ -330,7 +323,7 @@ where
     struct PasswordRequest {
         password: String,
         #[serde(flatten)]
-        device: LoginClaim,
+        device: Option<LoginClaim>,
     }
     // Requiring JSON prevents a cross-origin HTML form from claiming first setup.
     if !request.headers.get("content-type").is_some_and(|value| {
@@ -355,7 +348,8 @@ where
         )
         .await;
     };
-    if request.password.len() > 1024 || (!setup && !request.device.is_valid()) {
+    let device = request.device.filter(|device| !setup && device.is_valid());
+    if request.password.len() > 1024 || (!setup && device.is_none()) {
         return json_response(
             stream,
             "400 Bad Request",
@@ -374,9 +368,11 @@ where
             }
             auth.set_password(&request.password, false)?;
             Ok(("200 OK", serde_json::json!({"configured":true})))
-        } else if auth.verify_password(&request.password) {
-            let details = request.device.details();
-            let token = auth.issue_token(request.device.device_id, details)?;
+        } else if let Some(device) = device
+            && auth.verify_password(&request.password)
+        {
+            let details = device.details();
+            let token = auth.issue_token(device.device_id, details)?;
             shared.devices_changed.send_replace(());
             Ok(("200 OK", serde_json::json!({"host_id":auth.host_id,"host_name":auth.host_name,"token":token})))
         } else {
