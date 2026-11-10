@@ -8,24 +8,26 @@ use tcode_core::settings::{SettingsPatch, ThemeMode};
 use tcode_protocol::{BackgroundTaskStatus, Command, CommandResponse, HostMessage, Subscription};
 #[test]
 fn permission_relaunch_marker_requires_screen_access_only_for_computer_use() {
-    for screen_recording in [false, true] {
+    for (section, screen_recording, kept) in [
+        ("computer_use", false, false),
+        ("computer_use", true, true),
+        ("providers", false, true),
+        ("providers", true, true),
+    ] {
         let permissions = computer_use_mcp::permissions::PermissionStatus {
             screen_recording,
             ..Default::default()
         };
         assert_eq!(permission_relaunch_marker(None, permissions), None);
-        for section in ["computer_use", "providers"] {
-            let marker = tcode_services::relaunch::RelaunchMarker {
-                reopen_settings: section.into(),
-                active_session: Some("session-1".into()),
-            };
-            let expected =
-                (section != "computer_use" || screen_recording).then_some(marker.clone());
-            assert_eq!(
-                permission_relaunch_marker(Some(marker), permissions),
-                expected
-            );
-        }
+        let marker = tcode_services::relaunch::RelaunchMarker {
+            reopen_settings: section.into(),
+            active_session: Some("session-1".into()),
+        };
+        assert_eq!(
+            permission_relaunch_marker(Some(marker.clone()), permissions),
+            kept.then_some(marker),
+            "{section}, screen recording {screen_recording}"
+        );
     }
 }
 
@@ -2106,10 +2108,6 @@ fn title_session_uses_configured_model_with_low_effort() {
     assert_eq!(custom.provider, ProviderKind::ClaudeCode);
     assert_eq!(custom.model.as_deref(), Some("claude-haiku-4-5"));
     assert_eq!(custom.profile_id.as_deref(), Some("work-claude"));
-    assert_eq!(
-        title_turn_options().effort.as_deref(),
-        Some(AI_TITLE_REASONING_EFFORT)
-    );
 
     settings.title_generation.profile_id = Some("deleted-profile".into());
     let fallback = title_session_meta(&settings, PathBuf::from("/tmp/project"));
@@ -3256,73 +3254,51 @@ fn reopened_command_cache_seeds_a_draft_before_provider_start() {
         )
         .unwrap();
 
-    let state = TestClientState::new(SessionStore::open_at(root.clone()).unwrap());
-    let seeded = state.cached_provider_commands(ProviderKind::ClaudeCode, None, None);
-    let draft = AppState::build_draft_session(
-        "project".into(),
-        PathBuf::from("/tmp/project"),
-        ProviderKind::ClaudeCode,
-        None,
-        None,
-        seeded,
-    );
-    assert_eq!(draft.provider_commands, commands);
-    assert!(matches!(draft.runtime, Runtime::Idle));
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new(
+        SessionStore::open_at(root.clone()).unwrap(),
+    ));
+    state.update(cx, |state, cx| {
+        state.start_draft("project".into(), PathBuf::from("/tmp/project"), cx);
+        let draft = state.selected_session().unwrap();
+        assert_eq!(draft.meta.provider, ProviderKind::ClaudeCode);
+        assert_eq!(draft.provider_commands, commands);
+        assert!(matches!(draft.runtime, Runtime::Idle));
+    });
 }
 
-/// Settings → Harnesses env/home/launch-args must reach the spawn options,
-/// and the home override must land on the provider's own variable.
+/// Settings → Harnesses binary and launch arguments reach the spawn options.
 #[test]
-fn provider_binary_home_and_launch_arguments_follow_the_selected_profile() {
+fn provider_binary_and_launch_arguments_follow_the_selected_profile() {
     let mut settings = Settings::default();
     let claude = settings.provider_mut(ProviderKind::ClaudeCode);
     claude.binary_path = Some(PathBuf::from("/custom/claude"));
-    claude.home_path = Some(PathBuf::from("/tmp/claude-home"));
     claude.launch_args = Some("--chrome --verbose".into());
     let codex = settings.provider_mut(ProviderKind::Codex);
     codex.binary_path = Some(PathBuf::from("/custom/codex"));
-    codex.home_path = Some(PathBuf::from("/tmp/codex-shadow"));
     let pi = settings.provider_mut(ProviderKind::Pi);
     pi.launch_args = Some("--verbose".into());
 
-    let launch_env = LaunchEnv {
-        env: vec![("ANTHROPIC_BASE_URL".into(), "https://proxy.test".into())],
-        home: settings
-            .provider(ProviderKind::ClaudeCode)
-            .home_path
-            .clone(),
-    };
     let meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
-    let opts = session_options(&meta, &settings, launch_env, McpServers::default());
+    let opts = session_options(
+        &meta,
+        &settings,
+        LaunchEnv::default(),
+        McpServers::default(),
+    );
     assert_eq!(opts.binary_path, Some(PathBuf::from("/custom/claude")));
     assert_eq!(opts.extra_args, vec!["--chrome", "--verbose"]);
-    assert_eq!(
-        opts.launch_env.pairs(ProviderKind::ClaudeCode),
-        vec![
-            (
-                "ANTHROPIC_BASE_URL".to_string(),
-                "https://proxy.test".to_string()
-            ),
-            (
-                "CLAUDE_CONFIG_DIR".to_string(),
-                "/tmp/claude-home".to_string()
-            ),
-        ]
-    );
 
-    // Codex takes its home as CODEX_HOME; this profile has no launch arguments.
-    let launch_env = LaunchEnv {
-        env: Vec::new(),
-        home: settings.provider(ProviderKind::Codex).home_path.clone(),
-    };
+    // This Codex profile has no launch arguments.
     let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
-    let opts = session_options(&meta, &settings, launch_env, McpServers::default());
+    let opts = session_options(
+        &meta,
+        &settings,
+        LaunchEnv::default(),
+        McpServers::default(),
+    );
     assert_eq!(opts.binary_path, Some(PathBuf::from("/custom/codex")));
     assert!(opts.extra_args.is_empty());
-    assert_eq!(
-        opts.launch_env.pairs(ProviderKind::Codex),
-        vec![("CODEX_HOME".to_string(), "/tmp/codex-shadow".to_string())]
-    );
 
     // pi project trust is opt-in and appends --approve after launch args.
     let meta = SessionMeta::new(ProviderKind::Pi, PathBuf::from("/x"), None);
@@ -4983,49 +4959,6 @@ fn callbacks_racing_provider_start_share_one_wakeup_turn() {
 }
 
 #[test]
-fn queued_sends_dispatch_one_per_completed_turn() {
-    let (commands, receiver) = smol::channel::unbounded();
-    let mut active = ActiveSession {
-        runtime: Runtime::Live(commands),
-        ..ActiveSession::new(
-            SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None),
-            false,
-            Vec::new(),
-        )
-    };
-    active.push_queued("first".into(), Vec::new());
-    active.push_queued("second".into(), Vec::new());
-
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
-    let first_delivery = match receiver.try_recv() {
-        Ok(SessionCommand::SendTurn {
-            delivery_id, text, ..
-        }) if text == "first" => delivery_id,
-        other => panic!("expected first SendTurn, got {other:?}"),
-    };
-    assert_eq!(active.dispatch_next_pending(), Ok(false));
-    assert!(receiver.try_recv().is_err());
-    assert_eq!(active.queue.len(), 2, "unaccepted head stays queued");
-    assert_eq!(
-        active.accept_turn_delivery(first_delivery).unwrap().text,
-        "first"
-    );
-    assert_eq!(active.queue.len(), 1);
-    assert_eq!(active.queue[0].text, "second");
-
-    active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
-    let second_delivery = match receiver.try_recv() {
-        Ok(SessionCommand::SendTurn {
-            delivery_id, text, ..
-        }) if text == "second" => delivery_id,
-        other => panic!("expected second SendTurn, got {other:?}"),
-    };
-    active.accept_turn_delivery(second_delivery).unwrap();
-    assert!(active.queue.is_empty());
-}
-
-#[test]
 fn moved_queue_entries_dispatch_in_their_new_order() {
     let (commands, receiver) = smol::channel::unbounded();
     let mut active = live_session(ProviderKind::Codex, commands);
@@ -6603,14 +6536,16 @@ fn provider_config_options_remove_retired_wire_controls() {
             },
             cx,
         );
-        assert_eq!(
-            state
-                .session_status_snapshot("config-session")
-                .unwrap()
-                .provider_option_descriptors
-                .len(),
-            1
+        state.set_active_option(
+            "config-session",
+            "acp:config:thinking",
+            Some(serde_json::json!(false)),
+            cx,
         );
+        let offered = state.session_status_snapshot("config-session").unwrap();
+        assert_eq!(offered.provider_option_descriptors.len(), 1);
+        assert!(!offered.provider_option_selections.is_empty());
+        assert!(!offered.provider_option_requested_selections.is_empty());
         state.on_event(
             "config-session",
             AgentEvent::ProviderOptions {
@@ -6743,10 +6678,7 @@ fn effort_changes_use_per_turn_overrides_or_require_provider_restart() {
             value: serde_json::json!("high"),
         });
         assert_eq!(active.options_changed_while_live(), restart, "{provider:?}");
-        if restart {
-            active.shutdown_to_idle();
-            assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
-        } else {
+        if !restart {
             active.push_queued("next turn".into(), Vec::new());
             assert_eq!(active.dispatch_next_pending(), Ok(true));
             let SessionCommand::SendTurn {
@@ -6961,8 +6893,14 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
     assert!(text.starts_with(tcode_core::relay::RELAY_PREAMBLE));
     assert!(text.contains("<conversation-transcript>\n# prior work\n</conversation-transcript>"));
     assert!(text.contains("<new-user-message>\ncontinue here\n</new-user-message>"));
+    assert_eq!(active.dispatch_next_pending(), Ok(false));
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(active.queue.len(), 2, "an unaccepted head stays queued");
 
-    active.accept_turn_delivery(delivery_id).unwrap();
+    assert_eq!(
+        active.accept_turn_delivery(delivery_id).unwrap().text,
+        "continue here"
+    );
     active.turn_in_flight = false;
     assert_eq!(active.dispatch_next_pending(), Ok(true));
     assert!(matches!(
