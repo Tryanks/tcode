@@ -906,7 +906,7 @@ impl AppState {
                     .await;
                 let Ok(task) = task else { break };
                 task.await;
-                smol::Timer::after(Duration::from_secs(60)).await;
+                host.clock().timer(Duration::from_secs(60)).await;
             }
         });
         self.pull_requests.workers.push(task);

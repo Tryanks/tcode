@@ -1166,10 +1166,11 @@ impl AppState {
         let binary = self.resolve_profile_binary(&profile_id);
         let launch_env = self.prepare_profile_env(&profile_id, cx);
         let host_cx = cx.clone();
+        let timeout = cx.clock().timer(LIVE_USAGE_TIMEOUT);
         HostCx::spawn_detached(cx, async move {
             let answered = match answer {
                 Some(answer) => smol::future::or(async { answer.recv().await.ok() }, async {
-                    smol::Timer::after(LIVE_USAGE_TIMEOUT).await;
+                    timeout.await;
                     None
                 })
                 .await

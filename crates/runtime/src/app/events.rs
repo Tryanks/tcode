@@ -1014,9 +1014,16 @@ pub(super) async fn generate_ai_title(
     options.cwd = scratch.clone();
 
     let generated = smol::future::or(
-        generate_ai_title_inner(provider_launcher, provider, options, prompt, attachments),
+        generate_ai_title_inner(
+            provider_launcher,
+            provider,
+            options,
+            prompt,
+            attachments,
+            executor.clock(),
+        ),
         async {
-            smol::Timer::after(AI_TITLE_TIMEOUT).await;
+            executor.clock().timer(AI_TITLE_TIMEOUT).await;
             None
         },
     )
@@ -1033,6 +1040,7 @@ pub(super) async fn generate_ai_title_inner(
     options: SessionOptions,
     prompt: String,
     attachments: Vec<Attachment>,
+    clock: &crate::clock::HostClock,
 ) -> Option<String> {
     let handle = provider_launcher.launch(provider, options).await.ok()?;
     handle
@@ -1093,7 +1101,7 @@ pub(super) async fn generate_ai_title_inner(
             }
         },
         async {
-            smol::Timer::after(std::time::Duration::from_secs(2)).await;
+            clock.timer(std::time::Duration::from_secs(2)).await;
         },
     )
     .await;

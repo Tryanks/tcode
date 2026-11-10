@@ -177,7 +177,7 @@ impl AppState {
                     break;
                 };
                 pass.await;
-                smol::Timer::after(PASS_SPACING).await;
+                host.clock().timer(PASS_SPACING).await;
             }
         }));
     }
@@ -308,9 +308,9 @@ impl AppState {
                 }
             }
             let Ok(planned) = host
-                .enqueue_and_wait(move |state, _| {
+                .enqueue_and_wait(move |state, cx| {
                     let watches = &mut state.pull_request_watches;
-                    let now = Instant::now();
+                    let now = cx.clock().now();
                     fingerprinted
                         .into_iter()
                         .filter_map(|(group, fingerprint)| {
@@ -522,7 +522,7 @@ impl AppState {
         // An incomplete read never advances the watermark; a pass without the activity has none.
         let remarks = activity.flatten();
         let previous = self.pull_request_watches.last_reads.get(&key);
-        let now = Instant::now();
+        let now = cx.clock().now();
         let read = LastRead {
             at: if plan.activity {
                 now

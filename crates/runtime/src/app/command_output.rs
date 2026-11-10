@@ -160,7 +160,7 @@ impl AppState {
         }
         let Some(delay) = feed
             .last_started
-            .map(|started| started.elapsed())
+            .map(|started| cx.clock().now().saturating_duration_since(started))
             .filter(|elapsed| *elapsed < PUSH_INTERVAL)
             .map(|elapsed| PUSH_INTERVAL - elapsed)
         else {
@@ -170,9 +170,10 @@ impl AppState {
         feed.timer_armed = true;
         let generation = feed.generation;
         let topic = topic.clone();
+        let push = cx.clock().timer(delay);
         let tick = cx.clone();
         cx.spawn_detached(async move {
-            smol::Timer::after(delay).await;
+            push.await;
             tick.enqueue(move |state, cx| {
                 let Some(feed) = state
                     .command_output_feeds
@@ -193,7 +194,7 @@ impl AppState {
         };
         feed.rendering = true;
         feed.rendered = feed.revision;
-        feed.last_started = Some(Instant::now());
+        feed.last_started = Some(cx.clock().now());
         let generation = feed.generation;
         let render = self.render_command_output(topic, cx);
         let topic = topic.clone();
