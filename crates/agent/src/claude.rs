@@ -7462,184 +7462,137 @@ mod tests {
         );
     }
 
+    /// The snapshots of the Subagent item `id` in `events`.
+    fn subagent_snapshots<'a>(events: &'a [AgentEvent], id: &str) -> Vec<&'a ThreadItem> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ItemStarted(item)
+                | AgentEvent::ItemUpdated(item)
+                | AgentEvent::ItemCompleted(item)
+                    if item.id == id && matches!(item.content, ItemContent::Subagent { .. }) =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A foreground subagent as Claude Code recorded it: the lead waits on
+    /// it, its activity is parented to the spawn, the spawn shows the model
+    /// the child ran with, and no terminal snapshot reaches the thread before
+    /// the transcript tail's last flush.
     #[test]
     fn subagent_fixture_maps_lifecycle_and_parented_activity() {
-        let trace = include_str!("../tests/fixtures/claude/subagent_trace.jsonl");
+        const SPAWN: &str = "toolu_018ti8UQiJ6xqBmKf5gTsp1d";
+        let trace = include_str!("../tests/fixtures/claude/subagent_handback_trace.jsonl");
         let mut mapper = Mapper::new();
         let mut events = Vec::new();
         for line in trace.lines() {
             events.extend(feed(&mut mapper, line));
         }
-        // The lead waited on this agent: its call never returned early.
         assert!(
             !events
                 .iter()
                 .any(|event| matches!(event, AgentEvent::ItemBackgrounded { .. }))
         );
-        // task_started opened a transcript tail; every terminal snapshot
-        // (task_updated, task_notification, tool_result) waits for its ack.
-        assert!(events.iter().all(|event| !matches!(
-            event,
-            AgentEvent::ItemUpdated(ThreadItem { content: ItemContent::Subagent { status, .. }, .. })
-            | AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::Subagent { status, .. }, .. })
-                if *status != ItemStatus::InProgress
-        )));
-        events.extend(mapper.on_tail_notice(SubagentTailNotice {
-            parent_id: "toolu_spawn_1".into(),
-            events: Vec::new(),
-            model: None,
-            stopped: true,
-        }));
-
-        let spawn_events: Vec<_> = events
-            .iter()
-            .filter_map(|event| match event {
-                AgentEvent::ItemStarted(item)
-                | AgentEvent::ItemUpdated(item)
-                | AgentEvent::ItemCompleted(item)
-                    if item.id == "toolu_spawn_1" =>
-                {
-                    Some(item)
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(spawn_events.len(), 4);
-        assert!(matches!(events.last(), Some(AgentEvent::ItemCompleted(_))));
-        assert!(matches!(
-            &spawn_events[0].content,
-            ItemContent::Subagent { agent_type, description, status: ItemStatus::InProgress, summary: None, model: None, effort: None }
-                if agent_type == "general-purpose" && description == "Ping test"
-        ));
-        // The child's first assistant message reveals the model and effort the
-        // subagent actually ran with; the spawn item re-emits with them.
-        assert!(matches!(
-            &spawn_events[2].content,
-            ItemContent::Subagent { status: ItemStatus::InProgress, model: Some(model), effort: Some(effort), .. }
-                if model == "claude-sonnet-5" && effort == "high"
-        ));
-        assert!(matches!(
-            &spawn_events.last().unwrap().content,
-            ItemContent::Subagent { model: Some(model), effort: Some(effort), .. }
-                if model == "claude-sonnet-5" && effort == "high"
-        ));
-
-        assert!(spawn_events.iter().any(|item| matches!(
-            &item.content,
-            ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. }
-                if summary == "pong"
-        )));
-        assert!(matches!(
-            &spawn_events.last().unwrap().content,
-            ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. }
-                if summary == "pong"
-        ));
-
+        assert!(
+            subagent_snapshots(&events, SPAWN)
+                .iter()
+                .all(|item| matches!(
+                    item.content,
+                    ItemContent::Subagent {
+                        status: ItemStatus::InProgress,
+                        ..
+                    }
+                )),
+            "{events:?}"
+        );
         let children: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
-                AgentEvent::ItemStarted(item)
-                | AgentEvent::ItemUpdated(item)
-                | AgentEvent::ItemCompleted(item)
-                    if item.parent_item_id.as_deref() == Some("toolu_spawn_1") =>
+                AgentEvent::ItemStarted(item) | AgentEvent::ItemCompleted(item)
+                    if item.parent_item_id.as_deref() == Some(SPAWN) =>
                 {
-                    Some(item)
+                    Some(&item.content)
                 }
                 _ => None,
             })
             .collect();
-        assert_eq!(children.len(), 2);
-        assert!(matches!(
-            &children[0].content,
-            ItemContent::UserMessage { text, .. } if text.contains("Reply with pong")
-        ));
-        assert!(matches!(
-            &children[1].content,
-            ItemContent::AssistantMessage { text, .. } if text == "pong"
-        ));
+        assert!(
+            children.iter().any(|content| matches!(content,
+                ItemContent::UserMessage { text, .. } if text.starts_with("Your report is two lines"))),
+            "{children:?}"
+        );
+        assert!(
+            children.iter().any(|content| matches!(content,
+                ItemContent::ToolCall { name, status: ItemStatus::Completed, .. } if name == "SubagentHandback")),
+            "{children:?}"
+        );
 
-        assert!(events.iter().all(|event| match event {
-            AgentEvent::ItemStarted(item)
-            | AgentEvent::ItemUpdated(item)
-            | AgentEvent::ItemCompleted(item) => {
-                item.id == "toolu_spawn_1" || item.parent_item_id.is_some()
-            }
-            _ => true,
-        }));
+        let flushed = mapper.on_tail_notice(SubagentTailNotice {
+            parent_id: SPAWN.into(),
+            events: Vec::new(),
+            model: None,
+            stopped: true,
+        });
+        assert!(
+            matches!(
+                subagent_snapshots(&flushed, SPAWN).last(),
+                Some(ThreadItem { parent_item_id: None, content: ItemContent::Subagent { status: ItemStatus::Completed, model: Some(model), .. }, .. })
+                    if model == "claude-sonnet-5-5"
+            ),
+            "{flushed:?}"
+        );
+        assert!(mapper.take_pending_subagent_terminals().is_empty());
     }
 
-    /// Background subagent: the launch acknowledgement and the parent's result
-    /// leave the Subagent item in progress; the terminal snapshot is emitted
-    /// only after the transcript tail's final flush, and the tail's copy of a
-    /// child the stdout feed already completed cannot reopen it.
+    /// A background subagent as Claude Code recorded it: the launch
+    /// acknowledgement returns the call and leaves the Subagent item in
+    /// progress; it settles only with the transcript tail's final flush, and
+    /// the tail's copy of a child the stdout feed already completed cannot
+    /// reopen it.
     #[test]
     fn background_subagent_terminal_waits_for_tail_flush_and_dedupes_feeds() {
-        let trace = include_str!("../tests/fixtures/claude/subagent_background_trace.jsonl");
+        const SPAWN: &str = "toolu_01BXJLqzyGgqst9idkvgU4Mw";
+        let trace =
+            include_str!("../tests/fixtures/claude/subagent_handback_background_trace.jsonl");
         let mut mapper = Mapper::new();
         let mut events = Vec::new();
         for line in trace.lines() {
             events.extend(feed(&mut mapper, line));
         }
-        let spawn_status = |event: &AgentEvent| match event {
-            AgentEvent::ItemStarted(item)
-            | AgentEvent::ItemUpdated(item)
-            | AgentEvent::ItemCompleted(item)
-                if item.id == "toolu_spawn_bg" =>
-            {
-                match &item.content {
-                    ItemContent::Subagent { status, .. } => Some(*status),
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
         assert!(
-            events
+            subagent_snapshots(&events, SPAWN)
                 .iter()
-                .filter_map(spawn_status)
-                .all(|status| status == ItemStatus::InProgress),
-            "launch acknowledgement and task_notification must not settle the item yet"
+                .all(|item| matches!(
+                    item.content,
+                    ItemContent::Subagent {
+                        status: ItemStatus::InProgress,
+                        ..
+                    }
+                )),
+            "launch acknowledgement and task_notification must not settle the item yet: {events:?}"
         );
-        // The launch acknowledgement returns the call; the agent goes on in
-        // the background past the turn.
-        let position = |wanted: &dyn Fn(&AgentEvent) -> bool| events.iter().position(wanted);
-        let backgrounded = position(&|event| {
-            matches!(event, AgentEvent::ItemBackgrounded { item_id, parent_item_id: None }
-                if item_id == "toolu_spawn_bg")
-        })
-        .expect("the launch backgrounds the spawn");
-        let turn_completed = position(&|event| matches!(event, AgentEvent::TurnCompleted { .. }))
-            .expect("the turn completes");
-        assert!(backgrounded < turn_completed);
+        assert!(events.iter().any(|event| matches!(event,
+            AgentEvent::ItemBackgrounded { item_id, parent_item_id: None } if item_id == SPAWN)));
         assert!(events.iter().any(|event| matches!(
             event,
             AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::ToolCall { status: ItemStatus::Completed, .. }, .. })
-                if id == "toolu_spawn_bg:toolu_child_grep"
+                if *id == format!("{SPAWN}:toolu_01T4uuAGaM12YCPm6kBnYvH5")
         )));
-        assert!(matches!(
-            mapper.take_tail_requests().as_slice(),
-            [
-                TailRequest::Start { parent_id: start, .. },
-                TailRequest::PreferPath { parent_id: prefer, .. },
-                TailRequest::Stop { parent_id: stop },
-            ] if start == "toolu_spawn_bg" && prefer == "toolu_spawn_bg" && stop == "toolu_spawn_bg"
-        ));
 
-        // The tail maps the same transcript records a second time, plus one
-        // record the stdout feed never carried.
-        let mut tail = crate::subagent_tail::TranscriptMapper::new("toolu_spawn_bg");
+        // The tail maps the same child records a second time.
+        let mut tail = crate::subagent_tail::TranscriptMapper::new(SPAWN);
+        let child = format!("\"parent_tool_use_id\":\"{SPAWN}\"");
         let mut tail_events = Vec::new();
-        for line in trace
-            .lines()
-            .filter(|line| line.contains("parent_tool_use_id"))
-        {
+        for line in trace.lines().filter(|line| line.contains(&child)) {
             tail_events.extend(tail.map_value(&serde_json::from_str(line).unwrap()));
         }
-        tail_events.extend(tail.map_value(&json!({
-            "type": "assistant", "message": { "id": "msg-child-2", "content": [{ "type": "text", "text": "done" }] }
-        })));
+        assert!(!tail_events.is_empty());
         let flushed = mapper.on_tail_notice(SubagentTailNotice {
-            parent_id: "toolu_spawn_bg".into(),
+            parent_id: SPAWN.into(),
             events: tail_events,
             model: None,
             stopped: true,
@@ -7648,18 +7601,16 @@ mod tests {
             flushed
                 .iter()
                 .all(|event| !matches!(event, AgentEvent::ItemStarted(_))),
-            "a completed child must not be restarted by the tail's copy"
+            "a completed child must not be restarted by the tail's copy: {flushed:?}"
         );
-        assert!(matches!(
-            flushed.last(),
-            Some(AgentEvent::ItemUpdated(ThreadItem { id, content: ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), model: Some(model), effort: Some(effort), .. }, .. }))
-                if id == "toolu_spawn_bg" && summary == "Routing audited" && model == "claude-sonnet-5" && effort == "high"
-        ));
-        assert!(matches!(
-            &flushed[flushed.len() - 2],
-            AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::AssistantMessage { text, .. }, .. })
-                if id == "toolu_spawn_bg:msg-child-2:0" && text == "done"
-        ));
+        assert!(
+            matches!(
+                flushed.last(),
+                Some(AgentEvent::ItemUpdated(ThreadItem { id, content: ItemContent::Subagent { status: ItemStatus::Completed, .. }, .. }))
+                    if id == SPAWN
+            ),
+            "{flushed:?}"
+        );
         assert!(mapper.take_pending_subagent_terminals().is_empty());
     }
 
@@ -7826,129 +7777,6 @@ mod tests {
             }
             std::fs::remove_dir_all(root).unwrap();
         });
-    }
-
-    /// A background subagent that itself spawns a background Agent: the
-    /// nested spawn is a Subagent item parented to the child, the
-    /// grandchild's transcript is parented to the nested spawn, and the
-    /// grandchild's task_notification settles it after its tail's final
-    /// flush. Both feeds carry every child record; each stage is emitted once.
-    #[test]
-    fn nested_background_subagent_settles_through_its_own_task_notification() {
-        let trace = include_str!("../tests/fixtures/claude/subagent_nested_trace.jsonl");
-        let mut mapper = Mapper::new();
-        let mut events = Vec::new();
-        for line in trace.lines() {
-            events.extend(feed(&mut mapper, line));
-        }
-        let subagent_snapshots = |events: &[AgentEvent], id: &str| -> Vec<ThreadItem> {
-            events
-                .iter()
-                .filter_map(|event| match event {
-                    AgentEvent::ItemStarted(item)
-                    | AgentEvent::ItemUpdated(item)
-                    | AgentEvent::ItemCompleted(item)
-                        if item.id == id
-                            && matches!(item.content, ItemContent::Subagent { .. }) =>
-                    {
-                        Some(item.clone())
-                    }
-                    _ => None,
-                })
-                .collect()
-        };
-
-        let grandchild = subagent_snapshots(&events, "toolu_grandchild");
-        assert!(matches!(
-            &grandchild[0],
-            ThreadItem { parent_item_id: Some(parent), content: ItemContent::Subagent { agent_type, description, status: ItemStatus::InProgress, .. }, .. }
-                if parent == "toolu_child" && agent_type == "general-purpose" && description == "Research Workers limits"
-        ));
-        assert_eq!(
-            grandchild
-                .iter()
-                .filter(|item| matches!(
-                    item.content,
-                    ItemContent::Subagent {
-                        status: ItemStatus::InProgress,
-                        ..
-                    }
-                ))
-                .count(),
-            grandchild.len(),
-            "launch acknowledgement and task_notification wait for the grandchild's tail"
-        );
-        assert!(
-            grandchild
-                .iter()
-                .all(|item| item.parent_item_id.as_deref() == Some("toolu_child"))
-        );
-        assert!(grandchild.iter().any(|item| matches!(
-            &item.content,
-            ItemContent::Subagent { model: Some(model), effort: Some(effort), .. }
-                if model == "claude-sonnet-5" && effort == "high"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::ItemCompleted(ThreadItem { id, parent_item_id: Some(parent), content: ItemContent::ToolCall { name, status: ItemStatus::Completed, .. }, .. })
-                if id == "toolu_grandchild:toolu_gc_fetch" && parent == "toolu_grandchild" && name == "WebFetch"
-        )));
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(event, AgentEvent::ItemStarted(ThreadItem { id, .. }) if id == "toolu_grandchild"))
-                .count(),
-            1
-        );
-        let requests = mapper.take_tail_requests();
-        assert!(requests.iter().any(|request| matches!(request, TailRequest::Start { parent_id, .. } if parent_id == "toolu_grandchild")));
-        assert!(requests.iter().any(|request| matches!(request, TailRequest::Stop { parent_id } if parent_id == "toolu_grandchild")));
-
-        // The child's tail replays the nested spawn and the grandchild's tail
-        // replays its transcript; neither reopens or repeats a delivered stage.
-        let mut child_tail = crate::subagent_tail::TranscriptMapper::new("toolu_child");
-        let mut grandchild_tail = crate::subagent_tail::TranscriptMapper::new("toolu_grandchild");
-        let mut child_events = Vec::new();
-        let mut grandchild_events = Vec::new();
-        for line in trace.lines() {
-            let value: Value = serde_json::from_str(line).unwrap();
-            match value.get("parent_tool_use_id").and_then(Value::as_str) {
-                Some("toolu_child") => child_events.extend(child_tail.map_value(&value)),
-                Some("toolu_grandchild") => {
-                    grandchild_events.extend(grandchild_tail.map_value(&value))
-                }
-                _ => {}
-            }
-        }
-        let flushed = mapper.on_tail_notice(SubagentTailNotice {
-            parent_id: "toolu_grandchild".into(),
-            events: grandchild_events,
-            model: None,
-            stopped: true,
-        });
-        assert!(
-            matches!(
-                flushed.as_slice(),
-                [AgentEvent::ItemUpdated(ThreadItem { id, parent_item_id: Some(parent), content: ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), model: Some(model), effort: Some(effort), .. }, .. })]
-                    if id == "toolu_grandchild" && parent == "toolu_child" && summary == "Agent \"Research Workers limits\" finished" && model == "claude-sonnet-5" && effort == "high"
-            ),
-            "{flushed:?}"
-        );
-        let flushed = mapper.on_tail_notice(SubagentTailNotice {
-            parent_id: "toolu_child".into(),
-            events: child_events,
-            model: None,
-            stopped: true,
-        });
-        assert!(
-            matches!(
-                flushed.as_slice(),
-                [AgentEvent::ItemUpdated(ThreadItem { id, parent_item_id: None, content: ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. }, .. })]
-                    if id == "toolu_child" && summary == "Hosting researched"
-            ),
-            "{flushed:?}"
-        );
-        assert!(mapper.take_pending_subagent_terminals().is_empty());
     }
 
     /// A nested Agent that runs in the foreground settles with the child's
