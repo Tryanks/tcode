@@ -765,3 +765,212 @@ pub(super) fn votes(pr: &Value) -> HashMap<String, i64> {
         .filter_map(|reviewer| Some((text(reviewer, "id")?, reviewer["vote"].as_i64()?)))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A pull request as Azure answers it (shape: Azure DevOps REST 7.1, "Pull Requests - Get
+    /// Pull Request": GitPullRequest's `status`, `mergeStatus`, `creationDate`, `closedDate`,
+    /// `sourceRefName`, `reviewers` as IdentityRefWithVote, `autoCompleteSetBy` and
+    /// `completionOptions`; content invented). Its state, trial merge, votes and auto-complete
+    /// read as the reference defines them.
+    #[test]
+    fn a_pull_request_reads_as_azure_defines_it() {
+        let pr = |status: &str, merge: &str, reviewers: Value| {
+            json!({
+                "pullRequestId": 7,
+                "status": status,
+                "mergeStatus": merge,
+                "title": "Add the parser",
+                "isDraft": false,
+                "creationDate": "2026-01-02T03:04:05Z",
+                "closedDate": "2026-01-03T03:04:05Z",
+                "sourceRefName": "refs/heads/parser",
+                "targetRefName": "refs/heads/main",
+                "createdBy": { "id": "a1", "displayName": "Ada", "uniqueName": "ada@example.test" },
+                "reviewers": reviewers,
+            })
+        };
+        let voter = |vote: i64, required: bool| json!({ "id": "b2", "uniqueName": "bo@example.test", "vote": vote, "isRequired": required });
+        let completed = pr("completed", "succeeded", json!([voter(10, true)]));
+        let read = snapshot(&completed, &[], mergeability(&completed), 0).unwrap();
+        assert_eq!(read.state, PullRequestState::Merged);
+        assert_eq!(read.merged_at.as_deref(), Some("2026-01-03T03:04:05Z"));
+        assert_eq!(read.head_branch, "parser");
+        assert_eq!(read.review_decision, Some(ReviewDecision::Approved));
+        assert_eq!(read.author.unwrap().login, "ada@example.test");
+        assert_eq!(
+            state(&pr("abandoned", "notSet", json!([]))),
+            Some(PullRequestState::Closed)
+        );
+        for (merge, read) in [
+            ("succeeded", Mergeability::Clean),
+            ("conflicts", Mergeability::Conflicting),
+            ("queued", Mergeability::Pending),
+            ("rejectedByPolicy", Mergeability::Unknown),
+            ("failure", Mergeability::Unknown),
+        ] {
+            assert_eq!(
+                mergeability(&pr("active", merge, json!([]))),
+                read,
+                "{merge}"
+            );
+        }
+        // 5 approves with suggestions; -5 waits for the author.
+        for (reviewers, decision) in [
+            (json!([voter(5, false)]), Some(ReviewDecision::Approved)),
+            (
+                json!([voter(-5, false)]),
+                Some(ReviewDecision::ChangesRequested),
+            ),
+            (json!([voter(0, true)]), Some(ReviewDecision::Required)),
+            (json!([voter(0, false)]), None),
+        ] {
+            assert_eq!(
+                review_decision(&pr("active", "succeeded", reviewers)),
+                decision
+            );
+        }
+        // An explicit mergeStrategy decides; without one, the deprecated squashMerge does.
+        let armed = |options: Value| {
+            let mut read = pr("active", "succeeded", json!([]));
+            read["autoCompleteSetBy"] = json!({ "id": "a1" });
+            read["completionOptions"] = options;
+            auto_complete(&read)
+        };
+        assert_eq!(
+            armed(json!({ "mergeStrategy": "rebase", "squashMerge": true })),
+            Some(PullRequestMergeMethod::Rebase)
+        );
+        assert_eq!(
+            armed(json!({ "squashMerge": true })),
+            Some(PullRequestMergeMethod::Squash)
+        );
+        assert_eq!(armed(json!({})), Some(PullRequestMergeMethod::Merge));
+        assert_eq!(auto_complete(&pr("active", "succeeded", json!([]))), None);
+    }
+
+    /// Statuses and policy evaluations as Azure lists them (shape: Azure DevOps REST 7.1,
+    /// "Pull Request Statuses - List" GitStatus with `context.genre`, `context.name`,
+    /// `state`; "Evaluations - List" PolicyEvaluationRecord with `status` and `configuration`'s
+    /// `isBlocking`, `isEnabled`, `type.displayName`; content invented). A blocking policy not
+    /// yet approved holds completion back.
+    #[test]
+    fn statuses_and_policies_read_as_checks() {
+        let statuses = status_checks(&json!({ "value": [
+            { "id": 1, "state": "failed", "context": { "genre": "ci", "name": "build" } },
+            { "id": 2, "state": "notApplicable", "context": { "genre": "", "name": "lint" } },
+        ]}));
+        assert_eq!(
+            statuses
+                .iter()
+                .map(|check| (check.name.as_str(), check.status))
+                .collect::<Vec<_>>(),
+            [
+                ("ci/build", CheckStatus::Failure),
+                ("lint", CheckStatus::Skipped)
+            ]
+        );
+        let policy = |status: &str, blocking: bool, enabled: bool| {
+            json!({ "status": status, "configuration": {
+                "isBlocking": blocking, "isEnabled": enabled,
+                "type": { "displayName": "Minimum number of reviewers" }, "settings": {} } })
+        };
+        let policies = policy_checks(&json!({ "value": [
+            policy("queued", true, true),
+            policy("approved", false, true),
+            policy("rejected", true, false),
+        ]}));
+        assert_eq!(
+            policies
+                .iter()
+                .map(|check| (check.status, check.required))
+                .collect::<Vec<_>>(),
+            [
+                (CheckStatus::Pending, Some(true)),
+                (CheckStatus::Success, Some(false))
+            ]
+        );
+        let open = json!({ "status": "active", "isDraft": false });
+        assert_eq!(
+            merge_state(&open, Mergeability::Clean, &policies),
+            PullRequestMergeState::Blocked
+        );
+        assert_eq!(
+            merge_state(&open, Mergeability::Clean, &policies[1..]),
+            PullRequestMergeState::Clean
+        );
+    }
+
+    /// Threads as Azure lists them (shape: Azure DevOps REST 7.1, "Pull Request Threads -
+    /// List" sample: GitPullRequestCommentThread with `comments` of `commentType` `system` or
+    /// `text`, a soft-deleted reply, `threadContext.filePath` with `rightFileStart`, and
+    /// `pullRequestThreadContext.iterationContext`; GitPullRequestIteration's
+    /// `sourceRefCommit` and `commonRefCommit`; content invented). Azure's own events are no
+    /// comments, a thread on a file's lines anchors at the head it was written against, and it
+    /// is outdated once a later push exists.
+    #[test]
+    fn threads_read_as_azure_lists_them() {
+        let author = json!({ "id": "a1", "displayName": "Ada", "uniqueName": "ada@example.test" });
+        let comment = |id: u64, kind: &str, content: &str| {
+            json!({ "id": id, "parentCommentId": id - 1, "author": author, "content": content,
+                    "publishedDate": format!("2026-01-0{id}T00:00:00Z"),
+                    "lastContentUpdatedDate": format!("2026-01-0{id}T00:00:00Z"),
+                    "commentType": kind })
+        };
+        let mut deleted = comment(2, "text", "");
+        deleted["isDeleted"] = json!(true);
+        let threads = [
+            json!({ "id": 141, "pullRequestThreadContext": null, "threadContext": null,
+                    "comments": [comment(1, "system", "The reference was updated.")],
+                    "isDeleted": false }),
+            json!({ "id": 147, "status": "active", "threadContext": null,
+                    "comments": [comment(3, "text", "Looks good")], "isDeleted": false }),
+            json!({ "id": 148, "status": "fixed", "isDeleted": false,
+                    "pullRequestThreadContext": { "changeTrackingId": 1, "iterationContext":
+                        { "firstComparingIteration": 1, "secondComparingIteration": 2 } },
+                    "threadContext": { "filePath": "/src/main.rs",
+                        "rightFileStart": { "line": 5, "offset": 1 },
+                        "rightFileEnd": { "line": 6, "offset": 13 } },
+                    "comments": [comment(1, "text", "What does this mean?"), deleted] }),
+        ];
+        let push = |id: u64, head: &str| {
+            iteration(&json!({ "id": id, "sourceRefCommit": { "commitId": head },
+                               "commonRefCommit": { "commitId": "base0" } }))
+            .unwrap()
+        };
+        let pr = json!({ "description": "Adds the parser", "creationDate": "2026-01-01T00:00:00Z",
+                         "createdBy": author, "reviewers": [] });
+        let url = "https://dev.azure.com/fabrikam/web/_git/web/pullrequest/7";
+        let iterations = [push(1, "head1"), push(2, "head2"), push(3, "head3")];
+        let read = conversation(&pr, &threads, &iterations, Some("a1"), url);
+        assert_eq!(
+            read.comments
+                .iter()
+                .map(|comment| comment.body.as_str())
+                .collect::<Vec<_>>(),
+            ["Looks good"]
+        );
+        assert!(read.comments[0].viewer_can_update);
+        let [thread] = read.threads.as_slice() else {
+            panic!("one file thread")
+        };
+        assert_eq!(thread.id, "148");
+        assert_eq!(thread.path, "src/main.rs");
+        assert!(thread.resolved);
+        assert!(thread.outdated);
+        assert_eq!(thread.comments.len(), 1);
+        assert_eq!(
+            thread.anchor,
+            Some(PullRequestReviewAnchor {
+                revision: "head2".into(),
+                path: "src/main.rs".into(),
+                side: ReviewSide::New,
+                start_line: 5,
+                end_line: 6,
+            })
+        );
+    }
+}
