@@ -352,24 +352,7 @@ impl AppState {
             Some(meta) if meta.archived_at.is_none() => {
                 let caller = self.caller_of(&meta);
                 match self.authorize_control(&caller, &op) {
-                    // A tool call must never take the host down: a panic in one
-                    // handler answers that call and leaves every other thread served.
-                    Ok(()) => {
-                        let name = op.tool_name();
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            self.dispatch_control_op(&caller, op, cx)
-                        })) {
-                            Ok(answer) => answer,
-                            Err(_) => {
-                                log::error!(
-                                    "tcode_control: {name} panicked for thread {thread_id}"
-                                );
-                                Answer::Now(Err(format!(
-                                    "{name} failed inside tcode; see the host log"
-                                )))
-                            }
-                        }
-                    }
+                    Ok(()) => self.dispatch_control_op(&caller, op, cx),
                     Err(refusal) => Answer::Now(Err(refusal)),
                 }
             }
