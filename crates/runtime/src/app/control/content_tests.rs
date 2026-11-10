@@ -263,9 +263,6 @@ fn original_entries_are_read_by_anchor_after_compaction_rewind_retry_and_fork() 
     );
 }
 
-/// A long thread is answered within the budget with what was left out named, a huge output
-/// shown head and tail with a cursor that continues it, and a long outline cut to the newest
-/// turns.
 /// An undone rewind gives the thread its turns back, and each of their
 /// entries answers to the anchor it had before the rewind: a model that
 /// read them then can cite them again.
@@ -309,6 +306,9 @@ fn entries_an_undone_rewind_restores_keep_their_anchors() {
     }
 }
 
+/// A long thread is answered within the budget with what was left out named, a huge output
+/// shown head and tail with a cursor that continues it, and a long outline cut to the newest
+/// turns.
 #[test]
 fn reading_a_very_long_thread_stays_within_budget_and_says_what_it_left_out() {
     let store = TestStore::new("tcode-control-content-budget");
