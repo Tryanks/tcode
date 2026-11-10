@@ -861,6 +861,8 @@ providers:
       removing_marketplace: "Removing marketplace %{name}…"
       removed_marketplace: "Marketplace %{name} removed"
       remove_marketplace_failed: "Could not remove marketplace %{name}"
+      cancel: "Cancel"
+      cancelled: "Stopped the change to %{name}"
     harness_summary: "%{accounts} accounts · %{plugins} plugins"
     other_harnesses: "Other Harnesses"
     unmanaged:

@@ -1200,6 +1200,12 @@ pub enum RuntimeToast {
         target: PluginOperationTarget,
         detail: String,
     },
+    /// The user stopped it before the harness's command ended.
+    PluginOperationCancelled {
+        operation: RuntimeOperationId,
+        profile_id: String,
+        target: PluginOperationTarget,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

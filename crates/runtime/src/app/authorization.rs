@@ -505,7 +505,8 @@ impl AppState {
                 | Command::UpdateProviderPlugin { .. }
                 | Command::AddProviderMarketplace { .. }
                 | Command::RemoveProviderMarketplace { .. }
-                | Command::ResolvePluginChallenge { .. } => Err(refusal("command")),
+                | Command::ResolvePluginChallenge { .. }
+                | Command::CancelPluginOperation { .. } => Err(refusal("command")),
             },
             ClientPayload::Query(query) => match query {
                 Query::Ping | Query::SearchSessionContent { .. } | Query::ArchivedSessions => {

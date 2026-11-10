@@ -1,5 +1,5 @@
 //! Grok Build's native plugin management, driven through `grok plugin …`
-//! with one bounded child process per command.
+//! with one child process per command.
 //!
 //! Grok installs plugins for the user only, so every installation is in the
 //! user scope. Enablement is left out: no `grok plugin` read reports it, and
@@ -20,8 +20,6 @@ use crate::{
 };
 
 const LIST_TIMEOUT: Duration = Duration::from_secs(60);
-/// Installs, updates and marketplace adds may clone repositories.
-const MUTATION_TIMEOUT: Duration = Duration::from_secs(300);
 const DETAILS_CONCURRENCY: usize = 4;
 
 pub(crate) async fn list(context: &PluginContext) -> Result<PluginListing, AgentError> {
@@ -29,12 +27,12 @@ pub(crate) async fn list(context: &PluginContext) -> Result<PluginListing, Agent
         run_cli(
             context,
             &args(&["plugin", "list", "--json", "--available"]),
-            LIST_TIMEOUT,
+            Some(LIST_TIMEOUT),
         ),
         run_cli(
             context,
             &args(&["plugin", "marketplace", "list", "--json"]),
-            LIST_TIMEOUT,
+            Some(LIST_TIMEOUT),
         ),
     )
     .await;
@@ -60,7 +58,7 @@ pub(crate) async fn list(context: &PluginContext) -> Result<PluginListing, Agent
                         Ok(name) => run_cli(
                             &context,
                             &["plugin".into(), "details".into(), name],
-                            LIST_TIMEOUT,
+                            Some(LIST_TIMEOUT),
                         )
                         .await
                         .and_then(succeeded),
@@ -91,20 +89,20 @@ pub(crate) async fn run(
     let mut argv = op_args(op)?;
     match op {
         PluginOp::Install { accept_command, .. } => {
-            let untrusted = run_cli(context, &argv, MUTATION_TIMEOUT).await?;
+            let untrusted = run_cli(context, &argv, None).await?;
             match install_step(untrusted, accept_command.as_deref())? {
                 InstallStep::Finished(outcome) => Ok(outcome),
                 InstallStep::Trust => {
                     argv.push("--trust".into());
-                    message_outcome(run_cli(context, &argv, MUTATION_TIMEOUT).await?)
+                    message_outcome(run_cli(context, &argv, None).await?)
                 }
             }
         }
         PluginOp::Update { .. } => {
-            let stdout = succeeded(run_cli(context, &argv, MUTATION_TIMEOUT).await?)?;
+            let stdout = succeeded(run_cli(context, &argv, None).await?)?;
             Ok(update_outcome(&stdout))
         }
-        _ => message_outcome(run_cli(context, &argv, MUTATION_TIMEOUT).await?),
+        _ => message_outcome(run_cli(context, &argv, None).await?),
     }
 }
 
@@ -135,19 +133,21 @@ struct CliOutput {
 async fn run_cli(
     context: &PluginContext,
     args: &[String],
-    timeout: Duration,
+    bound: Option<Duration>,
 ) -> Result<CliOutput, AgentError> {
     let display = format!("grok {}", args.join(" "));
-    let mut command = smol::process::Command::from(management_command(context, args)?);
-    // `output()` gives the child a null stdin, so a prompt can never wait on
-    // input, and dropping it on timeout kills the child.
-    command.kill_on_drop(true);
-    let output = smol::future::or(async { Some(command.output().await) }, async {
-        smol::Timer::after(timeout).await;
-        None
-    })
-    .await
-    .ok_or_else(|| AgentError::Provider(format!("`{display}` timed out")))?
+    // A listing, which no one can stop, is bounded; a change runs until it
+    // ends or the user cancels it, which drops this and stops the command.
+    let output = crate::process::tree_output(management_command(context, args)?);
+    let output = match bound {
+        Some(bound) => smol::future::or(async { Some(output.await) }, async {
+            smol::Timer::after(bound).await;
+            None
+        })
+        .await
+        .ok_or_else(|| AgentError::Provider(format!("`{display}` timed out")))?,
+        None => output.await,
+    }
     .map_err(|error| AgentError::Spawn(format!("spawning `{display}`: {error}")))?;
     Ok(CliOutput {
         success: output.status.success(),

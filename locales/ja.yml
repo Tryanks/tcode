@@ -861,6 +861,8 @@ providers:
       removing_marketplace: "マーケットプレイス %{name} を削除中…"
       removed_marketplace: "マーケットプレイス %{name} を削除しました"
       remove_marketplace_failed: "マーケットプレイス %{name} を削除できませんでした"
+      cancel: "キャンセル"
+      cancelled: "%{name} の変更を中止しました"
     harness_summary: "%{accounts} アカウント · %{plugins} プラグイン"
     other_harnesses: "その他のハーネス"
     unmanaged:

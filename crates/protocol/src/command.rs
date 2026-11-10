@@ -284,6 +284,10 @@ pub enum Command {
         op_id: RuntimeOperationId,
         accept: bool,
     },
+    /// Stop the profile's running plugin change and the commands it runs.
+    CancelPluginOperation {
+        profile_id: String,
+    },
     ResetSettings,
     WriteRelaunchMarker {
         /// The thread to reopen; absent when none is on screen.

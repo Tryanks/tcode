@@ -209,6 +209,8 @@ pub(super) struct PresentedRuntimeToast {
 pub(super) enum RuntimeToastAction {
     RetryGit(GitActionRequest),
     UpdateProviders(Vec<ProviderKind>),
+    /// Stop the profile's running plugin change.
+    CancelPluginOperation(String),
 }
 
 fn git_action_toast_titles(action: GitAction) -> (String, String) {
@@ -237,6 +239,15 @@ fn git_action_toast_titles(action: GitAction) -> (String, String) {
             crate::tr!("git.toast.initializing").into_owned(),
             crate::tr!("git.toast.initialized").into_owned(),
         ),
+    }
+}
+
+/// What a native plugin operation changes, as its toasts name it.
+fn plugin_operation_name(target: &PluginOperationTarget) -> &str {
+    match target {
+        PluginOperationTarget::Plugin { plugin, .. } => plugin,
+        PluginOperationTarget::AddMarketplace { source } => source,
+        PluginOperationTarget::RemoveMarketplace { name } => name,
     }
 }
 
@@ -458,7 +469,9 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
             None,
         ),
         RuntimeToast::PluginOperationStarted {
-            operation, target, ..
+            operation,
+            profile_id,
+            target,
         } => {
             let [title, _, _] = plugin_operation_toast_titles(target);
             (
@@ -466,9 +479,24 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
                 ToastKind::Loading,
                 title,
                 None,
-                None,
+                Some(RuntimeToastAction::CancelPluginOperation(
+                    profile_id.clone(),
+                )),
             )
         }
+        RuntimeToast::PluginOperationCancelled {
+            operation, target, ..
+        } => (
+            RuntimeToastDisposition::Finish(*operation),
+            ToastKind::Info,
+            crate::tr!(
+                "providers.plugins.toast.cancelled",
+                name = plugin_operation_name(target)
+            )
+            .into_owned(),
+            None,
+            None,
+        ),
         RuntimeToast::PluginOperationSucceeded {
             operation, target, ..
         } => {
@@ -628,6 +656,11 @@ mod tests {
                 target: plugin_target.clone(),
                 detail: "plugin raw\0detail".into(),
             },
+            RuntimeToast::PluginOperationCancelled {
+                operation: RuntimeOperationId(3),
+                profile_id: "claude".into(),
+                target: plugin_target.clone(),
+            },
         ];
 
         for locale in [crate::LANGUAGE_ENGLISH, crate::LANGUAGE_SIMPLIFIED_CHINESE] {
@@ -636,13 +669,37 @@ mod tests {
                 let presented = present_runtime_toast(toast);
                 match toast {
                     RuntimeToast::GitStarted { operation, .. }
-                    | RuntimeToast::AcpInstallStarted { operation, .. }
-                    | RuntimeToast::PluginOperationStarted { operation, .. } => {
+                    | RuntimeToast::AcpInstallStarted { operation, .. } => {
                         assert_eq!(
                             presented.disposition,
                             RuntimeToastDisposition::Start(*operation)
                         );
                         assert_eq!(presented.kind, ToastKind::Loading);
+                    }
+                    // A running plugin change can be stopped from its toast.
+                    RuntimeToast::PluginOperationStarted {
+                        operation,
+                        profile_id,
+                        ..
+                    } => {
+                        assert_eq!(
+                            presented.disposition,
+                            RuntimeToastDisposition::Start(*operation)
+                        );
+                        assert_eq!(presented.kind, ToastKind::Loading);
+                        assert_eq!(
+                            presented.action,
+                            Some(RuntimeToastAction::CancelPluginOperation(
+                                profile_id.clone()
+                            ))
+                        );
+                    }
+                    RuntimeToast::PluginOperationCancelled { operation, .. } => {
+                        assert_eq!(
+                            presented.disposition,
+                            RuntimeToastDisposition::Finish(*operation)
+                        );
+                        assert_eq!(presented.kind, ToastKind::Info);
                     }
                     RuntimeToast::GitSucceeded { operation, .. }
                     | RuntimeToast::AcpInstallSucceeded { operation, .. }

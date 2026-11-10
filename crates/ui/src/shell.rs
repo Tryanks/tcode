@@ -4142,6 +4142,9 @@ impl AppShell {
             let label = match &action {
                 RuntimeToastAction::RetryGit(_) => crate::tr!("git.toast.retry"),
                 RuntimeToastAction::UpdateProviders(_) => crate::tr!("providers.update_all"),
+                RuntimeToastAction::CancelPluginOperation(_) => {
+                    crate::tr!("providers.plugins.toast.cancel")
+                }
             }
             .into_owned()
             .into();
@@ -4153,6 +4156,9 @@ impl AppShell {
                         RuntimeToastAction::RetryGit(request) => store.retry_git_action(request),
                         RuntimeToastAction::UpdateProviders(providers) => {
                             store.update_providers(providers)
+                        }
+                        RuntimeToastAction::CancelPluginOperation(profile_id) => {
+                            store.cancel_plugin_operation(profile_id)
                         }
                     });
                 }),

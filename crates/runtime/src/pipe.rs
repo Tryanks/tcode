@@ -863,6 +863,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                     .map(|()| CommandResponse::Unit),
             );
         }
+        Command::CancelPluginOperation { profile_id } => {
+            app.cancel_plugin_operation(&profile_id, cx)
+        }
         Command::ResetSettings => app.reset_settings(cx),
         Command::WriteRelaunchMarker {
             session_id,

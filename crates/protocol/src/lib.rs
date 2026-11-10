@@ -336,6 +336,7 @@ pub use wire::{
 // SetFollowUp carries on and note instead of a FollowUp: the host stamps since.
 // SessionStatus gains preparing_turn.
 // ServerEvent gains preview_request_cancelled.
+// Command gains cancel_plugin_operation, RuntimeToast plugin_operation_cancelled.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

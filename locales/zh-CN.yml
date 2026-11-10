@@ -854,6 +854,8 @@ providers:
       removing_marketplace: "正在移除插件市场 %{name}…"
       removed_marketplace: "插件市场 %{name} 已移除"
       remove_marketplace_failed: "无法移除插件市场 %{name}"
+      cancel: "取消"
+      cancelled: "已停止对 %{name} 的更改"
     harness_summary: "%{accounts} 个账号 · %{plugins} 个插件"
     other_harnesses: "其他 Harness"
     unmanaged:

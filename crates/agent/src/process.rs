@@ -494,6 +494,41 @@ pub(crate) fn refuse_batch_line_breaks<'a>(
     Ok(())
 }
 
+/// Run a harness's management command to its end and collect what it wrote.
+/// Its stdin is null, so a prompt can never wait on input; dropping the
+/// future stops the command and everything it started, as a cancelled
+/// plugin change does.
+pub(crate) async fn tree_output(
+    mut command: std::process::Command,
+) -> std::io::Result<std::process::Output> {
+    use smol::io::AsyncReadExt as _;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    async fn read_all(pipe: Option<impl smol::io::AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            pipe.read_to_end(&mut bytes).await?;
+        }
+        Ok(bytes)
+    }
+    let mut child = ProcessTree::new(smol::process::Command::from(command).spawn()?);
+    let (stdout, stderr) =
+        smol::future::try_zip(read_all(child.stdout.take()), read_all(child.stderr.take())).await?;
+    let status = child.status().await?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// An async (`smol`) command with the console suppressed. `async_process`
 /// exposes no `creation_flags`, so the flag rides in through the `From` impl.
 pub(crate) fn async_command<S: AsRef<std::ffi::OsStr>>(program: S) -> smol::process::Command {
@@ -765,6 +800,43 @@ mod tests {
         let mut late = processes.hold(harness());
         let _stdin = late.stdin.take();
         assert!(!late.wait().unwrap().success());
+    }
+
+    /// A plugin change the user cancels drops its command's future, which
+    /// stops the command. The command here holds a pipe the test reads, which
+    /// ends only when it exits.
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_management_command_stops_it() {
+        const ROLE: &str = "TCODE_TEST_PARKED_COMMAND";
+        if let Some(fifo) = std::env::var_os(ROLE) {
+            let mut held = std::fs::OpenOptions::new().write(true).open(fifo).unwrap();
+            writeln!(held, "parked").unwrap();
+            loop {
+                std::thread::park();
+            }
+        }
+        let fifo = std::env::temp_dir().join(format!("tcode-parked-{}", uuid::Uuid::new_v4()));
+        let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path this test owns.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let mut command = command(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "process::tests::dropping_a_management_command_stops_it",
+                "--quiet",
+            ])
+            .env(ROLE, &fifo);
+        let running = smol::spawn(tree_output(command));
+        let mut held = BufReader::new(std::fs::File::open(&fifo).unwrap());
+        let mut line = String::new();
+        held.read_line(&mut line).unwrap();
+        assert_eq!(line, "parked\n");
+
+        drop(running);
+        held.read_to_string(&mut line).unwrap();
+        std::fs::remove_file(&fifo).unwrap();
     }
 
     #[test]
