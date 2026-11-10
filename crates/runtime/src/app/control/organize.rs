@@ -51,7 +51,7 @@ impl AppState {
             .map(|change| change.thread_id.clone())
             .collect();
         if positioned.is_empty() {
-            return Answer::Now(Ok(self.update_threads(caller, params, &HashMap::new(), cx)));
+            return Answer::Now(self.update_threads(caller, params, &HashMap::new(), cx));
         }
         let store = self.store.clone();
         let flush = self.store_write_barrier(cx);
@@ -74,8 +74,8 @@ impl AppState {
                 error => Err(format!("store write barrier failed: {error:?}")),
             };
             finish_on_host(host_cx, move |state, cx| {
-                ends.map(|ends| state.update_threads(&caller, params, &ends, cx))
-                    .map_err(|error| format!("could not read the threads' logs: {error}"))
+                ends.map_err(|error| format!("could not read the threads' logs: {error}"))
+                    .and_then(|ends| state.update_threads(&caller, params, &ends, cx))
             })
             .await
         }))
@@ -87,7 +87,7 @@ impl AppState {
         params: UpdateThreadsParams,
         log_ends: &HashMap<String, u64>,
         cx: &mut HostCx,
-    ) -> serde_json::Value {
+    ) -> Result<serde_json::Value, String> {
         let dry_run = params.dry_run.unwrap_or(false);
         let mut cx = agent_cx(cx);
         let results = params
@@ -95,7 +95,8 @@ impl AppState {
             .into_iter()
             .map(|change| self.update_thread(caller, change, dry_run, log_ends, &mut cx))
             .collect();
-        serde_json::to_value(UpdateThreadsAnswer { dry_run, results }).unwrap_or_default()
+        serde_json::to_value(UpdateThreadsAnswer { dry_run, results })
+            .map_err(|error| error.to_string())
     }
 
     fn update_thread(
