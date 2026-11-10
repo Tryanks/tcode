@@ -319,7 +319,7 @@ pub struct ProviderVersionState {
     pub checking: bool,
     /// Whether an installation update is currently running.
     pub updating: bool,
-    /// Verified installation and the exact update plan presented to the user.
+    /// The installation and the update plan presented to the user.
     pub installation: Option<Installation>,
 }
 

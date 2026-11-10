@@ -7,7 +7,7 @@ use super::installation::{
     Context, Installation, LatestQuery, SystemProbe, UpdateCommand, env_value,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) enum Query {
     Apt(UpdateCommand),
     Apk {
@@ -116,7 +116,7 @@ async fn linux(ctx: &Context<'_>) -> Option<Installation> {
                 false
             };
             if !update_allowed {
-                return Some(owned(ctx, InstallSource::System, package, None));
+                return Some(ctx.managed(InstallSource::System, None));
             }
             let update = terminal(
                 ctx,
@@ -130,12 +130,7 @@ async fn linux(ctx: &Context<'_>) -> Option<Installation> {
                     LatestQuery::System(Query::Apt(query))
                 })
                 .unwrap_or(LatestQuery::None);
-            return Some(ctx.installation(
-                InstallSource::System,
-                update,
-                latest,
-                vec![package.into()],
-            ));
+            return Some(ctx.installation(InstallSource::System, update, latest));
         }
         if let Some(query) = ctx.command("rpm", &["-qf", "--queryformat", "%{NAME}\n", "--", path])
             && let Some(output) = ctx.probe.output(&query).await
@@ -144,14 +139,14 @@ async fn linux(ctx: &Context<'_>) -> Option<Installation> {
             let update = terminal(ctx, "dnf", &["upgrade", "--", package])
                 .or_else(|| terminal(ctx, "yum", &["upgrade", "--", package]))
                 .or_else(|| terminal(ctx, "zypper", &["update", "--", package]));
-            return Some(owned(ctx, InstallSource::System, package, update));
+            return Some(ctx.managed(InstallSource::System, update));
         }
         if let Some(query) = ctx.command("pacman", &["-Qoq", "--", path])
             && let Some(output) = ctx.probe.output(&query).await
-            && let Some(package) = single_package(&output)
+            && single_package(&output).is_some()
         {
             // Pacman upgrades may require a full system upgrade or an AUR helper.
-            return Some(owned(ctx, InstallSource::System, package, None));
+            return Some(ctx.managed(InstallSource::System, None));
         }
         if let Some(query) = ctx.command("apk", &["info", "--who-owns", "--quiet", "--", path])
             && let Some(output) = ctx.probe.output(&query).await
@@ -170,12 +165,7 @@ async fn linux(ctx: &Context<'_>) -> Option<Installation> {
                     })
                 })
                 .unwrap_or(LatestQuery::None);
-            return Some(ctx.installation(
-                InstallSource::System,
-                update,
-                latest,
-                vec![package.into()],
-            ));
+            return Some(ctx.installation(InstallSource::System, update, latest));
         }
     }
     None
@@ -231,15 +221,6 @@ fn terminal(ctx: &Context<'_>, manager: &str, args: &[&str]) -> Option<UpdateCom
     };
     command.requires_terminal = true;
     Some(command)
-}
-
-fn owned(
-    ctx: &Context<'_>,
-    source: InstallSource,
-    package: &str,
-    update: Option<UpdateCommand>,
-) -> Installation {
-    ctx.installation(source, update, LatestQuery::None, vec![package.to_string()])
 }
 
 async fn windows(ctx: &Context<'_>) -> Option<Installation> {
@@ -323,7 +304,7 @@ fn scoop(ctx: &Context<'_>) -> Option<Installation> {
             })
             .flatten()
             .unwrap_or(LatestQuery::None);
-        return Some(ctx.installation(InstallSource::Scoop, command, latest, vec![package.into()]));
+        return Some(ctx.installation(InstallSource::Scoop, command, latest));
     }
     None
 }
@@ -351,7 +332,7 @@ fn chocolatey(ctx: &Context<'_>) -> Option<Installation> {
     if let Some(command) = &mut command {
         command.requires_terminal = true;
     }
-    Some(owned(ctx, InstallSource::Chocolatey, package, command))
+    Some(ctx.managed(InstallSource::Chocolatey, command))
 }
 
 async fn winget(ctx: &Context<'_>) -> Option<Installation> {
@@ -399,7 +380,7 @@ async fn winget(ctx: &Context<'_>) -> Option<Installation> {
         if let Some(command) = &mut command {
             command.requires_terminal = true;
         }
-        return Some(owned(ctx, InstallSource::Winget, package, command));
+        return Some(ctx.managed(InstallSource::Winget, command));
     }
     None
 }

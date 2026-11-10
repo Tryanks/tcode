@@ -587,9 +587,7 @@ impl AppState {
         else {
             return;
         };
-        let Some(key_env) = endpoint.key_envs.first().copied() else {
-            return;
-        };
+        let key_env = endpoint.key_envs[0];
         let name = name.trim();
         let name = if name.is_empty() { "Third-party" } else { name };
         let model = model.map(str::trim).filter(|m| !m.is_empty());
@@ -1418,16 +1416,10 @@ impl AppState {
             .provider_versions
             .get(&provider)
             .and_then(|s| s.installation.clone());
-        let Some(installation) = installation.filter(|installation| {
-            installation
-                .update
-                .as_ref()
-                .is_some_and(|command| !command.requires_terminal)
-        }) else {
-            self.complete_provider_update(provider, false, cx);
-            return;
-        };
-        let Some(binary) = self.resolve_provider_binary(provider) else {
+        let Some(command) = installation
+            .and_then(|installation| installation.update)
+            .filter(|command| !command.requires_terminal)
+        else {
             self.complete_provider_update(provider, false, cx);
             return;
         };
@@ -1439,63 +1431,12 @@ impl AppState {
         status.updating = true;
         status.checking = false;
         status.revision += 1;
-        let revision = status.revision;
 
-        let settings = self.settings.clone();
-        let settings_store = self.settings_store.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let env = host_cx
-                .unblock(move || {
-                    let profile_id = Settings::builtin_profile_id(provider);
-                    std::io::Result::Ok(
-                        launch_env_for_profile(
-                            &settings,
-                            profile_id,
-                            settings_store
-                                .profile_secrets(&Settings::harness_secret_id(provider))?,
-                            settings_store.profile_secrets(profile_id)?,
-                        )
-                        .pairs(provider),
-                    )
-                })
-                .await;
-            let env = match env {
-                Ok(env) => env,
-                Err(error) => {
-                    host_cx.enqueue(move |state, cx| {
-                        state.report_error(RuntimeError::External(error.to_string()), cx);
-                        state.complete_provider_update(provider, false, cx);
-                    });
-                    return;
-                }
-            };
-            let current = provider_updates::resolve_installation(provider, &binary, &env).await;
+            let ok = command.run().await;
             host_cx.enqueue(move |state, cx| {
-                if state
-                    .providers
-                    .provider_versions
-                    .get(&provider)
-                    .map(|s| s.revision)
-                    != Some(revision)
-                    || state.resolve_provider_binary(provider).as_ref() != Some(&binary)
-                    || current != installation
-                {
-                    if let Some(status) = state.providers.provider_versions.get_mut(&provider) {
-                        status.updating = false;
-                        status.installation = None;
-                    }
-                    state.complete_provider_update(provider, false, cx);
-                    return;
-                }
-                let command = current.update.expect("validated automatic update plan");
-                let host_cx = cx.clone();
-                HostCx::spawn_detached(cx, async move {
-                    let ok = command.run().await;
-                    host_cx.enqueue(move |state, cx| {
-                        state.complete_provider_update(provider, ok, cx);
-                    });
-                });
+                state.complete_provider_update(provider, ok, cx);
             });
         });
     }

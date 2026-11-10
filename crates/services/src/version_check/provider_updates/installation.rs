@@ -7,19 +7,14 @@ use serde_json::Value;
 
 use super::{InstallSource, npm_package};
 
-/// A plan is bound to the binary and manager evidence observed when it was made.
-/// Re-resolve it before executing: a PATH or configuration change can replace its owner.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Installation {
     pub source: InstallSource,
     pub update: Option<UpdateCommand>,
-    binary: PathBuf,
-    canonical: PathBuf,
-    identity: Vec<String>,
     latest: LatestQuery,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct UpdateCommand {
     pub(super) program: PathBuf,
     pub(super) args: Vec<String>,
@@ -131,7 +126,7 @@ const DISPLAY_ENV: &[&str] = &[
     "CLAUDE_CONFIG_DIR",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) enum LatestQuery {
     None,
     Registry(String),
@@ -279,7 +274,7 @@ impl Context<'_> {
     }
 
     pub fn managed(&self, source: InstallSource, update: Option<UpdateCommand>) -> Installation {
-        self.installation(source, update, LatestQuery::None, Vec::new())
+        self.installation(source, update, LatestQuery::None)
     }
 
     pub fn installation(
@@ -287,15 +282,11 @@ impl Context<'_> {
         source: InstallSource,
         update: Option<UpdateCommand>,
         latest: LatestQuery,
-        identity: Vec<String>,
     ) -> Installation {
         Installation {
             source,
             update,
-            binary: self.binary.clone(),
-            canonical: self.canonical.clone(),
             latest,
-            identity,
         }
     }
 
@@ -556,8 +547,7 @@ async fn mise(context: &Context<'_>) -> Option<Installation> {
                 .and_then(Value::as_str);
             let requested = record.get("requested_version").and_then(Value::as_str);
             let current = record.get("version").and_then(Value::as_str);
-            let (Some(source), Some(requested), Some(current)) = (source, requested, current)
-            else {
+            let (Some(_), Some(requested), Some(current)) = (source, requested, current) else {
                 return Some(context.managed(InstallSource::Mise, None));
             };
             // External path/ref aliases are not a release channel that can be upgraded safely.
@@ -574,13 +564,6 @@ async fn mise(context: &Context<'_>) -> Option<Installation> {
                     tool: tool.clone(),
                     current: current.to_string(),
                 },
-                vec![
-                    tool.clone(),
-                    backend,
-                    source.to_string(),
-                    requested.to_string(),
-                    selected.to_string_lossy().into_owned(),
-                ],
             ));
         }
     }
@@ -659,12 +642,7 @@ async fn version_managers(context: &Context<'_>) -> Option<Installation> {
                 LatestQuery::None
             };
             let update = context.at(which.program, &["install", &target]);
-            return Some(context.installation(
-                InstallSource::Volta,
-                Some(update),
-                latest,
-                vec![package.name, actual.to_string_lossy().into_owned()],
-            ));
+            return Some(context.installation(InstallSource::Volta, Some(update), latest));
         }
         return Some(context.managed(InstallSource::Volta, None));
     }
@@ -779,7 +757,6 @@ async fn brew(context: &Context<'_>) -> Option<Installation> {
                     target: target.to_string(),
                     cask,
                 },
-                vec![target.to_string(), prefix.to_string_lossy().into_owned()],
             ));
         }
     }
@@ -905,7 +882,6 @@ async fn javascript(context: &Context<'_>) -> Option<Installation> {
                     command: latest,
                     yarn: false,
                 },
-                vec![package.name, package.root.to_string_lossy().into_owned()],
             ));
         }
     }
@@ -1034,10 +1010,6 @@ async fn javascript_plan(
             command: query,
             yarn: source == InstallSource::Yarn,
         },
-        vec![
-            package.name.clone(),
-            package.root.to_string_lossy().into_owned(),
-        ],
     ))
 }
 
@@ -1179,13 +1151,10 @@ fn native(context: &Context<'_>) -> Option<Installation> {
             {
                 return Some(context.managed(InstallSource::Native, None));
             }
-            let (latest, identity) =
-                claude_channel(context, &home).unwrap_or((LatestQuery::None, Vec::new()));
             Some(context.installation(
                 InstallSource::Native,
                 Some(context.at(context.binary.clone(), &["update"])),
-                latest,
-                identity,
+                claude_channel(context, &home).unwrap_or(LatestQuery::None),
             ))
         }
         ProviderKind::OpenCode if context.canonical == home.join(".opencode/bin/opencode") => {
@@ -1193,14 +1162,13 @@ fn native(context: &Context<'_>) -> Option<Installation> {
                 InstallSource::Native,
                 Some(context.at(context.binary.clone(), &["upgrade", "--method", "curl"])),
                 LatestQuery::Registry(npm_package(ProviderKind::OpenCode).into()),
-                Vec::new(),
             ))
         }
         _ => None,
     }
 }
 
-fn claude_channel(context: &Context<'_>, home: &Path) -> Option<(LatestQuery, Vec<String>)> {
+fn claude_channel(context: &Context<'_>, home: &Path) -> Option<LatestQuery> {
     let config = env_value(context.env, "CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".claude"));
@@ -1214,7 +1182,6 @@ fn claude_channel(context: &Context<'_>, home: &Path) -> Option<(LatestQuery, Ve
     };
     let mut channel = "latest".to_string();
     let mut maximum = None;
-    let mut identity = Vec::new();
     for path in [
         config.join("settings.json"),
         context.cwd.join(".claude/settings.json"),
@@ -1234,10 +1201,8 @@ fn claude_channel(context: &Context<'_>, home: &Path) -> Option<(LatestQuery, Ve
         if let Some(value) = json.get("requiredMaximumVersion") {
             maximum = Some(super::parse_version(value.as_str()?)?);
         }
-        identity.push(path.to_string_lossy().into_owned());
-        identity.push(format!("{channel}:{maximum:?}"));
     }
-    Some((LatestQuery::Claude { channel, maximum }, identity))
+    Some(LatestQuery::Claude { channel, maximum })
 }
 
 #[cfg(test)]
