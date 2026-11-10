@@ -32,7 +32,6 @@ const AX_ERROR_API_DISABLED: AXError = -25211;
 const AX_VALUE_CGPOINT: AXValueType = 1;
 const AX_VALUE_CGSIZE: AXValueType = 2;
 const AX_VALUE_CGRECT: AXValueType = 3;
-const MAX_DEPTH: usize = 18;
 const MAX_NODES: usize = 3_000;
 const MAX_CHILDREN_PER_NODE: usize = 500;
 
@@ -512,7 +511,7 @@ pub(super) fn observe_tree(root: &RootInfo) -> Result<UiNode, BackendError> {
         visited: VisitedElements::default(),
         root_frame: root.frame,
     };
-    let mut tree = walk_element(window.as_ax(), 0, &mut context).ok_or_else(|| {
+    let mut tree = walk_tree(window.as_ax(), &mut context).ok_or_else(|| {
         BackendError::new(
             BackendErrorCode::ObservationFailed,
             format!("the accessibility tree for {} was empty", root.title),
@@ -679,11 +678,45 @@ impl VisitedElements {
     }
 }
 
-fn walk_element(
+/// The subtree under `root`, depth first, ending once [`MAX_NODES`] nodes are
+/// read. The walk keeps its own stack: a web area's tree can be deeper than
+/// the thread's stack would allow one frame per level.
+fn walk_tree(root: AXUIElementRef, context: &mut WalkContext) -> Option<UiNode> {
+    let mut stack = vec![read_element(root, context)?];
+    loop {
+        let (_, children) = stack.last_mut()?;
+        let child = if context.count < MAX_NODES {
+            children.next()
+        } else {
+            None
+        };
+        if let Some(child) = child {
+            if let Some(entry) = read_element(child.as_ax(), context) {
+                stack.push(entry);
+            }
+            continue;
+        }
+        let (node, _) = stack.pop()?;
+        let Some((parent, _)) = stack.last_mut() else {
+            return Some(node);
+        };
+        let invisible_leaf = node.children.is_empty()
+            && !node.is_interactive()
+            && node.title.is_empty()
+            && node.value.is_empty()
+            && (!node.frame.has_area()
+                || (context.root_frame.has_area() && !node.frame.intersects(context.root_frame)));
+        if !invisible_leaf {
+            parent.children.push(node);
+        }
+    }
+}
+
+/// One element's node, without its children yet, and the children to walk.
+fn read_element(
     element: AXUIElementRef,
-    depth: usize,
     context: &mut WalkContext,
-) -> Option<UiNode> {
+) -> Option<(UiNode, std::vec::IntoIter<OwnedCf>)> {
     if context.count >= MAX_NODES || !context.visited.insert(element) {
         return None;
     }
@@ -702,7 +735,7 @@ fn walk_element(
     let actions = action_names(element);
     let enabled = attribute_bool(element, "AXEnabled").unwrap_or(true);
     let focused = attribute_bool(element, "AXFocused").unwrap_or(false);
-    let mut node = UiNode {
+    let node = UiNode {
         ref_id: String::new(),
         role: canonical_role(&role),
         title,
@@ -714,29 +747,9 @@ fn walk_element(
         focused,
         children: Vec::new(),
     };
-
-    if depth < MAX_DEPTH && context.count < MAX_NODES {
-        let remaining = MAX_NODES - context.count;
-        for child in copy_children(element, remaining.min(MAX_CHILDREN_PER_NODE)) {
-            let Some(child) = walk_element(child.as_ax(), depth + 1, context) else {
-                continue;
-            };
-            let invisible_leaf = child.children.is_empty()
-                && !child.is_interactive()
-                && child.title.is_empty()
-                && child.value.is_empty()
-                && (!child.frame.has_area()
-                    || (context.root_frame.has_area()
-                        && !child.frame.intersects(context.root_frame)));
-            if !invisible_leaf {
-                node.children.push(child);
-            }
-            if context.count >= MAX_NODES {
-                break;
-            }
-        }
-    }
-    Some(node)
+    let remaining = MAX_NODES - context.count;
+    let children = copy_children(element, remaining.min(MAX_CHILDREN_PER_NODE));
+    Some((node, children.into_iter()))
 }
 
 fn copy_children(element: AXUIElementRef, maximum: usize) -> Vec<OwnedCf> {
