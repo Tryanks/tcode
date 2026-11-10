@@ -346,13 +346,11 @@ impl Session {
         f(&mut self.state.lock_recover())
     }
 
-    /// Cancel the open turn as [`SessionCommand::Interrupt`] does. The turn
-    /// ends when the agent answers its `session/prompt`.
+    /// Cancel the agent's work as [`SessionCommand::Interrupt`] does, whether
+    /// or not tcode has a turn open: the agent may be running one tcode has
+    /// not seen start. A sent turn ends when the agent answers its
+    /// `session/prompt`.
     pub(crate) async fn interrupt(&self, session_id: &acp::SessionId) {
-        // The open turn may be one the agent started itself.
-        if self.state.lock_recover().turn.is_none() {
-            return;
-        }
         // Every in-flight permission request must be answered with
         // `cancelled` first: the protocol requires it, and the agent will
         // not settle the turn otherwise.
