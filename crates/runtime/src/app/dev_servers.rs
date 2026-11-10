@@ -13,9 +13,6 @@ use tcode_services::listening::{self, Listener};
 
 const REFRESH: Duration = Duration::from_secs(2);
 
-/// How many picks a thread is offered.
-const SHOWN: usize = 8;
-
 /// Ports dev servers choose by default (Vite, Astro, Angular, Next/CRA,
 /// Rails, Django, Flask, http.server, Jupyter, ...).
 const COMMON_PORTS: &[u16] = &[
@@ -174,7 +171,6 @@ impl AppState {
         picks
             .into_iter()
             .filter(|(listener, _)| ports.insert(listener.port))
-            .take(SHOWN)
             .map(|(listener, cwd)| DevServer {
                 port: listener.port,
                 pid: listener.pid,
