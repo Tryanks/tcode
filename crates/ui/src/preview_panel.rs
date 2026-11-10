@@ -301,7 +301,7 @@ impl PreviewPanel {
             {
                 let owner = cx.entity_id();
                 cx.on_release(move |this, cx| {
-                    this.lifecycle_entity()
+                    this.lifecycle()
                         .update(cx, |lifecycle, cx| lifecycle.forget_owner(owner, cx));
                 })
             },

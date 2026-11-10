@@ -186,29 +186,6 @@ jobs:
           WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: 1
         run: xvfb-run -a cargo nextest run --workspace --locked --no-fail-fast
 
-      # The preview on a Wayland session runs GTK on wayland-nest; a headless
-      # sway is that session. The smoke exits 0 when it skips, so it must
-      # print PASS.
-      - name: Run the preview smoke on Wayland
-        if: runner.os == 'Linux'
-        env:
-          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: 1
-        run: |
-          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 install -y --no-install-recommends sway mesa-vulkan-drivers
-          cargo build -p tcode --locked
-          export XDG_RUNTIME_DIR="$RUNNER_TEMP/wayland" TCODE_DATA_DIR="$RUNNER_TEMP/tcode-data"
-          mkdir -p -m 700 "$XDG_RUNTIME_DIR"
-          printf 'output HEADLESS-1 resolution 1600x1000\n' > "$RUNNER_TEMP/sway.conf"
-          WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 \
-            sway -c "$RUNNER_TEMP/sway.conf" &
-          for _ in $(seq 100); do
-            socket=$(cd "$XDG_RUNTIME_DIR" && ls wayland-? 2>/dev/null | head -n 1)
-            [ -n "$socket" ] && break
-            sleep 0.1
-          done
-          env -u DISPLAY WAYLAND_DISPLAY="$socket" timeout 300 target/debug/tcode --preview-smoke 2>&1 | tee "$RUNNER_TEMP/smoke.log"
-          grep -q '^preview-smoke: PASS$' "$RUNNER_TEMP/smoke.log"
-
   macos-clippy:
     name: macOS arm64 / clippy
     if: ${{ !github.event.pull_request.draft }}

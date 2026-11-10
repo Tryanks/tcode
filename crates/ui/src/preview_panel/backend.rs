@@ -35,8 +35,6 @@ const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
 /// How long a part drawn here takes to cross-fade to another of its states.
 const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
-const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly";
-
 /// Whether the pointer is dragging a gpui-base resize handle. Base keeps the
 /// handle's drag payload private; the resize cursor its band hands the drag is
 /// the public sign of one.
@@ -120,7 +118,7 @@ impl Backend {
 impl PreviewPanel {
     pub(super) fn refresh_preview_endpoint(&self, cx: &mut Context<Self>) {
         if let Ok(Some((host, _))) = self.store.read(cx).preview_proxy() {
-            self.lifecycle_entity().read(cx).refresh_endpoint(&host);
+            self.lifecycle().read(cx).refresh_endpoint(&host);
         }
     }
 
@@ -181,25 +179,19 @@ impl PreviewPanel {
         }
     }
 
-    pub(super) fn lifecycle_entity(&self) -> gpui::Entity<BrowserLifecycle> {
-        self.backend.lifecycle.clone()
-    }
-
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub(super) fn external_preview_url(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let key = self.active_key(cx)?;
         let logical = self
-            .lifecycle_entity()
+            .lifecycle()
             .read(cx)
             .remote_url(&key)
             .or_else(|| self.store.read(cx).preview_url(&key))?;
-        self.lifecycle_entity()
-            .read(cx)
-            .external_url(&key, &logical)
+        self.lifecycle().read(cx).external_url(&key, &logical)
     }
 
     pub(super) fn observe_backend(&mut self, cx: &mut Context<Self>) {
-        let lifecycle = self.lifecycle_entity();
+        let lifecycle = self.lifecycle();
         self._subscriptions
             .push(cx.observe(&lifecycle, |this, _, cx| {
                 this.sync_visibility(cx);
@@ -215,7 +207,7 @@ impl PreviewPanel {
         current: Option<(String, String)>,
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        let lifecycle = self.lifecycle_entity();
+        let lifecycle = self.lifecycle();
         let owner = cx.entity_id();
         if self.window_state.read(cx).compact {
             let previous = lifecycle.read(cx).active_identity(owner).cloned();
@@ -296,7 +288,7 @@ impl PreviewPanel {
         )
         .map(str::to_string);
         let owner = cx.entity_id();
-        self.lifecycle_entity().update(cx, |lifecycle, cx| {
+        self.lifecycle().update(cx, |lifecycle, cx| {
             if dragging {
                 lifecycle.hide_now(None, cx);
             } else if yielding {
@@ -319,7 +311,7 @@ impl PreviewPanel {
     /// press, and an inward drag's first motion would land on the native view
     /// in that frame, GPUI would never see it, and the divider would not
     /// move. It hides inside the press, and fades back in where the platform
-    /// allows it ([`BrowserLifecycle::set_visible`]).
+    /// allows it ([`BrowserLifecycle::show_for`]).
     #[cfg(not(target_os = "android"))]
     pub(super) fn yield_to_resize_handles(
         &self,
@@ -327,7 +319,7 @@ impl PreviewPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let panel = cx.entity().downgrade();
-        let page = active.and_then(|key| self.lifecycle_entity().read(cx).ready_view(key));
+        let page = active.and_then(|key| self.lifecycle().read(cx).ready_view(key));
         canvas(
             |_, _, _| {},
             move |_, _, window, _| {
@@ -389,13 +381,13 @@ impl PreviewPanel {
         cx: &mut Context<Self>,
     ) -> Availability {
         let initial_url = self.store.read(cx).preview_url(key);
-        self.lifecycle_entity().update(cx, |lifecycle, cx| {
+        self.lifecycle().update(cx, |lifecycle, cx| {
             lifecycle.ensure(key, initial_url.as_deref(), window, cx)
         })
     }
 
     pub(super) fn drop_webview(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.lifecycle_entity()
+        self.lifecycle()
             .update(cx, |lifecycle, cx| lifecycle.drop_view(key, cx));
         if self.mirrored.as_deref() == Some(key) {
             self.mirrored = None;
@@ -412,7 +404,7 @@ impl PreviewPanel {
             self.mirrored = None;
         }
         let store = self.store.clone();
-        self.lifecycle_entity().update(cx, |lifecycle, cx| {
+        self.lifecycle().update(cx, |lifecycle, cx| {
             lifecycle.prune(|key, cx| store.read(cx).preview_key_live(key), cx)
         });
     }
@@ -424,7 +416,7 @@ impl PreviewPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.lifecycle_entity().update(cx, |lifecycle, cx| {
+        self.lifecycle().update(cx, |lifecycle, cx| {
             lifecycle.navigate(key, url, window, cx);
         });
     }
@@ -476,7 +468,7 @@ impl PreviewPanel {
     fn go_forward(&mut self, cx: &mut Context<Self>) {
         self.user_acted(cx);
         if let Some(id) = self.active_key(cx)
-            && let Some(view) = self.lifecycle_entity().read(cx).ready_view(&id)
+            && let Some(view) = self.lifecycle().read(cx).ready_view(&id)
         {
             #[cfg(target_os = "android")]
             let forward = view.read(cx).raw().forward();
@@ -491,7 +483,7 @@ impl PreviewPanel {
     fn reload(&mut self, cx: &mut Context<Self>) {
         self.user_acted(cx);
         if let Some(id) = self.active_key(cx) {
-            self.lifecycle_entity().read(cx).reload(&id, cx);
+            self.lifecycle().read(cx).reload(&id, cx);
         }
     }
 
@@ -576,12 +568,12 @@ impl PreviewPanel {
         let placeholder = self.window_state.read(cx).compact
             && active.is_some_and(|key| {
                 self.store.read(cx).preview_url(key).is_none()
-                    && self.lifecycle_entity().read(cx).ready_view(key).is_none()
+                    && self.lifecycle().read(cx).ready_view(key).is_none()
             });
         #[cfg(target_os = "android")]
         if let Some(key) = active {
             let url = self
-                .lifecycle_entity()
+                .lifecycle()
                 .read(cx)
                 .ready_view(key)
                 .map(|view| view.read(cx).url())
@@ -597,7 +589,7 @@ impl PreviewPanel {
         }
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         if let Some(key) = active
-            && let Some(url) = self.lifecycle_entity().read(cx).remote_url(key)
+            && let Some(url) = self.lifecycle().read(cx).remote_url(key)
             && self.store.read(cx).preview_url(key).as_ref() != Some(&url)
         {
             self.store
@@ -665,7 +657,8 @@ impl PreviewPanel {
                     );
                     4
                 }
-                Availability::Starting(_) => 1,
+                #[cfg(any(target_os = "windows", target_os = "android"))]
+                Availability::Starting => 1,
                 Availability::Unavailable => 2,
             },
             None => 3,
@@ -690,7 +683,7 @@ impl PreviewPanel {
                     IconName::TriangleAlert,
                     crate::tr!("preview.unavailable").into_owned(),
                     Some(
-                        self.lifecycle_entity()
+                        self.lifecycle()
                             .read(cx)
                             .unavailable_error()
                             .map(str::to_owned)
@@ -727,7 +720,7 @@ impl PreviewPanel {
         self.sync_mounted_visibility(cx);
         // A page that failed to load says so in a banner that folds in over
         // it, and away once a load succeeds, drawn as it was.
-        let error = active.and_then(|key| self.lifecycle_entity().read(cx).load_error(key, cx));
+        let error = active.and_then(|key| self.lifecycle().read(cx).load_error(key, cx));
         if let Some(shown) = crate::motion::shown("preview-load-error", error, SHOW, window, cx) {
             let error = &shown.value;
             let banner = div()
@@ -948,7 +941,7 @@ impl PreviewPanel {
     /// reads or acts on the page waits for its document.
     fn loading_reply(&mut self, key: &str, reply: ReplyTx, cx: &mut Context<Self>) {
         if let Some(error) = self
-            .lifecycle_entity()
+            .lifecycle()
             .read(cx)
             .unavailable_error()
             .map(str::to_string)
@@ -975,13 +968,14 @@ impl PreviewPanel {
     ) -> bool {
         match self.ensure_webview(key, window, cx) {
             Availability::Ready(_) => true,
-            Availability::Starting(_) => {
-                let _ = reply.try_send(Err(STARTING_MESSAGE.into()));
+            #[cfg(any(target_os = "windows", target_os = "android"))]
+            Availability::Starting => {
+                let _ = reply.try_send(Err(super::lifecycle::STARTING_MESSAGE.into()));
                 false
             }
             Availability::Unavailable => {
                 let error = self
-                    .lifecycle_entity()
+                    .lifecycle()
                     .read(cx)
                     .unavailable_error()
                     .unwrap_or_default()
@@ -1007,7 +1001,7 @@ impl PreviewPanel {
             return;
         }
         let answered = self
-            .lifecycle_entity()
+            .lifecycle()
             .update(cx, |lifecycle, cx| lifecycle.call(key, method, args, cx));
         self.answer_with(key, answered, reply, |_| {}, cx);
     }
@@ -1021,7 +1015,7 @@ impl PreviewPanel {
         finish: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) + 'static,
         cx: &mut Context<Self>,
     ) {
-        let lifecycle = self.lifecycle_entity().downgrade();
+        let lifecycle = self.lifecycle().downgrade();
         let key = key.to_owned();
         cx.spawn(async move |_, cx| {
             let result = answered
@@ -1069,7 +1063,7 @@ impl PreviewPanel {
                 })
             })
             .unwrap_or_else(|| serde_json::json!({ "mode": "fill" }));
-        let lifecycle = self.lifecycle_entity();
+        let lifecycle = self.lifecycle();
         // The page cannot see a failed navigation, so the agent would keep
         // describing whatever was on screen before it.
         let load_error = lifecycle.read(cx).load_error(key, cx);
@@ -1129,7 +1123,7 @@ impl PreviewPanel {
         if !self.ready_or_reply(key, &reply, window, cx) {
             return;
         }
-        let answered = self.lifecycle_entity().update(cx, |lifecycle, cx| {
+        let answered = self.lifecycle().update(cx, |lifecycle, cx| {
             lifecycle.wait(
                 key,
                 selector,
@@ -1151,7 +1145,7 @@ impl PreviewPanel {
                 .preview_canvas(key)
                 .map(|(width, height)| gpui::size(px(width as f32), px(height as f32)));
             let fallback = window.viewport_size();
-            self.lifecycle_entity()
+            self.lifecycle()
                 .read(cx)
                 .stage_hidden(key, canvas, fallback, cx);
         }
@@ -1169,7 +1163,7 @@ impl PreviewPanel {
         cx: &mut Context<Self>,
     ) {
         let initial_url = self.store.read(cx).preview_url(key);
-        self.lifecycle_entity().update(cx, |lifecycle, cx| {
+        self.lifecycle().update(cx, |lifecycle, cx| {
             lifecycle.evaluate_json(key, initial_url.as_deref(), script, reply, window, cx);
         });
     }
@@ -1188,7 +1182,7 @@ impl PreviewPanel {
         if !self.ready_or_reply(key, &reply, window, cx) {
             return;
         }
-        let pictured = self.lifecycle_entity().update(cx, |lifecycle, cx| {
+        let pictured = self.lifecycle().update(cx, |lifecycle, cx| {
             lifecycle.screenshot(key, reference, full_page, cx)
         });
         cx.spawn(async move |_, _| {

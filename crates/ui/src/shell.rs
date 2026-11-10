@@ -55,8 +55,6 @@ use crate::panes::{
     SplitDown, SplitRight, SwapPane, ThreadPanel, ZoomPane,
 };
 use crate::preview_panel::PreviewPanel;
-#[cfg(preview_backend)]
-use crate::preview_panel::lifecycle::BrowserLifecycle;
 use crate::remote::{AttachmentTarget, HostRequest, RemotePanel};
 use crate::runtime_event::{
     RuntimeEventSeverity, RuntimeToastAction, RuntimeToastDisposition, present_runtime_event,
@@ -1068,13 +1066,6 @@ impl AppShell {
             target: self.current_link(cx).map(|link| link.target.clone()),
             navigation: self.navigation_snapshot(cx),
         }
-    }
-
-    #[cfg(preview_backend)]
-    #[allow(private_interfaces)]
-    #[doc(hidden)]
-    pub fn preview_lifecycle(&self, cx: &App) -> Option<Entity<BrowserLifecycle>> {
-        Some(self.current_link(cx)?.preview.read(cx).lifecycle())
     }
 
     fn link_of(&self, host: &HostKey) -> Option<&Link> {
