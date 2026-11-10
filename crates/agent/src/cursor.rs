@@ -397,15 +397,11 @@ impl Dialect for Cursor {
                     ApprovalDecision::Option(id) if id == "accept" => {
                         json!({"outcome": {"outcome": "accepted"}})
                     }
-                    ApprovalDecision::Option(id) if id == "reject" => {
-                        json!({"outcome": {"outcome": "rejected"}})
-                    }
+                    ApprovalDecision::Option(_) => json!({"outcome": {"outcome": "rejected"}}),
                     ApprovalDecision::Feedback(reason) => {
                         json!({"outcome": {"outcome": "rejected", "reason": reason}})
                     }
-                    ApprovalDecision::Option(_) | ApprovalDecision::Cancel => {
-                        json!({"outcome": {"outcome": "cancelled"}})
-                    }
+                    ApprovalDecision::Cancel => json!({"outcome": {"outcome": "cancelled"}}),
                 })
             }
             UPDATE_TODOS => {
