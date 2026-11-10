@@ -226,7 +226,8 @@ impl AppState {
             }
             ThreadOp::FollowUp { on, note } => Command::SetFollowUp {
                 session_id,
-                follow_up: on.then(|| follow_up(meta, note)),
+                on: *on,
+                note: note.clone(),
             },
             ThreadOp::Park { on } if *on == meta.parked_at.is_some() => {
                 return Err(if *on { "already parked" } else { "not parked" }.into());
@@ -274,9 +275,7 @@ impl AppState {
             ThreadOp::Rename { title } => self.rename_session(id, title, cx),
             ThreadOp::MarkRead => self.mark_session_read(id, meta.updated_at, cx),
             ThreadOp::MarkUnread => self.mark_session_unread(id, cx),
-            ThreadOp::FollowUp { on, note } => {
-                self.set_follow_up(id, on.then(|| follow_up(meta, note)), cx)
-            }
+            ThreadOp::FollowUp { on, note } => self.set_follow_up(id, *on, note.clone(), cx),
             ThreadOp::Park { on } => self.set_parked(id, *on, cx),
             ThreadOp::Keep { on } => self.set_auto_settle(id, !on, cx),
         }
@@ -514,13 +513,21 @@ impl AppState {
         );
     }
 
+    /// A thread already on Follow-up keeps the time it was added.
     pub fn set_follow_up(
         &mut self,
         session_id: &str,
-        follow_up: Option<FollowUp>,
+        on: bool,
+        note: Option<String>,
         cx: &mut HostCx,
     ) {
-        self.change_meta(session_id, cx, |meta| meta.follow_up = follow_up);
+        let now = cx.clock().unix_secs();
+        self.change_meta(session_id, cx, |meta| {
+            meta.follow_up = on.then(|| FollowUp {
+                since: meta.follow_up.as_ref().map_or(now, |kept| kept.since),
+                note,
+            });
+        });
     }
 
     pub fn set_parked(&mut self, session_id: &str, parked: bool, cx: &mut HostCx) {
@@ -571,17 +578,6 @@ fn agent_cx(cx: &HostCx) -> HostCx {
     cx.origin = Some(MessageOrigin::Agent);
     cx.author = None;
     cx
-}
-
-/// A thread already on Follow-up keeps the time it was added.
-fn follow_up(meta: &SessionMeta, note: &Option<String>) -> FollowUp {
-    FollowUp {
-        since: meta
-            .follow_up
-            .as_ref()
-            .map_or_else(now_secs, |follow_up| follow_up.since),
-        note: note.clone(),
-    }
 }
 
 fn thread_state(meta: &SessionMeta) -> &'static str {

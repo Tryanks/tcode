@@ -410,9 +410,12 @@ pub enum Command {
         session_id: String,
         thread_id: String,
     },
+    /// Put the thread on Follow-up or take it off. The host stamps when it
+    /// went on, and a thread already on keeps that time.
     SetFollowUp {
         session_id: String,
-        follow_up: Option<tcode_core::control::FollowUp>,
+        on: bool,
+        note: Option<String>,
     },
     SetParked {
         session_id: String,

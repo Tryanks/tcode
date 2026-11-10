@@ -1002,8 +1002,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         } => app.remove_thread_reference(&session_id, &thread_id, cx),
         Command::SetFollowUp {
             session_id,
-            follow_up,
-        } => app.set_follow_up(&session_id, follow_up, cx),
+            on,
+            note,
+        } => app.set_follow_up(&session_id, on, note, cx),
         Command::SetParked { session_id, parked } => app.set_parked(&session_id, parked, cx),
         Command::DismissSettleSuggestion { session_id } => {
             app.dismiss_settle_suggestion(&session_id, cx)

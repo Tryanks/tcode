@@ -243,6 +243,34 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
     });
 }
 
+/// Follow-up is stamped by the host's clock, not the client's, and a thread put on it again
+/// keeps the time it was first added.
+#[test]
+fn follow_up_carries_the_hosts_time_and_keeps_it_when_set_again() {
+    let store = TestStore::new("tcode-control-follow-up-since");
+    store.upsert_meta(&thread("follow", store.root())).unwrap();
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let added = cx.now_secs();
+    let follow_up = |note: Option<&str>| Command::SetFollowUp {
+        session_id: "follow".into(),
+        on: true,
+        note: note.map(Into::into),
+    };
+    state.dispatch_command(cx, 1, follow_up(None));
+    cx.run_until_parked();
+    cx.clock.advance(Duration::from_secs(3600));
+    state.dispatch_command(cx, 2, follow_up(Some("check the deploy")));
+    cx.run_until_parked();
+    assert_eq!(
+        state.read(|state| state.find_meta("follow").unwrap().follow_up.clone()),
+        Some(FollowUp {
+            since: added,
+            note: Some("check the deploy".into()),
+        })
+    );
+}
+
 /// Follow-up, parked and the Suggest tier hold back the automatic rules a plain thread falls
 /// to; releasing each lets the rule apply.
 #[test]
@@ -313,7 +341,8 @@ fn follow_up_parked_and_the_suggest_tier_hold_automatic_settlement() {
         2,
         Command::SetFollowUp {
             session_id: "follow".into(),
-            follow_up: None,
+            on: false,
+            note: None,
         },
     );
     state.dispatch_command(

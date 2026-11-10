@@ -5,7 +5,7 @@ use gpui::{App, Context, Task};
 use tcode_client::ConnectionState;
 use tcode_core::{
     acp::AcpAgentPatch,
-    control::{ControlGrant, FollowUp, SettlementAutomation},
+    control::{ControlGrant, SettlementAutomation},
     git::GitAction,
     session::ReviewComment,
     settings::{ChildApprovalMode, ImageMode, ProfileSettingsPatch},
@@ -432,10 +432,8 @@ impl WorkspaceStore {
     pub fn set_follow_up(&mut self, session_id: String, on: bool) {
         self.dispatch(Command::SetFollowUp {
             session_id,
-            follow_up: on.then(|| FollowUp {
-                since: crate::time::now_secs(),
-                note: None,
-            }),
+            on,
+            note: None,
         });
     }
     pub fn set_parked(&mut self, session_id: String, parked: bool) {

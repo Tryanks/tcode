@@ -71,7 +71,7 @@ use tcode_services::import::{
 use tcode_services::provider_probe::{probe_provider, run_capture_env};
 use tcode_services::session_search::SessionSearch;
 use tcode_services::settings::SettingsStore;
-use tcode_services::store::{CommandsCacheKey, SessionStore, now_secs};
+use tcode_services::store::{CommandsCacheKey, SessionStore};
 use tcode_services::user_files;
 use tcode_services::version_check::provider_updates::{
     self, CheckInput as ProviderCheckInput, Installation,
