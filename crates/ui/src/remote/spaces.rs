@@ -189,6 +189,20 @@ impl Spaces {
         }
     }
 
+    /// The name of the machine whose spaces these are, which members reach
+    /// and which this client may be another device than.
+    pub(crate) fn machine_name(&self, cx: &App) -> String {
+        let name = match &self.host {
+            #[cfg(feature = "remote-hosting")]
+            SpacesHost::Local => super::local_machine_name(cx),
+            SpacesHost::Remote(store) => store
+                .upgrade()
+                .and_then(|store| store.read(cx).remote_host_name().map(str::to_owned)),
+        };
+        name.filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| crate::tr!("spaces.machine_unnamed").into_owned())
+    }
+
     pub(crate) fn spaces(&self) -> &[SpaceInfo] {
         self.state
             .as_ref()
@@ -219,6 +233,12 @@ impl Spaces {
     /// only while it does.
     pub(crate) fn accepting(&self) -> bool {
         self.state.as_ref().is_some_and(|state| state.enabled)
+    }
+
+    /// The machine's name while it accepts no new devices, which leaves every
+    /// link of its spaces unusable.
+    fn refusing(&self, cx: &App) -> Option<String> {
+        (!self.accepting()).then(|| self.machine_name(cx))
     }
 
     /// Whether the machine has answered at least once.
@@ -803,6 +823,11 @@ pub(crate) fn open_create(
 ) {
     let name = cx
         .new(|cx| InputState::new(window, cx).placeholder(crate::tr!("spaces.create.placeholder")));
+    let disclosure = crate::tr!(
+        "spaces.create.disclosure",
+        machine = spaces.read(cx).machine_name(cx)
+    )
+    .into_owned();
     let on_created: Created = Rc::new(on_created);
     let title = if share.is_some() {
         crate::tr!("spaces.create.share_title")
@@ -840,22 +865,19 @@ pub(crate) fn open_create(
     window.open_dialog(cx, move |dialog, _, _| {
         let field = field.clone();
         submit_actions(
-            dialog
-                .title(title.clone())
-                .content(move |content, window, cx| {
+            dialog.title(title.clone()).content({
+                let disclosure = disclosure.clone();
+                move |content, window, cx| {
                     let compact = crate::window_seam::window_is_compact(window, cx);
                     content.child(
                         v_flex()
                             .gap_3()
                             .debug_selector(|| "spaces-create".into())
                             .child(Input::new(&field))
-                            .child(
-                                div()
-                                    .text_secondary(compact, cx)
-                                    .child(crate::tr!("spaces.create.disclosure")),
-                            ),
+                            .child(div().text_secondary(compact, cx).child(disclosure.clone())),
                     )
-                }),
+                }
+            }),
             "spaces-create",
             crate::tr!("spaces.create.action").into_owned().into(),
             submit.clone(),
@@ -907,7 +929,7 @@ fn open_shared(
         let Some(space) = model.space(&space_id).cloned() else {
             return dialog;
         };
-        let accepting = model.accepting();
+        let refusing = model.refusing(cx);
         let description =
             crate::tr!("spaces.shared.description", project = project_name.clone()).into_owned();
         let title = quoted("spaces.shared.title", &space.name);
@@ -918,7 +940,7 @@ fn open_shared(
                 let reflow = crate::motion::reflow("space-shared-link", window, cx);
                 content.child(link_block(
                     &space,
-                    accepting,
+                    refusing.as_deref(),
                     description.clone(),
                     true,
                     None,
@@ -948,7 +970,7 @@ fn copy_link(link: String, window: &mut Window, cx: &mut App) {
 }
 
 /// Why a space has no link to show, or `None` when it has one.
-fn link_unavailable(space: &SpaceInfo, accepting: bool) -> Option<SharedString> {
+fn link_unavailable(space: &SpaceInfo, refusing: Option<&str>) -> Option<SharedString> {
     if space.link.is_some() {
         return None;
     }
@@ -957,8 +979,8 @@ fn link_unavailable(space: &SpaceInfo, accepting: bool) -> Option<SharedString> 
             crate::tr!("spaces.link.dead")
         } else if !space.link_enabled {
             crate::tr!("spaces.link.paused")
-        } else if !accepting {
-            crate::tr!("spaces.link.pairing_off")
+        } else if let Some(machine) = refusing {
+            crate::tr!("spaces.link.pairing_off", machine = machine)
         } else {
             crate::tr!("spaces.link.unavailable")
         }
@@ -978,7 +1000,7 @@ type Regenerate = Rc<dyn Fn(&mut Window, &mut App)>;
 #[allow(clippy::too_many_arguments)]
 fn link_block(
     space: &SpaceInfo,
-    accepting: bool,
+    refusing: Option<&str>,
     description: String,
     copy: bool,
     regenerate: Option<Regenerate>,
@@ -999,7 +1021,7 @@ fn link_block(
         space
             .link
             .is_none()
-            .then(|| link_unavailable(space, accepting).unwrap_or_default()),
+            .then(|| link_unavailable(space, refusing).unwrap_or_default()),
         SHOW,
         window,
         cx,
@@ -1405,6 +1427,7 @@ mod section {
             &self,
             space: &SpaceInfo,
             agents: &[AgentChoice],
+            machine: &str,
             compact: bool,
             cx: &mut Context<Self>,
         ) -> AnyElement {
@@ -1472,7 +1495,10 @@ mod section {
                         agent_rows.push(
                             row_frame(compact, cx)
                                 .text_secondary(compact, cx)
-                                .child(crate::tr!("space_policy.agents.none_available"))
+                                .child(crate::tr!(
+                                    "space_policy.agents.none_available",
+                                    machine = machine
+                                ))
                                 .into_any_element(),
                         );
                     }
@@ -1683,35 +1709,35 @@ mod section {
                 .into_any_element();
 
             type Field = fn(&mut SpacePolicy) -> &mut bool;
-            let switches: [(&str, &str, Option<&str>, Field); 5] = [
+            let switches: [(&str, &str, &str, Field); 5] = [
                 (
                     "terminals",
                     "space_policy.terminals.title",
-                    Some("space_policy.terminals.description"),
+                    "space_policy.terminals.description",
                     |policy| &mut policy.terminals,
                 ),
                 (
                     "git-remote",
                     "space_policy.git_remote.title",
-                    Some("space_policy.git_remote.description"),
+                    "space_policy.git_remote.description",
                     |policy| &mut policy.git_remote,
                 ),
                 (
                     "preview",
                     "space_policy.preview.title",
-                    Some("space_policy.preview.description"),
+                    "space_policy.preview.description",
                     |policy| &mut policy.preview,
                 ),
                 (
                     "computer-use",
                     "space_policy.computer_use.title",
-                    Some("space_policy.computer_use.description"),
+                    "space_policy.computer_use.description",
                     |policy| &mut policy.computer_use,
                 ),
                 (
                     "editor",
                     "space_policy.editor.title",
-                    Some("space_policy.editor.description"),
+                    "space_policy.editor.description",
                     |policy| &mut policy.editor,
                 ),
             ];
@@ -1725,7 +1751,7 @@ mod section {
                         *field(&mut next) = !checked;
                         set(next)
                     };
-                    let row = ToggleRow::new(
+                    ToggleRow::new(
                         SharedString::from(format!("space-{key}-{space_id}")),
                         crate::tr!(title),
                         checked,
@@ -1733,11 +1759,8 @@ mod section {
                         move |_: &bool, window, cx| {
                             window.dispatch_action(Box::new(action.clone()), cx)
                         },
-                    );
-                    match description {
-                        Some(description) => row.description(crate::tr!(description)),
-                        None => row,
-                    }
+                    )
+                    .description(crate::tr!(description, machine = machine))
                     .into_any_element()
                 })
                 .collect();
@@ -1782,7 +1805,7 @@ mod section {
         fn link_section(
             &self,
             space: &SpaceInfo,
-            accepting: bool,
+            refusing: Option<&str>,
             compact: bool,
             window: &mut Window,
             cx: &mut Context<Self>,
@@ -1801,7 +1824,7 @@ mod section {
             let reflow = crate::motion::reflow("space-dialog-link", window, cx);
             let link = link_block(
                 space,
-                accepting,
+                refusing,
                 quoted("spaces.link.description", &space.name),
                 true,
                 Some(regenerate),
@@ -1835,6 +1858,7 @@ mod section {
             &self,
             space: &SpaceInfo,
             projects: Option<&[Project]>,
+            machine: &str,
             compact: bool,
             window: &mut Window,
             cx: &mut Context<Self>,
@@ -1852,7 +1876,10 @@ mod section {
                 let (label, removed) = match known {
                     Some(Some(name)) => (name, false),
                     Some(None) => (crate::tr!("spaces.projects.removed").into_owned(), true),
-                    None => (crate::tr!("spaces.projects.unknown").into_owned(), false),
+                    None => (
+                        crate::tr!("spaces.projects.unknown", machine = machine).into_owned(),
+                        false,
+                    ),
                 };
                 let action = ToggleShare {
                     space_id: space.id.clone(),
@@ -2130,7 +2157,8 @@ mod section {
                     .child(crate::tr!("spaces.missing"))
                     .into_any_element();
             };
-            let accepting = model.accepting();
+            let refusing = model.refusing(cx);
+            let machine = model.machine_name(cx);
             let projects = model.projects(cx);
             let agents = model.agent_choices(cx);
             let others: Vec<(String, String)> = model
@@ -2151,16 +2179,17 @@ mod section {
                         .w_full()
                         .gap(crate::material::section_gap(cx))
                         .debug_selector(|| "space-detail".into())
-                        .child(self.link_section(&space, accepting, compact, window, cx))
+                        .child(self.link_section(&space, refusing.as_deref(), compact, window, cx))
                         .child(self.projects_section(
                             &space,
                             projects.as_deref(),
+                            &machine,
                             compact,
                             window,
                             cx,
                         ))
                         .child(self.members_section(&space, &others, compact, window, cx))
-                        .child(self.permissions_section(&space, &agents, compact, cx)),
+                        .child(self.permissions_section(&space, &agents, &machine, compact, cx)),
                 )
                 .into_any_element()
         }
@@ -2270,7 +2299,10 @@ mod section {
         let description = if space.members.is_empty() {
             crate::tr!("spaces.delete_description_empty")
         } else {
-            crate::tr!("spaces.delete_description")
+            crate::tr!(
+                "spaces.delete_description",
+                machine = spaces.read(cx).machine_name(cx)
+            )
         };
         super::super::confirm_destructive(
             quoted("spaces.delete_title", &name),
@@ -2300,12 +2332,18 @@ mod section {
         cx: &mut App,
     ) {
         let regenerate = Rc::new(std::cell::Cell::new(true));
+        let description = crate::tr!(
+            "spaces.members.remove_description",
+            machine = spaces.read(cx).machine_name(cx)
+        )
+        .into_owned();
         window.open_dialog(cx, move |dialog, _, _| {
             let checked = regenerate.get();
             let toggle = regenerate.clone();
             let confirm = regenerate.clone();
             let spaces = spaces.clone();
             let device_id = device_id.clone();
+            let description = description.clone();
             dialog
                 .close_button(false)
                 .title(
@@ -2322,11 +2360,7 @@ mod section {
                         v_flex()
                             .gap_3()
                             .debug_selector(|| "spaces-remove-member".into())
-                            .child(
-                                div()
-                                    .text_secondary(compact, cx)
-                                    .child(crate::tr!("spaces.members.remove_description")),
-                            )
+                            .child(div().text_secondary(compact, cx).child(description.clone()))
                             .child(
                                 Checkbox::new("spaces-remove-regenerate")
                                     .label(crate::tr!("spaces.members.regenerate"))
@@ -2415,12 +2449,12 @@ mod machines {
         if list.is_empty() {
             return None;
         }
-        let accepting = model.accepting();
+        let refusing = model.refusing(cx);
         let mut rows = Vec::new();
         for space in list {
             let id = space.id.clone();
             let open = open_qr == Some(id.as_str()) && space.link.is_some();
-            let (status, color) = match link_unavailable(&space, accepting) {
+            let (status, color) = match link_unavailable(&space, refusing.as_deref()) {
                 None => (summary(&space).into(), cx.theme().muted_foreground),
                 Some(reason) if space.link_dead => (reason, cx.theme().danger_foreground),
                 Some(reason) => (reason, cx.theme().muted_foreground),
@@ -2553,7 +2587,7 @@ mod machines {
                         .pb(px(crate::material::CARD_INSET))
                         .child(link_block(
                             &space,
-                            accepting,
+                            refusing.as_deref(),
                             quoted("spaces.link.description", &space.name),
                             false,
                             None,
