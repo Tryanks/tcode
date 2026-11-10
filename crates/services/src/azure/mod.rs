@@ -374,7 +374,14 @@ impl Azure {
         };
         let url = repository::url(key);
         let conversation =
-            reads::conversation(&read, &threads, &iterations, viewer.as_deref(), &url);
+            reads::conversation(&read, &threads, &iterations, viewer.as_deref(), &url).ok_or_else(
+                || {
+                    error(
+                        ForgeErrorKind::Uncertain,
+                        "Azure DevOps conversation unreadable",
+                    )
+                },
+            )?;
         Ok(PullRequestConversation {
             description: conversation.description,
             comments: conversation.comments,

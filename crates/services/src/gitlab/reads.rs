@@ -698,7 +698,7 @@ pub(super) fn conversation(
             authority,
             project,
         ),
-        created_at: text(mr, "createdAt").unwrap_or_default(),
+        created_at: text(mr, "createdAt")?,
         // GitLab's GraphQL names no edit of a merge request's description.
         edited_at: None,
         url: text(mr, "webUrl"),

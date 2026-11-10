@@ -581,7 +581,7 @@ pub(super) fn conversation(
     iterations: &[Iteration],
     viewer: Option<&str>,
     pr_url: &str,
-) -> Conversation {
+) -> Option<Conversation> {
     let signed_in = viewer.is_some();
     let latest = iterations.last().map(|iteration| iteration.id);
     let mut comments = Vec::new();
@@ -633,7 +633,7 @@ pub(super) fn conversation(
         id: PULL_REQUEST.into(),
         author: actor(&pr["createdBy"]),
         body: text(pr, "description").unwrap_or_default(),
-        created_at: text(pr, "creationDate").unwrap_or_default(),
+        created_at: text(pr, "creationDate")?,
         edited_at: None,
         url: Some(pr_url.to_owned()),
         review_state: None,
@@ -650,7 +650,7 @@ pub(super) fn conversation(
     } else {
         Vec::new()
     };
-    Conversation {
+    Some(Conversation {
         description,
         comments,
         threads,
@@ -663,7 +663,7 @@ pub(super) fn conversation(
             request_reviewers: signed_in,
         },
         reviewers: reviewers(pr),
-    }
+    })
 }
 
 pub(super) fn reviewer(identity: &Value) -> Option<PullRequestReviewer> {
@@ -949,7 +949,7 @@ mod tests {
                          "createdBy": author, "reviewers": [] });
         let url = "https://dev.azure.com/fabrikam/web/_git/web/pullrequest/7";
         let iterations = [push(1, "head1"), push(2, "head2"), push(3, "head3")];
-        let read = conversation(&pr, &threads, &iterations, Some("a1"), url);
+        let read = conversation(&pr, &threads, &iterations, Some("a1"), url).unwrap();
         assert_eq!(
             read.comments
                 .iter()
