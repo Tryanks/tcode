@@ -28,10 +28,6 @@ impl AppState {
     ) {
         let not_before = UNIX_EPOCH + Duration::from_secs(fire_at_unix_secs);
         let (text, attachments) = self.assemble_user_message(target_id, text, attachment_paths);
-        if self.relay_confirmation(target_id).is_some() {
-            log::warn!("scheduled send deferred because a conversation relay needs confirmation");
-            return;
-        }
 
         let commit_draft = self.resident(target_id).is_some_and(|active| {
             active.draft && !matches!(active.draft_workspace, WorkspaceMode::NewWorktree { .. })
@@ -193,10 +189,7 @@ impl AppState {
         attachments: Vec<Attachment>,
         cx: &mut HostCx,
     ) {
-        if self.relay_confirmation(target_id).is_some() {
-            log::warn!("send deferred until the pending conversation relay is confirmed");
-            return;
-        }
+        let relay_pending = self.relay_confirmation(target_id).is_some();
         // A draft in worktree mode creates its worktree in the
         // background on first send, then re-enters send_turn once ready.
         if let Some(active) = self.resident(target_id)
@@ -235,6 +228,11 @@ impl AppState {
             message.author = cx.author.clone();
             message.space = cx.space.clone();
             message.origin = cx.origin.unwrap_or(message.origin);
+        }
+        // Nothing goes to the backend the thread was switched to before the
+        // relay to it is confirmed; the message waits in the queue for that.
+        if relay_pending {
+            return;
         }
         // The first message after a rewind goes ahead of the messages the
         // rewind held, which follow it.
@@ -440,8 +438,11 @@ impl AppState {
             message.space = cx.space.clone();
             message.origin = cx.origin.unwrap_or(message.origin);
         }
-        if let Some(message) = active.queue.last_mut() {
+        // The message that confirms the relay carries it, so it goes ahead of
+        // the messages the relay held, which follow it.
+        if let Some(mut message) = active.queue.pop() {
             message.relay_transcript = Some(transcript);
+            active.queue.insert(0, message);
         }
         let dispatch_failed = self.dispatch_next_queued(target_id, cx).is_err();
         self.ensure_started(target_id, cx);

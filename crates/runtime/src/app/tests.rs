@@ -5611,6 +5611,8 @@ fn profile_switch_within_one_provider_requires_a_relay() {
 /// Switching provider while the only turn is still streaming keeps what it
 /// produced: the switch arms a relay instead of silently dropping the cursor,
 /// and confirming it closes the abandoned turn so the handoff opens a new one.
+/// A scheduled message that comes due meanwhile waits for the confirmation and
+/// follows the message that carries the handoff.
 #[test]
 fn provider_switch_mid_turn_relays_the_partial_answer() {
     let cx = &mut TestAppContext::default();
@@ -5655,6 +5657,13 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
         }
         state.sessions.push(active.meta.clone());
         state.install_selected(active);
+        state.schedule_turn(
+            "mid-turn-relay",
+            "check the logs".into(),
+            Vec::new(),
+            now_secs(),
+            cx,
+        );
 
         state.set_active_model(
             "mid-turn-relay",
@@ -5670,8 +5679,21 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
             state.relay_confirmation("mid-turn-relay"),
             Some(("Codex".into(), "Claude Code".into()))
         );
+        // A message that comes due while the relay waits waits with it.
+        state.fire_due_scheduled(cx);
+        let queued = |state: &TestClientState| {
+            state
+                .selected_session()
+                .unwrap()
+                .queue
+                .iter()
+                .map(|message| message.text.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(queued(state), ["check the logs"]);
 
         state.confirm_relay_and_send("mid-turn-relay", "now review it".into(), Vec::new(), cx);
+        assert_eq!(queued(state), ["now review it", "check the logs"]);
         let active = state.selected_session().unwrap();
         assert!(active.pending_relay.is_none());
         assert_eq!(
