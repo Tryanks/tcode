@@ -195,7 +195,7 @@ pub fn badge_label(links: &[ThreadPullRequestLink], cx: &App) -> Option<String> 
     };
     Some(label)
 }
-pub fn badge(links: &[ThreadPullRequestLink], _size: f32, cx: &App) -> Option<AnyElement> {
+pub fn badge(links: &[ThreadPullRequestLink], cx: &App) -> Option<AnyElement> {
     let (state, count, stacked) = pull_request::badge(links)?;
     let (glyph, color, _) = appearance(state, cx);
     let label = badge_label(links, cx)?;
@@ -318,7 +318,7 @@ pub fn sidebar_badge(
     store: Entity<WorkspaceStore>,
     cx: &App,
 ) -> Option<AnyElement> {
-    let badge = badge(links, 12., cx)?;
+    let badge = badge(links, cx)?;
     let id = id.to_owned();
     let hover_links = links.to_vec();
     let hover_store = store.clone();

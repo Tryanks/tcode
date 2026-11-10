@@ -6195,7 +6195,7 @@ impl SessionsSidebar {
                             })
                             .children(status)
                             .when_some(
-                                crate::pull_requests::badge(&meta.pull_requests, 14., cx),
+                                crate::pull_requests::badge(&meta.pull_requests, cx),
                                 |line, badge| line.child(badge).child("·"),
                             )
                             .child(div().flex_none().child(cached.relative_time.clone())),
