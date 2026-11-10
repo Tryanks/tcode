@@ -1078,46 +1078,27 @@ impl PiActor {
                 .await;
             return;
         };
-        let payload: Value = message
-            .get("message")
-            .and_then(Value::as_str)
-            .and_then(|text| serde_json::from_str(text).ok())
-            .unwrap_or(Value::Null);
-        let tool_name = payload
-            .get("toolName")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_owned();
         self.pending_approvals.insert(id.to_owned());
-        let kind = if payload.is_null() {
-            ApprovalKind::ToolUse {
-                name: message
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Confirmation")
-                    .to_owned(),
-                input: Value::Null,
-                detail: message
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-            }
-        } else {
-            approval_kind(&tool_name, &payload)
-        };
         self.events
             .emit(AgentEvent::ApprovalRequested(ApprovalRequest {
                 id: id.to_owned(),
                 parent_item_id: None,
                 turn_id: self.mapper.current_turn.clone(),
-                // A tool's reason is already its detail.
-                reason: (!matches!(kind, ApprovalKind::ToolUse { .. }))
-                    .then(|| payload.get("reason").and_then(Value::as_str))
-                    .flatten()
-                    .map(str::to_owned),
+                reason: None,
                 blocked_path: None,
-                kind,
+                kind: ApprovalKind::ToolUse {
+                    name: message
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Confirmation")
+                        .to_owned(),
+                    input: Value::Null,
+                    detail: message
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                },
                 options: vec![
                     ApprovalOption {
                         id: "confirm".into(),
@@ -1682,73 +1663,6 @@ fn tool_item(id: &str, tool: &PiTool, status: ItemStatus) -> ThreadItem {
         id: id.into(),
         parent_item_id: None,
         content,
-    }
-}
-
-fn approval_kind(tool_name: &str, payload: &Value) -> ApprovalKind {
-    let input = payload.get("input").cloned().unwrap_or(Value::Null);
-    let reason = payload
-        .get("reason")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    if payload.get("source").and_then(Value::as_str) == Some("extension") {
-        let path = payload
-            .get("extensionPath")
-            .and_then(Value::as_str)
-            .unwrap_or("(unknown path)");
-        let mut source = format!("extension tool from {path}");
-        if payload
-            .get("shadowsBuiltin")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            source.push_str(&format!(" (overrides builtin {tool_name})"));
-        }
-        let detail = match reason {
-            Some(reason) => format!("{reason}; {source}"),
-            None => source,
-        };
-        return ApprovalKind::ToolUse {
-            name: tool_name.to_owned(),
-            input,
-            detail,
-        };
-    }
-    match tool_name {
-        "bash" => ApprovalKind::ExecCommand {
-            command: input
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_owned(),
-            cwd: payload
-                .get("cwd")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            description: None,
-        },
-        "edit" | "write" => ApprovalKind::FileChange {
-            changes: input
-                .get("path")
-                .and_then(Value::as_str)
-                .map(|path| {
-                    vec![FileChange {
-                        path: path.to_owned(),
-                        kind: if tool_name == "write" {
-                            FileChangeKind::Create
-                        } else {
-                            FileChangeKind::Modify
-                        },
-                        diff: None,
-                    }]
-                })
-                .unwrap_or_default(),
-        },
-        _ => ApprovalKind::ToolUse {
-            name: tool_name.to_owned(),
-            detail: reason.unwrap_or_else(|| input.to_string()),
-            input,
-        },
     }
 }
 
