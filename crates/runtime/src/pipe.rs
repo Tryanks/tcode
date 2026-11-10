@@ -549,14 +549,6 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
     if let Err(error) = app.validate_command_target(&command) {
         return CommandOutcome::Immediate(Err(error));
     }
-    if matches!(cx.principal, Principal::Space { .. })
-        && matches!(
-            command,
-            Command::MarkSessionRead { .. } | Command::MarkSessionUnread { .. }
-        )
-    {
-        return CommandOutcome::Immediate(Ok(CommandResponse::Unit));
-    }
     let mut response = CommandResponse::Unit;
     match command {
         Command::TerminalInput { terminal_id, bytes } => {
