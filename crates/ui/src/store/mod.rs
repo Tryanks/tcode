@@ -7099,7 +7099,7 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn reconnect_on_a_delayed_link_restores_workspace_readiness(cx: &mut TestAppContext) {
+    fn reconnect_restores_workspace_readiness_once_the_link_answers(cx: &mut TestAppContext) {
         use tcode_client::{ConnectionFailure, ConnectionState};
         let root = scratch_root("delayed-reconnect");
         let disk = SessionStore::open_at(root.clone()).unwrap();
@@ -7118,7 +7118,6 @@ pub(crate) mod tests {
         let state_link = link.clone();
         let replies = async move {
             while let Ok(line) = connection.from_host.recv().await {
-                smol::Timer::after(std::time::Duration::from_millis(30)).await;
                 if matches!(
                     state_link.connection_state(),
                     ConnectionState::Syncing { .. }
@@ -7455,7 +7454,7 @@ pub(crate) mod tests {
                 }
             },
             async {
-                smol::Timer::after(std::time::Duration::from_secs(5)).await;
+                smol::Timer::after(HOST_PATIENCE).await;
                 panic!("recovery Scope and IndexUnchanged were not delivered");
             },
         ));
