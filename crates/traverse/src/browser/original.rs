@@ -1,10 +1,13 @@
-use std::{io, sync::Arc};
+use std::{io, sync::Arc, time::Duration};
 
 use tcode_protocol::{OriginalTarget, Principal, ProtocolError};
 use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 
 use super::{Request, Shared};
-use crate::{http::response, original::IDLE};
+use crate::http::response;
+
+/// The bound on an original that makes no progress.
+const IDLE: Duration = Duration::from_secs(60);
 
 pub(super) async fn serve<S: AsyncWrite + Unpin>(
     stream: &mut S,

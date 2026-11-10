@@ -1,4 +1,4 @@
-use std::{io, time::Duration};
+use std::io;
 
 use iroh::endpoint::{Connection, SendStream};
 use tcode_client::original::{OpenedOriginal, OriginalFuture, OriginalReader, error};
@@ -12,8 +12,6 @@ use crate::{
     wire::{self, LineReader},
 };
 
-/// The browser listener's bound on an original that makes no progress.
-pub(crate) const IDLE: Duration = Duration::from_secs(60);
 const CANCEL: u32 = 0x100;
 const BROKEN: u32 = 0x104;
 
