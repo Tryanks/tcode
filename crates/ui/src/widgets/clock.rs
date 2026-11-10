@@ -4,12 +4,19 @@
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext as _, Context, ElementId, Entity, IntoElement, ParentElement as _, Render,
-    RenderOnce, SharedString, Task, Window, div,
+    App, AppContext as _, BackgroundExecutor, Context, ElementId, Entity, IntoElement,
+    ParentElement as _, Render, RenderOnce, SharedString, Task, Window, div,
 };
 
 /// How far a moment is from now, in milliseconds, written for the reader.
 pub(crate) type ClockText = fn(u64) -> SharedString;
+
+/// Now, in unix milliseconds, by the clock the executor's timers run on:
+/// the system's in the app, the one a test advances in a test.
+fn now_ms(executor: &BackgroundExecutor) -> u64 {
+    let now = executor.scheduler_executor().scheduler().clock().utc_now();
+    u64::try_from(now.timestamp_millis()).unwrap_or(0)
+}
 
 /// The time since a moment, or until one, redrawn as its second changes.
 ///
@@ -78,7 +85,7 @@ impl Ticks {
     fn new(at_ms: u64, until: bool, text: ClockText, cx: &mut Context<Self>) -> Self {
         let tick = cx.spawn(async move |this, cx| {
             loop {
-                let now = crate::time::now_millis();
+                let now = now_ms(cx.background_executor());
                 if until && now >= at_ms {
                     break;
                 }
@@ -103,8 +110,8 @@ impl Ticks {
 }
 
 impl Render for Ticks {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let now = crate::time::now_millis();
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = now_ms(cx.background_executor());
         let distance = if self.until {
             // Rounded up, as whole seconds left of a deadline on the second
             // are: the last one shows until the deadline itself.
@@ -113,5 +120,49 @@ impl Render for Ticks {
             now.saturating_sub(self.at_ms)
         };
         div().child((self.text)(distance))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use gpui::{TestAppContext, VisualTestContext};
+
+    use super::*;
+
+    thread_local! {
+        static SHOWN: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// What the clock last drew, in milliseconds from its moment.
+    fn record(distance: u64) -> SharedString {
+        SHOWN.with(|shown| shown.set(Some(distance)));
+        SharedString::default()
+    }
+
+    struct Since(u64);
+
+    impl Render for Since {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().child(Clock::since("clock", self.0, record))
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext) -> Option<u64> {
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        SHOWN.with(Cell::get)
+    }
+
+    /// The time since a moment is the executor's, and the clock redraws as
+    /// each second of it passes.
+    #[gpui::test]
+    fn a_clock_counts_the_seconds_the_executor_passes(cx: &mut TestAppContext) {
+        let started = cx.update(|cx| now_ms(cx.background_executor())) - 5_000;
+        let (_, cx) = cx.add_window_view(|_, _| Since(started));
+        assert_eq!(draw(cx), Some(5_000));
+        cx.executor().advance_clock(Duration::from_secs(1));
+        assert_eq!(draw(cx), Some(6_000));
     }
 }

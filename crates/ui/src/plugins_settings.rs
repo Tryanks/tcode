@@ -750,8 +750,9 @@ impl PluginsSettingsPanel {
             .and_then(|thread| store.session_of(thread))
             .and_then(|thread| store.thread_meta(&thread).cloned())
             .map(|meta| {
-                meta.profile_id
-                    .unwrap_or_else(|| tcode_core::settings::provider_key(meta.provider).into())
+                meta.profile_id.unwrap_or_else(|| {
+                    tcode_core::settings::Settings::builtin_profile_id(meta.provider).into()
+                })
             });
         thread_profile
             .filter(|id| accounts.iter().any(|account| account.id == *id))
@@ -2715,8 +2716,19 @@ impl PluginsSettingsPanel {
                 popover
             };
             let (name, touch) = (entry.name.clone(), self.touch);
+            let marketplace = entry.source.marketplace.clone();
             popover
-                .content(move |_, _, cx| install_body(&panel, kind, &accounts, &name, touch, cx))
+                .content(move |_, _, cx| {
+                    install_body(
+                        &panel,
+                        kind,
+                        &accounts,
+                        &name,
+                        marketplace.as_deref(),
+                        touch,
+                        cx,
+                    )
+                })
                 .into_any_element()
         });
         let badges = installed_in.iter().map(|account| {
@@ -2778,12 +2790,14 @@ impl PluginsSettingsPanel {
 }
 
 /// The install popover's body: the accounts to install to, the scope, and
-/// the command each account runs.
+/// the command each account runs. `marketplace` is where the plugin browsed
+/// comes from, named for an account whose own listing does not offer it.
 fn install_body(
     panel: &Entity<PluginsSettingsPanel>,
     kind: ProviderKind,
     accounts: &[Account],
     name: &str,
+    marketplace: Option<&str>,
     compact: bool,
     cx: &mut App,
 ) -> AnyElement {
@@ -2832,11 +2846,7 @@ fn install_body(
                 .as_ref()
                 .and_then(|catalog| catalog.entries.iter().find(|entry| entry.id == entry_id))
                 .and_then(|entry| entry.source.marketplace.clone())
-                .or_else(|| {
-                    entry_id
-                        .rsplit_once('@')
-                        .map(|(_, marketplace)| marketplace.to_string())
-                })
+                .or_else(|| marketplace.map(str::to_owned))
                 .map(|marketplace| {
                     crate::tr!(
                         "providers.plugins.no_marketplace",
@@ -3369,8 +3379,6 @@ mod tests {
         fn replicate(&self, catalogs: Vec<ProviderPluginCatalog>, cx: &mut VisualTestContext) {
             send(&self.incoming, Topic::Providers, providers(catalogs));
             cx.run_until_parked();
-            self.store
-                .update(cx, |store, cx| store.drain_host_events_for_test(cx));
             draw(cx);
         }
 
@@ -3646,8 +3654,6 @@ mod tests {
         });
         cx.simulate_resize(size(px(1400.), px(1600.)));
         cx.run_until_parked();
-        host.store
-            .update(cx, |store, cx| store.drain_host_events_for_test(cx));
         draw(cx);
         (host, cx)
     }

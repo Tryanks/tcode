@@ -794,7 +794,7 @@ mod tests {
         let (view, cx) = thread.open(cx);
         // A frame as the display draws it, then the page it asked for.
         let frame = |thread: &mut ScriptedThread, cx: &mut VisualTestContext| -> Option<u64> {
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
             cx.update(|window, cx| {
                 window.simulate_next_frame(cx);

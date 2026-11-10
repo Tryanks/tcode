@@ -773,7 +773,12 @@ impl SettingsPage {
             let store = store.clone();
             cx.new(|cx| crate::local_permissions::LocalPermissions::new(store, window, cx))
         });
-        let auto_settle_input = cx.new(|cx| InputState::new(window, cx).step(1.).min(1.).max(90.));
+        let auto_settle_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .step(1.)
+                .min(*tcode_core::settings::AUTO_SETTLE_DAYS.start())
+                .max(*tcode_core::settings::AUTO_SETTLE_DAYS.end())
+        });
         let source_control_panel = cx.new(|cx| {
             crate::source_control_settings::SourceControlPanel::new(
                 store.clone(),
@@ -941,7 +946,10 @@ impl SettingsPage {
         let settings = self.store.read(cx).settings();
         if !self.auto_settle_input.dirty {
             self.auto_settle_input.push(
-                settings.auto_settle_after_days.unwrap_or(3.).to_string(),
+                settings
+                    .auto_settle_after_days
+                    .unwrap_or(tcode_core::settings::AUTO_SETTLE_DEFAULT_DAYS)
+                    .to_string(),
                 window,
                 cx,
             );
@@ -2560,12 +2568,15 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// Archived sessions: loading, the empty state and the list cross-fade
-    /// into one another.
+    /// Archived sessions: loading, a failed load, the empty state and the
+    /// list cross-fade into one another.
     fn render_archived(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let groups = self.store.read(cx).archived_groups();
+        let failure = self.store.read(cx).archived_failure().map(str::to_owned);
         let slot = if !groups.is_empty() {
             "list"
+        } else if failure.is_some() {
+            "failed"
         } else if self.store.read(cx).archived_loading() {
             "loading"
         } else {
@@ -2595,6 +2606,14 @@ impl SettingsPage {
                         ))
                         .child(if slot == "loading" {
                             crate::material::empty_row(crate::tr!("settings.archived_loading"), cx)
+                        } else if slot == "failed" {
+                            crate::material::empty_row(
+                                crate::tr!(
+                                    "settings.archived_failed",
+                                    error = failure.clone().unwrap_or_default()
+                                ),
+                                cx,
+                            )
                         } else {
                             crate::material::empty_state(
                                 Icon::new(Section::Archived.icon()),
@@ -2742,14 +2761,20 @@ impl SettingsPage {
         compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let archived_at = meta.archived_at.unwrap_or(meta.created_at);
-        let archived_when = humanize_ago(now.saturating_sub(archived_at));
-        let created_when = humanize_ago(now.saturating_sub(meta.created_at));
-        let desc = format!(
-            "{} · {}",
-            crate::tr!("settings.archived_at", when = archived_when),
-            crate::tr!("settings.archived_created", when = created_when),
+        let created = crate::tr!(
+            "settings.archived_created",
+            when = humanize_ago(now.saturating_sub(meta.created_at))
         );
+        let desc = match meta.archived_at {
+            Some(archived_at) => format!(
+                "{} · {created}",
+                crate::tr!(
+                    "settings.archived_at",
+                    when = humanize_ago(now.saturating_sub(archived_at))
+                ),
+            ),
+            None => created.into_owned(),
+        };
         let id_unarchive = meta.id.clone();
         let id_delete = meta.id.clone();
         let title = meta.title.clone();
@@ -3623,7 +3648,7 @@ mod tests {
         };
         let shown = |cx: &mut VisualTestContext| {
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             crate::test_frames::draw_settled(cx);
             cx.debug_bounds("storage-migration").is_some()
         };
@@ -3700,7 +3725,7 @@ mod tests {
         };
         let shown = |cx: &mut VisualTestContext, selectors: &[&'static str]| {
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             crate::test_frames::draw_settled(cx);
             selectors
                 .iter()
@@ -4258,7 +4283,7 @@ mod tests {
         };
         let drawn = |cx: &mut VisualTestContext| {
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             crate::test_frames::draw_settled(cx);
             page.read_with(cx, |page, cx| {
                 page.new_project_dir_input

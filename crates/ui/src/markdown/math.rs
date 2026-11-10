@@ -28,7 +28,7 @@ const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 type FormulaCache = RecentCache<(String, bool), Option<Arc<MathBox>>>;
 
 thread_local! {
-    static FONT: Option<MathFont> = MathFont::stix_two_math().ok();
+    static FONT: MathFont = MathFont::stix_two_math().expect("embedded math font must parse");
     static FORMULAS: RefCell<FormulaCache> = RefCell::new(RecentCache::new(128));
 }
 
@@ -46,21 +46,12 @@ fn formula(source: &str, display: bool) -> Option<Arc<MathBox>> {
             .borrow_mut()
             .get_or_insert_with((source.into(), display), || {
                 FONT.with(|font| {
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        layout(
-                            &parse(source).ok()?,
-                            font.as_ref()?,
-                            if display {
-                                MathStyle::Display
-                            } else {
-                                MathStyle::Text
-                            },
-                        )
-                        .ok()
-                        .map(Arc::new)
-                    }))
-                    .ok()
-                    .flatten()
+                    let style = if display {
+                        MathStyle::Display
+                    } else {
+                        MathStyle::Text
+                    };
+                    layout(&parse(source).ok()?, font, style).ok().map(Arc::new)
                 })
             })
     })

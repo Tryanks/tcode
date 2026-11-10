@@ -24,7 +24,7 @@ use tcode_protocol::{
     PullRequestRead, PullRequestReadResponse, PullRequestViewedFiles,
 };
 
-use super::{ChangeLink, ChangeWatch, appearance, row_menu, row_state, source};
+use super::{ChangeLink, ChangeWatch, appearance, row_menu, row_state};
 use crate::{
     icon::{Icon, IconName},
     material,
@@ -250,14 +250,9 @@ pub(super) fn ago_rfc3339(stamp: &str) -> Option<String> {
         .map(|time| ago(time.timestamp().max(0) as u64))
 }
 
-/// The host's reason, at most 320 characters on screen.
+/// The host's reason, as it gave it.
 pub(super) fn reason(error: &ProtocolError) -> String {
-    let message = error.message.trim();
-    if message.chars().count() > 320 {
-        format!("{}…", message.chars().take(320).collect::<String>())
-    } else {
-        message.to_owned()
-    }
+    error.message.trim().to_owned()
 }
 
 impl PullRequestView {
@@ -393,17 +388,8 @@ impl PullRequestView {
     }
 
     pub(super) fn url(&self, cx: &App) -> Option<String> {
-        let (_, key) = self.current.as_ref()?;
-        self.link(cx)
-            .map(|link| link.url)
-            .filter(|url| !url.is_empty())
-            .or_else(|| {
-                self.stack(cx)?
-                    .layers
-                    .iter()
-                    .find(|layer| layer.number == key.number)
-                    .map(|layer| layer.url.clone())
-            })
+        let (session, key) = self.current.as_ref()?;
+        super::page_url(self.store.read(cx).pull_requests(session), key)
     }
 
     pub(super) fn tab(&self, cx: &App) -> Tab {
@@ -933,15 +919,7 @@ impl PullRequestView {
                     .font_family(cx.theme().mono_font_family.clone())
                     .child(format!("#{}", key.number))
                     .with_tooltip({
-                        let label = crate::tr!(
-                            "pull_requests.number_tooltip",
-                            source = crate::tr!(source(link.as_ref())).into_owned(),
-                            ago = ago(link
-                                .as_ref()
-                                .and_then(|link| link.linked_at)
-                                .unwrap_or_default())
-                        )
-                        .into_owned();
+                        let label = super::number_tooltip(link.as_ref());
                         move |_, _| Tooltip::new(label.clone())
                     }),
             )
@@ -1327,7 +1305,7 @@ impl PullRequestView {
             )
             .into_owned()
         };
-        let merges = super::lifecycle::merges_base(Some(state));
+        let merges = super::lifecycle::merges_base(state);
         let tooltip = crate::tr!(
             if merges {
                 "pull_requests.actions.update_tooltip"
@@ -2369,13 +2347,8 @@ impl PullRequestView {
                         .child(div().text_title(cx).child(title))
                         .child(
                             div()
-                                .id("pr-failure-reason")
                                 .text_secondary(self.compact(cx), cx)
-                                .child(reason(error))
-                                .with_tooltip({
-                                    let full = error.message.clone();
-                                    move |_, _| Tooltip::new(full.clone())
-                                }),
+                                .child(reason(error)),
                         )
                         .child(
                             div().child(
@@ -2625,7 +2598,7 @@ mod tests {
             )
             .unwrap();
         settle(cx);
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         store.update(cx, |store, cx| store.show_alone("session".into(), cx));
         view.update(cx, |view, cx| {
             view.window_state
@@ -3190,8 +3163,7 @@ mod tests {
             )
             .unwrap();
         settle(cx);
-        let store = view.read_with(cx, |view, _| view.store.clone());
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         settle(cx);
         let label =
             |cx: &mut VisualTestContext| view.read_with(cx, |view, cx| view.files_label(cx));
@@ -3305,7 +3277,7 @@ mod tests {
         });
         send_links(&incoming, &[7, 8, 9]);
         settle(cx);
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         store.update(cx, |store, cx| store.show_alone("session".into(), cx));
         cx.replace_root_view(|_, cx| {
             super::super::PullRequestsPanel::new(
@@ -3328,7 +3300,7 @@ mod tests {
         let change = |links: &[u64], cx: &mut VisualTestContext| {
             send_links(&incoming, links);
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
             cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
             draw(cx);

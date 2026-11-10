@@ -217,11 +217,15 @@ impl ClientHost for WebHost {
         true
     }
 
-    fn pick_files(&self) -> HostFuture<'_, Result<Vec<PickedFile>, String>> {
+    fn pick_files(
+        &self,
+    ) -> HostFuture<'_, Result<Vec<PickedFile>, tcode_client::host::DeviceFailure>> {
         Box::pin(async {
-            pick_browser_files()
-                .await
-                .map_err(|error| error.as_string().unwrap_or_else(|| format!("{error:?}")))
+            pick_browser_files().await.map_err(|error| {
+                tcode_client::host::DeviceFailure::Platform(
+                    error.as_string().unwrap_or_else(|| format!("{error:?}")),
+                )
+            })
         })
     }
 

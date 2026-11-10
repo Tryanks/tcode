@@ -321,7 +321,6 @@ impl Render for Notification {
             .icon
             .clone()
             .or_else(|| self.type_.map(|kind| kind.icon(cx)));
-        let has_icon = icon.is_some();
         let spacing = &cx.theme().tokens.spacing;
         crate::material::raised(
             BaseToast::new("notification")
@@ -355,8 +354,7 @@ impl Render for Notification {
                     el.child(div().font_semibold().child(title))
                 })
                 .when_some(self.message.clone(), |el, message| el.child(message))
-                .when_some(content, |el, content| el.child(content))
-                .when(!has_icon, |el| el),
+                .when_some(content, |el, content| el.child(content)),
         )
         .when_some(action, |el, action| el.child(action))
         .child(
@@ -376,18 +374,29 @@ impl Render for Notification {
     }
 }
 
-/// How long a toast takes to leave, and a compact one to enter.
-const TOAST: std::time::Duration = std::time::Duration::from_millis(200);
-
-/// A leaving toast stays mounted for its `appear` exit. A compact toast also
-/// enters over [`TOAST`]; a wide one keeps the stack's own sonner timing.
+/// A leaving toast stays mounted for its [`APPEAR`] exit. A compact toast
+/// also enters over it; a wide one keeps the stack's own sonner timing.
 fn toast_manager(compact: bool) -> ToastManager<NotificationId, Entity<Notification>> {
     let sonner = ToastMotion::sonner();
     ToastManager::new(ToastMotion {
-        duration: if compact { TOAST } else { sonner.duration },
-        exit_duration: TOAST,
+        duration: if compact { APPEAR } else { sonner.duration },
+        exit_duration: APPEAR,
         ..sonner
     })
+}
+
+/// How long `note` stays before it leaves on its own: a compact pill always
+/// leaves, later when it offers an action.
+fn timeout(note: &Notification, compact: bool) -> Option<Duration> {
+    if compact {
+        Some(Duration::from_secs(if note.action.is_some() {
+            5
+        } else {
+            3
+        }))
+    } else {
+        note.autohide.then_some(Duration::from_secs(5))
+    }
 }
 
 pub(crate) struct NotificationList {
@@ -456,19 +465,13 @@ impl NotificationList {
         // A notice pushed again under its id updates the one on screen, so it
         // neither replays its entry nor, if it was leaving, finishes leaving.
         let existing = self.manager.get(&id).cloned();
-        let timeout = if compact {
+        if compact {
             // Replacement is immediate: discarded messages never reappear later.
             self.manager = toast_manager(true);
             self.subscriptions
                 .retain(|kept, _| existing.is_some() && *kept == id);
-            Some(Duration::from_secs(if note.action.is_some() {
-                5
-            } else {
-                3
-            }))
-        } else {
-            note.autohide.then_some(Duration::from_secs(5))
-        };
+        }
+        let timeout = timeout(&note, compact);
         let entity = match existing {
             Some(entity) => {
                 entity.update(cx, |current, cx| {
@@ -520,16 +523,7 @@ impl NotificationList {
         self.subscriptions
             .retain(|id, _| latest.as_ref().is_some_and(|(latest, _)| latest == id));
         if let Some((id, note)) = latest {
-            let value = note.read(cx);
-            let timeout = if compact {
-                Some(Duration::from_secs(if value.action.is_some() {
-                    5
-                } else {
-                    3
-                }))
-            } else {
-                value.autohide.then_some(Duration::from_secs(5))
-            };
+            let timeout = timeout(note.read(cx), compact);
             self.manager.push(
                 id,
                 note,
@@ -622,19 +616,6 @@ impl NotificationList {
             self.dismiss(&id, window, cx);
         }
     }
-    pub fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ids = self.manager.dismiss_all(cx.background_executor().now());
-        for id in ids {
-            if let Some(note) = self.manager.get(&id) {
-                note.update(cx, |note, cx| {
-                    note.transition_status = ToastTransitionStatus::Ending;
-                    cx.notify();
-                });
-            }
-        }
-        self.tick(window, cx);
-        cx.notify();
-    }
 }
 
 impl Render for NotificationList {
@@ -674,7 +655,6 @@ impl Render for NotificationList {
 #[cfg(test)]
 impl NotificationList {
     /// What each card says in the compact pill, in the order shown.
-    #[cfg(test)]
     pub(super) fn said(&self, cx: &App) -> Vec<SharedString> {
         self.manager
             .iter()
@@ -686,14 +666,5 @@ impl NotificationList {
                     .or_else(|| note.title.clone())
             })
             .collect()
-    }
-
-    pub(super) fn assert_messages(&self, cx: &App, expected: &[&str]) {
-        let messages = self
-            .manager
-            .iter()
-            .map(|(_, note, _)| note.read(cx).message.as_ref().unwrap().as_ref())
-            .collect::<Vec<_>>();
-        assert_eq!(messages, expected);
     }
 }

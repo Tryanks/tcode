@@ -935,9 +935,7 @@ fn render_paragraph(
     }
 
     let (text, links, highlights, fonts) = paragraph_text_style(paragraph, cx);
-    if let Ok(mut inline_state) = paragraph.state.lock() {
-        inline_state.set_text(text.into());
-    }
+    paragraph.state.lock().unwrap().set_text(text.into());
     Inline::new(
         id.to_string(),
         view.clone(),
@@ -1026,9 +1024,7 @@ fn inline_flow_items(paragraph: &Paragraph, id: &str, cx: &mut App) -> Vec<Inlin
         let state = segment_state
             .take()
             .unwrap_or_else(|| paragraph.state.clone());
-        if let Ok(mut inline_state) = state.lock() {
-            inline_state.set_text(text.clone().into());
-        }
+        state.lock().unwrap().set_text(text.clone().into());
         items.push(InlineFlowItem::Text {
             state,
             base,
@@ -1106,9 +1102,7 @@ fn inline_flow_items(paragraph: &Paragraph, id: &str, cx: &mut App) -> Vec<Inlin
                 segment_base,
             );
             let (code_links, code_highlights, code_fonts) = marks_for_node(&child.marks, 0, cx);
-            if let Ok(mut inline_state) = child.state.lock() {
-                inline_state.set_text(child.text.clone());
-            }
+            child.state.lock().unwrap().set_text(child.text.clone());
             items.push(InlineFlowItem::Text {
                 state: child.state.clone(),
                 base: child_start,
@@ -1310,20 +1304,14 @@ fn render_list_item(
 fn cached_highlights(code: &CodeBlock, theme: &HighlightTheme) -> SharedHighlightRuns {
     let prepared = code.prepared();
     let language = code.lang.clone().unwrap_or_else(|| "text".into());
-    let Ok(mut cache) = prepared.highlights.lock() else {
-        return highlight::highlighted(prepared.text.clone(), language, theme);
-    };
+    let mut cache = prepared.highlights.lock().unwrap();
     if let Some((cached_theme, held)) = cache.as_ref()
         && cached_theme == theme
         && let Some(runs) = held.get()
     {
         return runs;
     }
-    let previous = prepared
-        .previous_highlights
-        .lock()
-        .ok()
-        .and_then(|mut previous| previous.take());
+    let previous = prepared.previous_highlights.lock().unwrap().take();
     let (runs, held) = match previous {
         Some(previous) => {
             let runs = Arc::new(highlight::HighlightedSource::new(

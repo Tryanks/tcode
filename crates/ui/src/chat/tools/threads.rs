@@ -1,10 +1,8 @@
-//! The thread windows: calls an agent made to Tcode about its threads —
-//! `tcode_control` (outline, read, search, message, start, update, notify,
-//! approve, report), and the `tcode_orchestrate` (dispatch, send, result,
-//! settle) and `tcode_report` calls transcripts recorded before those moved
-//! into `tcode_control`.
-//! Each reads as what it did to which thread; the threads and entries it
-//! names are links that open them, as a cited anchor does.
+//! The thread windows: calls an agent made to Tcode about its threads
+//! through `tcode_control` (outline, read, search, message, start, update,
+//! notify, approve, report). Each reads as what it did to which thread; the
+//! threads and entries it names are links that open them, as a cited anchor
+//! does.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -26,8 +24,6 @@ use crate::typography::TextRole as _;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 
 const CONTROL: &[&str] = &["tcode_control"];
-const ORCHESTRATE: &[&str] = &["tcode_orchestrate"];
-const REPORT: &[&str] = &["tcode_report"];
 
 /// What a call did, by the tool it called.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44,19 +40,12 @@ enum Kind {
     NotifyWhen,
     SettleSelf,
     RequestGrant,
-    Dispatch,
-    Result,
-    Status,
-    Settle,
-    Archive,
-    Cancel,
     Approve,
     Report,
 }
 
 pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView + 'a>> {
     let control = |names: &[&str]| call.served(CONTROL, names, false);
-    let orchestrate = |names: &[&str]| call.served(ORCHESTRATE, names, false);
     let kind = if control(&["outline"]) {
         Kind::Outline
     } else if control(&["read"]) {
@@ -69,7 +58,7 @@ pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView
         Kind::GetThread
     } else if control(&["list_threads"]) {
         Kind::ListThreads
-    } else if control(&["send_message"]) || orchestrate(&["send"]) {
+    } else if control(&["send_message"]) {
         Kind::Message
     } else if control(&["start_thread"]) {
         Kind::StartThread
@@ -81,21 +70,9 @@ pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView
         Kind::SettleSelf
     } else if control(&["request_grant"]) {
         Kind::RequestGrant
-    } else if orchestrate(&["dispatch", "collaborate"]) {
-        Kind::Dispatch
-    } else if orchestrate(&["result"]) {
-        Kind::Result
-    } else if orchestrate(&["status"]) {
-        Kind::Status
-    } else if orchestrate(&["settle"]) {
-        Kind::Settle
-    } else if orchestrate(&["archive"]) {
-        Kind::Archive
-    } else if orchestrate(&["cancel"]) {
-        Kind::Cancel
-    } else if control(&["respond_approval"]) || orchestrate(&["approve"]) {
+    } else if control(&["respond_approval"]) {
         Kind::Approve
-    } else if control(&["report_result"]) || call.served(REPORT, &["report_result"], false) {
+    } else if control(&["report_result"]) {
         Kind::Report
     } else {
         return None;
@@ -287,12 +264,11 @@ fn targets(input: &Value) -> Vec<&str> {
     ids
 }
 
-/// The text a call carried to a thread: the message, the brief, the report.
+/// The text a call carried to a thread: the message, the report, the reason.
 fn carried(input: &Value) -> Option<(&'static str, &str)> {
     [
         ("text", "tools.message"),
         ("message", "tools.message"),
-        ("brief", "tools.brief"),
         ("reason", "tools.reason"),
     ]
     .into_iter()
@@ -313,12 +289,6 @@ impl Threads {
             Kind::NotifyWhen => "notify_when",
             Kind::SettleSelf => "settle_self",
             Kind::RequestGrant => "request_grant",
-            Kind::Dispatch => "dispatch",
-            Kind::Result => "result",
-            Kind::Status => "check_threads",
-            Kind::Settle => "settle",
-            Kind::Archive => "archive",
-            Kind::Cancel => "cancel",
             Kind::Approve => "approve",
             Kind::Report => "report",
         })
@@ -334,14 +304,7 @@ impl Threads {
                 .find(|anchor| anchor.position.is_some())
         };
         match self.kind {
-            Kind::Outline
-            | Kind::GetThread
-            | Kind::Message
-            | Kind::Result
-            | Kind::Status
-            | Kind::Settle
-            | Kind::Archive
-            | Kind::Cancel => Argument::plain(threads()),
+            Kind::Outline | Kind::GetThread | Kind::Message => Argument::plain(threads()),
             Kind::Read => {
                 let from = string(input, "from").or_else(|| string(input, "anchor"));
                 let to = string(input, "to");
@@ -379,7 +342,7 @@ impl Threads {
                     .map(one_line)
                     .unwrap_or_default(),
             ),
-            Kind::StartThread | Kind::Dispatch => {
+            Kind::StartThread => {
                 let model = [string(input, "provider"), string(input, "model")]
                     .into_iter()
                     .flatten()
@@ -427,7 +390,6 @@ impl Threads {
                     .or_else(|| {
                         (input.get("cancel") == Some(&Value::Bool(true))).then_some("cancel")
                     })
-                    .or_else(|| string(input, "decision"))
                     .unwrap_or_default(),
             ),
             Kind::Report => Argument::plain(
@@ -457,7 +419,7 @@ impl ToolView for Threads {
         let named = Named::of(call);
         let icon = match self.kind {
             Kind::Search | Kind::SearchInItem | Kind::ListThreads => IconName::Search,
-            Kind::Dispatch | Kind::StartThread => IconName::Bot,
+            Kind::StartThread => IconName::Bot,
             Kind::Report => IconName::FileText,
             Kind::NotifyWhen => IconName::Bell,
             _ => IconName::MessageSquare,

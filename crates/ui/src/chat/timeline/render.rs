@@ -110,12 +110,12 @@ impl TimelineView {
                     ));
                 }
                 Segment::ContextCompacted(entry) => {
+                    let EntryContent::ContextCompacted(compaction) = &entry.content else {
+                        unreachable!();
+                    };
                     column = column.child(components::dividers::context_compacted_divider(
                         &entry.id,
-                        match &entry.content {
-                            EntryContent::ContextCompacted(c) => Some(c),
-                            _ => None,
-                        },
+                        compaction,
                         &self.motion,
                         cx,
                     ));
@@ -754,8 +754,14 @@ impl TimelineView {
     ) -> AnyElement {
         let store = self.workspace_store.read(cx);
         let harness = store.harness_name_for(self.session_id.as_deref(), cx);
-        let EntryContent::Rewound(rewound) = &entry.content else {
-            return components::dividers::rewind_divider(entry, &harness, cx);
+        let rewound = match &entry.content {
+            EntryContent::Rewound(rewound) => rewound,
+            EntryContent::RewindFailed { mode, failure } => {
+                return components::dividers::rewind_failed_divider(
+                    &entry.id, *mode, failure, &harness, cx,
+                );
+            }
+            _ => unreachable!("a rewind segment holds a rewind entry"),
         };
         let status = store
             .session_status_for(self.session_id.as_deref(), cx)
@@ -898,7 +904,7 @@ impl TimelineView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (turn, entry_id, text, cwd, context_len, attachments, steering, pinned) = args;
+        let (turn, entry_id, visible, cwd, attachments, steering, pinned) = args;
         if self
             .workspace_store
             .read(cx)
@@ -911,10 +917,6 @@ impl TimelineView {
             return div().into_any_element();
         }
 
-        let context = context_len
-            .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
-            .map(|len| &text[..len]);
-        let visible = user_visible_text(text, context_len);
         // A steer is a target only once its harness has a restore point for it.
         let steer = matches!(steering, Some(SteeringStatus::Accepted)).then(|| entry_id.to_owned());
         let rewind_menu = (steering.is_none() || steer.is_some())
@@ -1018,7 +1020,7 @@ impl TimelineView {
             None => bubble,
         };
 
-        let bubble = if let Some(author) = self.workspace_store.read(cx).message_byline_for(
+        if let Some(author) = self.workspace_store.read(cx).message_byline_for(
             self.session_id.as_deref(),
             entry_id,
             cx,
@@ -1041,23 +1043,7 @@ impl TimelineView {
                 .into_any_element()
         } else {
             bubble
-        };
-
-        let Some(context) = context else {
-            return bubble;
-        };
-        v_flex()
-            .w_full()
-            .gap_2()
-            .child(self.compose_disclosure(
-                turn,
-                format!("orchestrate-context-{entry_id}"),
-                injected_context_label(context).into(),
-                context,
-                cx,
-            ))
-            .child(bubble)
-            .into_any_element()
+        }
     }
 
     /// A user-role entry, sent or still steering: the notice the host wrote,
@@ -1174,29 +1160,16 @@ impl TimelineView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (text, steering, context_len, attachments) =
-            user_content(&entry.content).expect("a user entry");
+        let (text, steering, attachments) = user_content(&entry.content).expect("a user entry");
         let Some(notice) = user_notice(&entry.content) else {
             return self.compose_user(
-                (
-                    turn,
-                    &entry.id,
-                    text,
-                    cwd,
-                    context_len,
-                    attachments,
-                    steering,
-                    pinned,
-                ),
+                (turn, &entry.id, text, cwd, attachments, steering, pinned),
                 window,
                 cx,
             );
         };
         // A notice is the host's, never the user's words: centered disclosure
-        // rows without an action row, below any context the turn injected.
-        let context = context_len
-            .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
-            .map(|len| &text[..len]);
+        // rows without an action row.
         let pending = steering == Some(SteeringStatus::Pending);
         let label = |label: String| -> SharedString {
             if pending {
@@ -1205,21 +1178,9 @@ impl TimelineView {
                 label.into()
             }
         };
-        let mut column = v_flex()
-            .w_full()
-            .gap_2()
-            .when_some(context, |column, context| {
-                column.child(self.compose_disclosure(
-                    turn,
-                    format!("orchestrate-context-{}", entry.id),
-                    injected_context_label(context).into(),
-                    context,
-                    cx,
-                ))
-            });
+        let mut column = v_flex().w_full().gap_2();
         let mut keys = notice_keys(&notice, &entry.id).into_iter();
         let mut key = || keys.next().expect("a key per notice row");
-        let visible = user_visible_text(text, context_len);
         match &notice {
             HostNotice::Orchestrate(callbacks) => {
                 for callback in callbacks {
@@ -1236,7 +1197,7 @@ impl TimelineView {
                     turn,
                     key(),
                     label(components::disclosure::notice_label(&notice)),
-                    visible,
+                    text,
                     cx,
                 ));
             }
@@ -1377,7 +1338,7 @@ impl TimelineView {
                 capsule_label = crate::tr!("chat.work_log").into_owned();
             }
             let duration = format_elapsed(activity_run_duration_ms(folded, turn, is_last));
-            let outcome = work_log_outcome(turn, folded, is_last);
+            let outcome = work_log_outcome(turn, is_last);
             let rows = if expanded && !header_only {
                 self.compose_work_log_rows(folded, cwd, live_reasoning_id, false, window, cx)
             } else {
@@ -2092,22 +2053,6 @@ impl TimelineView {
     }
 }
 
-/// A recorded turn's injected context is named by what it holds.
-fn injected_context_label(context: &str) -> String {
-    let orchestrate = || crate::tr!("chat.orchestrate_skill").into_owned();
-    match tcode_core::pull_request::strip_linking_instructions(context) {
-        None => orchestrate(),
-        Some(rest) => {
-            let instructions = crate::tr!("pull_requests.instructions_disclosure").into_owned();
-            if rest.trim().is_empty() {
-                instructions
-            } else {
-                format!("{instructions} · {}", orchestrate())
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2135,7 +2080,6 @@ mod tests {
                 EntryContent::Steer {
                     text: "also do this".into(),
                     status: SteeringStatus::Pending,
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             ),
@@ -2163,7 +2107,6 @@ mod tests {
         let steer = |text: String, status| EntryContent::Steer {
             text,
             status,
-            context_len: None,
             attachments: Vec::new(),
         };
         let mut timeline = Timeline::default();
@@ -2559,7 +2502,6 @@ mod tests {
                     parent_item_id: None,
                     content: ItemContent::UserMessage {
                         text: "build it".into(),
-                        context_len: None,
                         attachments: Vec::new(),
                     },
                 }),
@@ -3497,7 +3439,6 @@ This begins after the hard break."#;
                         parent_item_id: None,
                         content: agent::ItemContent::UserMessage {
                             text: format!("prompt {index}"),
-                            context_len: None,
                             attachments: Vec::new(),
                         },
                     }),
@@ -3528,7 +3469,6 @@ This begins after the hard break."#;
                     parent_item_id: None,
                     content: agent::ItemContent::UserMessage {
                         text: "sent after".into(),
-                        context_len: None,
                         attachments: Vec::new(),
                     },
                 }));

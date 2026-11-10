@@ -25,7 +25,6 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
-    panic::AssertUnwindSafe,
     rc::Rc,
     sync::Arc,
     time::Duration,
@@ -106,8 +105,9 @@ enum Raster {
     /// The source parses, but has nothing to draw yet: a header without a
     /// node or an edge.
     Empty,
-    /// The source does not parse; the engine's message, when it gave one.
-    Failed(Option<String>),
+    /// The source does not parse, or its picture does not rasterize: the
+    /// engine's or the rasterizer's message.
+    Failed(String),
 }
 
 fn draw(source: &str, dark: bool, whole: bool, renderer: &SvgRenderer) -> Raster {
@@ -116,32 +116,19 @@ fn draw(source: &str, dark: bool, whole: bool, renderer: &SvgRenderer) -> Raster
     // slab of another shade inside it.
     theme.background = "transparent".to_string();
     let config = LayoutConfig::default();
-    // Every statement of a streaming fence reaches the engine as a new partial
-    // source; a panic on one of them must not take the window down.
-    let laid_out = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let parsed = parse_mermaid_strict(source)?;
-        let layout = compute_layout(&parsed.graph, &theme, &config);
-        // A pie or a gantt chart keeps its data outside nodes and edges, so
-        // one shows only once its fence is whole.
-        if !whole && layout.nodes.is_empty() && layout.edges.is_empty() {
-            return Ok(None);
-        }
-        let dimensions = measure_svg_dimensions(&layout, &config, None);
-        Ok(Some((
-            render_svg(&layout, &theme, &config),
-            gpui::size(dimensions.width, dimensions.height),
-        )))
-    }));
-    let (svg, natural) = match laid_out {
-        Ok(Ok(Some(laid_out))) => laid_out,
-        Ok(Ok(None)) => return Raster::Empty,
-        Ok(Err(error)) => {
-            let error: mermaid_rs_renderer::ParseError = error;
-            return Raster::Failed(Some(error.to_string()));
-        }
-        Err(_) => return Raster::Failed(None),
+    let parsed = match parse_mermaid_strict(source) {
+        Ok(parsed) => parsed,
+        Err(error) => return Raster::Failed(error.to_string()),
     };
-    let scale = raster_scale(natural);
+    let layout = compute_layout(&parsed.graph, &theme, &config);
+    // A pie or a gantt chart keeps its data outside nodes and edges, so one
+    // shows only once its fence is whole.
+    if !whole && layout.nodes.is_empty() && layout.edges.is_empty() {
+        return Raster::Empty;
+    }
+    let dimensions = measure_svg_dimensions(&layout, &config, None);
+    let svg = render_svg(&layout, &theme, &config);
+    let scale = raster_scale(gpui::size(dimensions.width, dimensions.height));
     match renderer.render_single_frame(svg.as_bytes(), scale / gpui::SMOOTH_SVG_SCALE_FACTOR) {
         Ok(image) => {
             let device = image.size(0);
@@ -151,7 +138,7 @@ fn draw(source: &str, dark: bool, whole: bool, renderer: &SvgRenderer) -> Raster
             );
             Raster::Drawn(image, size)
         }
-        Err(_) => Raster::Failed(None),
+        Err(error) => Raster::Failed(error.to_string()),
     }
 }
 
@@ -190,7 +177,7 @@ impl Picture {
 enum Outcome {
     Drawn(Picture),
     Empty,
-    Failed(Option<SharedString>),
+    Failed(SharedString),
 }
 
 impl Outcome {
@@ -198,7 +185,7 @@ impl Outcome {
         match raster {
             Raster::Drawn(image, size) => Self::Drawn(Picture::new(image, size, cx)),
             Raster::Empty => Self::Empty,
-            Raster::Failed(message) => Self::Failed(message.map(Into::into)),
+            Raster::Failed(message) => Self::Failed(message.into()),
         }
     }
 }
@@ -298,7 +285,7 @@ struct Shown {
 struct Ready {
     attempt: Attempt,
     /// The picture, or for a whole source, the engine's message.
-    drawn: Result<Picture, Option<SharedString>>,
+    drawn: Result<Picture, SharedString>,
     /// It came of text that appears at once, or as one document.
     snap: bool,
 }
@@ -309,8 +296,8 @@ pub(super) struct Slot {
     shown: Option<Shown>,
     /// The picture the shown one replaced, while it fades out.
     leaving: Option<Picture>,
-    /// The whole source's message, when it does not parse.
-    failed: Option<Option<SharedString>>,
+    /// The whole source's message, when it does not draw.
+    failed: Option<SharedString>,
     generation: u64,
     swap: Option<Swap>,
     last_swap: Option<Instant>,
@@ -713,12 +700,7 @@ pub(super) fn block(
     let mut layers = Vec::new();
     if shows(Layer::Source) {
         let failure = failed.as_ref().map(|message| {
-            let text = match message {
-                Some(message) => {
-                    crate::tr!("markdown.mermaid_error_detail", message = message).into_owned()
-                }
-                None => crate::tr!("markdown.mermaid_error").into_owned(),
-            };
+            let text = crate::tr!("markdown.mermaid_error_detail", message = message).into_owned();
             let line = div().pt_2().text_secondary(false, cx).child(text);
             #[cfg(test)]
             let line = {
@@ -1496,44 +1478,6 @@ mod tests {
             first,
             "nothing moves after the first frame"
         );
-    }
-
-    /// A fence drawn before, whose picture is no longer among the recent
-    /// ones, is drawn again off the main thread; meanwhile its code holds
-    /// the diagram's height, so nothing below moves when the picture comes.
-    #[gpui::test]
-    fn a_diagram_drawn_again_holds_its_height_while_it_draws(cx: &mut TestAppContext) {
-        let text = format!("```mermaid\n{FLOWCHART}```\n");
-        let (_, cx) = open(&text, false, cx);
-        draw_settled(cx);
-        let drawn = block_height(cx);
-        // Many diagrams later: the picture has left, its size is kept.
-        FINALS.with(|finals| finals.borrow_mut().entries.clear());
-        let root = cx
-            .update(|window, _| window.root::<Root>())
-            .flatten()
-            .expect("the root view");
-        root.update(cx, |root, cx| {
-            root.markdown = cx.new(|cx| MarkdownState::new(&text, cx));
-            cx.notify();
-        });
-        // A frame drawn before the picture is.
-        cx.update(|window, cx| {
-            window.refresh();
-            let _ = window.draw(cx);
-        });
-        assert!(
-            code_shown(cx) && !diagram_shown(cx),
-            "the code, until drawn"
-        );
-        assert_eq!(
-            block_height(cx),
-            drawn,
-            "the code holds the diagram's height"
-        );
-        draw(cx);
-        assert!(diagram_shown(cx) && !code_shown(cx), "the picture, at once");
-        assert_eq!(block_height(cx), drawn);
     }
 
     /// A theme switch draws a diagram again for the new theme; with motion

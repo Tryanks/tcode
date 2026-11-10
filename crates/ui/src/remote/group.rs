@@ -385,7 +385,11 @@ impl gpui::Render for GroupSection {
         let compact = crate::window_seam::window_is_compact(window, cx);
         let spaces = self.spaces(cx);
         self.observer.watch(spaces.as_ref(), cx);
-        let state = spaces.map(|spaces| spaces.read(cx).group().cloned());
+        // Until the machine answers, it is neither in a group nor out of one.
+        let state = spaces.map(|spaces| {
+            let spaces = spaces.read(cx);
+            spaces.loaded().then(|| spaces.group().cloned())
+        });
         // Creating, joining or leaving a group replaces the whole page: the
         // state that goes folds into the one that comes.
         let off =
@@ -398,12 +402,17 @@ impl gpui::Render for GroupSection {
                     ))
                 },
             );
-        let detail =
-            crate::motion::shown("group-detail", state.clone().flatten(), SHOW, window, cx)
-                .map(|shown| shown.fold(self.detail(&shown.value, compact, window, cx)));
+        let detail = crate::motion::shown(
+            "group-detail",
+            state.clone().flatten().flatten(),
+            SHOW,
+            window,
+            cx,
+        )
+        .map(|shown| shown.fold(self.detail(&shown.value, compact, window, cx)));
         let intro = crate::motion::shown(
             "group-intro",
-            matches!(state, Some(None)).then_some(()),
+            matches!(state, Some(Some(None))).then_some(()),
             SHOW,
             window,
             cx,

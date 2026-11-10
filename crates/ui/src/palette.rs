@@ -319,11 +319,6 @@ impl CommandPalette {
         self.select_current = self.window_state.read(cx).palette_picker.is_some();
     }
 
-    #[cfg(test)]
-    pub(crate) fn query_focus_handle(&self, cx: &gpui::App) -> FocusHandle {
-        self.query.read(cx).focus_handle(cx)
-    }
-
     /// Debounce, then ask each host for content hits. The index, cache and
     /// session metadata are host-owned; this keeps only the debounce and the
     /// generation guard that discards an answer a newer query superseded.
@@ -1605,10 +1600,8 @@ impl Render for CommandPalette {
             })
             .flex_col()
             .items_center()
-            .when(compact, |host| host.justify_end().pb(insets.bottom))
-            .when(!compact, |host| {
-                host.justify_start().pt(insets.top + px(DESKTOP_TOP_OFFSET))
-            });
+            .justify_start()
+            .pt(insets.top + px(DESKTOP_TOP_OFFSET));
         reflow.render(dialog)
     }
 }
@@ -1873,7 +1866,7 @@ mod tests {
         });
         let cx: &mut VisualTestContext = cx;
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         while requests.try_recv().is_ok() {}
         let (palette, window_state) = cx.update(|_, cx| {
             let harness = harness.read(cx);
@@ -2146,7 +2139,7 @@ mod tests {
             }),
         });
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
         let palette = sheet.read_with(cx, |sheet, _| sheet.palette.clone());
         cx.update(|window, cx| palette.update(cx, |palette, cx| palette.open(false, window, cx)));

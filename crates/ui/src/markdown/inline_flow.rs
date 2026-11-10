@@ -349,9 +349,7 @@ impl Element for InlineFlow {
                     window,
                 );
                 let size = layout.size;
-                if let Ok(mut slot) = layout_ref.lock() {
-                    *slot = Some(layout);
-                }
+                *layout_ref.lock().unwrap() = Some(layout);
                 size
             }
         });
@@ -370,8 +368,9 @@ impl Element for InlineFlow {
         let fragments = request_layout
             .layout
             .lock()
-            .ok()
-            .and_then(|layout| layout.as_ref().map(|layout| layout.fragments.clone()))
+            .unwrap()
+            .as_ref()
+            .map(|layout| layout.fragments.clone())
             .unwrap_or_default();
         let mut elements = Vec::with_capacity(fragments.len());
         for fragment in fragments {
@@ -402,9 +401,7 @@ impl Element for InlineFlow {
                     let run_origin =
                         RunOrigin::new(self.path.clone()).offset(base + source_range.start);
                     let len = text.len();
-                    if let Ok(mut state) = state.lock() {
-                        state.set_text(text);
-                    }
+                    state.lock().unwrap().set_text(text);
                     let inline = Inline::new(
                         elements.len(),
                         self.view.clone(),

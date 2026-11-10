@@ -55,8 +55,6 @@ use crate::panes::{
     SplitDown, SplitRight, SwapPane, ThreadPanel, ZoomPane,
 };
 use crate::preview_panel::PreviewPanel;
-#[cfg(preview_backend)]
-use crate::preview_panel::lifecycle::BrowserLifecycle;
 use crate::remote::{AttachmentTarget, HostRequest, RemotePanel};
 use crate::runtime_event::{
     RuntimeEventSeverity, RuntimeToastAction, RuntimeToastDisposition, present_runtime_event,
@@ -95,7 +93,7 @@ impl Render for WindowDragState {
 /// Whether this client's window can be dragged by its content at all. A phone
 /// or browser surface has no movable window, so the handlers below are not just
 /// useless there — they would arm on presses that belong to the content.
-pub(crate) const WINDOW_DRAGGABLE: bool = cfg!(not(any(
+const WINDOW_DRAGGABLE: bool = cfg!(not(any(
     target_os = "ios",
     target_os = "android",
     target_family = "wasm"
@@ -1070,13 +1068,6 @@ impl AppShell {
         }
     }
 
-    #[cfg(preview_backend)]
-    #[allow(private_interfaces)]
-    #[doc(hidden)]
-    pub fn preview_lifecycle(&self, cx: &App) -> Option<Entity<BrowserLifecycle>> {
-        Some(self.current_link(cx)?.preview.read(cx).lifecycle())
-    }
-
     fn link_of(&self, host: &HostKey) -> Option<&Link> {
         self.links.iter().find(|link| link.key() == *host)
     }
@@ -1356,12 +1347,7 @@ impl AppShell {
     /// reached only alone replaces them, and a browser only ever has its
     /// own. A link the machine refused is not reused: it stopped
     /// reconnecting, and pairing again lands here with the same machine.
-    pub fn open_host(
-        &mut self,
-        target: AttachmentTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_host(&mut self, target: AttachmentTarget, window: &mut Window, cx: &mut Context<Self>) {
         let fixed = self
             .setup
             .client_host
@@ -1430,7 +1416,7 @@ impl AppShell {
     /// Take `host` out of the workspace: only its link closes, and it stays
     /// out though a group it is in would bring it back. Leaving a host
     /// reached alone opens the workspace again.
-    pub fn leave_host(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
+    fn leave_host(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
         // The host in this process is always in the workspace.
         if *host == HostKey::Local || self.link_of(host).is_none() {
             return;
@@ -1447,7 +1433,7 @@ impl AppShell {
     }
 
     /// Move `host` one place earlier, or later, among the workspace's hosts.
-    pub fn move_host(&mut self, host: &HostKey, earlier: bool, cx: &mut Context<Self>) {
+    fn move_host(&mut self, host: &HostKey, earlier: bool, cx: &mut Context<Self>) {
         self.arrange_workspace(
             |workspace| crate::workspace::shift(workspace, host, earlier),
             cx,
@@ -1728,7 +1714,23 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<HostKey> {
-        let open = Attachment::open(target, local, self.setup.client_host.clone(), cx)?;
+        let name = match &target {
+            AttachmentTarget::Local => crate::tr!("hosts.this_computer").into_owned(),
+            AttachmentTarget::Remote(host) => host.name.clone(),
+        };
+        let open = match Attachment::open(target, local, self.setup.client_host.clone(), cx) {
+            Ok(open) => open?,
+            Err(error) => {
+                window.push_notification(
+                    Notification::error(
+                        crate::tr!("errors.outbox_unreadable", host = name, error = error)
+                            .into_owned(),
+                    ),
+                    cx,
+                );
+                return None;
+            }
+        };
         let host = open.target.key();
         let store = open.store.clone();
         let preview =
@@ -4098,16 +4100,18 @@ impl AppShell {
         let host = store.read(cx).host_key();
         let toast_id = match presented.disposition {
             RuntimeToastDisposition::Push => self.take_toast_id(),
-            RuntimeToastDisposition::Start(operation) => {
-                let toast_id = self.take_toast_id();
-                self.operation_toasts.insert((host, operation), toast_id);
-                toast_id
-            }
-            RuntimeToastDisposition::Update(operation) => {
-                let Some(id) = self.operation_toasts.get(&(host, operation)) else {
-                    return;
-                };
-                *id
+            // A window that opened after an operation started hears of it
+            // first from its progress.
+            RuntimeToastDisposition::Start(operation)
+            | RuntimeToastDisposition::Update(operation) => {
+                match self.operation_toasts.get(&(host.clone(), operation)) {
+                    Some(id) => *id,
+                    None => {
+                        let toast_id = self.take_toast_id();
+                        self.operation_toasts.insert((host, operation), toast_id);
+                        toast_id
+                    }
+                }
             }
             RuntimeToastDisposition::Finish(operation) => self
                 .operation_toasts
@@ -4232,26 +4236,16 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         let (title, detail, progress) = content;
-        let has_action = action.is_some();
+        let autohide = action.is_none()
+            && matches!(
+                kind,
+                ToastKind::Success | ToastKind::Info | ToastKind::Warning
+            );
         window.push_notification(
-            crate::toast::notification(id, kind, title, detail.map(Into::into), action, progress),
+            crate::toast::notification(id, kind, title, detail.map(Into::into), action, progress)
+                .autohide(autohide),
             cx,
         );
-
-        let delay = match kind {
-            ToastKind::Success | ToastKind::Info => Some(Duration::from_secs(4)),
-            ToastKind::Warning => Some(Duration::from_secs(6)),
-            ToastKind::Error | ToastKind::Loading => None,
-        };
-        if let Some(delay) = delay.filter(|_| !has_action) {
-            cx.spawn_in(window, async move |this, cx| {
-                cx.background_executor().timer(delay).await;
-                _ = this.update_in(cx, |_, window, cx| {
-                    window.remove_notification1::<RuntimeToastNotification>(id as usize, cx);
-                });
-            })
-            .detach();
-        }
     }
 
     fn on_open_source_control(
@@ -4436,7 +4430,7 @@ fn back_button(id: &'static str, parent: SharedString) -> crate::widgets::button
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
-/// A nav-bar icon button. Blue is reserved for primary actions and live state.
+/// A nav-bar icon button.
 fn nav_icon_button(
     id: impl Into<ElementId>,
     aria_label: impl Into<SharedString>,
@@ -5411,15 +5405,6 @@ impl AppShell {
             })
             .collect();
         let body = fade.fill().render(layers).size_full();
-        // The drawer sizes its grid from the space it is actually given.
-        if terminal {
-            let size = window.viewport_size();
-            let drawer = column.chat(cx).read(cx).terminal_drawer();
-            let (width, height) = (f32::from(size.width), f32::from(size.height) - 110.);
-            if !drawer.read(cx).is_size(width, height) {
-                drawer.update(cx, |drawer, cx| drawer.resize(width, height, cx));
-            }
-        }
 
         page_surface(window, cx)
             .child(nav_bar(
@@ -5519,8 +5504,10 @@ impl AppShell {
         self.panel_shows_terminal = id == "terminal";
         store.update(cx, |store, cx| match id {
             "terminal" => {
-                if !panel.terminal_open {
-                    store.toggle_terminal_panel_for(session.unwrap_or_default(), cx);
+                if !panel.terminal_open
+                    && let Some(session) = &session
+                {
+                    store.toggle_terminal_panel_for(session.clone(), cx);
                 }
             }
             tab => {
@@ -6997,7 +6984,7 @@ pub(crate) mod tests {
                 .try_send(tcode_client::ConnectionState::Connected { path: None })
                 .unwrap();
             draw(cx);
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
         }
     }
@@ -7505,7 +7492,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-1"), cx)
         });
-        b.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         crate::test_frames::draw_settled(cx);
         (shell, hosts, cx)
     }
@@ -7979,7 +7966,7 @@ pub(crate) mod tests {
             RuntimeToast,
         };
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
+        let (_shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
         // The device took up the system's language.
         crate::set_locale(crate::LANGUAGE_ENGLISH);
         let (key_a, key_b) = (
@@ -7995,8 +7982,7 @@ pub(crate) mod tests {
                 )],
             );
             draw(cx);
-            let store = store_on(&shell, host.name(), cx);
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
         };
         let said = |cx: &mut VisualTestContext| cx.update(crate::overlay::notifications_said);
@@ -8052,14 +8038,31 @@ pub(crate) mod tests {
             },
             cx,
         );
+        let said_now = said(cx);
+        assert!(
+            said_now
+                .iter()
+                .any(|toast| toast.starts_with("host-b: Updating"))
+                && !said_now
+                    .iter()
+                    .any(|toast| toast.starts_with("host-a: Updating")),
+            "A's update finished and B's goes on: {said_now:?}"
+        );
+
+        // An update this window did not see start shows from its progress.
+        toast(
+            &key_a,
+            RuntimeToast::ProviderUpdateProgress {
+                operation: RuntimeOperationId(2),
+                run: run(0),
+            },
+            cx,
+        );
         let said = said(cx);
         assert!(
             said.iter()
-                .any(|toast| toast.starts_with("host-b: Updating"))
-                && !said
-                    .iter()
-                    .any(|toast| toast.starts_with("host-a: Updating")),
-            "A's update finished and B's goes on: {said:?}"
+                .any(|toast| toast.starts_with("host-a: Updating")),
+            "A's second update shows from its progress: {said:?}"
         );
     }
 
@@ -8166,8 +8169,8 @@ pub(crate) mod tests {
 
     /// `store` takes in what `host` sent it, and what it sent `host` so far
     /// is set aside.
-    fn heard(host: &WorkspaceHost, store: &Entity<WorkspaceStore>, cx: &mut VisualTestContext) {
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+    fn heard(host: &WorkspaceHost, _store: &Entity<WorkspaceStore>, cx: &mut VisualTestContext) {
+        cx.run_until_parked();
         draw(cx);
         let _ = sent(&host.host);
     }
@@ -8253,7 +8256,7 @@ pub(crate) mod tests {
         draw(cx);
         assert_eq!(drafts_asked(&hosts[&key_a]), Vec::<Option<String>>::new());
         ack_project_draft(&hosts[&key_b].host, "on-b", "draft");
-        b.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         crate::test_frames::draw_settled(cx);
         assert_eq!(store_of(&shell, cx), b, "the column goes to B");
         assert_eq!(pane_threads(&shell, cx), [Some("draft".into())]);
@@ -8346,7 +8349,7 @@ pub(crate) mod tests {
         assert_eq!(store_of(&shell, cx), b);
 
         ack_draft(&hosts[&key_a].host, "late");
-        a.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         crate::test_frames::draw_settled(cx);
         assert_eq!(store_of(&shell, cx), b, "the column stays on B");
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
@@ -8592,7 +8595,7 @@ pub(crate) mod tests {
     ) {
         let store = store_of(shell, cx);
         for _ in 0..500 {
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
             if store.read_with(cx, |store, cx| ready(store, cx)) {
                 return;
@@ -10291,7 +10294,7 @@ pub(crate) mod tests {
                 )],
             );
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             let at = from + (to - from) * (step as f32 / 8.);
             cx.simulate_mouse_move(at, Some(MouseButton::Left), none);
             draw(cx);
@@ -10421,7 +10424,7 @@ pub(crate) mod tests {
     #[cfg(preview_backend)]
     fn render_preview_here(
         host: &MountedShell,
-        store: &Entity<WorkspaceStore>,
+        _store: &Entity<WorkspaceStore>,
         id: &str,
         cx: &mut VisualTestContext,
     ) {
@@ -10464,7 +10467,7 @@ pub(crate) mod tests {
             ],
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
     }
 
     /// What the host answers a thread's subscriptions with: its status and an
@@ -10766,7 +10769,6 @@ pub(crate) mod tests {
                 parent_item_id: None,
                 content: agent::ItemContent::UserMessage {
                     text: "Look around".into(),
-                    context_len: None,
                     attachments: vec![],
                 },
             }),
@@ -10919,7 +10921,6 @@ pub(crate) mod tests {
                 parent_item_id: None,
                 content: agent::ItemContent::UserMessage {
                     text: "Look around".into(),
-                    context_len: None,
                     attachments: vec![],
                 },
             }),
@@ -11233,6 +11234,115 @@ pub(crate) mod tests {
                         && (bounds.top() - column.top()).abs() < px(0.5)
                 })
         })
+    }
+
+    /// The rows of either timeline painted between `left` and `right`, by
+    /// index. The lead's and the agent's rows share their selectors, so
+    /// each is told apart by where it is painted.
+    fn rows_between(
+        left: Pixels,
+        right: Pixels,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(usize, gpui::Bounds<Pixels>)> {
+        (0..400)
+            .filter_map(|index| {
+                let row = cx.debug_bounds(format!("timeline-row-{index}").leak())?;
+                (row.center().x > left && row.center().x < right).then_some((index, row))
+            })
+            .collect()
+    }
+
+    /// A trackpad's wheel at `at`, moving the content down `by`.
+    fn wheel_at(at: gpui::Point<Pixels>, by: f32, cx: &mut VisualTestContext) {
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+        draw(cx);
+        for (phase, delta) in [
+            (gpui::TouchPhase::Started, 0.),
+            (gpui::TouchPhase::Moved, by),
+            (gpui::TouchPhase::Ended, 0.),
+        ] {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: at,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(delta))),
+                touch_phase: phase,
+                ..Default::default()
+            });
+            draw(cx);
+        }
+        crate::test_frames::draw_settled(cx);
+    }
+
+    /// Beside its lead, the agent's card takes the wheel over it and leaves
+    /// the lead's timeline where it was; the wheel over the lead's column,
+    /// and over the gap between that column and the card, where the card's
+    /// edge is grabbed, scrolls the lead and leaves the agent where it was.
+    ///
+    /// The gap is wheeled once the lead is off its end: from the end it
+    /// does not move the lead today.
+    #[gpui::test]
+    fn the_wheel_scrolls_the_timeline_it_is_over_beside_an_agent(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_lead_with_agent(cx);
+        // A running agent's mark never rests; the wheel is what is read.
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let store = store_of(&shell, cx);
+        serve_finished_turns(&host, "thread-1", 60, false);
+        await_restore_update(&shell, cx, |store, cx| {
+            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx)
+                == Some(60)
+        });
+        serve_finished_turns(&host, "agent-1", 30, false);
+        cx.update(|window, cx| {
+            crate::agents_panel::open_agent(
+                &store,
+                "agent-1".into(),
+                crate::shell::side_host_for(&store.read(cx).thread_key("thread-1"), cx),
+                None,
+                window,
+                cx,
+            )
+        });
+        draw(cx);
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("agent-1"), cx) && store.timeline_settled_for("agent-1")
+        });
+        crate::test_frames::draw_settled(cx);
+        let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
+        let timeline = cx
+            .debug_bounds("chat-side-timeline")
+            .expect("the agent's timeline");
+        let grip = cx
+            .debug_bounds("chat-side-grip")
+            .expect("the grip of the card's edge");
+        let pane = pane_bounds(&shell, cx)[0];
+        // The topmost row of each, which stays on screen as the wheel moves
+        // its content down.
+        let (lead_row, mut lead_at) = rows_between(pane.left(), card.left(), cx)[0];
+        let (agent_row, mut agent_at) = rows_between(card.left(), card.right(), cx)[0];
+        let at = |row: usize, cx: &mut VisualTestContext| {
+            cx.debug_bounds(format!("timeline-row-{row}").leak())
+                .unwrap_or_else(|| panic!("row {row} stays on screen"))
+        };
+
+        for (over, x, lead_moves) in [
+            ("the agent's card", timeline.center().x, false),
+            ("the lead's column", pane.left() + px(300.), true),
+            ("the gap before the card", grip.center().x, true),
+        ] {
+            wheel_at(gpui::point(x, timeline.center().y), 120., cx);
+            let (lead_now, agent_now) = (at(lead_row, cx), at(agent_row, cx));
+            let (moved, moved_at, still, still_at) = if lead_moves {
+                (lead_now, lead_at, agent_now, agent_at)
+            } else {
+                (agent_now, agent_at, lead_now, lead_at)
+            };
+            assert!(
+                moved.top() > moved_at.top() + px(60.),
+                "a wheel over {over} scrolls it: {moved_at:?} -> {moved:?}"
+            );
+            assert_eq!(still, still_at, "a wheel over {over} leaves the other");
+            (lead_at, agent_at) = (lead_now, agent_now);
+        }
     }
 
     /// On a tablet: an agent beside its lead is neither drawn nor held open
@@ -12881,7 +12991,6 @@ pub(crate) mod tests {
                 parent_item_id: None,
                 content: agent::ItemContent::UserMessage {
                     text: "Hello there.".into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }),
@@ -13864,11 +13973,14 @@ pub(crate) mod tests {
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         state.update(cx, |state, cx| state.open_palette(cx));
         crate::test_frames::draw_settled(cx);
-        let query = shell.read_with(cx, |shell, cx| {
-            let palette = shell.palette.read(cx);
-            palette.query_focus_handle(cx)
-        });
-        cx.update(|window, _| assert!(query.is_focused(window)));
+        // Its query, inside it, holds the keyboard, not the palette itself.
+        let palette = shell.read_with(cx, |shell, cx| shell.palette.focus_handle(cx));
+        let query_held = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                palette.contains_focused(window, cx) && !palette.is_focused(window)
+            })
+        };
+        assert!(query_held(cx));
         serve_thread(&host, "thread-1");
         store.update(cx, |store, cx| store.put_back_thread("thread-1".into(), cx));
         await_restore_update(&shell, cx, |store, cx| {
@@ -13876,7 +13988,7 @@ pub(crate) mod tests {
         });
         crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
-        cx.update(|window, _| assert!(query.is_focused(window), "it keeps the keyboard"));
+        assert!(query_held(cx), "it keeps the keyboard");
         state.update(cx, |state, cx| state.close_palette(cx));
         crate::test_frames::draw_settled(cx);
 
@@ -14288,8 +14400,10 @@ pub(crate) mod tests {
             if project_count > 1 {
                 cx.update(|window, cx| {
                     let palette = &shell.read(cx).palette;
+                    // Its query holds the keyboard where the palette
+                    // itself does not.
                     assert_eq!(
-                        palette.read(cx).query_focus_handle(cx).is_focused(window),
+                        !palette.read(cx).focus_handle(cx).is_focused(window),
                         !(compact && mobile),
                         "the chooser raises the keyboard only off a phone"
                     );
@@ -15546,7 +15660,6 @@ pub(crate) mod tests {
                         parent_item_id: None,
                         content: agent::ItemContent::UserMessage {
                             text: format!("Keep reading position {index}\n").repeat(4),
-                            context_len: None,
                             attachments: Vec::new(),
                         },
                     }),
@@ -16168,7 +16281,6 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         as_mobile(cx);
-        let store = store_of(&shell, cx);
         host.incoming
             .try_send(
                 encode_line(&HostMessage::Event(EventEnvelope {
@@ -16183,7 +16295,7 @@ pub(crate) mod tests {
                 .unwrap(),
             )
             .unwrap();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         // The thread is opened and the host describes it, so the chat draws
         // it with its composer.
         deliver_thread(&shell, &host, "thread-1", false, cx);
@@ -17068,7 +17180,7 @@ pub(crate) mod tests {
         let store = store_of(shell, cx);
         store.update(cx, |store, cx| store.show_thread(session.into(), cx));
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
     }
 
     #[gpui::test]
@@ -17094,7 +17206,7 @@ pub(crate) mod tests {
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| store.show_thread(session.into(), cx));
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         crate::settings::assert_follows_language_switch(cx, "chat.new_thread", |cx| {
             cx.window_title().expect("the shell titles its window")
         });
@@ -17107,7 +17219,7 @@ pub(crate) mod tests {
     /// working-tree read is answered with `git_diff` when given; returns how
     /// many the client made.
     fn draw_until(
-        shell: &Entity<AppShell>,
+        _shell: &Entity<AppShell>,
         cx: &mut VisualTestContext,
         host: &MountedShell,
         selector: &'static str,
@@ -17115,8 +17227,7 @@ pub(crate) mod tests {
     ) -> usize {
         let mut git_diff_reads = 0;
         for _ in 0..12 {
-            let store = store_of(shell, cx);
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             while let Ok(line) = host.outgoing.try_recv() {
                 let line = decode_client_line(&line).expect("client line");
                 let ClientPayload::Query(query) = line.payload else {
@@ -17617,7 +17728,7 @@ pub(crate) mod tests {
         };
         let arrive = |cx: &mut VisualTestContext| {
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
         };
         let open = |cx: &mut VisualTestContext| {
@@ -17681,6 +17792,33 @@ pub(crate) mod tests {
         let _ = sent(&host);
 
         resize(cx, 1800.);
+        crate::test_frames::draw_settled(cx);
+        let heights: Vec<_> = sent(&host)
+            .into_iter()
+            .filter(|payload| {
+                matches!(
+                    payload,
+                    ClientPayload::Command(Command::SetTerminalHeight { .. })
+                )
+            })
+            .collect();
+        assert!(heights.is_empty(), "{heights:?}");
+    }
+
+    /// A phone opening the terminal page tells the host no drawer height:
+    /// the page has no drawer, and the height is the desktop's.
+    #[gpui::test]
+    fn the_compact_terminal_page_sends_the_host_no_terminal_height(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_thread_with(cx, Vec::new());
+        as_mobile(cx);
+        resize(cx, 393.);
+        let _ = sent(&host);
+
+        shell.update(cx, |shell, cx| {
+            shell.show_panel("terminal", cx);
+            shell.go(Destination::Panel, cx);
+        });
         crate::test_frames::draw_settled(cx);
         let heights: Vec<_> = sent(&host)
             .into_iter()
@@ -17878,7 +18016,7 @@ pub(crate) mod tests {
         let store = store_of(shell, cx);
         store.update(cx, |store, cx| store.show_thread(session.into(), cx));
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         resize(cx, 1200.);
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for(session, tcode_core::ui::RightTab::Diff, cx)
@@ -17889,13 +18027,13 @@ pub(crate) mod tests {
     /// query is refused, as a workspace without a checkout would. Returns the held reads in
     /// the order the client made them.
     fn held_git_diff_reads(
-        shell: &Entity<AppShell>,
+        _shell: &Entity<AppShell>,
         host: &MountedShell,
         cx: &mut VisualTestContext,
     ) -> Vec<u64> {
         let mut reads = Vec::new();
         for _ in 0..6 {
-            store_of(shell, cx).update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             while let Ok(line) = host.outgoing.try_recv() {
                 let line = decode_client_line(&line).expect("client line");
                 let ClientPayload::Query(query) = line.payload else {
@@ -18121,35 +18259,39 @@ pub(crate) mod tests {
         assert!(cx.debug_bounds("diff-line-new-stale.rs-1").is_none());
     }
 
-    #[test]
-    fn sidebar_overlay_follows_hover_only_on_collapsed_workspace_routes() {
-        for (current, transition, popover, visible) in [
-            (false, SidebarHoverTransition::Trigger(true), false, true),
-            (false, SidebarHoverTransition::Trigger(false), false, false),
-            (true, SidebarHoverTransition::Trigger(false), false, true),
-            (false, SidebarHoverTransition::Overlay(true), false, true),
-            (true, SidebarHoverTransition::Overlay(true), false, true),
-            (true, SidebarHoverTransition::Overlay(false), false, false),
-            (true, SidebarHoverTransition::Overlay(false), true, true),
-            (false, SidebarHoverTransition::Overlay(false), true, false),
-        ] {
-            assert_eq!(
-                next_sidebar_overlay_visibility(current, transition, true, Route::Chat, popover),
-                visible
-            );
-            assert!(!next_sidebar_overlay_visibility(
-                current,
-                transition,
-                false,
-                Route::Chat,
-                popover
-            ));
-            for route in [Route::Settings, Route::Hosts] {
-                assert!(!next_sidebar_overlay_visibility(
-                    current, transition, true, route, popover
-                ));
-            }
-        }
+    /// With the sidebar collapsed, the pointer at the window's left edge
+    /// brings the sidebar in over the chat; it stays while the pointer is on
+    /// it and goes once the pointer leaves it. Expanded, the sidebar is in
+    /// its column and the edge brings nothing.
+    #[gpui::test]
+    fn a_collapsed_sidebar_comes_in_from_the_edge_while_the_pointer_is_on_it(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (_shell, _host, cx) = mount_panes(cx);
+        let none = gpui::Modifiers::default();
+        let edge = gpui::point(px(4.), px(400.));
+        let overlay = |cx: &mut VisualTestContext| cx.debug_bounds("sidebar-hover-overlay");
+
+        cx.simulate_mouse_move(edge, None, none);
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(overlay(cx), None, "the sidebar is in its column");
+
+        cx.simulate_mouse_move(gpui::point(px(1000.), px(400.)), None, none);
+        cx.update(|_, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(overlay(cx), None);
+
+        cx.simulate_mouse_move(edge, None, none);
+        crate::test_frames::draw_settled(cx);
+        let shown = overlay(cx).expect("the edge brings the sidebar in");
+        cx.simulate_mouse_move(shown.center(), None, none);
+        crate::test_frames::draw_settled(cx);
+        assert!(overlay(cx).is_some(), "it stays while the pointer is on it");
+
+        cx.simulate_mouse_move(gpui::point(shown.right() + px(200.), px(400.)), None, none);
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(overlay(cx), None, "it goes once the pointer leaves it");
     }
 
     /// thread-1's timeline: a running turn holding a question, an agent
@@ -18271,7 +18413,6 @@ pub(crate) mod tests {
                         format!("{id}-ask-{turn}"),
                         agent::ItemContent::UserMessage {
                             text: format!("What is in {id}?"),
-                            context_len: None,
                             attachments: vec![],
                         },
                     )),
@@ -18354,7 +18495,7 @@ pub(crate) mod tests {
             serve_finished_turns(&host, id, turns, agent);
             cx.simulate_keystrokes(key);
             let store = store_of(&shell, cx);
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
             assert_eq!(pane_threads(&shell, cx), [Some(id.into())]);
             let shown = store.read_with(cx, |store, cx| {

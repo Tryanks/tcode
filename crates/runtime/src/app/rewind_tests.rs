@@ -582,7 +582,6 @@ fn a_history_window_never_begins_inside_turns_a_rewind_took_out() {
             parent_item_id: None,
             content: agent::ItemContent::UserMessage {
                 text: id.into(),
-                context_len: None,
                 attachments: Vec::new(),
             },
         })

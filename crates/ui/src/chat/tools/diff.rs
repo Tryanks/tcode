@@ -1,12 +1,10 @@
 //! The edit window: one row per file an edit touched, opening on its diff.
 //!
 //! A `FileChange` carries each file's diff from its harness. An edit made as
-//! a tool call (a subagent's `Edit`/`Write` recorded before subagents mapped
-//! like their parent, Codex's imported `apply_patch`, an `edit` or `patch`
-//! recorded from OpenCode 1.x) carries only what it asked for: its replaced
-//! and replacing text, the content it wrote, or its patch. The window builds
-//! the same diff from that, without line numbers where the call never said
-//! which lines.
+//! a tool call (an imported Claude Code `Edit`/`Write`, Codex's imported
+//! `apply_patch`) carries only what it asked for: its replaced and replacing
+//! text, the content it wrote, or its patch. The window builds the same diff
+//! from that, without line numbers where the call never said which lines.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -108,7 +106,7 @@ const REPLACE: &[&str] = &[
     "replace",
 ];
 const WRITE: &[&str] = &["write", "write_file", "create_file"];
-const PATCH: &[&str] = &["apply_patch", "patch"];
+const PATCH: &[&str] = &["apply_patch"];
 
 #[derive(Deserialize)]
 struct Replace<'a> {
@@ -153,7 +151,7 @@ struct Write<'a> {
 enum Patch {
     Text(String),
     Field {
-        #[serde(alias = "patchText", alias = "input")]
+        #[serde(alias = "input")]
         patch: String,
     },
 }
@@ -226,7 +224,7 @@ fn added_diff(content: &str) -> String {
 }
 
 /// The files a patch edits: a Git unified diff, or the patch grammar Codex
-/// and OpenCode speak (`*** Begin Patch`, `*** Update File: …`).
+/// speaks (`*** Begin Patch`, `*** Update File: …`).
 fn patch_files(text: &str) -> Option<Vec<(FileChange, bool)>> {
     if text.lines().any(|line| line.starts_with("diff --git ")) {
         return agent::file_changes_from_unified_diff(text)

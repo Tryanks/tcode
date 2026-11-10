@@ -1054,14 +1054,20 @@ pub struct Settings {
     pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
+/// How many idle days auto-settle waits when it is turned on.
+pub const AUTO_SETTLE_DEFAULT_DAYS: f64 = 3.0;
+
+/// The idle days auto-settle may wait.
+pub const AUTO_SETTLE_DAYS: std::ops::RangeInclusive<f64> = 1.0..=90.0;
+
 const fn default_auto_settle_after_days() -> Option<f64> {
-    Some(3.0)
+    Some(AUTO_SETTLE_DEFAULT_DAYS)
 }
 
-/// Auto-settle after 1 to 90 days, or never.
+/// Auto-settle after one of [`AUTO_SETTLE_DAYS`], or never.
 fn auto_settle_days(days: Option<f64>) -> Result<Option<f64>, &'static str> {
     match days {
-        Some(days) if !(1.0..=90.0).contains(&days) => {
+        Some(days) if !AUTO_SETTLE_DAYS.contains(&days) => {
             Err("Auto-settle days must be between 1 and 90.")
         }
         days => Ok(days),
@@ -1450,6 +1456,17 @@ impl Settings {
             return id.to_string();
         };
         let product = provider_label(profile.kind);
+        match self.profile_qualifier_as(id, signed_in_as) {
+            Some(name) => format!("{product} ({name})"),
+            None => product.to_string(),
+        }
+    }
+
+    /// What tells the profile apart from its harness's others in
+    /// [`Self::profile_display_name_as`]: its name, the account it is signed
+    /// in as, or its id. `None` is a profile named by its product alone.
+    pub fn profile_qualifier_as(&self, id: &str, signed_in_as: Option<&str>) -> Option<String> {
+        let profile = self.resolved_profile(id)?;
         let builtin = Self::is_builtin_profile_id(id);
         let account = signed_in_as
             .filter(|_| {
@@ -1462,18 +1479,15 @@ impl Settings {
             .and_then(|email| email.split('@').next())
             .map(str::trim)
             .filter(|local| !local.is_empty());
-        let qualifier = profile
+        profile
             .settings
             .display_name
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .or(account)
-            .or_else(|| (!builtin).then_some(id));
-        match qualifier {
-            Some(name) => format!("{product} ({name})"),
-            None => product.to_string(),
-        }
+            .or_else(|| (!builtin).then_some(id))
+            .map(str::to_owned)
     }
 
     /// The ids a new profile named `name` may take, best first: the name as a

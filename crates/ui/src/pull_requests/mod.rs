@@ -452,6 +452,23 @@ pub fn sidebar_badge(
     )
 }
 
+/// The pull request's page as the host names it: the thread's link to it, or the layer of a
+/// native stack it was opened from.
+pub(super) fn page_url(links: &[ThreadPullRequestLink], key: &PullRequestKey) -> Option<String> {
+    links
+        .iter()
+        .find(|link| link.key == *key)
+        .map(|link| link.url.clone())
+        .filter(|url| !url.is_empty())
+        .or_else(|| {
+            pull_request::native_stack(links, key)?
+                .layers
+                .iter()
+                .find(|layer| layer.number == key.number)
+                .map(|layer| layer.url.clone())
+        })
+}
+
 /// What a watch message reports, localized and joined for its notice and transcript row.
 pub fn watch_notice_kinds(notice: &WatchNotice) -> String {
     let parts: Vec<_> = match notice {
@@ -533,6 +550,23 @@ fn source(link: Option<&ThreadPullRequestLink>) -> &'static str {
         None => "pull_requests.source_not_linked",
     }
 }
+/// The number's tooltip: what made the thread show the pull request, and when the thread linked
+/// it where it did. A dismissed link and a stack layer carry no time.
+fn number_tooltip(link: Option<&ThreadPullRequestLink>) -> String {
+    let source = crate::tr!(source(link)).into_owned();
+    match link.and_then(|link| link.linked_at) {
+        Some(linked_at) => crate::tr!(
+            "pull_requests.number_tooltip",
+            source = source,
+            ago = crate::time::humanize_ago(
+                tcode_core::project::now_secs().saturating_sub(linked_at)
+            )
+        )
+        .into_owned(),
+        None => source,
+    }
+}
+
 /// When a rate limit lifts, as the notices say it: ahead, or soon once its time has passed.
 pub(super) fn resumes(retry_at: u64) -> String {
     let now = tcode_core::project::now_secs();
@@ -1572,17 +1606,7 @@ impl PullRequestsPanel {
                                     .text_color(cx.theme().foreground)
                                     .id("pr-number")
                                     .with_tooltip({
-                                        let label = crate::tr!(
-                                            "pull_requests.number_tooltip",
-                                            source = source.clone(),
-                                            ago = crate::time::humanize_ago(
-                                                tcode_core::project::now_secs().saturating_sub(
-                                                    link.and_then(|link| link.linked_at)
-                                                        .unwrap_or_default()
-                                                )
-                                            )
-                                        )
-                                        .into_owned();
+                                        let label = number_tooltip(link);
                                         move |_, _| {
                                             crate::widgets::tooltip::Tooltip::new(label.clone())
                                         }
@@ -2551,4 +2575,26 @@ pub fn open_link_dialog(
             })
     });
     input.update(cx, |input, cx| input.focus(window, cx));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A dismissed link keeps no time (`tcode_core::pull_request::unlink_pull_request` clears it); its
+    /// number said it was linked some fifty years ago, the epoch.
+    #[test]
+    fn a_dismissed_number_names_no_link_time() {
+        let link = ThreadPullRequestLink {
+            key: PullRequestKey::new("github.com", "owner/project", 7),
+            source: PullRequestSource::Dismissed,
+            url: String::new(),
+            linked_at: None,
+            snapshot: None,
+            stack: pull_request::PullRequestStackState::Unknown,
+            sync_error: None,
+            watch: None,
+        };
+        assert_eq!(number_tooltip(Some(&link)), "Dismissed");
+    }
 }

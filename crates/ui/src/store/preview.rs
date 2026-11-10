@@ -181,7 +181,7 @@ impl WorkspaceStore {
             (
                 Topic::PreviewSession { session_id },
                 ServerEvent::PreviewSessionReplaced(session),
-            ) if session.session_id == *session_id => {
+            ) => {
                 if self.preview.asked.get(session_id) == Some(&false) {
                     self.preview.asked.remove(session_id);
                 }
@@ -201,9 +201,7 @@ impl WorkspaceStore {
                 held.replicated = true;
                 Some(vec![session_id.clone()])
             }
-            (Topic::Preview { client }, ServerEvent::PreviewRenderingReplaced(sessions))
-                if client.id == self.preview.client.id =>
-            {
+            (Topic::Preview { .. }, ServerEvent::PreviewRenderingReplaced(sessions)) => {
                 let mut changed = Vec::new();
                 for session in sessions {
                     let id = &session.session_id;

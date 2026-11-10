@@ -165,10 +165,6 @@ impl ClientAttachment {
         self.request.clone()
     }
 
-    pub fn hosts(&self) -> Vec<PairedHost> {
-        self.host.load_hosts()
-    }
-
     pub fn save_host(&self, host: PairedHost) {
         self.host.remember_host(host);
     }
@@ -312,13 +308,13 @@ pub(crate) fn open_host_path_in_zed(
     let home = store.update(cx, |store, cx| store.browse_directories(String::new(), cx));
     window
         .spawn(cx, async move |cx| {
-            let relative = home
-                .await
-                .ok()
-                .and_then(|listing| listing.home)
-                .and_then(|home| home_relative(&path, &home.to_string_lossy()));
+            let relative = home.await.map(|listing| {
+                listing
+                    .home
+                    .and_then(|home| home_relative(&path, &home.to_string_lossy()))
+            });
             let _ = cx.update(|window, cx| match relative {
-                Some(path) => {
+                Ok(Some(path)) => {
                     let target = tcode_client::host::MachinePath {
                         host_id: machine.host_id.clone(),
                         path,
@@ -326,11 +322,15 @@ pub(crate) fn open_host_path_in_zed(
                     };
                     confirm_and_open(editor, target, machine.name, window, cx);
                 }
-                None => window.push_notification(
+                Ok(None) => window.push_notification(
                     Notification::error(crate::tr!(
                         "editor.zed.open_failed",
                         error = crate::tr!("editor.zed.windows_outside_home")
                     )),
+                    cx,
+                ),
+                Err(error) => window.push_notification(
+                    Notification::error(crate::tr!("editor.zed.open_failed", error = error)),
                     cx,
                 ),
             });
@@ -371,10 +371,9 @@ fn confirm_and_open(
         open_on_machine(editor.as_ref(), target, window, cx);
         return;
     }
-    let settings_file = editor.settings_file().map_or_else(
-        || "settings.json".to_owned(),
-        |path| path.display().to_string(),
-    );
+    let settings_file = editor
+        .settings_file()
+        .map(|path| path.display().to_string());
     let dismiss = Rc::new(std::cell::Cell::new(false));
     window.open_dialog(cx, move |dialog, _, _| {
         let checked = dismiss.get();
@@ -407,11 +406,13 @@ fn confirm_and_open(
                         .child(line(
                             crate::tr!("editor.zed.remote_only_zed").into_owned().into(),
                         ))
-                        .child(line(
-                            crate::tr!("editor.zed.remote_settings", file = settings_file.clone())
-                                .into_owned()
-                                .into(),
-                        ))
+                        .children(settings_file.clone().map(|file| {
+                            line(
+                                crate::tr!("editor.zed.remote_settings", file = file)
+                                    .into_owned()
+                                    .into(),
+                            )
+                        }))
                         .child(
                             crate::widgets::checkbox::Checkbox::new("remote-zed-note-dismiss")
                                 .label(crate::tr!("editor.zed.remote_dont_show"))
@@ -729,7 +730,7 @@ impl RemotePanel {
             let scanned = host.scan_qr().await;
             let _ = this.update_in(cx, |panel, window, cx| {
                 match scanned {
-                    Ok(value) => {
+                    Ok(Some(value)) => {
                         if panel.form.fill_invite(&value, window, cx) {
                             panel.submit(window, cx);
                         } else {
@@ -737,7 +738,8 @@ impl RemotePanel {
                                 Some(crate::tr!("hosts.pair.bad_invite").into_owned());
                         }
                     }
-                    Err(error) => panel.form.error = Some(error),
+                    Ok(None) => {}
+                    Err(error) => panel.form.error = Some(crate::i18n::device_failure(&error)),
                 }
                 cx.notify();
             });
@@ -2540,7 +2542,9 @@ mod tests {
 
         cx.update(|_, cx| {
             cx.update_global::<RemoteController, _>(|controller, _| {
-                controller.set_pairing_enabled(false)
+                controller
+                    .hosting(tcode_protocol::HostingAction::SetEnabled(false))
+                    .unwrap();
             });
         });
         for width in [1024., 393.] {

@@ -37,41 +37,16 @@ use crate::store::WorkspaceStore;
 /// is stuck, or blocked by a dialog, never answers.
 const CALL_BOUND: Duration = Duration::from_secs(15);
 
-const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly";
-const SMOKE_CREATION_QUEUED: &str = "preview creation is queued";
-const SMOKE_CREATION_IN_FLIGHT: &str = "preview creation is in flight";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CreationPhase {
-    Queued,
-    InFlight,
-}
+#[cfg(any(target_os = "windows", target_os = "android"))]
+pub(super) const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly";
 
 #[derive(Clone)]
 pub enum Availability {
-    Starting(CreationPhase),
+    /// Windows and Android create a page asynchronously.
+    #[cfg(any(target_os = "windows", target_os = "android"))]
+    Starting,
     Ready(Entity<WebView>),
     Unavailable,
-}
-
-impl Availability {
-    /// Harness-facing classification without exposing platform slot internals.
-    pub fn is_ready(&self) -> bool {
-        matches!(self, Self::Ready(_))
-    }
-
-    /// The exact pending status used by the cross-platform lifecycle smoke run.
-    pub fn pending_message(&self) -> Option<&'static str> {
-        match self {
-            Self::Starting(CreationPhase::Queued) => Some(SMOKE_CREATION_QUEUED),
-            Self::Starting(CreationPhase::InFlight) => Some(SMOKE_CREATION_IN_FLIGHT),
-            Self::Ready(_) | Self::Unavailable => None,
-        }
-    }
-
-    pub fn is_unavailable(&self) -> bool {
-        matches!(self, Self::Unavailable)
-    }
 }
 
 enum WebViewSlot {
@@ -80,7 +55,6 @@ enum WebViewSlot {
     #[cfg(any(target_os = "windows", target_os = "android"))]
     Creating {
         id: u64,
-        phase: CreationPhase,
         pending_url: Option<String>,
     },
     Ready {
@@ -136,7 +110,7 @@ impl WebViewSlot {
     fn availability(&self) -> Availability {
         match self {
             #[cfg(any(target_os = "windows", target_os = "android"))]
-            Self::Creating { phase, .. } => Availability::Starting(*phase),
+            Self::Creating { .. } => Availability::Starting,
             #[cfg(test)]
             Self::Stub => Availability::Unavailable,
             Self::Ready { view, .. } => Availability::Ready(view.clone()),
@@ -331,13 +305,11 @@ impl BrowserLifecycle {
                 self.load(key, &webview, url, cx);
             }
             #[cfg(any(target_os = "windows", target_os = "android"))]
-            Availability::Starting(_) => {
+            Availability::Starting => {
                 if let Some(WebViewSlot::Creating { pending_url, .. }) = self.slots.get_mut(key) {
                     *pending_url = Some(url.to_string());
                 }
             }
-            #[cfg(not(any(target_os = "windows", target_os = "android")))]
-            Availability::Starting(_) => {}
             Availability::Unavailable => {}
         }
         availability
@@ -361,8 +333,8 @@ impl BrowserLifecycle {
             .transpose()
         {
             Ok(mapped) => mapped,
-            Err(_) => {
-                cx.notify();
+            Err(message) => {
+                self.fail_load(key, url, "RemotePreview", message, cx);
                 return;
             }
         };
@@ -374,25 +346,38 @@ impl BrowserLifecycle {
         if objc2_foundation::NSURL::URLWithString(&objc2_foundation::NSString::from_str(url))
             .is_none()
         {
-            if let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) {
-                let outcome = page.events.handle(Event::Failed(LoadError {
-                    url: url.to_owned(),
-                    code: "InvalidURL".into(),
-                    message: "this is not a URL the browser can load".into(),
-                }));
-                self.apply(key, outcome, cx);
-            }
+            let message = "this is not a URL the browser can load".to_owned();
+            self.fail_load(key, url, "InvalidURL", message, cx);
             return;
         }
         if let Err(error) = raw.load_url(url) {
-            log::warn!("preview: failed to navigate {key}: {error}");
+            self.fail_load(key, url, "load_url", error.to_string(), cx);
         }
     }
 
-    /// Show exactly `key` and let every other ready native child go.
-    ///
-    /// Call this only after the selected WebView element has been laid out in
-    /// the current frame. Pass `None` to let every child go.
+    /// End the navigation `load` started on `key` as failed before the
+    /// engine took it: its calls and waits answer with the failure.
+    fn fail_load(
+        &mut self,
+        key: &str,
+        url: &str,
+        code: &str,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) {
+            let outcome = page.events.handle(Event::Failed(LoadError {
+                url: url.to_owned(),
+                code: code.to_owned(),
+                message,
+            }));
+            self.apply(key, outcome, cx);
+        }
+    }
+
+    /// Show `key`'s page for the panel `owner`, whose element has laid it out
+    /// for this frame, letting go of what that panel showed. Pages other
+    /// panels show are theirs to place.
     ///
     /// On macOS and iOS a page fades in and out (`PreviewPanel::native_fade`).
     /// Gap: on Windows, Linux and Android it shows and hides at once.
@@ -401,14 +386,6 @@ impl BrowserLifecycle {
     /// gpui-webview has none, and an X11 child window or an Android view is
     /// not faded here; a snapshot drawn by GPUI in the page's place is the
     /// open alternative.
-    pub fn set_visible(&mut self, key: Option<&str>, cx: &mut Context<Self>) {
-        self.shown.clear();
-        self.show_for(cx.entity_id(), key, cx);
-    }
-
-    /// Show `key`'s page for the panel `owner`, whose element has laid it out
-    /// for this frame, letting go of what that panel showed. Pages other
-    /// panels show are theirs to place.
     pub(super) fn show_for(&mut self, owner: EntityId, key: Option<&str>, cx: &mut Context<Self>) {
         #[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(unused_mut))]
         let mut fading = self.set_wanted(owner, key);
@@ -981,7 +958,8 @@ impl BrowserLifecycle {
     ) {
         match self.ensure(key, initial_url, window, cx) {
             Availability::Ready(_) => {}
-            Availability::Starting(_) => {
+            #[cfg(any(target_os = "windows", target_os = "android"))]
+            Availability::Starting => {
                 let _ = reply.try_send(Err(STARTING_MESSAGE.into()));
                 return;
             }
@@ -1027,19 +1005,6 @@ impl BrowserLifecycle {
                 WebViewSlot::Creating { id, .. } if *id == creation_id
             )
         })
-    }
-
-    #[cfg(target_os = "windows")]
-    fn mark_creation_in_flight(&mut self, creation_id: u64) -> bool {
-        for slot in self.slots.values_mut() {
-            if let WebViewSlot::Creating { id, phase, .. } = slot
-                && *id == creation_id
-            {
-                *phase = CreationPhase::InFlight;
-                return true;
-            }
-        }
-        false
     }
 
     #[cfg(any(target_os = "windows", target_os = "android"))]
@@ -1299,20 +1264,16 @@ fn trap_gdk_x_errors() {
 
 #[cfg(target_os = "windows")]
 mod platform {
-    use std::future::Future as _;
     use std::rc::Rc;
 
     use super::super::webview2;
     use super::*;
-
-    const SMOKE_CREATION_PAUSE: Duration = Duration::from_millis(50);
 
     pub(super) struct Adapter {
         environment: Rc<webview2::Environment>,
         /// Whether pages are in-private: those of an attached browser.
         private: bool,
         next_creation_id: u64,
-        smoke_creation_pause: bool,
     }
 
     impl Adapter {
@@ -1323,9 +1284,6 @@ mod platform {
                 environment: Rc::new(webview2::Environment::new(proxy)?),
                 private: proxy.is_some(),
                 next_creation_id: 0,
-                // Preserve the harness's deterministic in-flight cancellation
-                // window without putting smoke routing state back in the panel.
-                smoke_creation_pause: std::env::args().any(|arg| arg == "--preview-smoke"),
             })
         }
     }
@@ -1337,14 +1295,13 @@ mod platform {
         window: &mut Window,
         cx: &mut Context<BrowserLifecycle>,
     ) -> Availability {
-        let (environment, private, creation_id, smoke_creation) = match &mut lifecycle.creator {
+        let (environment, private, creation_id) = match &mut lifecycle.creator {
             Creator::Available(adapter) => {
                 adapter.next_creation_id = adapter.next_creation_id.wrapping_add(1).max(1);
                 (
                     adapter.environment.clone(),
                     adapter.private,
                     adapter.next_creation_id,
-                    adapter.smoke_creation_pause,
                 )
             }
             Creator::Unavailable { .. } => return Availability::Unavailable,
@@ -1362,7 +1319,6 @@ mod platform {
             creation_key.clone(),
             WebViewSlot::Creating {
                 id: creation_id,
-                phase: CreationPhase::Queued,
                 pending_url: initial_url.map(str::to_string),
             },
         );
@@ -1388,28 +1344,7 @@ mod platform {
             // The HWND may be destroyed while WebView2 builds the controller
             // by design; creation then fails, or completes with a controller
             // discarded unless the same window/panel/generation are still live.
-            let mut build = Box::pin(webview2::create(environment, parent, private));
-            let first_poll = std::future::poll_fn(|task_cx| {
-                std::task::Poll::Ready(match build.as_mut().poll(task_cx) {
-                    std::task::Poll::Ready(result) => Some(result),
-                    std::task::Poll::Pending => None,
-                })
-            })
-            .await;
-            let built = match first_poll {
-                Some(result) => result,
-                None => {
-                    let _ = lifecycle.update(cx, |lifecycle, cx| {
-                        if lifecycle.mark_creation_in_flight(creation_id) {
-                            cx.notify();
-                        }
-                    });
-                    if smoke_creation {
-                        cx.background_executor().timer(SMOKE_CREATION_PAUSE).await;
-                    }
-                    build.as_mut().await
-                }
-            };
+            let built = webview2::create(environment, parent, private).await;
 
             if let Ok(controller) = &built
                 && let Ok(webview) = webview2::core_webview(controller)
@@ -1479,7 +1414,7 @@ mod platform {
         })
         .detach();
 
-        Availability::Starting(CreationPhase::Queued)
+        Availability::Starting
     }
 }
 
@@ -1530,7 +1465,6 @@ mod platform {
             key.to_owned(),
             WebViewSlot::Creating {
                 id,
-                phase: CreationPhase::Queued,
                 pending_url: Some(initial_url.clone()),
             },
         );
@@ -1573,7 +1507,7 @@ mod platform {
             });
         })
         .detach();
-        Availability::Starting(CreationPhase::Queued)
+        Availability::Starting
     }
 }
 

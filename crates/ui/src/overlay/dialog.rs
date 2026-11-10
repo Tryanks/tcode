@@ -55,7 +55,6 @@ pub struct DialogButtons {
     ok_text: Option<SharedString>,
     cancel_text: Option<SharedString>,
     ok_variant: ButtonVariant,
-    cancel_variant: ButtonVariant,
     show_cancel: bool,
     on_ok: Decision,
     on_cancel: Decision,
@@ -68,7 +67,6 @@ impl Default for DialogButtons {
             ok_text: None,
             cancel_text: None,
             ok_variant: ButtonVariant::Primary,
-            cancel_variant: ButtonVariant::Default,
             show_cancel: false,
             on_ok: Rc::new(|_, _, _| true),
             on_cancel: Rc::new(|_, _, _| true),
@@ -88,10 +86,6 @@ impl DialogButtons {
     }
     pub fn ok_variant(mut self, variant: ButtonVariant) -> Self {
         self.ok_variant = variant;
-        self
-    }
-    pub fn cancel_variant(mut self, variant: ButtonVariant) -> Self {
-        self.cancel_variant = variant;
         self
     }
     pub fn show_cancel(mut self, show: bool) -> Self {
@@ -349,7 +343,6 @@ pub struct Dialog {
     close_button: bool,
     fill: bool,
     sheet: bool,
-    overlay: bool,
     overlay_closable: bool,
     keyboard: bool,
     button_props: DialogButtons,
@@ -373,7 +366,6 @@ impl Dialog {
             close_button: true,
             fill: false,
             sheet: false,
-            overlay: true,
             overlay_closable: true,
             keyboard: true,
             button_props: DialogButtons::default(),
@@ -442,10 +434,6 @@ impl Dialog {
     }
     pub fn max_w(mut self, width: impl Into<Pixels>) -> Self {
         self.max_width = Some(width.into());
-        self
-    }
-    pub fn overlay(mut self, value: bool) -> Self {
-        self.overlay = value;
         self
     }
     pub fn overlay_closable(mut self, value: bool) -> Self {
@@ -560,7 +548,7 @@ impl RenderOnce for Dialog {
         let backdrop = div()
             .absolute()
             .size_full()
-            .when(self.overlay, |el| el.bg(crate::material::scrim(scrim, cx)))
+            .bg(crate::material::scrim(scrim, cx))
             .when(exiting, |el| el.occlude())
             .on_scroll(|_, _, cx| cx.stop_propagation());
         let popup = div()
@@ -772,7 +760,6 @@ impl AlertDialog {
                 .unwrap_or_else(|| "Cancel".into());
             Button::new("alert-cancel")
                 .label(label)
-                .with_variant(self.button_props.cancel_variant)
                 .on_click(move |event, window, cx| {
                     if on_cancel(event, window, cx) {
                         window.close_dialog(cx);

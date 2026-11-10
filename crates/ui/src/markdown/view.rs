@@ -1006,14 +1006,17 @@ mod tests {
                 let _ = window.draw(cx);
             });
 
+            let measured = |markdown: &MarkdownState, item| {
+                markdown.list_state.bounds_for_item(item).is_some()
+            };
             assert!(view.read_with(cx, |root, cx| {
-                root.markdown.read(cx).has_measured_item(settled + 1)
+                measured(root.markdown.read(cx), settled + 1)
             }));
             view.update(cx, |root, cx| {
                 root.markdown.update(cx, |markdown, cx| {
                     markdown.push_str(append, cx);
-                    assert!(markdown.has_measured_item(settled));
-                    assert!(!markdown.has_measured_item(settled + 1));
+                    assert!(measured(markdown, settled));
+                    assert!(!measured(markdown, settled + 1));
                 });
             });
         }
@@ -1838,6 +1841,23 @@ mod tests {
                 .as_deref(),
             Some("first line")
         );
+    }
+
+    /// Copy puts the selection on the clipboard as it is, the indentation of
+    /// the code line it starts in included.
+    #[gpui::test]
+    fn copy_keeps_the_indentation_the_selection_starts_in(cx: &mut TestAppContext) {
+        let (_, cx) = open_timeline_row("```text\n    indented line\nnext\n```", cx);
+        let first = cx.debug_bounds("markdown-code-line-0").unwrap();
+        let last = cx.debug_bounds("markdown-code-line-1").unwrap();
+        cx.simulate_mouse_down(
+            point(first.left() + px(1.), first.center().y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        let end = point(last.right() - px(1.), last.center().y);
+        drag_to(cx, end);
+        assert_eq!(release(cx, end), "    indented line\nnext");
     }
 
     #[gpui::test]

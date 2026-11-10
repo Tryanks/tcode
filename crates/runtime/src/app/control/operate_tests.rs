@@ -663,7 +663,6 @@ fn control_thread_guards_human_queued_messages_and_forks() {
                 parent_item_id: None,
                 content: agent::ItemContent::UserMessage {
                     text: "first".into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }),
@@ -677,7 +676,6 @@ fn control_thread_guards_human_queued_messages_and_forks() {
                 parent_item_id: None,
                 content: agent::ItemContent::UserMessage {
                     text: "second".into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }),

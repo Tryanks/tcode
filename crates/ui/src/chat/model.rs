@@ -100,22 +100,19 @@ pub(crate) fn limit_resume_action(
     }
 }
 
-pub(crate) type UserContent<'a> = (&'a str, Option<SteeringStatus>, Option<usize>, &'a [String]);
+pub(crate) type UserContent<'a> = (&'a str, Option<SteeringStatus>, &'a [String]);
 
 pub(crate) fn user_content(content: &EntryContent) -> Option<UserContent<'_>> {
     match content {
-        EntryContent::Item(ItemContent::UserMessage {
-            text,
-            context_len,
-            attachments,
-        }) => Some((text, None, *context_len, attachments)),
+        EntryContent::Item(ItemContent::UserMessage { text, attachments }) => {
+            Some((text, None, attachments))
+        }
         EntryContent::Steer {
             text,
             status,
-            context_len,
             attachments,
-        } => Some((text, Some(*status), *context_len, attachments)),
-        EntryContent::Feedback { text } => Some((text, None, None, &[])),
+        } => Some((text, Some(*status), attachments)),
+        EntryContent::Feedback { text } => Some((text, None, &[])),
         _ => None,
     }
 }
@@ -416,11 +413,7 @@ pub(crate) fn activity_run_duration_ms(
 // A failed command inside a run is normal agent probing (grep exit 1, a
 // retried build); it never fails the run. Only the turn's own terminal
 // status colors the snapshot, and only on the segment that carries it.
-pub(crate) fn work_log_outcome(
-    turn: &TurnMeta,
-    _activities: &[&TimelineEntry],
-    is_last: bool,
-) -> TurnStatus {
+pub(crate) fn work_log_outcome(turn: &TurnMeta, is_last: bool) -> TurnStatus {
     if is_last {
         turn.status.unwrap_or(TurnStatus::Completed)
     } else {
@@ -553,27 +546,15 @@ pub(crate) fn format_cost_usd(cost: f64) -> String {
     }
 }
 
-/// The quiet, visible portion of a finished turn's timing row. Bucket details
-/// intentionally live in [`turn_time_breakdown`] instead of competing with the
-/// completion clock, total duration, and cost.
-pub(crate) fn turn_time_parts(clock: String, timing: Option<TurnTiming>) -> Vec<String> {
-    let mut parts = vec![clock];
-    if let Some(timing) = timing {
-        parts.push(format_elapsed(timing.total_ms));
-    }
-    parts
-}
-
-pub(crate) fn turn_time_breakdown(timing: Option<TurnTiming>) -> Option<String> {
-    timing.map(|timing| {
-        let tools = timing.tool_ms.min(timing.total_ms);
-        let ai = timing.total_ms - tools;
-        [
-            crate::tr!("chat.turn_ai", duration = format_elapsed(ai)).into_owned(),
-            crate::tr!("chat.turn_tools", duration = format_elapsed(tools)).into_owned(),
-        ]
-        .join(" · ")
-    })
+/// The total's breakdown a finished turn's timing row shows on hover, so the
+/// buckets do not compete with the clock, the total and the cost.
+pub(crate) fn turn_time_breakdown(timing: TurnTiming) -> String {
+    let ai = timing.total_ms - timing.tool_ms;
+    [
+        crate::tr!("chat.turn_ai", duration = format_elapsed(ai)).into_owned(),
+        crate::tr!("chat.turn_tools", duration = format_elapsed(timing.tool_ms)).into_owned(),
+    ]
+    .join(" · ")
 }
 
 #[derive(Clone)]
@@ -585,27 +566,33 @@ pub(crate) struct TurnTimeClause {
     pub(crate) tooltip: Option<String>,
 }
 
+/// A finished turn's timing row: when it finished, how long it took, what it
+/// cost, and the model that served it where that is not the one asked for;
+/// each where the turn has it.
 pub(crate) fn turn_time_clauses(
-    clock: String,
+    clock: Option<String>,
     timing: Option<TurnTiming>,
     cost_usd: Option<f64>,
     served_model: Option<&str>,
     requested_model: Option<&str>,
 ) -> Vec<TurnTimeClause> {
-    const TIMING_SELECTORS: [&str; 2] = ["turn-time-clock", "turn-time-total"];
-
-    let mut clauses = turn_time_parts(clock, timing)
-        .into_iter()
-        .zip(TIMING_SELECTORS)
-        .map(|(text, selector)| TurnTimeClause {
-            text,
-            selector,
+    let mut clauses = Vec::new();
+    if let Some(clock) = clock {
+        clauses.push(TurnTimeClause {
+            text: clock,
+            selector: "turn-time-clock",
             warning: false,
-            tooltip: (selector == "turn-time-total")
-                .then(|| turn_time_breakdown(timing))
-                .flatten(),
-        })
-        .collect::<Vec<_>>();
+            tooltip: None,
+        });
+    }
+    if let Some(timing) = timing {
+        clauses.push(TurnTimeClause {
+            text: format_elapsed(timing.total_ms),
+            selector: "turn-time-total",
+            warning: false,
+            tooltip: Some(turn_time_breakdown(timing)),
+        });
+    }
     if let Some(cost) = cost_usd {
         clauses.push(TurnTimeClause {
             text: format_cost_usd(cost),
@@ -797,13 +784,6 @@ pub(crate) fn md_sync(synced: &str, text: &str) -> MdSync {
     }
 }
 
-/// Return the part of a user entry that belongs in its message bubble.
-pub(crate) fn user_visible_text(text: &str, context_len: Option<usize>) -> &str {
-    context_len
-        .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
-        .map_or(text, |len| &text[len..])
-}
-
 /// Encode plain text as markdown whose rendered text is still literal input.
 pub(crate) fn plain_text_as_markdown(text: &str) -> String {
     let mut markdown = String::with_capacity(text.len());
@@ -862,11 +842,10 @@ pub(crate) fn work_log_key(segment_id: &str) -> String {
     format!("worklog-{segment_id}")
 }
 
-/// The notice the host wrote as a user message, read past any injected context the turn
-/// carried (the pull request instructions precede a notice like any other queued message).
+/// The notice the host wrote as a user message.
 pub(crate) fn user_notice(content: &EntryContent) -> Option<HostNotice> {
-    let (text, _, context_len, _) = user_content(content)?;
-    host_notice(user_visible_text(text, context_len))
+    let (text, _, _) = user_content(content)?;
+    host_notice(text)
 }
 
 /// The expansion key of each disclosure row a notice renders as, in order.
@@ -881,53 +860,17 @@ pub(crate) fn notice_keys(notice: &HostNotice, entry_id: &str) -> Vec<String> {
     }
 }
 
-/// The per-entry expansion keys of a user message's disclosure rows: its injected context
-/// (annotated with a `context_len`) and its notice. Empty for an ordinary user message,
-/// which stays a plain bubble.
+/// The per-entry expansion keys of a user message's disclosure rows, one per
+/// row its notice renders as. Empty for an ordinary user message, which stays
+/// a plain bubble.
 pub(crate) fn disclosure_keys(content: &EntryContent, entry_id: &str) -> Vec<String> {
-    let mut keys = Vec::new();
-    if user_content(content).is_some_and(|(_, _, context_len, _)| context_len.is_some()) {
-        keys.push(format!("orchestrate-context-{entry_id}"));
-    }
-    if let Some(notice) = user_notice(content) {
-        keys.extend(notice_keys(&notice, entry_id));
-    }
-    keys
+    user_notice(content).map_or_else(Vec::new, |notice| notice_keys(&notice, entry_id))
 }
 
 #[cfg(test)]
 pub(in crate::chat) mod tests {
     use super::*;
     use agent::{FileChange, FileChangeKind, ItemContent, ItemStatus, ProviderKind};
-
-    /// A child's callback dispatched behind the pull request instructions is still the callback
-    /// (a disclosure row), not the user's words (a bubble), and both of its rows have keys.
-    #[test]
-    fn a_callback_behind_injected_context_is_still_a_callback() {
-        let context = "<pull_request_linking>\nlink it\n</pull_request_linking>\n\n";
-        let callback = "[orchestrate] thread child-7 (\"Fix the build\") completed. tokens: input 5, output 3, total 8.\nDone.";
-        let content = EntryContent::Item(ItemContent::UserMessage {
-            text: format!("{context}{callback}"),
-            context_len: Some(context.len()),
-            attachments: Vec::new(),
-        });
-        let Some(HostNotice::Orchestrate(parsed)) = user_notice(&content) else {
-            panic!("the visible text is the callback");
-        };
-        assert_eq!(parsed[0].child_id, "child-7");
-        assert_eq!(parsed[0].body, "Done.");
-        assert_eq!(
-            disclosure_keys(&content, "u1"),
-            ["orchestrate-context-u1", "orchestrate-callback-u1-0"]
-        );
-        let plain = EntryContent::Item(ItemContent::UserMessage {
-            text: format!("{context}fix the build"),
-            context_len: Some(context.len()),
-            attachments: Vec::new(),
-        });
-        assert!(user_notice(&plain).is_none());
-        assert_eq!(disclosure_keys(&plain, "u2"), ["orchestrate-context-u2"]);
-    }
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use tcode_core::project::{Project, SessionMeta};
@@ -1036,7 +979,6 @@ pub(in crate::chat) mod tests {
     pub(in crate::chat) fn user_item(text: &str) -> EntryContent {
         EntryContent::Item(ItemContent::UserMessage {
             text: text.into(),
-            context_len: None,
             attachments: Vec::new(),
         })
     }
@@ -1063,7 +1005,6 @@ pub(in crate::chat) mod tests {
                 EntryContent::Steer {
                     text: "new".into(),
                     status: SteeringStatus::Pending,
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             ),
@@ -1246,7 +1187,6 @@ pub(in crate::chat) mod tests {
                 EntryContent::Steer {
                     text: id.into(),
                     status: SteeringStatus::Pending,
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             )
@@ -1554,7 +1494,7 @@ pub(in crate::chat) mod tests {
         crate::set_locale(crate::LANGUAGE_ENGLISH);
 
         let clauses = turn_time_clauses(
-            "3:04 PM".into(),
+            Some("3:04 PM".into()),
             Some(TurnTiming::new(80_000, 35_000)),
             Some(0.12),
             Some("claude-opus-5"),
@@ -1574,7 +1514,7 @@ pub(in crate::chat) mod tests {
         );
 
         let sub_cent = turn_time_clauses(
-            "3:04 PM".into(),
+            Some("3:04 PM".into()),
             None,
             Some(0.004),
             Some("claude-fable-5"),
@@ -1589,8 +1529,28 @@ pub(in crate::chat) mod tests {
         );
 
         let missing_requested =
-            turn_time_clauses("3:04 PM".into(), None, None, Some("served"), None);
+            turn_time_clauses(Some("3:04 PM".into()), None, None, Some("served"), None);
         assert_eq!(missing_requested.len(), 1);
+
+        // A turn with no finish time still says what it cost and which model
+        // served it.
+        let unclocked = turn_time_clauses(
+            None,
+            None,
+            Some(0.12),
+            Some("claude-opus-5"),
+            Some("claude-fable-5"),
+        );
+        assert_eq!(
+            unclocked
+                .iter()
+                .map(|clause| (clause.selector, clause.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("turn-time-cost", "$0.12"),
+                ("turn-time-model", "⚠ claude-opus-5"),
+            ]
+        );
     }
 
     #[test]
@@ -1620,16 +1580,18 @@ pub(in crate::chat) mod tests {
             .into_iter()
             .zip(totals)
             {
+                let clauses = turn_time_clauses(None, Some(timing), None, None, None);
                 assert_eq!(
-                    turn_time_parts("3:04 PM".into(), Some(timing)),
-                    ["3:04 PM", total]
+                    clauses
+                        .iter()
+                        .map(|clause| clause.text.as_str())
+                        .collect::<Vec<_>>(),
+                    [total]
                 );
                 if let Some(tooltip) = tooltip {
-                    assert_eq!(turn_time_breakdown(Some(timing)).as_deref(), Some(tooltip));
+                    assert_eq!(clauses[0].tooltip.as_deref(), Some(tooltip));
                 }
             }
-            assert_eq!(turn_time_parts("9:00 AM".into(), None), ["9:00 AM"]);
-            assert_eq!(turn_time_breakdown(None), None);
         }
     }
 

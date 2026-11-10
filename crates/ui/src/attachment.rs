@@ -94,19 +94,27 @@ pub struct Attachment {
 
 impl Attachment {
     /// Open a link to `target` and build its store, over `local` when the
-    /// target is this process's own host. `None` when this client has no way
-    /// to reach that target — a browser asked to attach locally has no local
-    /// host to attach to.
+    /// target is this process's own host. `Ok(None)` when this client has no
+    /// way to reach that target — a browser asked to attach locally has no
+    /// local host to attach to. `Err` carries why the writes this device
+    /// still had for that host could not be read; the link is not opened, and
+    /// nothing is written over them.
     pub fn open(
         target: AttachmentTarget,
         local: Option<Transport>,
         client_host: Option<Rc<dyn ClientHost>>,
         cx: &mut App,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>, String> {
         let (transport, identity) = match &target {
-            AttachmentTarget::Local => (local?, WorkspaceAttachment::Local),
+            AttachmentTarget::Local => match local {
+                Some(local) => (local, WorkspaceAttachment::Local),
+                None => return Ok(None),
+            },
             AttachmentTarget::Remote(host) => (
-                client_host.as_ref()?.connect(host),
+                match client_host.as_ref() {
+                    Some(client) => client.connect(host),
+                    None => return Ok(None),
+                },
                 WorkspaceAttachment::Remote {
                     host_id: host.host_id.clone(),
                     host_name: host.name.clone(),
@@ -134,9 +142,8 @@ impl Attachment {
                 });
             }
             if let Err(error) = link.restore_outbox(storage) {
-                log::error!("could not restore outbox: {}", error.message);
                 link.close();
-                return None;
+                return Err(error.message);
             }
         }
         // The store subscribes before the link pumps, so a restored write is
@@ -151,11 +158,11 @@ impl Attachment {
             )
         });
         let runtime = AttachmentRuntime::start_link(link, transport.state, cx);
-        Some(Self {
+        Ok(Some(Self {
             target,
             store,
             runtime,
-        })
+        }))
     }
 
     pub fn link(&self) -> HostLink {
@@ -236,6 +243,7 @@ mod tests {
                 None,
                 cx,
             )
+            .expect("the outbox is readable")
             .expect("local attachment")
         });
         cx.run_until_parked();

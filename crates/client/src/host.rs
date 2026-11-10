@@ -187,6 +187,42 @@ pub struct PickedFile {
     pub bytes: Vec<u8>,
 }
 
+/// Why the platform's camera scan or picker gave nothing back. The client
+/// shows it in the user's language; only [`Self::Platform`] carries words,
+/// the platform's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceFailure {
+    /// This client has no such camera or picker.
+    Unsupported,
+    /// The device has no camera.
+    NoCamera,
+    /// The user has not allowed the camera.
+    CameraDenied,
+    /// Another scan or pick is still open.
+    Busy,
+    /// The platform could not show its scanner or picker.
+    CannotOpen,
+    /// An item the user chose could not be read.
+    Unreadable,
+    Platform(String),
+}
+
+impl DeviceFailure {
+    /// A failure as a native layer reports it: the code it sends for a
+    /// failure it names (`no_camera`, `camera_denied`, `busy`, `cannot_open`,
+    /// `unreadable`), else the platform's text.
+    pub fn from_native(report: String) -> Self {
+        match report.as_str() {
+            "no_camera" => Self::NoCamera,
+            "camera_denied" => Self::CameraDenied,
+            "busy" => Self::Busy,
+            "cannot_open" => Self::CannotOpen,
+            "unreadable" => Self::Unreadable,
+            _ => Self::Platform(report),
+        }
+    }
+}
+
 /// Persistence, pairing, transport, and platform facilities for a tcode client.
 pub trait ClientHost: 'static {
     /// Native dictation supplied by this client platform, when available.
@@ -297,8 +333,10 @@ pub trait ClientHost: 'static {
         false
     }
 
-    fn scan_qr(&self) -> HostFuture<'_, Result<String, String>> {
-        Box::pin(async { Err("unsupported".into()) })
+    /// Read one QR code with the camera. Closing the scanner resolves to
+    /// `None`.
+    fn scan_qr(&self) -> HostFuture<'_, Result<Option<String>, DeviceFailure>> {
+        Box::pin(async { Err(DeviceFailure::Unsupported) })
     }
 
     /// Whether [`pick_images`](Self::pick_images) opens the platform's own
@@ -310,9 +348,9 @@ pub trait ClientHost: 'static {
     /// Let the user choose up to `limit` images in the platform's media
     /// picker. Dismissing the picker resolves to an empty list; `Err` is a
     /// real failure to show.
-    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedFile>, String>> {
+    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedFile>, DeviceFailure>> {
         let _ = limit;
-        Box::pin(async { Err("unsupported".into()) })
+        Box::pin(async { Err(DeviceFailure::Unsupported) })
     }
 
     /// Whether [`pick_files`](Self::pick_files) opens a platform file picker.
@@ -323,8 +361,8 @@ pub trait ClientHost: 'static {
 
     /// Let the user choose files of any type. Dismissing the picker resolves
     /// to an empty list; `Err` is a real failure to show.
-    fn pick_files(&self) -> HostFuture<'_, Result<Vec<PickedFile>, String>> {
-        Box::pin(async { Err("unsupported".into()) })
+    fn pick_files(&self) -> HostFuture<'_, Result<Vec<PickedFile>, DeviceFailure>> {
+        Box::pin(async { Err(DeviceFailure::Unsupported) })
     }
 
     /// Whether [`ClientHost::deliver_artifact`] can actually hand a produced

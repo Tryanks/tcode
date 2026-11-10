@@ -596,7 +596,6 @@ mod tests {
                         parent_item_id: None,
                         content: agent::ItemContent::UserMessage {
                             text: "Earlier conversation".into(),
-                            context_len: None,
                             attachments: Vec::new(),
                         },
                     }),

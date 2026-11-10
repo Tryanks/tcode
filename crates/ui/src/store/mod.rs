@@ -266,12 +266,18 @@ pub struct WorkspaceStore {
     /// Archived threads, which the index leaves out; loaded while a view
     /// holds them.
     archived_replica: Option<ArchivedSessions>,
+    /// Why the last load of the archived threads failed, and the archived
+    /// revision it was asked at: the same revision is not asked for again.
+    archived_failure: Option<(u64, String)>,
     archived_holds: usize,
     archived_task: Option<Task<()>>,
     /// The thread the index event being applied removed, so the destination
     /// can still follow it to its parent.
     removed_session: Option<SessionMeta>,
     settings_replica: Settings,
+    /// The settings this device keeps for the space it is a member of could
+    /// not be read: the workspace runs on defaults and writes none over them.
+    member_settings_unreadable: bool,
     /// Whether `settings_replica` is the host's settings or still the local
     /// defaults it was constructed with. Views that copy a setting into an
     /// editable input must not treat the defaults as the host's answer.
@@ -468,6 +474,7 @@ impl WorkspaceStore {
             index_summary: IndexSummary::default(),
             thread_list_revision: 0,
             archived_replica: None,
+            archived_failure: None,
             archived_holds: 0,
             archived_task: None,
             storage_migration: None,
@@ -476,6 +483,7 @@ impl WorkspaceStore {
             disk_usage_holds: 0,
             removed_session: None,
             settings_replica: Settings::default(),
+            member_settings_unreadable: false,
             settings_hydrated: false,
             baseline_topics: HashSet::new(),
             applied_scope_request: None,
@@ -500,7 +508,6 @@ impl WorkspaceStore {
             topic: Topic::Scope,
             after: None,
         });
-        #[cfg(not(test))]
         {
             let event_messages = host.events();
             store.attachment_tasks.push(cx.spawn(async move |this, cx| {
@@ -515,7 +522,6 @@ impl WorkspaceStore {
             }));
         }
 
-        #[cfg(not(test))]
         {
             let delivery_changes = host.delivery_changes();
             store.attachment_tasks.push(cx.spawn(async move |this, cx| {
@@ -677,6 +683,9 @@ impl WorkspaceStore {
     }
 
     fn save_member_settings(&self) {
+        if self.member_settings_unreadable {
+            return;
+        }
         if let Some(host) = &self.client_host {
             let mut preferences = host.load_preferences();
             let navigation = preferences
@@ -721,6 +730,7 @@ impl WorkspaceStore {
         }
         if needs_baseline {
             self.archived_replica = None;
+            self.archived_failure = None;
             self.archived_task = None;
             self.baseline_topics.clear();
             self.index_hydrated = false;
@@ -761,12 +771,13 @@ impl WorkspaceStore {
             }
             Scope::Full => {}
             Scope::Space {
+                space_name,
                 projects,
                 providers,
                 ..
             } => {
                 if changed {
-                    self.settings_replica = self
+                    let saved = self
                         .client_host
                         .as_ref()
                         .and_then(|host| host.load_preferences().navigation)
@@ -775,9 +786,23 @@ impl WorkspaceStore {
                                 .get("member_settings")?
                                 .get(self.member_settings_key())
                                 .cloned()
-                        })
-                        .and_then(|settings| serde_json::from_value(settings).ok())
-                        .unwrap_or_default();
+                        });
+                    self.member_settings_unreadable = false;
+                    self.settings_replica = match saved.map(serde_json::from_value) {
+                        None => Settings::default(),
+                        Some(Ok(settings)) => settings,
+                        Some(Err(error)) => {
+                            self.member_settings_unreadable = true;
+                            cx.emit(RuntimeEvent::Error(
+                                tcode_protocol::RuntimeError::FileUnreadable {
+                                    error: format!(
+                                        "this device's settings for {space_name}: {error}"
+                                    ),
+                                },
+                            ));
+                            Settings::default()
+                        }
+                    };
                 }
                 self.settings_hydrated = true;
                 self.index_replica.1 = projects.clone();
@@ -1034,9 +1059,11 @@ impl WorkspaceStore {
         })
     }
 
-    pub(crate) fn retry_delivery(&self, key: &str) {
+    pub(crate) fn retry_delivery(&self, key: &str, cx: &mut Context<Self>) {
         if let Err(error) = self.host.retry_failed(key) {
-            log::error!("retry failed: {}", error.message);
+            cx.emit(RuntimeEvent::Error(tcode_protocol::RuntimeError::External(
+                error.message,
+            )));
         }
     }
 
@@ -1290,9 +1317,7 @@ impl WorkspaceStore {
             &envelope.topic
         };
         match (topic, &envelope.event) {
-            (Topic::SessionStatus { session_id }, ServerEvent::SessionStatusReplaced(status))
-                if status.session_id == *session_id =>
-            {
+            (Topic::SessionStatus { session_id }, ServerEvent::SessionStatusReplaced(status)) => {
                 for message in &status.queued_messages {
                     if let Some(key) = &message.delivery_key {
                         self.retire_delivery_for(session_id, key);
@@ -1383,15 +1408,9 @@ impl WorkspaceStore {
                 }
                 None
             }
-            (
-                Topic::Terminal { terminal_id },
-                ServerEvent::TerminalFrame {
-                    terminal_id: frame_id,
-                    frame,
-                },
-            ) if *terminal_id == frame_id => {
-                self.apply_terminal_frame(frame_id, *frame, cx);
-                reach = Reach::Terminal(frame_id);
+            (Topic::Terminal { terminal_id }, ServerEvent::TerminalFrame { frame, .. }) => {
+                self.apply_terminal_frame(*terminal_id, *frame, cx);
+                reach = Reach::Terminal(*terminal_id);
                 None
             }
             (
@@ -1422,13 +1441,7 @@ impl WorkspaceStore {
                         event,
                     });
                 }
-                (
-                    Topic::Terminal { terminal_id },
-                    ServerEvent::TerminalDelta {
-                        terminal_id: delta_id,
-                        delta,
-                    },
-                ) if terminal_id == delta_id => {
+                (Topic::Terminal { terminal_id }, ServerEvent::TerminalDelta { delta, .. }) => {
                     self.apply_terminal_delta(*terminal_id, delta, cx);
                     reach = Reach::Terminal(*terminal_id);
                 }
@@ -1504,11 +1517,8 @@ impl WorkspaceStore {
                 }
                 (
                     Topic::ExternalImport { project_id },
-                    ServerEvent::ExternalImportStatusReplaced {
-                        project_id: replaced,
-                        status,
-                    },
-                ) if project_id == replaced => {
+                    ServerEvent::ExternalImportStatusReplaced { status, .. },
+                ) => {
                     self.import_statuses
                         .insert(project_id.clone(), status.clone());
                 }
@@ -1662,7 +1672,7 @@ impl WorkspaceStore {
                 (
                     Topic::SessionStatus { session_id },
                     ServerEvent::SessionStatusReplaced(status),
-                ) if status.session_id == *session_id => {
+                ) => {
                     let loaded = self.baseline_topics.insert(envelope_topic.clone());
                     if let Some(thread) = self.threads.get_mut(session_id) {
                         let status = status.as_ref().clone();
@@ -1714,9 +1724,7 @@ impl WorkspaceStore {
                         reach = Reach::Thread(session_id.clone(), &[Part::Status]);
                     }
                 }
-                (Topic::SessionPlan { session_id }, ServerEvent::SessionPlanReplaced(plan))
-                    if plan.session_id == *session_id =>
-                {
+                (Topic::SessionPlan { session_id }, ServerEvent::SessionPlanReplaced(plan)) => {
                     let loaded = self.baseline_topics.insert(envelope_topic.clone());
                     if let Some(thread) = self.threads.get_mut(session_id) {
                         thread.plan = Some(plan.clone());
@@ -1734,12 +1742,12 @@ impl WorkspaceStore {
                 (
                     Topic::SessionStatus { session_id },
                     ServerEvent::RewindPrefill {
-                        session_id: event_session,
                         client_id,
                         text,
                         attachments,
+                        ..
                     },
-                ) if session_id == event_session && *client_id == self.client_id() => {
+                ) if *client_id == self.client_id() => {
                     self.native_rewind_prefills.insert(
                         session_id.clone(),
                         RewindPrefill {
@@ -2146,14 +2154,6 @@ impl WorkspaceStore {
             .unwrap_or_default()
     }
 
-    #[cfg(test)]
-    pub(crate) fn drain_host_events_for_test(&mut self, cx: &mut Context<Self>) {
-        let events = self.host.events();
-        while let Ok(envelope) = events.try_recv() {
-            self.receive(envelope, cx);
-        }
-    }
-
     pub fn working_sessions_count(&self) -> usize {
         self.index_summary
             .activity
@@ -2477,6 +2477,10 @@ impl WorkspaceStore {
                 .archived_replica
                 .as_ref()
                 .is_none_or(|archived| archived.revision != summary.archived_revision)
+            && self
+                .archived_failure
+                .as_ref()
+                .is_none_or(|(revision, _)| *revision != summary.archived_revision)
         {
             self.load_archived_sessions(cx);
         }
@@ -2491,17 +2495,20 @@ impl WorkspaceStore {
             let result = host.query(Query::ArchivedSessions).await;
             let _ = this.update(cx, |store, cx| {
                 store.archived_task = None;
-                match result {
+                let failure = match result {
                     Ok(QueryResponse::ArchivedSessions(archived)) => {
                         if archived.revision < store.index_summary.archived_revision {
                             store.load_archived_sessions(cx);
                         } else {
                             store.archived_replica = Some(archived);
                         }
+                        None
                     }
-                    Ok(other) => log::warn!("unexpected archived-sessions response: {other:?}"),
-                    Err(error) => log::warn!("archived sessions failed: {}", error.message),
-                }
+                    Ok(other) => Some(format!("unexpected response: {other:?}")),
+                    Err(error) => Some(error.message),
+                };
+                store.archived_failure =
+                    failure.map(|message| (store.index_summary.archived_revision, message));
                 cx.notify();
             });
         }));
@@ -2520,12 +2527,20 @@ impl WorkspaceStore {
         self.archived_holds = self.archived_holds.saturating_sub(1);
         if self.archived_holds == 0 {
             self.archived_replica = None;
+            self.archived_failure = None;
             self.archived_task = None;
         }
     }
 
     pub fn archived_loading(&self) -> bool {
-        self.archived_replica.is_none()
+        self.archived_replica.is_none() && self.archived_failure.is_none()
+    }
+
+    /// Why the archived threads could not be loaded, until a load succeeds.
+    pub fn archived_failure(&self) -> Option<&str> {
+        self.archived_failure
+            .as_ref()
+            .map(|(_, message)| message.as_str())
     }
 
     pub fn archived_sessions(&self) -> &[SessionMeta] {
@@ -2876,6 +2891,23 @@ impl WorkspaceStore {
             .and_then(|auth| auth.email.clone());
         self.settings_replica
             .profile_display_name_as(profile_id, email.as_deref())
+    }
+
+    /// The profile as a list of its harness's profiles names it: what
+    /// [`Self::provider_profile_display_name`] puts beside the product, or
+    /// the whole name where there is nothing beside it.
+    pub fn provider_profile_short_name(&self, profile_id: &str) -> String {
+        if self.scoped_choice(profile_id).is_some() {
+            return self.provider_profile_display_name(profile_id);
+        }
+        let email = self
+            .provider_profile_snapshot(profile_id)
+            .as_ref()
+            .and_then(crate::provider_status::signed_in_account)
+            .and_then(|auth| auth.email.clone());
+        self.settings_replica
+            .profile_qualifier_as(profile_id, email.as_deref())
+            .unwrap_or_else(|| self.provider_profile_display_name(profile_id))
     }
 
     /// What the host says each harness is: the native ones, then each
@@ -4149,7 +4181,7 @@ impl WorkspaceStore {
     /// product's with its account.
     pub fn harness_name_for(&self, session_id: Option<&str>, cx: &App) -> String {
         let Some(status) = self.thread_status(session_id, cx) else {
-            return "Harness".to_owned();
+            return crate::tr!("providers.harness.unnamed").into_owned();
         };
         self.harness_name(
             status.acp_agent_id.as_deref(),
@@ -4443,7 +4475,7 @@ pub(crate) mod tests {
         let mut pump = std::pin::pin!(link.pump());
         let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         for line in deferred {
             incoming.try_send(line).unwrap();
         }
@@ -4707,6 +4739,94 @@ pub(crate) mod tests {
         }
     }
 
+    /// The settings a member device keeps for its space cannot be read: the
+    /// user is told, the workspace runs on defaults, and a change made there
+    /// writes nothing over what the device saved.
+    #[gpui::test]
+    fn unreadable_member_settings_are_reported_and_never_written_over(cx: &mut TestAppContext) {
+        use std::cell::RefCell;
+        use tcode_client::host::{ClientHost, ClientPreferences, Transport};
+        use tcode_client::pairing::PairedHost;
+        struct Device(RefCell<ClientPreferences>);
+        impl ClientHost for Device {
+            fn device_name(&self) -> String {
+                "member".into()
+            }
+            fn device_id(&self) -> String {
+                "member-device".into()
+            }
+            fn device_platform(&self) -> Option<String> {
+                None
+            }
+            fn load_preferences(&self) -> ClientPreferences {
+                self.0.borrow().clone()
+            }
+            fn save_preferences(&self, preferences: &ClientPreferences) {
+                *self.0.borrow_mut() = preferences.clone();
+            }
+            fn load_hosts(&self) -> Vec<PairedHost> {
+                Vec::new()
+            }
+            fn save_hosts(&self, _: &[PairedHost]) {}
+            fn last_host_id(&self) -> Option<String> {
+                None
+            }
+            fn set_last_host_id(&self, _: Option<&str>) {}
+            fn connect(&self, _: &PairedHost) -> Transport {
+                unreachable!("the store is handed its link")
+            }
+        }
+        cx.update(crate::theme::init);
+        let saved = serde_json::json!("not this device's settings");
+        let device = std::rc::Rc::new(Device(RefCell::new(ClientPreferences {
+            navigation: Some(serde_json::json!({
+                "member_settings": { "machine:space-one": saved.clone() }
+            })),
+            ..ClientPreferences::default()
+        })));
+        let mut space = ScriptedSpace::new();
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                space.link.clone(),
+                WorkspaceAttachment::Remote {
+                    host_id: "machine".into(),
+                    host_name: "Studio".into(),
+                },
+                Some(device.clone()),
+                None,
+                cx,
+            )
+        });
+        let reported = std::rc::Rc::new(RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let reported = reported.clone();
+            cx.subscribe(&workspace, move |_, event: &super::RuntimeEvent, _| {
+                reported.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        space
+            .driver
+            .wait_until(cx, &workspace, "space baseline", |cx| {
+                workspace.read_with(cx, |store, _| store.baseline_ready())
+            });
+        assert!(matches!(
+            reported.borrow().as_slice(),
+            [super::RuntimeEvent::Error(
+                tcode_protocol::RuntimeError::FileUnreadable { .. }
+            )]
+        ));
+        workspace.update(cx, |store, cx| store.cycle_project_sort(cx));
+        assert_ne!(
+            workspace.read_with(cx, |store, _| store.project_sort()),
+            Settings::default().project_sort
+        );
+        assert_eq!(
+            device.0.borrow().navigation.as_ref().unwrap()["member_settings"]["machine:space-one"],
+            saved
+        );
+    }
+
     /// Another account runs the CLI the default one does, so both pickers list
     /// that CLI's catalog; a third-party endpoint answers to its card alone.
     /// The host answers over a scripted transport.
@@ -4785,7 +4905,7 @@ pub(crate) mod tests {
         });
         seed_full_scope(&store, &incoming, deferred, cx);
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let ids = |store: &WorkspaceStore, profile: &str| {
             store
                 .picker_models_for_profile(profile)
@@ -5288,7 +5408,7 @@ pub(crate) mod tests {
         });
         assert!(visual.debug_bounds("retry-delivery").is_some());
         assert!(visual.debug_bounds("discard-delivery").is_some());
-        store.update(cx, |store, _| store.retry_delivery(&key));
+        store.update(cx, |store, cx| store.retry_delivery(&key, cx));
         let retry = next_command();
         assert_ne!(retry.key, request.key);
         assert_eq!(retry.payload, request.payload);
@@ -5314,7 +5434,6 @@ pub(crate) mod tests {
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: "hello".into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }))
@@ -5576,6 +5695,80 @@ pub(crate) mod tests {
             store.release_archived_sessions();
             assert!(store.archived_loading());
         });
+        link.close();
+    }
+
+    /// A load the host refuses is shown with the host's words, and the
+    /// summary repeating the same archived revision does not ask again; a new
+    /// revision does.
+    #[gpui::test]
+    fn archived_list_that_fails_says_why_and_waits_for_a_new_revision(cx: &mut TestAppContext) {
+        let (to_host, requests) = async_channel::unbounded();
+        let (replies, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, None, cx)
+        });
+        crate::store::tests::seed_full_scope(&store, &replies, deferred, cx);
+        let mut pump = std::pin::pin!(link.pump());
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let queries = || {
+            std::iter::from_fn(|| requests.try_recv().ok())
+                .filter_map(|line| {
+                    let message = tcode_protocol::decode_client_line(&line).unwrap();
+                    matches!(
+                        message.payload,
+                        tcode_protocol::ClientPayload::Query(
+                            tcode_protocol::Query::ArchivedSessions
+                        )
+                    )
+                    .then_some(message.id)
+                })
+                .collect::<Vec<_>>()
+        };
+        let revision_event = |revision| EventEnvelope {
+            request_id: None,
+            topic: Topic::Index,
+            event: ServerEvent::IndexSummaryReplaced(tcode_protocol::IndexSummary {
+                archived_revision: revision,
+                ..Default::default()
+            }),
+        };
+        store.update(cx, |store, cx| {
+            store.receive(revision_event(10), cx);
+            store.hold_archived_sessions(cx);
+        });
+        cx.run_until_parked();
+        let asked = queries();
+        assert_eq!(asked.len(), 1);
+        replies
+            .try_send(
+                tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
+                    id: asked[0],
+                    result: Err(tcode_protocol::ProtocolError {
+                        code: "storage".into(),
+                        message: "the archive index is unreadable".into(),
+                    }),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        cx.run_until_parked();
+        store.read_with(cx, |store, _| {
+            assert_eq!(
+                store.archived_failure(),
+                Some("the archive index is unreadable")
+            );
+            assert!(!store.archived_loading());
+        });
+        store.update(cx, |store, cx| store.receive(revision_event(10), cx));
+        cx.run_until_parked();
+        assert!(queries().is_empty(), "the same revision is not asked again");
+        store.update(cx, |store, cx| store.receive(revision_event(11), cx));
+        cx.run_until_parked();
+        assert_eq!(queries().len(), 1, "a new revision is asked for");
         link.close();
     }
 
@@ -5897,7 +6090,6 @@ pub(crate) mod tests {
                             content: ItemContent::UserMessage {
                                 text: format!("Message {index}"),
                                 attachments: vec![],
-                                context_len: None,
                             },
                         })
                         .into(),
@@ -6144,7 +6336,6 @@ pub(crate) mod tests {
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: id.into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }),
@@ -6474,7 +6665,7 @@ pub(crate) mod tests {
                 )
                 .unwrap();
             cx.run_until_parked();
-            workspace.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             cx.run_until_parked();
             assert!(
                 workspace.read_with(cx, |store, _| {
@@ -7008,7 +7199,7 @@ pub(crate) mod tests {
         pub(crate) fn step(
             &mut self,
             cx: &mut TestAppContext,
-            store: &gpui::Entity<WorkspaceStore>,
+            _store: &gpui::Entity<WorkspaceStore>,
         ) {
             if let Some(pump) = &mut self.pump {
                 let mut task_cx = std::task::Context::from_waker(&self.waker);
@@ -7016,7 +7207,7 @@ pub(crate) mod tests {
                     self.pump = None;
                 }
             }
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             cx.run_until_parked();
         }
 
@@ -7604,8 +7795,8 @@ pub(crate) mod tests {
             }
         });
 
-        // A released thread opens as on a fresh client, with what was
-        // appended while it was away and what arrives live once it is open.
+        // A released thread opens from a baseline, with what was appended
+        // while it was away and what arrives live once it is open.
         let released = &ids[3];
         let away = answer(released, 3);
         let live = answer(released, 4);
@@ -7632,26 +7823,7 @@ pub(crate) mod tests {
                 held_window(store, released).is_some_and(|held| held.end == 11)
             })
         });
-        let fresh = driver.workspace(cx);
-        open(&mut driver, cx, &fresh, released);
-        let fresh = fresh.read_with(cx, |store, cx| {
-            (
-                store.thread_timeline(Some(released), cx).cloned(),
-                store
-                    .thread(store.sole_thread().as_deref())
-                    .map_or(0, |thread| thread.turn_offset),
-            )
-        });
-        workspace.read_with(cx, |store, cx| {
-            assert_eq!(
-                (
-                    store.thread_timeline(Some(released), cx).cloned(),
-                    store
-                        .thread(store.sole_thread().as_deref())
-                        .map_or(0, |thread| thread.turn_offset)
-                ),
-                fresh
-            );
+        workspace.read_with(cx, |store, _| {
             for event in [&away, &live] {
                 assert_eq!(held_count(store, released, event), 1);
             }
@@ -8283,8 +8455,8 @@ pub(crate) mod tests {
             .link
             .set_connection_state(tcode_client::ConnectionState::Connected { path: None });
         driver.command(cx, &workspace, Command::ClearRelaunchMarker);
-        workspace.update(cx, |store, cx| {
-            store.drain_host_events_for_test(cx);
+        cx.run_until_parked();
+        workspace.read_with(cx, |store, _| {
             assert_eq!(held_history(store, "reconnect").records.len(), 3);
         });
         workspace.read_with(cx, |store, _| {

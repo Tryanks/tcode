@@ -146,18 +146,6 @@ impl WorkspaceStore {
         self.thread(session_id)?.history_error.as_deref()
     }
 
-    /// Chat tests that run frame callbacks would otherwise request a page from
-    /// the seeded host, whose reply wakes the test scheduler from a thread it
-    /// does not control. A failed page holds prefetch until its retry cooldown.
-    #[cfg(test)]
-    pub(crate) fn suppress_history_prefetch_for_test(&mut self) {
-        if let Some(session_id) = self.sole_thread()
-            && let Some(thread) = self.open_thread_mut(&session_id)
-        {
-            thread.history_error = Some("prefetch suppressed".into());
-        }
-    }
-
     pub(super) fn load_pending_chat_history(&mut self, cx: &mut Context<Self>) {
         let Some((session_id, turn)) = self.pending_chat_turn.clone() else {
             return;
@@ -342,12 +330,13 @@ impl WorkspaceStore {
                     return false;
                 };
                 match result {
-                    Ok(QueryResponse::SessionHistoryPage {
-                        records, from, end, ..
-                    }) if from < before
-                            && end == before
-                            && thread.history.as_ref().map(|held| held.from) == Some(before) =>
-                    {
+                    // The log moved under the page (a rewind cut it) or a new
+                    // window replaced what it continues: that window is the
+                    // thread now, and the page is not part of it.
+                    Ok(QueryResponse::SessionHistoryPage { end, .. })
+                        if end != before
+                            || thread.history.as_ref().map(|held| held.from) != Some(before) => {}
+                    Ok(QueryResponse::SessionHistoryPage { records, from, .. }) => {
                         thread.history_pages_fetched += 1;
                         let previous_turns = thread
                             .timeline
@@ -369,9 +358,9 @@ impl WorkspaceStore {
                         log::warn!("Earlier history page failed for {session_id} before {before}: {error:?}");
                         thread.history_error = Some(error.message);
                     }
-                    _ => {
-                        log::warn!("Invalid earlier history page response for {session_id} before {before}");
-                        thread.history_error = Some("Invalid history page response".into());
+                    Ok(other) => {
+                        thread.history_error =
+                            Some(format!("unexpected history page response: {other:?}"));
                     }
                 }
                 let failed = thread.history_error.is_some();

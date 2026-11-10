@@ -1143,7 +1143,10 @@ impl Entries {
             Entry::NativeCaption(provider) => material::list_caption(
                 crate::tr!(
                     "agents.provider_subagents",
-                    provider = provider.unwrap_or("Harness")
+                    provider = provider.map_or_else(
+                        || crate::tr!("providers.harness.unnamed").into_owned(),
+                        str::to_owned
+                    )
                 )
                 .into_owned()
                 .into(),
@@ -1357,14 +1360,11 @@ impl Entries {
             .text_secondary(compact, cx)
             .when_some(row.provider, |line, provider| {
                 line.child(
-                    match provider {
-                        ProviderKind::Acp => Icon::empty().path("icons/box.svg"),
-                        kind => crate::provider_card::profile_glyph(
-                            self.store.read(cx),
-                            kind,
-                            row.profile_id.as_deref(),
-                        ),
-                    }
+                    crate::provider_card::profile_glyph(
+                        self.store.read(cx),
+                        provider,
+                        row.profile_id.as_deref(),
+                    )
                     .flex_none(),
                 )
             })
@@ -1710,7 +1710,7 @@ mod tests {
         let mut pump = std::pin::pin!(link.pump());
         let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
 
         store.read_with(cx, |store, cx| {
             let agents = Agents::of(store, "lead", cx);
@@ -1995,7 +1995,6 @@ mod tests {
                         parent_item_id: None,
                         content: ItemContent::UserMessage {
                             text: callback,
-                            context_len: None,
                             attachments: vec![],
                         },
                     })

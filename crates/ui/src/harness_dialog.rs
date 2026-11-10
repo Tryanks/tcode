@@ -70,6 +70,13 @@ impl HarnessId {
         }
     }
 
+    pub(crate) fn kind(&self) -> ProviderKind {
+        match self {
+            Self::Native(kind) => *kind,
+            Self::Acp(_) => ProviderKind::Acp,
+        }
+    }
+
     pub(crate) fn of(description: &HarnessDescription) -> Self {
         match &description.acp_agent_id {
             Some(id) => Self::Acp(id.clone()),
@@ -301,10 +308,7 @@ impl HarnessDialog {
     }
 
     fn kind(&self) -> ProviderKind {
-        match self.harness {
-            HarnessId::Native(kind) => kind,
-            HarnessId::Acp(_) => ProviderKind::Acp,
-        }
+        self.harness.kind()
     }
 
     fn builtin_id(&self) -> &'static str {
@@ -1091,7 +1095,7 @@ impl HarnessDialog {
         };
         let page_title = match &self.page {
             Page::Overview => None,
-            Page::Profile(id) => Some(profile_name(store, id)),
+            Page::Profile(id) => Some(store.provider_profile_short_name(id)),
             Page::AddAccount => Some(crate::tr!("providers.harness.add_account").into_owned()),
             Page::AddEndpoint => Some(crate::tr!("providers.harness.add_endpoint").into_owned()),
         };
@@ -1155,10 +1159,7 @@ impl HarnessDialog {
                 .as_ref()
                 .and_then(|snapshot| snapshot.binary.clone()),
         };
-        let glyph = match &self.harness {
-            HarnessId::Native(kind) => crate::provider_card::provider_glyph(*kind),
-            HarnessId::Acp(_) => Icon::empty().path("icons/box.svg"),
-        };
+        let glyph = crate::provider_card::provider_glyph(self.kind());
         h_flex()
             .w_full()
             .min_w_0()
@@ -1708,7 +1709,7 @@ impl HarnessDialog {
         let store = self.store.read(cx);
         let snapshot = store.provider_profile_snapshot(&profile.id);
         let endpoint = profile.is_endpoint_profile();
-        let name = profile_name(store, &profile.id);
+        let name = store.provider_profile_short_name(&profile.id);
         let detail = if endpoint {
             endpoint_summary(description, &profile.settings.env)
         } else {
@@ -3071,19 +3072,6 @@ pub(crate) fn set_harness_enabled(
     });
 }
 
-/// A profile as its own page and its row name it: its display name, for the
-/// default account who it is signed in as, else its harness's name.
-pub(crate) fn profile_name(store: &WorkspaceStore, profile_id: &str) -> String {
-    let full = store.provider_profile_display_name(profile_id);
-    let kind = store.provider_profile_kind(profile_id);
-    let product = provider_label(kind);
-    full.strip_prefix(product)
-        .map(str::trim)
-        .and_then(|rest| rest.strip_prefix('(')?.strip_suffix(')'))
-        .map(str::to_owned)
-        .unwrap_or(full)
-}
-
 fn endpoint_chip(cx: &App) -> AnyElement {
     crate::material::semantic_chip(
         crate::tr!("providers.harness.endpoint_profile").into_owned(),
@@ -3251,7 +3239,7 @@ mod tests {
             });
             crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             Self {
                 store,
                 outgoing,

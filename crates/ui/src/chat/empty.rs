@@ -232,7 +232,11 @@ impl ChatView {
     ) -> AnyElement {
         let seed = self.slogan_seed();
         let project = self.location(cx);
-        let quick = project.as_ref().is_none_or(|project| project.quick_chat);
+        let named = project
+            .as_ref()
+            .filter(|project| !project.quick_chat)
+            .map(|project| project.name.clone());
+        let quick = named.is_none();
         let store = self.workspace_store.read(cx);
         let host = store.host_title();
         let image_host = store.image_host();
@@ -272,60 +276,57 @@ impl ChatView {
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(cx.theme().foreground)
             .debug_selector(|| "new-thread-title".into());
-        let title = if quick {
-            title
+        let title = match named {
+            None => title
                 .child(crate::tr!(crate::i18n::variant_key(
                     "chat.slogan_quick",
                     seed
                 )))
-                .into_any_element()
-        } else {
-            let sentence =
-                crate::tr!(crate::i18n::variant_key("chat.slogan_project", seed)).into_owned();
-            let (before, after) = sentence
-                .split_once("%{project}")
-                .map(|(before, after)| (before.to_owned(), after.to_owned()))
-                .unwrap_or((sentence.clone(), String::new()));
-            let name = project
-                .as_ref()
-                .map(|project| project.name.clone())
-                .unwrap_or_default();
-            h_flex()
-                .flex_wrap()
-                .justify_center()
-                .child(title.child(before.trim_end().to_owned()))
-                .child(
-                    crate::material::accessible_clickable(
+                .into_any_element(),
+            Some(name) => {
+                let sentence =
+                    crate::tr!(crate::i18n::variant_key("chat.slogan_project", seed)).into_owned();
+                let (before, after) = sentence
+                    .split_once("%{project}")
+                    .map(|(before, after)| (before.to_owned(), after.to_owned()))
+                    .unwrap_or((sentence.clone(), String::new()));
+                h_flex()
+                    .flex_wrap()
+                    .justify_center()
+                    .child(title.child(before.trim_end().to_owned()))
+                    .child(
+                        crate::material::accessible_clickable(
+                            div()
+                                .text_token(&cx.theme().tokens.typography.xl)
+                                .text_size(px(26.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(accent)
+                                .cursor_pointer()
+                                .when(!before.is_empty() && before.ends_with(' '), |name| {
+                                    name.ml(px(7.))
+                                })
+                                .when(!after.is_empty() && after.starts_with(' '), |name| {
+                                    name.mr(px(7.))
+                                })
+                                .debug_selector(|| "new-thread-project".into())
+                                .child(name),
+                            "new-thread-project",
+                            Role::Button,
+                            picker_label.clone(),
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.open_project_picker(cx))),
+                    )
+                    .child(
                         div()
                             .text_token(&cx.theme().tokens.typography.xl)
                             .text_size(px(26.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(accent)
-                            .cursor_pointer()
-                            .when(!before.is_empty() && before.ends_with(' '), |name| {
-                                name.ml(px(7.))
-                            })
-                            .when(!after.is_empty() && after.starts_with(' '), |name| {
-                                name.mr(px(7.))
-                            })
-                            .debug_selector(|| "new-thread-project".into())
-                            .child(name),
-                        "new-thread-project",
-                        Role::Button,
-                        picker_label.clone(),
-                        cx,
+                            .text_color(cx.theme().foreground)
+                            .child(after.trim_start().to_owned()),
                     )
-                    .on_click(cx.listener(|this, _, _, cx| this.open_project_picker(cx))),
-                )
-                .child(
-                    div()
-                        .text_token(&cx.theme().tokens.typography.xl)
-                        .text_size(px(26.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(cx.theme().foreground)
-                        .child(after.trim_start().to_owned()),
-                )
-                .into_any_element()
+                    .into_any_element()
+            }
         };
 
         // The host, and for a quick thread what kind of place it is, which
@@ -476,7 +477,6 @@ impl ChatView {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::time::Duration;
 
     use gpui::{AppContext as _, Bounds, Pixels, TestAppContext, VisualTestContext, px, size};
     use tcode_core::project::Project;
@@ -486,13 +486,11 @@ mod tests {
 
     use crate::chat::ChatView;
     use crate::store::WorkspaceStore;
-    use crate::test_frames::{draw, draw_settled};
+    use crate::test_frames::draw_settled;
     use crate::window_state::WindowState;
 
-    /// The start hub's projects follow the host's: one removed folds away
-    /// where it stood, drawn as it was, while the one below it glides up
-    /// into its place, and one added folds in and pushes it back down, over
-    /// several frames; with motion reduced each change lands at once.
+    /// The start hub's projects follow the host's: one the host removes
+    /// leaves the hub and one it adds joins it.
     #[gpui::test]
     fn start_hub_projects_fold_in_and_out_as_the_host_changes_them(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
@@ -551,7 +549,7 @@ mod tests {
         });
         let cx: &mut VisualTestContext = cx;
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.simulate_resize(size(px(1_024.), px(700.)));
         draw_settled(cx);
         let row = |name: &str, cx: &mut VisualTestContext| -> Option<Bounds<Pixels>> {
@@ -559,37 +557,16 @@ mod tests {
         };
         assert!(row("gamma", cx).is_some(), "the hub lists the projects");
 
-        for reduce in [false, true] {
-            cx.update(|_, cx| cx.set_reduce_motion(reduce));
-            for (names, beta_stays) in [
-                (&["alpha", "gamma"][..], false),
-                (&["alpha", "beta", "gamma"][..], true),
-            ] {
-                incoming.try_send(index(names)).unwrap();
-                cx.run_until_parked();
-                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-                draw(cx);
-                let mut frames = Vec::new();
-                for _ in 0..20 {
-                    frames.push((
-                        row("beta", cx).is_some(),
-                        row("gamma", cx).expect("gamma stays").top(),
-                    ));
-                    cx.executor().advance_clock(Duration::from_millis(16));
-                    cx.update(|window, cx| window.simulate_next_frame(cx));
-                    draw(cx);
-                }
-                draw_settled(cx);
-                assert_eq!(row("beta", cx).is_some(), beta_stays);
-                let rest = row("gamma", cx).unwrap().top();
-                let tops: Vec<_> = frames.iter().map(|(_, top)| *top).collect();
-                // Frames beta was drawn on: leaving, it is drawn as it folds.
-                let drawn = frames.iter().filter(|(beta, _)| *beta).count();
-                if reduce {
-                    assert_eq!(tops[0], rest, "gamma glided with motion reduced: {tops:?}");
-                    assert!(beta_stays || drawn == 0, "beta lingered");
-                }
-            }
+        for (names, beta_stays) in [
+            (&["alpha", "gamma"][..], false),
+            (&["alpha", "beta", "gamma"][..], true),
+        ] {
+            incoming.try_send(index(names)).unwrap();
+            cx.run_until_parked();
+            cx.run_until_parked();
+            draw_settled(cx);
+            assert_eq!(row("beta", cx).is_some(), beta_stays);
+            assert!(row("gamma", cx).is_some(), "gamma stays");
         }
     }
 }

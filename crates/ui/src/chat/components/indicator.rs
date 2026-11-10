@@ -62,7 +62,7 @@ impl Render for WorkingClock {
         // The indicator's animations draw it again on every frame, which moves
         // its time with them. Reduced motion stills them, and the time, shown
         // to the decisecond, is then moved by a timer.
-        if !cx.reduce_motion() {
+        if !cx.reduce_motion() || self.started_at.is_none() {
             self.tick = None;
         } else if self.tick.is_none() {
             self.tick = Some(cx.spawn(async move |this, cx| {
@@ -155,23 +155,30 @@ pub(crate) fn working_indicator(
         );
     }
 
-    let elapsed_ms = started_at.map_or(0, |start| now_millis().saturating_sub(start));
     let label = crate::tr!("chat.working");
-    let elapsed = format_elapsed(elapsed_ms);
-    // The timer is moved onto the label's baseline.
-    let theme = cx.theme();
-    let typography = &theme.tokens.typography;
-    let drop = crate::typography::baseline_below_centre(
-        SharedString::from(label.clone().into_owned()),
-        theme.font_family.clone(),
-        typography.sm.size,
-        window,
-    ) - crate::typography::baseline_below_centre(
-        SharedString::from(elapsed.clone()),
-        typography.mono.clone(),
-        typography.xs.size,
-        window,
-    );
+    // A turn whose start is not known has no time to show.
+    let timer = started_at.map(|start| {
+        let elapsed = format_elapsed(now_millis().saturating_sub(start));
+        // The timer is moved onto the label's baseline.
+        let theme = cx.theme();
+        let typography = &theme.tokens.typography;
+        let drop = crate::typography::baseline_below_centre(
+            SharedString::from(label.clone().into_owned()),
+            theme.font_family.clone(),
+            typography.sm.size,
+            window,
+        ) - crate::typography::baseline_below_centre(
+            SharedString::from(elapsed.clone()),
+            typography.mono.clone(),
+            typography.xs.size,
+            window,
+        );
+        div()
+            .text_meta_mono(false, cx)
+            .relative()
+            .top(drop)
+            .child(elapsed)
+    });
     h_flex()
         .gap(px(10.))
         .items_center()
@@ -182,13 +189,7 @@ pub(crate) fn working_indicator(
             label,
             cx,
         ))
-        .child(
-            div()
-                .text_meta_mono(false, cx)
-                .relative()
-                .top(drop)
-                .child(elapsed),
-        )
+        .children(timer)
         .into_any_element()
 }
 
@@ -310,15 +311,13 @@ pub(crate) fn finished_turn_time(
     window: &Window,
     cx: &App,
 ) -> Stateful<Div> {
-    let clauses = timestamp.map_or_else(Vec::new, |timestamp| {
-        turn_time_clauses(
-            format_local_time(timestamp),
-            turn.timing,
-            turn.cost_usd,
-            turn.served_model.as_deref(),
-            requested_model,
-        )
-    });
+    let clauses = turn_time_clauses(
+        timestamp.map(format_local_time),
+        turn.timing,
+        turn.cost_usd,
+        turn.served_model.as_deref(),
+        requested_model,
+    );
     turn_time_footer(
         SharedString::from(format!("turn-time-{}", timestamp.unwrap_or_default())),
         clauses,

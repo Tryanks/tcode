@@ -1101,32 +1101,20 @@ pub(super) fn title_turn_generated_output(
     status == TurnStatus::Completed && usage.is_none_or(|usage| usage.output_tokens != Some(0))
 }
 
-/// Keep the original user goal and the recent conversation, excluding tool output,
-/// reasoning and hidden orchestration prefixes. Attachment paths stay host-local.
+/// Keep the original user goal and the recent conversation, excluding tool output
+/// and reasoning. Attachment paths stay host-local.
 pub(super) fn title_regeneration_context(timeline: &Timeline) -> (String, Vec<PathBuf>) {
     let sections: Vec<_> = timeline
         .entries
         .iter()
         .filter_map(|entry| {
             let (role, text, paths) = match &entry.content {
-                EntryContent::Item(ItemContent::UserMessage {
-                    text,
-                    context_len,
-                    attachments,
-                })
+                EntryContent::Item(ItemContent::UserMessage { text, attachments })
                 | EntryContent::Steer {
                     text,
-                    context_len,
                     attachments,
                     status: tcode_core::session::SteeringStatus::Accepted,
-                } => (
-                    "USER",
-                    context_len
-                        .and_then(|len| text.get(len..))
-                        .unwrap_or(text)
-                        .trim(),
-                    attachments.as_slice(),
-                ),
+                } => ("USER", text.trim(), attachments.as_slice()),
                 EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => {
                     ("ASSISTANT", text.trim(), &[][..])
                 }

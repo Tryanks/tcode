@@ -791,15 +791,6 @@ impl Composer {
         if self.subagent(cx) {
             return;
         }
-        if self.compact
-            && !self
-                .workspace_store
-                .read(cx)
-                .connection_state()
-                .is_connected()
-        {
-            return;
-        }
         #[cfg(feature = "voice")]
         if self.submit_after_dictation(steer, cx) {
             return;
@@ -1962,13 +1953,12 @@ impl Composer {
             // the Paste *action* in the capture phase. Swallow it only when the
             // clipboard held an image; text paste propagates to the editor.
             .capture_action(cx.listener(|this, _: &Paste, window, cx| {
-                if this.interactive(cx) && !this.compact && this.paste_clipboard_image(window, cx) {
+                if this.interactive(cx) && this.paste_clipboard_image(window, cx) {
                     cx.stop_propagation();
                 }
             }))
             .capture_action(cx.listener(|this, paste: &BrowserPaste, window, cx| {
-                if this.interactive(cx) && !this.compact && this.paste_images(&paste.0, window, cx)
-                {
+                if this.interactive(cx) && this.paste_images(&paste.0, window, cx) {
                     cx.stop_propagation();
                 }
             }))
@@ -2014,7 +2004,7 @@ impl Composer {
                 move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
                     let paths: Vec<PathBuf> = paths.paths().to_vec();
                     composer.update(cx, |this, cx| {
-                        if this.compact || !this.interactive(cx) {
+                        if !this.interactive(cx) {
                             return;
                         }
                         for path in paths {
@@ -2317,7 +2307,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let store = store.clone();
         let slot = std::rc::Rc::new(std::cell::OnceCell::new());
         let view = slot.clone();
@@ -2634,7 +2624,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let own = store.read_with(cx, |store, _| store.client_id().to_owned());
         let (composer, cx) = cx.add_window_view(|window, cx| {
             Composer::new(store.clone(), Some(session_id.clone()), window, cx)
@@ -2659,7 +2649,7 @@ mod replica_tests {
                 },
             );
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             cx.update(|window, cx| window.draw(cx).clear(cx));
         }
         assert_eq!(
@@ -2684,7 +2674,7 @@ mod replica_tests {
                 ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
             );
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             let (composer, cx) = cx.add_window_view(|window, cx| {
                 Composer::new(store.clone(), session_id.clone(), window, cx)
             });
@@ -2737,9 +2727,6 @@ mod replica_tests {
                 ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
             );
             cx.run_until_parked();
-            store.update(cx, |store, cx| {
-                store.drain_host_events_for_test(cx);
-            });
             cx.update(|window, cx| window.draw(cx).clear(cx));
             assert_eq!(
                 composer.read_with(cx, |composer, cx| composer.draft(cx)),
@@ -2772,7 +2759,7 @@ mod replica_tests {
                 ServerEvent::SessionStatusReplaced(Box::new(restored_status.clone())),
             );
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             cx.update(|window, cx| {
                 window.draw(cx).clear(cx);
                 composer.update(cx, |composer, cx| composer.focus(window, cx));
@@ -2813,7 +2800,7 @@ mod replica_tests {
                     ServerEvent::SessionStatusReplaced(Box::new(destination)),
                 );
                 cx.run_until_parked();
-                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                cx.run_until_parked();
                 cx.update(|window, cx| window.draw(cx).clear(cx));
                 assert_eq!(
                     composer.read_with(cx, |composer, cx| composer.draft(cx)),
@@ -2861,7 +2848,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         // The running turn's spinner rests only with motion reduced.
         cx.update(|cx| cx.set_reduce_motion(true));
         let (_composer, cx) = cx.add_window_view(|window, cx| {
@@ -2910,7 +2897,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         draw(cx);
         cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
         draw(cx);
@@ -2956,7 +2943,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let (_composer, cx) = cx.add_window_view(|window, cx| {
             Composer::new(store.clone(), session_id.clone(), window, cx)
         });
@@ -3025,7 +3012,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let (_composer, cx) = cx.add_window_view(|window, cx| {
             Composer::new(store.clone(), session_id.clone(), window, cx)
         });
@@ -3304,7 +3291,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let (composer, cx) = cx.add_window_view(|window, cx| {
             Composer::new(store.clone(), session_id.clone(), window, cx)
         });
@@ -3381,7 +3368,7 @@ mod replica_tests {
             replace(&incoming, topic, event);
         }
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let (composer, cx) = cx.add_window_view(|window, cx| {
             Composer::new(store.clone(), Some(session_id.clone()), window, cx)
         });
@@ -3583,7 +3570,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(unsupported)),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.update(|window, cx| _ = window.draw(cx));
         let button = cx.debug_bounds("steer-turn").unwrap();
         touch(cx, TouchPhase::Started, button.center());
@@ -3615,7 +3602,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let composer =
                 cx.new(|cx| Composer::new(store.clone(), session_id.clone(), window, cx));
@@ -3633,7 +3620,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.update(|window, cx| _ = window.draw(cx));
         while outgoing.try_recv().is_ok() {}
         let button = cx
@@ -3650,6 +3637,54 @@ mod replica_tests {
                 )
             )),
             "the process is killed only once the user confirms"
+        );
+    }
+
+    /// The option chosen is the answer, whatever the free-form field holds.
+    /// A select field with a default arrives with the default in that field
+    /// (OpenCode's `form_question` makes it the prefill); choosing another
+    /// option answers with the one chosen.
+    #[gpui::test]
+    fn a_chosen_option_is_the_answer_whatever_the_custom_field_holds(cx: &mut TestAppContext) {
+        let (store, incoming, outgoing, mut status) = attach(cx);
+        let option = |label: &str| agent::UserInputOption {
+            label: label.into(),
+            description: String::new(),
+        };
+        status.activity.turn_running = true;
+        status.pending_user_input = Some(tcode_core::session::PendingUserInput {
+            request_id: "ask".into(),
+            questions: vec![UserInputQuestion {
+                id: "color".into(),
+                header: "Color".into(),
+                question: "Which color?".into(),
+                options: vec![option("Red"), option("Blue")],
+                multi_select: false,
+                prefill: Some("Red".into()),
+            }],
+            delivery: agent::UserInputDelivery::Blocking,
+        });
+        let (_composer, cx) = composer_on(&store, &incoming, status, cx);
+        while outgoing.try_recv().is_ok() {}
+        cx.simulate_keystrokes("2");
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        let answers: Vec<_> = std::iter::from_fn(|| outgoing.try_recv().ok())
+            .filter_map(
+                |line| match tcode_protocol::decode_client_line(&line).unwrap().payload {
+                    tcode_protocol::ClientPayload::Command(
+                        tcode_protocol::Command::RespondUserInput { answers, .. },
+                    ) => Some(answers),
+                    _ => None,
+                },
+            )
+            .collect();
+        assert_eq!(
+            answers,
+            [serde_json::Map::from_iter([(
+                "color".to_owned(),
+                serde_json::json!("Blue")
+            )])]
         );
     }
 
@@ -3676,7 +3711,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let (composer, cx) = cx.add_window_view(|window, cx| {
             Composer::new(store.clone(), session_id.clone(), window, cx)
         });
@@ -3714,7 +3749,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.update(|window, cx| _ = window.draw(cx));
         let drop_button = cx.debug_bounds("queue-drop-7").unwrap();
         cx.simulate_click(drop_button.center(), Modifiers::default());
@@ -3742,7 +3777,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.update(|window, cx| _ = window.draw(cx));
         assert!(cx.debug_bounds("queue-drop-7").is_none());
         assert_eq!(
@@ -3768,7 +3803,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.update(|window, cx| _ = window.draw(cx));
         let drop_button = cx.debug_bounds("queue-drop-8").unwrap();
         cx.simulate_click(drop_button.center(), Modifiers::default());
@@ -3782,7 +3817,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.update(|window, cx| _ = window.draw(cx));
         assert_eq!(
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
@@ -3822,7 +3857,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let (_composer, cx) = cx.add_window_view(|window, cx| {
             Composer::new(store.clone(), session_id.clone(), window, cx)
         });
@@ -3844,7 +3879,7 @@ mod replica_tests {
                 ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
             );
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
             cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
             draw(cx);
@@ -3881,7 +3916,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         draw(cx);
         assert!(top(3, cx).is_some());
         status.queued_messages.clear();
@@ -3891,7 +3926,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         draw(cx);
         assert_eq!(top(3, cx), None, "with motion reduced it is gone at once");
     }
@@ -3918,7 +3953,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let (_composer, cx) = cx.add_window_view(|window, cx| {
             Composer::new(store.clone(), session_id.clone(), window, cx)
         });
@@ -3995,7 +4030,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let composer =
                 cx.new(|cx| Composer::new(store.clone(), session_id.clone(), window, cx));
@@ -4096,7 +4131,7 @@ mod replica_tests {
             ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let (composer, cx) = cx.add_window_view(|window, cx| {
             Composer::new(store.clone(), session_id.clone(), window, cx)
         });

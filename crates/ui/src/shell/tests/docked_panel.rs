@@ -112,7 +112,6 @@ fn a_body_that_holds_the_column_measures_no_row_again(cx: &mut TestAppContext) {
             parent_item_id: None,
             content: agent::ItemContent::UserMessage {
                 text: format!("Question {turn}: {}", "how does this wrap? ".repeat(30)),
-                context_len: None,
                 attachments: vec![],
             },
         })]

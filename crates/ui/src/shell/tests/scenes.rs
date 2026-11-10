@@ -49,7 +49,6 @@ pub(super) fn asked(id: &str) -> agent::AgentEvent {
             } else {
                 format!("What is in {id}?")
             },
-            context_len: None,
             attachments: vec![],
         },
     })
@@ -88,9 +87,8 @@ fn serve_running(host: &MountedShell, id: &str) {
 }
 
 /// What the host has sent arrives, and a frame is drawn.
-fn arrive(shell: &Entity<AppShell>, cx: &mut VisualTestContext) {
+fn arrive(_shell: &Entity<AppShell>, cx: &mut VisualTestContext) {
     cx.run_until_parked();
-    store_of(shell, cx).update(cx, |store, cx| store.drain_host_events_for_test(cx));
     draw(cx);
 }
 
@@ -645,7 +643,6 @@ fn serve_other_after(host: &MountedShell, went_on: usize) {
             parent_item_id: None,
             content: agent::ItemContent::UserMessage {
                 text: "What is in thread-2, which asks at length? ".repeat(8),
-                context_len: None,
                 attachments: vec![],
             },
         }),
@@ -1042,7 +1039,6 @@ fn finished_turns(turns: usize) -> Vec<tcode_core::session::StoredEvent> {
                     parent_item_id: None,
                     content: agent::ItemContent::UserMessage {
                         text: format!("What is in part {turn} of thread-2?"),
-                        context_len: None,
                         attachments: vec![],
                     },
                 }),

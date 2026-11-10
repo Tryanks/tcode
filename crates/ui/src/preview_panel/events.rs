@@ -84,8 +84,6 @@ struct Logged<T> {
     source: Source,
 }
 
-/// How many console entries a page keeps.
-const RING: usize = 1000;
 /// How many recent errors a status lists.
 const RECENT: usize = 5;
 
@@ -172,7 +170,34 @@ pub(crate) struct PageEvents {
     calls: HashMap<u64, Call>,
     /// Page-world evaluations waiting for the navigation to settle.
     deferred: Vec<(String, ReplyTx)>,
-    console: VecDeque<Logged<ConsoleEntry>>,
+    console: Console,
+}
+
+/// The console since the page's last navigation: every entry counted, the
+/// latest errors kept.
+#[derive(Default)]
+struct Console {
+    entries: usize,
+    warnings: usize,
+    errors: usize,
+    recent_errors: VecDeque<Logged<ConsoleEntry>>,
+}
+
+impl Console {
+    fn record(&mut self, logged: Logged<ConsoleEntry>) {
+        self.entries += 1;
+        match logged.entry.level.as_str() {
+            "warn" => self.warnings += 1,
+            "error" => {
+                self.errors += 1;
+                if self.recent_errors.len() == RECENT {
+                    self.recent_errors.pop_front();
+                }
+                self.recent_errors.push_back(logged);
+            }
+            _ => {}
+        }
+    }
 }
 
 impl PageEvents {
@@ -188,7 +213,7 @@ impl PageEvents {
             next_call: 0,
             calls: HashMap::new(),
             deferred: Vec::new(),
-            console: VecDeque::new(),
+            console: Console::default(),
         }
     }
 
@@ -217,7 +242,7 @@ impl PageEvents {
             Event::Started => {
                 self.navigating = true;
                 outcome.changed = self.load_error.take().is_some();
-                self.console.clear();
+                self.console = Console::default();
             }
             Event::Finished => {
                 self.navigating = false;
@@ -242,13 +267,10 @@ impl PageEvents {
                 self.flush(&mut outcome);
             }
             Event::Message(raw) => self.message(&raw, &mut outcome),
-            Event::Console(entry) => push(
-                &mut self.console,
-                Logged {
-                    entry,
-                    source: Source::Engine,
-                },
-            ),
+            Event::Console(entry) => self.console.record(Logged {
+                entry,
+                source: Source::Engine,
+            }),
             // The lifecycle loads it.
             Event::NewWindow(_) => {}
         }
@@ -288,13 +310,10 @@ impl PageEvents {
                     self.check_urls();
                 }
             }
-            Message::Console(entry) => push(
-                &mut self.console,
-                Logged {
-                    entry,
-                    source: Source::Script,
-                },
-            ),
+            Message::Console(entry) => self.console.record(Logged {
+                entry,
+                source: Source::Script,
+            }),
         }
     }
 
@@ -539,43 +558,15 @@ impl PageEvents {
     /// What `preview_status` adds of the console since the page's last
     /// navigation.
     pub(crate) fn summary(&self) -> Value {
-        let errors = self
-            .console
-            .iter()
-            .filter(|logged| logged.entry.level == "error");
-        let warnings = self
-            .console
-            .iter()
-            .filter(|logged| logged.entry.level == "warn")
-            .count();
         serde_json::json!({
             "console": {
-                "entries": self.console.len(),
-                "errors": errors.clone().count(),
-                "warnings": warnings,
-                "recentErrors": recent(errors),
+                "entries": self.console.entries,
+                "errors": self.console.errors,
+                "warnings": self.console.warnings,
+                "recentErrors": self.console.recent_errors,
             },
         })
     }
-}
-
-fn push<T>(ring: &mut VecDeque<T>, entry: T) {
-    if ring.len() == RING {
-        ring.pop_front();
-    }
-    ring.push_back(entry);
-}
-
-fn recent<'a, T: serde::Serialize + 'a>(
-    entries: impl DoubleEndedIterator<Item = &'a Logged<T>>,
-) -> Vec<Value> {
-    let mut recent: Vec<Value> = entries
-        .rev()
-        .take(RECENT)
-        .filter_map(|logged| serde_json::to_value(logged).ok())
-        .collect();
-    recent.reverse();
-    recent
 }
 
 fn strings(value: &Value) -> Vec<String> {
@@ -768,6 +759,26 @@ mod tests {
         assert!(
             page.handle(message("d1", json!({"t": "input", "generation": 1})))
                 .user_acted
+        );
+    }
+
+    /// The status counts every console entry since the page's last
+    /// navigation, however chatty the page; an early error stays counted.
+    #[test]
+    fn the_console_summary_counts_every_entry() {
+        let mut page = page_on("http://localhost/");
+        let console =
+            |level: &str| message("d1", json!({"t": "console", "level": level, "text": "x"}));
+        let _ = page.handle(console("error"));
+        for _ in 0..1000 {
+            let _ = page.handle(console("log"));
+        }
+        let summary = page.summary();
+        assert_eq!(summary["console"]["entries"], 1001);
+        assert_eq!(summary["console"]["errors"], 1);
+        assert_eq!(
+            summary["console"]["recentErrors"].as_array().unwrap().len(),
+            1
         );
     }
 

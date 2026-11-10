@@ -326,6 +326,7 @@ pub use wire::{
 // import could not bring in, which skipped no longer counts.
 // PullRequestSnapshot's updated_at may be absent (Azure DevOps keeps none).
 // RuntimeError gains mcp_unavailable.
+// The user_message item has no context_len.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

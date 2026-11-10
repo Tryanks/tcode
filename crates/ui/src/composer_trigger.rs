@@ -32,17 +32,13 @@ fn is_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\n' | b'\t' | b'\r')
 }
 
-/// Detect an active trigger at `cursor` (a UTF-8 byte offset into `text`).
+/// Detect an active trigger at `cursor`, the input's caret: a UTF-8 byte
+/// offset into `text`, on a character boundary.
 ///
 /// `/` is recognized only at the start of the message: Claude Code expands a
 /// command only there, and Tcode's own commands are whole-message too. A `/`
 /// token with a second `/` in it is a path. `@` and `$` follow whitespace.
 pub fn detect_composer_trigger(text: &str, cursor: usize) -> Option<ComposerTrigger> {
-    let cursor = cursor.min(text.len());
-    // Snap to a char boundary defensively (byte offsets from the input are on
-    // boundaries, but clamping above could land mid-char in pathological input).
-    let cursor = (0..=cursor).rev().find(|&i| text.is_char_boundary(i))?;
-
     let prefix = &text[..cursor];
 
     if let Some(rest) = prefix.strip_prefix('/') {
@@ -156,8 +152,6 @@ mod tests {
             ("look at @src/ma", 15, TriggerKind::Path, "src/ma", 8..15),
             ("use $rev", 8, TriggerKind::Skill, "rev", 4..8),
             ("\t@文件 suffix", 5, TriggerKind::Path, "文", 1..5),
-            ("@文", 2, TriggerKind::Path, "", 0..1),
-            ("@file", usize::MAX, TriggerKind::Path, "file", 0..5),
             ("/de", 3, TriggerKind::SlashCommand, "de", 0..3),
             ("/a:b", 4, TriggerKind::SlashCommand, "a:b", 0..4),
             ("/", 1, TriggerKind::SlashCommand, "", 0..1),

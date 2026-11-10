@@ -714,7 +714,6 @@ impl AppState {
             parent_item_id: None,
             content: ItemContent::UserMessage {
                 text: text.to_owned(),
-                context_len: None,
                 attachments: attachment_paths(attachments),
             },
         });

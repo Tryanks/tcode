@@ -522,11 +522,6 @@ pub enum EntryContent {
         text: String,
         /// Delivery state for a message injected into an already-open turn.
         status: SteeringStatus,
-        /// Byte length of a context prefix Tcode folded into `text` ahead of
-        /// the user's own words; only stored messages carry it. When present,
-        /// the UI renders `text[..context_len]` as a collapsed disclosure row
-        /// and keeps the bubble to `text[context_len..]`.
-        context_len: Option<usize>,
         /// Local paths of the image attachments sent with this message (empty
         /// for text-only messages and for logs predating the field).
         attachments: Vec<String>,
@@ -1980,18 +1975,14 @@ impl Timeline {
                 }) {
                     // Legacy logs represented a steer as a second UserMessage
                     // item. Preserve their historical accepted rendering.
-                    let EntryContent::Item(ItemContent::UserMessage {
-                        text,
-                        context_len,
-                        attachments,
-                    }) = incoming
+                    let EntryContent::Item(ItemContent::UserMessage { text, attachments }) =
+                        incoming
                     else {
                         unreachable!();
                     };
                     incoming = EntryContent::Steer {
                         text,
                         status: SteeringStatus::Accepted,
-                        context_len,
                         attachments,
                     };
                 }
@@ -2027,7 +2018,6 @@ impl Timeline {
             content: EntryContent::Steer {
                 text: text.to_owned(),
                 status: SteeringStatus::Pending,
-                context_len: None,
                 attachments: attachments.to_vec(),
             },
             ts,
@@ -2165,15 +2155,10 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
     match (existing, incoming) {
         (
             EntryContent::Steer { status, .. },
-            EntryContent::Item(ItemContent::UserMessage {
-                text,
-                context_len,
-                attachments,
-            }),
+            EntryContent::Item(ItemContent::UserMessage { text, attachments }),
         ) => EntryContent::Steer {
             text,
             status,
-            context_len,
             attachments,
         },
         (
@@ -2583,7 +2568,6 @@ mod tests {
             parent_item_id: None,
             content: ItemContent::UserMessage {
                 text: text.into(),
-                context_len: None,
                 attachments: Vec::new(),
             },
         })
@@ -3736,7 +3720,6 @@ mod tests {
             parent_item_id: Some("spawn".into()),
             content: ItemContent::UserMessage {
                 text: "ping".into(),
-                context_len: None,
                 attachments: Vec::new(),
             },
         };
@@ -3770,26 +3753,15 @@ mod tests {
         ));
     }
 
+    /// A message stored while Tcode still marked a context prefix in it
+    /// reads, and reads as its whole text: the stored length is ignored.
     #[test]
-    fn stored_user_messages_keep_injected_context_and_accept_older_plain_messages() {
-        for (record, expected_text, expected_context) in [
-            (
-                r#"{"type":"item_completed","id":"u1","content":{"kind":"user_message","text":"just words"}}"#,
-                "just words",
-                None,
-            ),
-            (
-                r#"{"type":"item_completed","id":"u1","content":{"kind":"user_message","text":"PREFIX\n\nvisible","context_len":8}}"#,
-                "PREFIX\n\nvisible",
-                Some(8),
-            ),
-        ] {
-            let event: AgentEvent = serde_json::from_str(record).unwrap();
-            let timeline = Timeline::fold_events([event]);
-            assert!(matches!(&timeline.entries[0].content,
-                EntryContent::Item(ItemContent::UserMessage { text, context_len, .. })
-                    if text == expected_text && *context_len == expected_context));
-        }
+    fn a_stored_user_message_with_a_context_length_reads_as_its_whole_text() {
+        let record = r#"{"type":"item_completed","id":"u1","content":{"kind":"user_message","text":"PREFIX\n\nvisible","context_len":8}}"#;
+        let event: AgentEvent = serde_json::from_str(record).unwrap();
+        let timeline = Timeline::fold_events([event]);
+        assert!(matches!(&timeline.entries[0].content,
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "PREFIX\n\nvisible"));
     }
 
     fn at(ts: u64, event: AgentEvent) -> StoredEvent {

@@ -236,15 +236,12 @@ fn instructions_reach_the_provider_at_launch_and_no_turn_carries_them() {
         .into_iter()
         .find_map(|event| match event.event {
             AgentEvent::ItemCompleted(ThreadItem {
-                content:
-                    ItemContent::UserMessage {
-                        text, context_len, ..
-                    },
+                content: ItemContent::UserMessage { text, .. },
                 ..
-            }) => Some((text, context_len)),
+            }) => Some(text),
             _ => None,
         });
-    assert_eq!(stored, Some(("fix the build".to_owned(), None)));
+    assert_eq!(stored.as_deref(), Some("fix the build"));
 
     let disclosed = |state: &TestEntity| {
         state.read(|state| {

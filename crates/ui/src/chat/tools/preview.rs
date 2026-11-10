@@ -1,25 +1,22 @@
 //! The preview windows: Tcode's embedded browser (`tcode_preview`) as the
 //! agent drove it — the page it opened, what it clicked, typed and pressed,
-//! the screenshot it took, the page as a snapshot read it, and the script it
-//! evaluated beside the value it returned.
+//! the screenshot it took, the page's outline as a snapshot read it, and the
+//! script it evaluated beside the value it returned.
 
 use std::path::Path;
 
 use agent::ItemStatus;
-use gpui::{AnyElement, IntoElement as _};
+use gpui::AnyElement;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::outline::{self, Node};
-use super::window::{Argument, Chip, Header, Verb, section};
-use super::{
-    Bound, Call, ToolCtx, ToolView, bounded_text, code_section, copy, output_section, thumbnails,
-};
+use super::outline;
+use super::window::{Argument, Chip, Header, Verb};
+use super::{Bound, Call, ToolCtx, ToolView, code_section, copy, output_section, thumbnails};
 use crate::chat::model::one_line;
 use crate::icon::IconName;
 
-/// The server's name, and the one an older build gave it.
-const SERVERS: &[&str] = &["tcode_preview", "t3-code"];
+const SERVERS: &[&str] = &["tcode_preview"];
 
 #[derive(Deserialize)]
 struct Url<'a> {
@@ -27,8 +24,7 @@ struct Url<'a> {
     url: Option<&'a str>,
 }
 
-/// The element a call acts on: a snapshot's ref, or a CSS selector, which
-/// older calls always gave.
+/// The element a call acts on: a snapshot's ref, or a CSS selector.
 #[derive(Deserialize)]
 struct Target<'a> {
     #[serde(default, borrow, rename = "ref")]
@@ -184,10 +180,8 @@ impl ToolView for Preview<'_> {
             Tool::Snapshot => {
                 let count = page
                     .as_ref()
-                    .and_then(|page| match text_of(page, "outline") {
-                        Some(outline) => Some(outline::nodes(outline).len()),
-                        None => Some(page.get("interactiveElements")?.as_array()?.len()),
-                    })
+                    .and_then(|page| text_of(page, "outline"))
+                    .map(|outline| outline::nodes(outline).len())
                     .map(|count| Chip::Count(super::counted("tools.elements", count)));
                 browser("snapshot")
                     .argument(page.as_ref().and_then(page_name).and_then(Argument::plain))
@@ -274,15 +268,9 @@ impl ToolView for Preview<'_> {
                 let Some(page) = page(&text) else {
                     return super::body(output_section(call, Bound::OUTPUT, ctx));
                 };
-                // The page agent's outline; an older build listed elements.
-                let nodes: Vec<Node> = match text_of(&page, "outline") {
-                    Some(outline) => outline::nodes(outline),
-                    None => page
-                        .get("interactiveElements")
-                        .and_then(Value::as_array)
-                        .map(|elements| elements.iter().map(element_node).collect())
-                        .unwrap_or_default(),
-                };
+                let nodes = text_of(&page, "outline")
+                    .map(outline::nodes)
+                    .unwrap_or_default();
                 let elements = outline::section_of(
                     call,
                     &nodes,
@@ -290,18 +278,8 @@ impl ToolView for Preview<'_> {
                     super::counted("tools.elements", nodes.len()),
                     ctx,
                 );
-                let visible = text_of(&page, "visibleText").map(|text| {
-                    let text = bounded_text(call.entry, "visible", text, false, Bound::HEAD, ctx);
-                    section(&crate::tr!("tools.visible_text"), text, ctx.app()).into_any_element()
-                });
                 let raw = super::raw_section(call, text.trim(), ctx);
-                super::body(
-                    elements
-                        .into_iter()
-                        .chain(visible)
-                        .chain([raw])
-                        .chain(control),
-                )
+                super::body(elements.into_iter().chain([raw]).chain(control))
             }
             Tool::Evaluate(js) => {
                 let code = code_section(
@@ -337,18 +315,5 @@ impl ToolView for Preview<'_> {
             call.output.unwrap_or_default(),
         );
         items
-    }
-}
-
-/// An element a snapshot lists: `{tag, role, name, selector}`.
-fn element_node(element: &Value) -> Node {
-    let text = |key: &str| text_of(element, key).map(str::to_owned);
-    Node {
-        role: text("role")
-            .or_else(|| text("tag"))
-            .unwrap_or_else(|| "element".to_owned()),
-        name: text("name").map(|name| one_line(&name)),
-        reference: text("selector"),
-        ..Node::default()
     }
 }

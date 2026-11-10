@@ -102,11 +102,6 @@ impl NavigationSnapshot {
             thread,
             panel: saved.panel,
         };
-        // Ignore malformed/unbounded local state rather than building an
-        // arbitrary number of mounted views during startup.
-        if snapshot.history.len() > 128 {
-            return None;
-        }
         snapshot.history.retain(|destination| {
             !matches!(
                 destination,
@@ -221,7 +216,6 @@ pub struct WindowState {
     /// The palette lists only where a new thread can start, with this place
     /// marked as the current one; `None` lists everything.
     pub palette_picker: Option<PickerFrom>,
-    pub quit_prompt_epoch: u64,
     pub quit_prompt_open: bool,
     pub pending_settings_section: Option<String>,
     /// The host whose settings the Settings route shows; `None` for the
@@ -238,7 +232,6 @@ impl Default for WindowState {
             palette_leaving: false,
             palette_focuses_query: true,
             palette_picker: None,
-            quit_prompt_epoch: 0,
             quit_prompt_open: false,
             pending_settings_section: None,
             settings_host: None,

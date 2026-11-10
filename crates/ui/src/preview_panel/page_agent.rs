@@ -79,11 +79,9 @@ mod imp {
         });
     }
 
-    /// Tcode's world, where the page's scripts cannot reach the agent:
-    /// macOS 11 and iOS 14.
-    fn world(mtm: MainThreadMarker) -> Option<Retained<WKContentWorld>> {
-        AnyClass::get(c"WKContentWorld")?;
-        Some(unsafe { WKContentWorld::worldWithName(&NSString::from_str(WORLD), mtm) })
+    /// Tcode's world, where the page's scripts cannot reach the agent.
+    fn world(mtm: MainThreadMarker) -> Retained<WKContentWorld> {
+        unsafe { WKContentWorld::worldWithName(&NSString::from_str(WORLD), mtm) }
     }
 
     pub(crate) struct HandlerState {
@@ -152,10 +150,7 @@ mod imp {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let Some(world) = world(mtm) else {
-            log::warn!("preview: this WebKit has no script worlds; the page agent is off");
-            return;
-        };
+        let world = world(mtm);
         let scripts = page::scripts(
             &Transport {
                 post: POST,
@@ -192,9 +187,7 @@ mod imp {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let Some(world) = world(mtm) else {
-            return;
-        };
+        let world = world(mtm);
         let webview = raw.webview();
         // The answer comes from the agent; only a failure is of interest.
         let done = block2::RcBlock::new(|_: *mut AnyObject, error: *mut NSError| {

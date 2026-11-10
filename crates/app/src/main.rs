@@ -25,7 +25,6 @@ use tcode_ui::widgets::button::{Button, ButtonVariants as _};
 
 mod editor;
 mod migration;
-mod preview_smoke;
 
 /// macOS vibrancy can be disabled with `TCODE_NO_VIBRANCY=1` as a diagnostic
 /// escape hatch (opaque window + flattened palette).
@@ -506,7 +505,7 @@ impl MainWindow {
         setup: ShellSetup,
         bounds: Option<WindowBounds>,
         cx: &mut App,
-    ) -> (AnyWindowHandle, Entity<AppShell>) {
+    ) -> Entity<AppShell> {
         let state = &self.0;
         let mut options = window_options(cx, state.throttle_inactive);
         if bounds.is_some() {
@@ -547,7 +546,7 @@ impl MainWindow {
             window,
             shell: shell.clone(),
         };
-        (window, shell)
+        shell
     }
 
     fn window(&self) -> Option<AnyWindowHandle> {
@@ -620,14 +619,6 @@ fn main() {
         use std::io::Write as _;
         print!("{}", computer_use_mcp::smoke());
         let _ = std::io::stdout().flush();
-        return;
-    }
-
-    let preview_smoke = std::env::args().any(|arg| arg == "--preview-smoke");
-    if preview_smoke && !tcode_ui::preview_backend() {
-        use std::io::Write as _;
-        eprintln!("preview-smoke: SKIP (no native webview)");
-        let _ = std::io::stderr().flush();
         return;
     }
 
@@ -812,7 +803,7 @@ fn main() {
                 !local_settings.inactive_frame_throttle_disabled,
                 cx,
             );
-            let (window, shell) = main_window.open(
+            let shell = main_window.open(
                 ShellSetup {
                     local_failure: failure,
                     initial: Some(initial_target),
@@ -846,12 +837,6 @@ fn main() {
             }
 
             cx.spawn(async move |cx| {
-                if preview_smoke {
-                    preview_smoke::run(shell, window, cx).await;
-                    return;
-                }
-                let _ = window;
-
                 if open_latest {
                     let Some(link) = cx.update(|cx| shell.read(cx).link(cx)) else {
                         return;

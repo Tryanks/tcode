@@ -298,7 +298,6 @@ impl PopupMenu {
     /// enabled only when something is; Select All dispatches to the surface
     /// that owns the text and is offered when `select_all`.
     pub fn selection_items(self, selected: String, select_all: bool) -> Self {
-        let selected = selected.trim().to_string();
         let has_selection = !selected.is_empty();
         self.menu_with_enable(
             crate::tr!("edit_menu.copy").into_owned(),
@@ -926,6 +925,39 @@ mod tests {
                     .touch(true),
             )
         }
+    }
+
+    /// Text a view has selected, offered by its context menu.
+    struct SelectionHarness;
+    impl Render for SelectionHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("selected-text")
+                .debug_selector(|| "selected-text".into())
+                .size_full()
+                .context_menu(|menu, _, _| menu.selection_items("    indented\n".into(), false))
+        }
+    }
+
+    /// The menu's Copy puts the selection on the clipboard as it was
+    /// selected, its leading indentation and trailing newline included.
+    #[gpui::test]
+    fn the_selection_menu_copies_the_selection_as_selected(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (_, cx) = cx.add_window_view(|_, _| SelectionHarness);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let at = cx.debug_bounds("selected-text").unwrap().center();
+        cx.simulate_mouse_down(at, MouseButton::Right, Default::default());
+        cx.simulate_mouse_up(at, MouseButton::Right, Default::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let copy = cx.debug_bounds("menu-item-0").expect("menu opens").center();
+        cx.simulate_click(copy, Default::default());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some("    indented\n".into())
+        );
     }
 
     #[gpui::test]

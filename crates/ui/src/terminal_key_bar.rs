@@ -92,23 +92,21 @@ struct TerminalKeyEncoder {
 }
 
 impl TerminalKeyEncoder {
-    fn new() -> Self {
-        Self {
-            modifiers: StickyModifiers::default(),
-        }
-    }
-
+    /// The bytes `key` sends, or `None` for a named key the terminal's
+    /// encoding has no sequence for with the sticky modifiers, as a
+    /// hardware key with no sequence sends nothing.
     fn encode_key(
         &mut self,
         key: TerminalKey,
         mode: TerminalMode,
         keyboard_mode: KeyboardModes,
         modify_other_keys: Option<u8>,
-    ) -> Vec<u8> {
+    ) -> Option<Vec<u8>> {
         // A combo carries its own Control. It still clears whatever the user
         // had made sticky, so Ctrl · Ctrl+C never encodes a double modifier
         // and never leaves Ctrl armed for the next key.
         let control = matches!(key, TerminalKey::Control(_));
+        let character = matches!(key, TerminalKey::Symbol(_) | TerminalKey::Control(_));
         let key = key.mapping_name();
         let mut modifiers = self.modifiers.take();
         modifiers.control |= control;
@@ -120,7 +118,7 @@ impl TerminalKeyEncoder {
             modify_other_keys,
             true,
         )
-        .unwrap_or_else(|| key.into_bytes())
+        .or_else(|| character.then(|| key.into_bytes()))
     }
 
     /// Encode committed software-keyboard text. Sticky modifiers apply to the
@@ -166,7 +164,7 @@ impl TerminalKeyBar {
     pub(crate) fn new(terminal_focus: FocusHandle) -> Self {
         Self {
             terminal_focus,
-            encoder: TerminalKeyEncoder::new(),
+            encoder: TerminalKeyEncoder::default(),
         }
     }
 
@@ -176,7 +174,7 @@ impl TerminalKeyBar {
         mode: TerminalMode,
         keyboard_mode: KeyboardModes,
         modify_other_keys: Option<u8>,
-    ) -> Vec<u8> {
+    ) -> Option<Vec<u8>> {
         self.encoder
             .encode_key(key, mode, keyboard_mode, modify_other_keys)
     }
@@ -417,7 +415,7 @@ mod tests {
                     KeyboardModes::NO_MODE,
                     None
                 ),
-                b"\x1b[A"
+                Some(b"\x1b[A".to_vec())
             );
             assert_eq!(
                 state.encode_key(
@@ -426,7 +424,7 @@ mod tests {
                     KeyboardModes::NO_MODE,
                     None,
                 ),
-                b"\x1bOA"
+                Some(b"\x1bOA".to_vec())
             );
         }
         {
@@ -439,7 +437,7 @@ mod tests {
             ] {
                 assert_eq!(
                     state.encode_key(key, TerminalMode::empty(), KeyboardModes::NO_MODE, None),
-                    vec![byte]
+                    Some(vec![byte])
                 );
             }
 
@@ -454,7 +452,7 @@ mod tests {
                     KeyboardModes::NO_MODE,
                     None,
                 ),
-                vec![0x03],
+                Some(vec![0x03]),
                 "a sticky Ctrl on top of the combo is still one Control-C"
             );
             assert_eq!(state.modifiers, StickyModifiers::default());
@@ -463,6 +461,19 @@ mod tests {
                 b"c",
                 "the combo must not leave Ctrl armed for the next key"
             );
+        }
+        {
+            // A legacy terminal has no sequence for Ctrl+Esc or Ctrl+Tab;
+            // the key's name is not typed in its place.
+            let mut state = TerminalKeyEncoder::default();
+            for key in [TerminalKey::Escape, TerminalKey::Tab] {
+                state.modifiers.control = true;
+                assert_eq!(
+                    state.encode_key(key, TerminalMode::empty(), KeyboardModes::NO_MODE, None),
+                    None,
+                    "{key:?}"
+                );
+            }
         }
     }
 
@@ -623,7 +634,7 @@ mod tests {
                 .unwrap();
         }
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         assert_eq!(
             store.read_with(cx, |store, cx| store.with_terminal_workspace_for(
                 store.sole_thread().as_deref(),

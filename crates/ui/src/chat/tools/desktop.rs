@@ -688,11 +688,17 @@ impl ToolView for Desktop<'_> {
                 let structured = tree.is_some();
                 tree.into_iter().chain(raw(structured, ctx)).collect()
             }
-            Tool::ReadText(_) => {
-                let page = text.split_once("\n---\n").map_or(&*text, |(_, page)| page);
-                let body = bounded_text(call.entry, "output", page, true, Bound::HEAD, ctx);
-                vec![section(&crate::tr!("tools.output"), body, ctx.app()).into_any_element()]
-            }
+            // The page of text it read, past the facts the server puts first
+            // (its ref, offsets, where to continue), which stay in the raw.
+            Tool::ReadText(_) => match text.split_once("\n---\n") {
+                Some((_, page)) => {
+                    let body = bounded_text(call.entry, "page", page, true, Bound::HEAD, ctx);
+                    let page =
+                        section(&crate::tr!("tools.output"), body, ctx.app()).into_any_element();
+                    std::iter::once(page).chain(raw(true, ctx)).collect()
+                }
+                None => raw(false, ctx).into_iter().collect(),
+            },
             Tool::Inspect(_) => output_section(call, Bound::HEAD, ctx).into_iter().collect(),
         };
         super::body(sections.into_iter().chain(control))

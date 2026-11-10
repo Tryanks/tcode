@@ -160,15 +160,10 @@ fn render_incomplete_timeline(output: &mut String, timeline: &Timeline) {
         output.push_str(&format!("### Turn {} (incomplete)\n\n", turn + 1));
         for entry in timeline.entries.iter().filter(|entry| entry.turn == turn) {
             match &entry.content {
-                EntryContent::Item(ItemContent::UserMessage {
-                    text, context_len, ..
-                })
-                | EntryContent::Steer {
-                    text, context_len, ..
-                } => {
-                    let visible = context_len.and_then(|len| text.get(len..)).unwrap_or(text);
+                EntryContent::Item(ItemContent::UserMessage { text, .. })
+                | EntryContent::Steer { text, .. } => {
                     output.push_str("#### User\n\n");
-                    output.push_str(visible);
+                    output.push_str(text);
                     output.push_str("\n\n");
                 }
                 EntryContent::Feedback { text } => {
@@ -265,7 +260,6 @@ mod tests {
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: "Inspect the project".into(),
-                    context_len: None,
                     attachments: vec!["/work/project/screenshot.png".into()],
                 },
             }),
@@ -469,7 +463,6 @@ mod tests {
             "user",
             ItemContent::UserMessage {
                 text: "Run every check".into(),
-                context_len: None,
                 attachments: Vec::new(),
             },
         )];

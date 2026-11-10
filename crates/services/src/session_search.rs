@@ -548,7 +548,6 @@ mod tests {
                 "user",
                 ItemContent::UserMessage {
                     text: "Where is auth.rs?".into(),
-                    context_len: None,
                     attachments: vec!["diagram.png".into()],
                 },
             )
@@ -742,7 +741,6 @@ mod tests {
                 id,
                 ItemContent::UserMessage {
                     text: text.into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             )

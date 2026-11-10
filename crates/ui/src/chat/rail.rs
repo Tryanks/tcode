@@ -598,6 +598,7 @@ impl RailView {
     pub(super) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
         self.session_id = session_id;
         self.expanded.clear();
+        changes::forget(self);
         cx.notify();
     }
 
@@ -648,6 +649,7 @@ impl RailView {
     /// List again what the Screen and Commands cards show, from the
     /// thread's items and background work as they are now.
     pub(super) fn sync(&mut self, cx: &App) {
+        changes::forget(self);
         let (screen, commands) = (&mut self.screen, &mut self.commands);
         let store = self.workspace_store.read(cx);
         let tasks = store

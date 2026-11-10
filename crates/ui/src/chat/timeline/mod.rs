@@ -195,6 +195,8 @@ impl TimelineView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // GPUI's list, not gpui-base's `VirtualList`, which takes every row's
+        // size up front: a row's height here is known only once it is laid out.
         // Measure enough rows to establish the six-screen window even when
         // distant rows still have unknown heights in ListState's summary.
         let height = f32::from(window.bounds().size.height);
@@ -1490,7 +1492,6 @@ mod tests {
                 EntryContent::Steer {
                     text: format!("queued steer {index}"),
                     status: SteeringStatus::Pending,
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             ));
@@ -1671,7 +1672,6 @@ mod tests {
                     parent_item_id: None,
                     content: ItemContent::UserMessage {
                         text: format!("Question {turn}"),
-                        context_len: None,
                         attachments: Vec::new(),
                     },
                 }));
@@ -2303,7 +2303,6 @@ mod tests {
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: format!("Question {turn}"),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             })
@@ -3315,7 +3314,7 @@ mod tests {
         // asked for, ten turns above `before`; then let the store's single
         // request gate reopen.
         let frame = |thread: &mut ScriptedThread, cx: &mut VisualTestContext| -> Option<u64> {
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
             cx.update(|window, cx| {
                 window.simulate_next_frame(cx);
@@ -3477,7 +3476,7 @@ mod tests {
             )
             .unwrap();
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         assert_eq!(replica(cx).unwrap(), tail);
     }
 
@@ -3525,7 +3524,6 @@ mod tests {
             assert!(content_top > list.viewport_bounds().top());
             store.update(cx, |store, cx| {
                 store.set_session_replica_for_test(session_id, full, cx);
-                store.suppress_history_prefetch_for_test();
                 cx.notify();
             });
             // The frame that lands the page measures it.
@@ -3717,7 +3715,7 @@ mod tests {
         let store = thread.store.clone();
         let (view, cx) = thread.open(cx);
         let frame = |cx: &mut VisualTestContext| {
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             cx.executor().advance_clock(Duration::from_millis(16));
             cx.update(|window, cx| {
                 window.simulate_next_frame(cx);

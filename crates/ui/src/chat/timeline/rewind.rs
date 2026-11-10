@@ -1,9 +1,7 @@
 //! The rewind panel a message opens, and the undo its divider offers.
 use super::*;
 use crate::chat::components::rewind::{Panel, PanelActions, PreviewState};
-use agent::{
-    RewindFailure, RewindFailureReason, RewindMode, RewindPreviewKind, RewindPreviewResult,
-};
+use agent::{RewindMode, RewindPreviewKind, RewindPreviewResult};
 
 /// The open panel: the message it rewinds to, the scope chosen, and what the
 /// Harness said each file scope would restore.
@@ -65,10 +63,7 @@ impl TimelineView {
                     let state = match preview.await {
                         Ok(RewindPreviewResult::Ready(preview)) => PreviewState::Ready(preview),
                         Ok(RewindPreviewResult::Refused(failure)) => PreviewState::Refused(failure),
-                        Err(detail) => PreviewState::Refused(RewindFailure::new(
-                            RewindFailureReason::Other,
-                            detail,
-                        )),
+                        Err(error) => PreviewState::Failed(error),
                     };
                     let _ = this.update(cx, |this, cx| {
                         if let Some(panel) =

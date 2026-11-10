@@ -538,16 +538,12 @@ fn summarize_turn(
     let mut compactions = (0usize, 0usize);
     for (_, entry) in entries {
         match &entry.content {
-            EntryContent::Item(ItemContent::UserMessage {
-                text, context_len, ..
-            }) if summary.user_message_head.is_none() => {
-                summary.user_message_head = Some(head(visible(text, *context_len), head_chars));
+            EntryContent::Item(ItemContent::UserMessage { text, .. })
+                if summary.user_message_head.is_none() =>
+            {
+                summary.user_message_head = Some(head(text, head_chars));
             }
-            EntryContent::Steer {
-                text, context_len, ..
-            } => summary
-                .steers
-                .push(head(visible(text, *context_len), head_chars)),
+            EntryContent::Steer { text, .. } => summary.steers.push(head(text, head_chars)),
             EntryContent::Item(ItemContent::AssistantMessage { text, .. })
                 if !text.trim().is_empty() =>
             {
@@ -613,10 +609,8 @@ fn summarize_segment(entries: &[(u64, &TimelineEntry)]) -> OutlineSegment {
     let mut activity = Activity::default();
     for (_, entry) in entries {
         match &entry.content {
-            EntryContent::Steer {
-                text, context_len, ..
-            } if segment.steer.is_none() => {
-                segment.steer = Some(head(visible(text, *context_len), HEAD_CHARS));
+            EntryContent::Steer { text, .. } if segment.steer.is_none() => {
+                segment.steer = Some(head(text, HEAD_CHARS));
             }
             EntryContent::Item(ItemContent::AssistantMessage { text, .. })
                 if segment.assistant_head.is_none() =>
@@ -679,10 +673,6 @@ fn is_activity(content: &EntryContent) -> bool {
                 | ItemContent::ImageRead { .. }
         )
     )
-}
-
-fn visible(text: &str, context_len: Option<usize>) -> &str {
-    context_len.and_then(|len| text.get(len..)).unwrap_or(text)
 }
 
 fn prefix(text: &str, bytes: usize) -> &str {
@@ -825,9 +815,7 @@ fn collect_references(text: &str, out: &mut Vec<String>) {
 fn hint_text(content: &EntryContent) -> Option<String> {
     match content {
         EntryContent::Item(item) => match item {
-            ItemContent::UserMessage {
-                text, context_len, ..
-            } => Some(visible(text, *context_len).to_owned()),
+            ItemContent::UserMessage { text, .. } => Some(text.clone()),
             ItemContent::AssistantMessage { text, .. } => Some(text.clone()),
             ItemContent::CommandExecution { command, .. } => Some(command.clone()),
             ItemContent::FileChange { changes, .. } => Some(
@@ -845,9 +833,7 @@ fn hint_text(content: &EntryContent) -> Option<String> {
             ItemContent::ImageRead { path, .. } => Some(path.clone()),
             _ => None,
         },
-        EntryContent::Steer {
-            text, context_len, ..
-        } => Some(visible(text, *context_len).to_owned()),
+        EntryContent::Steer { text, .. } => Some(text.clone()),
         EntryContent::Error { message, .. } => Some(message.clone()),
         EntryContent::ProviderStartError { error } => Some(error.clone()),
         _ => None,
@@ -1215,14 +1201,9 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
     }
     match content {
         EntryContent::Item(item) => match item {
-            ItemContent::UserMessage {
-                text,
-                context_len,
-                attachments,
-            } => (
-                "user_message",
-                with_attachments(visible(text, *context_len), attachments),
-            ),
+            ItemContent::UserMessage { text, attachments } => {
+                ("user_message", with_attachments(text, attachments))
+            }
             ItemContent::AssistantMessage { text, .. } => ("assistant_message", text.clone()),
             ItemContent::Plan { markdown } => ("plan", markdown.clone()),
             ItemContent::Reasoning { text } => ("reasoning", text.clone()),
@@ -1294,14 +1275,8 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
             } => ("other", format!("{provider_kind}: {summary}")),
         },
         EntryContent::Steer {
-            text,
-            context_len,
-            attachments,
-            ..
-        } => (
-            "steer",
-            with_attachments(visible(text, *context_len), attachments),
-        ),
+            text, attachments, ..
+        } => ("steer", with_attachments(text, attachments)),
         EntryContent::Feedback { text } => ("feedback", text.clone()),
         EntryContent::Error { message, .. } => ("error", message.clone()),
         EntryContent::ProviderStartError { error } => ("provider_start_error", error.clone()),
@@ -1721,7 +1696,6 @@ mod tests {
             id,
             ItemContent::UserMessage {
                 text: text.into(),
-                context_len: None,
                 attachments: Vec::new(),
             },
         ))

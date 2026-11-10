@@ -253,7 +253,7 @@ mod tests {
             "a takes presses where it is drawn"
         );
 
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.executor().advance_clock(super::FLIP / 2);
         draw(cx);
         let gliding = top("a", cx);
         assert!(gliding > first && gliding < third, "a is on its way");

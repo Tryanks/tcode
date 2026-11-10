@@ -2962,13 +2962,6 @@ pub struct ThreadItem {
 pub enum ItemContent {
     UserMessage {
         text: String,
-        /// Byte length of a context prefix Tcode folded into `text` ahead of the
-        /// user's own words. Only stored messages carry it; nothing sends one
-        /// now. The provider received the whole `text`; the UI renders the
-        /// prefix as a collapsed disclosure row and keeps the bubble to
-        /// `text[context_len..]`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        context_len: Option<usize>,
         /// Local paths of the image attachments sent with this message, so the
         /// timeline (live and replayed) can render them. Empty on text-only
         /// messages and on logs written before this field existed.

@@ -747,10 +747,7 @@ impl DiffPanel {
                         .with_diff_turn_changes_for(
                             self.session_id.as_deref(),
                             turn,
-                            |changes, completeness| {
-                                let _completeness = completeness;
-                                changes.to_vec()
-                            },
+                            |changes, _| changes.to_vec(),
                             cx,
                         )
                         .unwrap_or_default();
@@ -1656,7 +1653,26 @@ impl DiffPanel {
             .is_some_and(|preview| preview.result.truncated)
             .then(|| crate::tr!("diff.truncated").into_owned());
         let error = preview.and_then(|preview| preview.result.error.clone());
-        for (id, notice) in [("diff-truncated", truncated), ("diff-error", error)] {
+        // A turn's changes as the provider attributed them; commands may have written others.
+        let partial = match cache.scope {
+            DiffScope::Turn(turn) => self
+                .workspace_store
+                .read(cx)
+                .with_diff_turn_changes_for(
+                    self.session_id.as_deref(),
+                    turn,
+                    |_, completeness| completeness == agent::ChangeCompleteness::Partial,
+                    cx,
+                )
+                .unwrap_or_default(),
+            DiffScope::WorkingTree | DiffScope::Branch => false,
+        }
+        .then(|| crate::tr!("diff.turn_partial").into_owned());
+        for (id, notice) in [
+            ("diff-turn-partial", partial),
+            ("diff-truncated", truncated),
+            ("diff-error", error),
+        ] {
             if let Some(shown) = crate::motion::shown(id, notice, SHOW, window, cx) {
                 content = content.child(shown.fold(render_notice(shown.value.clone(), cx)));
             }

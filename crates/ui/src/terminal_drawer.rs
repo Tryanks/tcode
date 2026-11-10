@@ -631,8 +631,10 @@ impl TerminalDrawer {
                 terminal.modify_other_keys(),
             )
         });
-        terminal.write_input(bytes);
-        self.note_input(cx);
+        if let Some(bytes) = bytes {
+            terminal.write_input(bytes);
+            self.note_input(cx);
+        }
     }
 
     fn send_committed_text(&mut self, terminal_id: u64, text: &str, cx: &mut Context<Self>) {
@@ -3584,8 +3586,6 @@ mod tests {
                 )
                 .unwrap();
             cx.run_until_parked();
-            self.store
-                .update(cx, |store, cx| store.drain_host_events_for_test(cx));
             crate::test_frames::draw(cx);
         }
 

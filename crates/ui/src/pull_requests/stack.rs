@@ -1387,12 +1387,7 @@ pub(super) fn answer_toast(
                     let body = if messages.is_empty() {
                         tr("result_refused_body")
                     } else {
-                        let joined = messages.join(" ");
-                        if joined.chars().count() > 320 {
-                            format!("{}…", joined.chars().take(320).collect::<String>())
-                        } else {
-                            joined
-                        }
+                        messages.join(" ")
                     };
                     not(tr("result_refused"), body)
                 }
@@ -1478,16 +1473,14 @@ pub fn present_result(
         result,
         PullRequestActionResult::Rebased { .. } | PullRequestActionResult::RebaseStopped { .. }
     );
+    let links = store.read(cx).pull_requests(session);
     let answer = Answer {
         stack: id,
         target: target.number,
         layers,
         base,
-        branches: branches(store.read(cx).pull_requests(session), target),
-        url: Some(format!(
-            "https://{}/{}/pull/{}",
-            target.host, target.repository, target.number
-        )),
+        branches: branches(links, target),
+        url: super::page_url(links, target),
         rebase,
         late,
     };
@@ -1535,7 +1528,7 @@ fn stays(result: &PullRequestActionResult) -> bool {
     )
 }
 
-fn notice_text(result: &PullRequestActionResult) -> Option<String> {
+fn notice_text(result: &PullRequestActionResult, machine: &str) -> Option<String> {
     let PullRequestActionResult::Rejected(rejection) = result else {
         return None;
     };
@@ -1554,15 +1547,16 @@ fn notice_text(result: &PullRequestActionResult) -> Option<String> {
         }
         PullRequestRejection::NoGitIdentity => tr_with(
             "rebase_blocked_identity",
-            &[("machine", machine_label(None))],
+            &[("machine", machine.to_owned())],
         ),
         _ => return None,
     })
 }
 
-fn machine_label(store: Option<&WorkspaceStore>) -> String {
+fn machine_label(store: &WorkspaceStore) -> String {
     store
-        .and_then(|store| store.remote_host_name().map(str::to_owned))
+        .remote_host_name()
+        .map(str::to_owned)
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| tr("this_machine"))
 }
@@ -1589,8 +1583,8 @@ fn line(icon: IconName, color: Hsla, text: String) -> AnyElement {
         .into_any_element()
 }
 
-/// A note of the merge confirmation: its glyph and colour, if it has one, and its words.
-type MergeNote = (Option<(IconName, Hsla)>, String);
+/// A note of the merge confirmation: its glyph, its colour and its words.
+type MergeNote = (IconName, Hsla, String);
 
 /// The text role of a confirmation's notes.
 fn notes(cx: &App) -> gpui::Div {
@@ -1851,7 +1845,7 @@ impl MergeStackDialog {
                     window.push_notification(note, cx);
                 }
                 if stays(&result) {
-                    this.notice = notice_text(&result);
+                    this.notice = notice_text(&result, &machine_label(target.store.read(cx)));
                 } else {
                     window.close_dialog(cx);
                 }
@@ -2136,7 +2130,8 @@ impl Render for MergeStackDialog {
                 let mut notes: Vec<(SharedString, MergeNote)> = vec![(
                     "merge".into(),
                     (
-                        Some((IconName::GitMerge, theme.info)),
+                        IconName::GitMerge,
+                        theme.info,
                         tr_with(
                             "note_merge",
                             &[
@@ -2149,14 +2144,14 @@ impl Render for MergeStackDialog {
                 if state.merge_queue {
                     notes.push((
                         "queue".into(),
-                        (Some((IconName::ListOrdered, theme.info)), tr("note_queue")),
+                        (IconName::ListOrdered, theme.info, tr("note_queue")),
                     ));
                 }
                 let blockers = self.blockers(state);
                 for blocker in &blockers {
                     notes.push((
                         SharedString::from(format!("blocker-{blocker}")),
-                        (Some((IconName::Lock, theme.danger)), blocker.clone()),
+                        (IconName::Lock, theme.danger, blocker.clone()),
                     ));
                 }
                 let links = target.store.read(cx).pull_requests(&target.session);
@@ -2179,24 +2174,13 @@ impl Render for MergeStackDialog {
                         })
                     })
                     .collect();
-                for number in failing.iter().take(3) {
+                for number in failing {
                     notes.push((
                         SharedString::from(format!("checks-{number}")),
                         (
-                            Some((IconName::CircleX, theme.danger)),
+                            IconName::CircleX,
+                            theme.danger,
                             tr_with("note_checks", &[("number", number.to_string())]),
-                        ),
-                    ));
-                }
-                if failing.len() > 3 {
-                    notes.push((
-                        "checks-more".into(),
-                        (
-                            None,
-                            tr_with(
-                                "summary_more",
-                                &[("count", (failing.len() - 3).to_string())],
-                            ),
                         ),
                     ));
                 }
@@ -2207,7 +2191,8 @@ impl Render for MergeStackDialog {
                         notes.push((
                             SharedString::from(format!("changes-{number}")),
                             (
-                                Some((IconName::MessageSquareWarning, theme.danger)),
+                                IconName::MessageSquareWarning,
+                                theme.danger,
                                 tr_with("note_changes", &[("number", number.to_string())]),
                             ),
                         ));
@@ -2226,7 +2211,8 @@ impl Render for MergeStackDialog {
                     notes.push((
                         "unconfirmed".into(),
                         (
-                            Some((IconName::CircleQuestionMark, theme.warning)),
+                            IconName::CircleQuestionMark,
+                            theme.warning,
                             tr_with(
                                 "previous_unconfirmed",
                                 &[("ago", super::detail::ago(*started_at))],
@@ -2241,13 +2227,10 @@ impl Render for MergeStackDialog {
                     ROWS,
                     window,
                     cx,
-                    |_, (icon, text), _, _| {
+                    |_, (icon, color, text), _, _| {
                         div()
                             .pt_1()
-                            .child(match icon {
-                                Some((icon, color)) => line(icon.clone(), *color, text.clone()),
-                                None => div().child(text.clone()).into_any_element(),
-                            })
+                            .child(line(icon.clone(), *color, text.clone()))
                             .into_any_element()
                     },
                 );
@@ -2461,7 +2444,7 @@ impl RebaseStackDialog {
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Ok(state)) = &self.state else { return };
-        let machine = machine_label(Some(self.target.store.read(cx)));
+        let machine = machine_label(self.target.store.read(cx));
         if self.sending || !self.blockers(state, &machine).is_empty() || self.notice.is_some() {
             return;
         }
@@ -2513,7 +2496,7 @@ impl RebaseStackDialog {
                         window.push_notification(note, cx);
                     }
                     if stays(&result) {
-                        this.notice = notice_text(&result);
+                        this.notice = notice_text(&result, &machine_label(target.store.read(cx)));
                     } else {
                         window.close_dialog(cx);
                     }
@@ -2543,7 +2526,7 @@ impl RebaseStackDialog {
         let target = &self.target;
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
-        let machine = machine_label(Some(target.store.read(cx)));
+        let machine = machine_label(target.store.read(cx));
         let base = target
             .offer
             .stack
@@ -2850,7 +2833,7 @@ fn progress_view(
 ) -> AnyElement {
     let theme = cx.theme().clone();
     let store = target.store.read(cx);
-    let machine = machine_label(Some(store));
+    let machine = machine_label(store);
     let offer = StackOffer::new(
         &target.offer.key,
         store.pull_requests(&target.session),
@@ -3029,22 +3012,26 @@ fn progress_view(
                     }
                 })
         });
-        let url = format!(
-            "https://{}/{}/pull/{failed}",
-            target.offer.key.host, target.offer.key.repository
+        let url = super::page_url(
+            target.store.read(cx).pull_requests(&target.session),
+            &PullRequestKey::new(&target.offer.key.host, &target.offer.key.repository, failed),
         );
         let wash = warning_wash(cx)
             .child(div().child(state))
             .child(div().child(advice))
             .child(
-                h_flex().gap_2().items_center().children(ask).child(
-                    Button::new("pr-stack-open-failed")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::ExternalLink)
-                        .label(tr_with("open_layer", &[("number", failed.to_string())]))
-                        .on_click(move |_, _, cx| cx.open_url(&url)),
-                ),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .children(ask)
+                    .children(url.map(|url| {
+                        Button::new("pr-stack-open-failed")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::ExternalLink)
+                            .label(tr_with("open_layer", &[("number", failed.to_string())]))
+                            .on_click(move |_, _, cx| cx.open_url(&url))
+                    })),
             );
         body = body.children(shown.map(|shown| shown.fold(wash)));
     }

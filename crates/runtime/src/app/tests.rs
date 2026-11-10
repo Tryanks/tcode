@@ -925,7 +925,6 @@ fn nested_subagent_items_open_a_titled_mirror_under_the_child_mirror_and_close_i
                 parent_item_id: Some("toolu_grandchild".into()),
                 content: ItemContent::UserMessage {
                     text: "Fetch the limits page.".into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }),
@@ -2200,8 +2199,7 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
             (
                 "user",
                 ItemContent::UserMessage {
-                    text: "hidden instructions\nImprove QR sharing".into(),
-                    context_len: Some("hidden instructions\n".len()),
+                    text: "Improve QR sharing".into(),
                     attachments: vec![image.to_string_lossy().into_owned()],
                 },
             ),
@@ -2256,7 +2254,6 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                         parent_item_id: None,
                         content: ItemContent::UserMessage {
                             text: "Include link expiration".into(),
-                            context_len: None,
                             attachments: Vec::new(),
                         },
                     }),
@@ -2464,13 +2461,12 @@ fn title_regeneration_context_keeps_the_original_goal_and_recent_messages() {
             content,
         })
     };
-    let first = format!("hidden\nOriginal QR sharing goal {}", "界".repeat(3_000));
+    let first = format!("Original QR sharing goal {}", "界".repeat(3_000));
     let timeline = Timeline::fold_events([
         item(
             "first",
             ItemContent::UserMessage {
                 text: first,
-                context_len: Some("hidden\n".len()),
                 attachments: vec!["/images/first.png".into()],
             },
         ),
@@ -2500,7 +2496,6 @@ fn title_regeneration_context_keeps_the_original_goal_and_recent_messages() {
             "latest",
             ItemContent::UserMessage {
                 text: "Focus on QR expiration".into(),
-                context_len: None,
                 attachments: (1..=4).map(|i| format!("/images/recent-{i}.png")).collect(),
             },
         ),
@@ -2517,7 +2512,6 @@ fn title_regeneration_context_keeps_the_original_goal_and_recent_messages() {
     assert!(context.contains("[Earlier content truncated]"));
     assert!(context.contains("USER:\nFocus on QR expiration"));
     assert!(context.ends_with("ASSISTANT:\nMake shared QR links last longer"));
-    assert!(!context.contains("hidden"));
     assert!(!context.contains("private reasoning"));
     assert!(!context.contains("tool output"));
     assert!(context.chars().count() <= 8_000);
@@ -4744,7 +4738,6 @@ fn steering_user_and_queue_paths_send_the_same_id_they_record() {
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: "start".into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }),
@@ -5233,7 +5226,6 @@ fn profile_switch_within_one_provider_requires_a_relay() {
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: "hello".into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }),
@@ -5317,7 +5309,6 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: "compare them".into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }),
@@ -10519,7 +10510,6 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                     parent_item_id: None,
                     content: ItemContent::UserMessage {
                         text: format!("question {turn}"),
-                        context_len: None,
                         attachments: Vec::new(),
                     },
                 }),
@@ -10622,7 +10612,6 @@ fn persist_streamed_turns(store: &SessionStore, id: &str, turns: u64) -> Vec<Sto
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: format!("question {turn}"),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }),
@@ -10682,7 +10671,6 @@ fn session_log_follows_residency_and_flushes_before_release() {
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: "one more question".into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }),
@@ -12633,7 +12621,6 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
                     parent_item_id: None,
                     content: ItemContent::UserMessage {
                         text: "An old request".into(),
-                        context_len: None,
                         attachments: vec![],
                     },
                 }),
@@ -12809,7 +12796,6 @@ fn first_index_snapshot_includes_persisted_child_runs_and_human_resume_status() 
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: "One more change".into(),
-                    context_len: None,
                     attachments: vec![],
                 },
             }),
@@ -13569,7 +13555,6 @@ fn settling_detaches_only_its_own_provider_and_releases_its_parent() {
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: "Earlier work".into(),
-                    context_len: None,
                     attachments: vec![],
                 },
             }),
@@ -13712,7 +13697,6 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
                     parent_item_id: None,
                     content: ItemContent::UserMessage {
                         text: "Earlier work".into(),
-                        context_len: None,
                         attachments: vec![],
                     },
                 }),
@@ -14392,7 +14376,6 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
         parent_item_id: None,
         content: ItemContent::UserMessage {
             text: "Do the task".into(),
-            context_len: None,
             attachments: Vec::new(),
         },
     });
@@ -14520,7 +14503,6 @@ fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: b
     };
     let continued = Some(EntryContent::Item(ItemContent::UserMessage {
         text: "continue".into(),
-        context_len: None,
         attachments: Vec::new(),
     }));
     let running = (

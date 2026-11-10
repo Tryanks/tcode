@@ -23,7 +23,6 @@ use std::{
 };
 
 use gpui::{AnyElement, App, Bounds, ElementId, IntoElement, Pixels, Point, SharedString, Window};
-use gpui_base::motion::Timing;
 #[cfg(target_family = "wasm")]
 use web_time::Instant;
 
@@ -297,12 +296,9 @@ impl Part {
         let moved = state.bounds.measure(&self.key, frame.origin.get(), corner);
         let now = cx.background_executor().now();
         let still = |glide: &Glide| {
-            let sample = Timing::new(GLIDE)
-                .ease(gpui_base::motion::Easing::Custom(Rc::new(
-                    gpui_base::animation::ease_out_cubic,
-                )))
-                .sample(now.saturating_duration_since(glide.started_at));
-            (!sample.finished).then(|| glide.from * (1. - sample.directed_progress))
+            let elapsed = now.saturating_duration_since(glide.started_at);
+            (elapsed < GLIDE)
+                .then(|| glide.from * (1. - super::Curve::new(GLIDE).progress(elapsed)))
         };
         if cx.reduce_motion() {
             state.glides.remove(&self.key);
@@ -454,7 +450,7 @@ mod tests {
         assert_eq!(at("field", cx), beside, "the field starts where it was");
         assert_eq!(at("button", cx).x, px(250.), "the button follows the width");
 
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.executor().advance_clock(super::GLIDE / 2);
         draw(cx);
         let gliding = at("field", cx);
         assert!(
@@ -523,7 +519,7 @@ mod tests {
         });
         draw(cx);
         assert_eq!(left(cx), px(0.), "the meter starts where it was");
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.executor().advance_clock(super::GLIDE / 2);
         draw(cx);
         let gliding = left(cx);
         assert!(gliding > px(0.) && gliding < px(360.), "{gliding:?}");

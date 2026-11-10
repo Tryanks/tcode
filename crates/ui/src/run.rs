@@ -187,7 +187,7 @@ pub fn open_client_window<V: Render>(
 /// Open this client's window on the shared shell.
 ///
 /// Returns the window and its shell, so bootstrap can keep doing whatever is
-/// genuinely its own (a smoke run, a launch flag, a platform Back callback).
+/// genuinely its own (a launch flag, a platform Back callback).
 pub fn run_shell(
     cx: &mut App,
     host: Rc<dyn ClientHost>,

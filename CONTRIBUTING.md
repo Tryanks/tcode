@@ -240,8 +240,8 @@ on a copy of real data.
 
 **Launch flags**: `--open-latest` reopens the most recent thread,
 `--connect <host_id>` starts attached to a paired host, `--pair <invite-url>`
-pairs from the command line with the `tcode://pair?…` link a machine shows, and `--preview-smoke` / `--cu-smoke` run the
-preview and computer-use smoke phases against the live desktop.
+pairs from the command line with the `tcode://pair?…` link a machine shows, and `--cu-smoke` runs the
+computer-use smoke phase against the live desktop.
 
 **Phone geometry without pairing**:
 `TCODE_DATA_DIR=$(mktemp -d) cargo run -p tcode-ui --example phone -- --local`

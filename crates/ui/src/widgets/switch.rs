@@ -1,12 +1,8 @@
 use crate::widgets::TooltipTrigger as _;
-use crate::{
-    sizing::{Sizable, Size},
-    theme::ActiveTheme as _,
-    widgets::Tooltip,
-};
+use crate::{theme::ActiveTheme as _, widgets::Tooltip};
 use gpui::{
-    App, ElementId, Hsla, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, px,
+    App, ElementId, IntoElement, ParentElement as _, RenderOnce, SharedString, StyleRefinement,
+    Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::StyledExt as _;
 use gpui_base::motion::{Transition, transition};
@@ -25,8 +21,6 @@ pub struct Switch {
     label: Option<SharedString>,
     aria_label: Option<SharedString>,
     on_click: Option<super::ToggleHandler>,
-    size: Size,
-    color: Option<Hsla>,
     tooltip: Option<SharedString>,
 }
 
@@ -40,8 +34,6 @@ impl Switch {
             label: None,
             aria_label: None,
             on_click: None,
-            size: Size::Medium,
-            color: None,
             tooltip: None,
         }
     }
@@ -61,22 +53,12 @@ impl Switch {
         self.on_click = Some(Rc::new(handler));
         self
     }
-    pub fn color(mut self, color: impl Into<Hsla>) -> Self {
-        self.color = Some(color.into());
-        self
-    }
     pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
         self.tooltip = Some(tooltip.into());
         self
     }
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
-        self
-    }
-}
-impl Sizable for Switch {
-    fn with_size(mut self, size: impl Into<Size>) -> Self {
-        self.size = size.into();
         self
     }
 }
@@ -89,12 +71,9 @@ impl Styled for Switch {
 impl RenderOnce for Switch {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let checked = self.checked;
-        let (width, height, thumb) = match self.size {
-            Size::XSmall | Size::Small => (px(28.), px(16.), px(12.)),
-            _ => (px(36.), px(20.), px(16.)),
-        };
+        let (width, height, thumb) = (px(36.), px(20.), px(16.));
         let inset = px(2.);
-        let checked_bg = self.color.unwrap_or(cx.theme().primary);
+        let checked_bg = cx.theme().primary;
         let unchecked_bg = cx.theme().muted;
         let thumb_bg = cx.theme().background;
         let settle = || Transition::new(GLIDE);

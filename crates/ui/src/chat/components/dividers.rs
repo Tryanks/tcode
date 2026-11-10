@@ -128,33 +128,31 @@ pub(crate) fn model_change_divider(
 /// itself at model-swap prominence rather than hiding in the work log.
 pub(crate) fn context_compacted_divider(
     id: &str,
-    metadata: Option<&agent::Compaction>,
+    compaction: &agent::Compaction,
     motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
-    let mut label = if metadata.is_some_and(|c| c.in_progress) {
+    let mut label = if compaction.in_progress {
         crate::tr!("chat.context_compacting").into_owned()
     } else {
         crate::tr!("chat.context_compacted").into_owned()
     };
-    if let Some(c) = metadata {
-        if let Some(trigger) = &c.trigger {
-            let trigger = match trigger.as_str() {
-                "manual" => crate::tr!("chat.context_manual").into_owned(),
-                "auto" => crate::tr!("chat.context_auto").into_owned(),
-                other => other.to_owned(),
-            };
-            label.push_str(&format!(" · {trigger}"));
-        }
-        if let Some(tokens) = c.pre_tokens {
-            label.push_str(&format!(
-                " · {}",
-                crate::tr!(
-                    "chat.context_pre_tokens",
-                    tokens = crate::context_meter::format_tokens(Some(tokens))
-                )
-            ));
-        }
+    if let Some(trigger) = &compaction.trigger {
+        let trigger = match trigger.as_str() {
+            "manual" => crate::tr!("chat.context_manual").into_owned(),
+            "auto" => crate::tr!("chat.context_auto").into_owned(),
+            other => other.to_owned(),
+        };
+        label.push_str(&format!(" · {trigger}"));
+    }
+    if let Some(tokens) = compaction.pre_tokens {
+        label.push_str(&format!(
+            " · {}",
+            crate::tr!(
+                "chat.context_pre_tokens",
+                tokens = crate::context_meter::format_tokens(Some(tokens))
+            )
+        ));
     }
     divider_in(
         SharedString::from(format!("context-compacted-{id}")),
@@ -282,10 +280,10 @@ pub(crate) fn worktree_divider(
     )
 }
 
-/// Why a harness did not rewind, in the user's words.
-pub(crate) fn rewind_reason(reason: agent::RewindFailureReason, harness: &str) -> String {
+/// Why a harness did not rewind, in the user's words, with the words it gave.
+pub(crate) fn rewind_reason(failure: &agent::RewindFailure, harness: &str) -> String {
     use agent::RewindFailureReason as Reason;
-    match reason {
+    let reason = match failure.reason {
         Reason::TurnRunning => crate::tr!("rewind.reason.turn_running"),
         Reason::Busy => crate::tr!("rewind.reason.busy", harness = harness),
         Reason::TargetNotFound => crate::tr!("rewind.reason.target_not_found"),
@@ -299,6 +297,10 @@ pub(crate) fn rewind_reason(reason: agent::RewindFailureReason, harness: &str) -
         Reason::Unsupported => crate::tr!("rewind.reason.unsupported"),
         Reason::ProcessGone => crate::tr!("rewind.reason.process_gone", harness = harness),
         Reason::Other => crate::tr!("rewind.reason.other", harness = harness),
+    };
+    match failure.detail.as_deref() {
+        Some(detail) => crate::tr!("rewind.reason_detail", reason = reason, detail = detail),
+        None => reason,
     }
     .into_owned()
 }
@@ -318,7 +320,7 @@ pub(crate) fn rewound_label(rewound: &tcode_core::session::Rewound, harness: &st
         crate::tr!("rewind.divider.turns", count = rewound.removed_turns.max(1)).into_owned()
     };
     if let Some(incomplete) = &rewound.incomplete {
-        let reason = rewind_reason(incomplete.failure.reason, harness);
+        let reason = rewind_reason(&incomplete.failure, harness);
         label = if rewound.mode.includes_conversation() {
             crate::tr!("rewind.incomplete.files", reason = reason)
         } else {
@@ -329,41 +331,50 @@ pub(crate) fn rewound_label(rewound: &tcode_core::session::Rewound, harness: &st
     label
 }
 
-pub(crate) fn rewind_divider(
-    entry: &tcode_core::session::TimelineEntry,
+/// A rewind, or the undo of one when `mode` is `None`, that the harness did
+/// not make.
+pub(crate) fn rewind_failed_divider(
+    id: &str,
+    mode: Option<agent::RewindMode>,
+    failure: &agent::RewindFailure,
     harness: &str,
     cx: &App,
 ) -> AnyElement {
-    let (label, tint) = match &entry.content {
-        tcode_core::session::EntryContent::Rewound(rewound) => (
-            rewound_label(rewound, harness),
-            if rewound.incomplete.is_some() {
-                cx.theme().warning
-            } else {
-                cx.theme().muted_foreground
-            },
-        ),
-        tcode_core::session::EntryContent::RewindFailed { mode, failure } => (
-            if mode.is_some() {
-                crate::tr!(
-                    "rewind.failed",
-                    reason = rewind_reason(failure.reason, harness)
-                )
-            } else {
-                crate::tr!(
-                    "rewind.undo_failed",
-                    reason = rewind_reason(failure.reason, harness)
-                )
-            }
-            .into_owned(),
-            cx.theme().warning,
-        ),
-        _ => unreachable!("a rewind segment holds a rewind entry"),
+    let reason = rewind_reason(failure, harness);
+    let label = match mode {
+        Some(_) => crate::tr!("rewind.failed", reason = reason),
+        None => crate::tr!("rewind.undo_failed", reason = reason),
     };
     divider(
-        SharedString::from(format!("rewind-{}", entry.id)),
-        label,
-        tint,
+        SharedString::from(format!("rewind-{id}")),
+        label.into_owned(),
+        cx.theme().warning,
         cx,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use agent::{RewindFailure, RewindFailureReason};
+
+    /// A harness that says why it did not rewind is read in its own words
+    /// after the reason Tcode names, not the reason alone.
+    #[test]
+    fn a_rewind_failure_reads_with_the_words_its_harness_gave() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+        let refused = RewindFailure::new(
+            RewindFailureReason::Other,
+            "no checkpoint named c-1".to_owned(),
+        );
+        assert_eq!(
+            super::rewind_reason(&refused, "Codex"),
+            "Codex refused. (no checkpoint named c-1)"
+        );
+        let expired = RewindFailure::new(RewindFailureReason::Expired, None);
+        assert_eq!(
+            super::rewind_reason(&expired, "Codex"),
+            "the request expired."
+        );
+    }
 }

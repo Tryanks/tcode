@@ -579,8 +579,6 @@ impl Bound {
     pub(in crate::chat) const HEAD: Self = Self { head: 12, tail: 0 };
 }
 
-/// Characters of a text a body lays out at most, opened in full.
-const MAX_SHOWN_CHARS: usize = 256 * 1024;
 /// The height an opened text scrolls within.
 const OPEN_MAX_HEIGHT: f32 = 360.;
 
@@ -711,7 +709,7 @@ pub(in crate::chat) fn bounded_text(
 enum Shown {
     /// All of it: it is short.
     Whole(SharedString),
-    /// All of it, up to [`MAX_SHOWN_CHARS`], once the reader opened it.
+    /// All of it, once the reader opened it.
     Open(SharedString),
     /// Its first and last lines around a count of the rest.
     Folded {
@@ -728,15 +726,7 @@ impl Shown {
             return Self::Whole(text.trim_end().to_owned().into());
         }
         if open {
-            return Self::Open(if text.len() > MAX_SHOWN_CHARS {
-                let mut end = MAX_SHOWN_CHARS;
-                while !text.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!("{}…", &text[..end]).into()
-            } else {
-                text.trim_end().to_owned().into()
-            });
+            return Self::Open(text.trim_end().to_owned().into());
         }
         Self::Folded {
             head: lines.head.join("\n").into(),
@@ -1036,11 +1026,7 @@ pub(in crate::chat) fn code_section(
             )),
     );
     let code_block = open.then(|| {
-        let mut end = code.len().min(MAX_SHOWN_CHARS);
-        while !code.is_char_boundary(end) {
-            end -= 1;
-        }
-        let source = code[..end].trim_end();
+        let source = code.trim_end();
         let theme = ctx.highlight_theme();
         let highlighted = ctx.derived(key.clone(), source, |source| {
             crate::highlight::highlighted(

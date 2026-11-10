@@ -80,19 +80,12 @@ impl BlockNode {
                 let cached = prepared
                     .highlights
                     .lock()
-                    .ok()
-                    .and_then(|cache| cache.as_ref().and_then(|(_, held)| held.get()))
-                    .or_else(|| {
-                        prepared
-                            .previous_highlights
-                            .lock()
-                            .ok()
-                            .and_then(|previous| previous.clone())
-                    });
-                if let Some(cached) = cached
-                    && let Ok(mut previous) = new.prepared().previous_highlights.lock()
-                {
-                    *previous = Some(cached);
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|(_, held)| held.get())
+                    .or_else(|| prepared.previous_highlights.lock().unwrap().clone());
+                if let Some(cached) = cached {
+                    *new.prepared().previous_highlights.lock().unwrap() = Some(cached);
                 }
             }
             (Self::Root { children: new }, Self::Root { children: old })
@@ -609,7 +602,7 @@ mod tests {
 
     #[test]
     fn a_copy_reads_segments_in_document_order_from_the_middle_of_one_to_another() {
-        let document = super::super::parse(DOCUMENT);
+        let document = super::super::parse::parse_document(DOCUMENT).root;
         assert_eq!(
             document.text_between(&at(&[1], 0, 6), &at(&[1], 1, 6)),
             "code line\nsecond"
@@ -626,7 +619,7 @@ mod tests {
 
     #[test]
     fn a_table_is_read_cell_by_cell_along_each_row() {
-        let document = super::super::parse(DOCUMENT);
+        let document = super::super::parse::parse_document(DOCUMENT).root;
         assert_eq!(
             document.text_between(&at(&[2, 0, 0], 0, 2), &at(&[2, 1, 0], 0, 3)),
             "me\tvalue\nalp"
@@ -639,7 +632,7 @@ mod tests {
 
     #[test]
     fn a_range_touching_a_segment_only_at_its_edge_adds_nothing_of_it() {
-        let document = super::super::parse(DOCUMENT);
+        let document = super::super::parse::parse_document(DOCUMENT).root;
         assert_eq!(
             document.text_between(&at(&[1], 0, 15), &at(&[1], 1, 6)),
             "second"

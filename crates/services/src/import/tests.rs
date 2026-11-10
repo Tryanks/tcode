@@ -67,7 +67,6 @@ fn shown(thread: ConvertedThread) -> Vec<Option<ItemContent>> {
 fn user(text: &str) -> Option<ItemContent> {
     Some(ItemContent::UserMessage {
         text: text.into(),
-        context_len: None,
         attachments: Vec::new(),
     })
 }

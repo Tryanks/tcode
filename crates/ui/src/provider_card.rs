@@ -136,10 +136,7 @@ pub(crate) fn harness_row(
         }
     };
     let (line, trouble) = row_summary(&description, &profiles, enabled);
-    let glyph = match harness {
-        HarnessId::Native(kind) => provider_glyph(*kind),
-        HarnessId::Acp(_) => Icon::empty().path("icons/box.svg"),
-    };
+    let glyph = provider_glyph(harness.kind());
     let key = harness.key();
     let chip = trouble.map(|trouble| {
         let theme = cx.theme();
@@ -253,8 +250,8 @@ pub(crate) fn harness_row(
         .into_any_element()
 }
 
-/// The provider's glyph. Claude's is pre-tinted with its brand color; the
-/// others take the text color.
+/// The provider's glyph; every ACP agent shares one. Claude's is pre-tinted
+/// with its brand color; the others take the text color.
 pub fn provider_glyph(provider: ProviderKind) -> Icon {
     let (path, tint) = match provider {
         ProviderKind::ClaudeCode => ("icons/claude.svg", builtin_provider_color(provider)),
@@ -263,7 +260,7 @@ pub fn provider_glyph(provider: ProviderKind) -> Icon {
         ProviderKind::OpenCode => ("icons/opencode.svg", None),
         ProviderKind::Cursor => ("icons/cursor.svg", None),
         ProviderKind::Grok => ("icons/grok.svg", None),
-        ProviderKind::Acp => return Icon::empty(),
+        ProviderKind::Acp => ("icons/box.svg", None),
     };
     Icon::empty()
         .path(path)
@@ -273,12 +270,15 @@ pub fn provider_glyph(provider: ProviderKind) -> Icon {
 /// The glyph a provider profile is drawn with wherever that profile, rather
 /// than its CLI, is meant: the kind's [`provider_glyph`] in the profile's color,
 /// the one its sidebar threads are marked with. `None` is the kind's built-in
-/// profile.
+/// profile. An ACP agent has no profile, so its glyph keeps the text color.
 pub fn profile_glyph(
     store: &WorkspaceStore,
     provider: ProviderKind,
     profile_id: Option<&str>,
 ) -> Icon {
+    if provider == ProviderKind::Acp {
+        return provider_glyph(provider);
+    }
     let profile_id =
         profile_id.unwrap_or_else(|| tcode_core::settings::Settings::builtin_profile_id(provider));
     provider_glyph(provider).text_color(rgb(store.provider_profile_color(profile_id)))

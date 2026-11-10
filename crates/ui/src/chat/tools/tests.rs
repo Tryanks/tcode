@@ -1410,6 +1410,14 @@ fn a_desktop_call_reads_as_the_window_it_saw_and_the_steps_it_took(cx: &mut Test
     click(cx, &format!("tool-tree-{act}-toggle"));
     assert!(shows(cx, &format!("tool-tree-{act}-0")));
     assert!(!shows(cx, &format!("tool-tree-{act}-1")));
+    click(cx, &format!("activity-row-{act}"));
+    // A read shows the page it read; the facts the server put before it
+    // (where to continue) stay one click away.
+    let read_text = "toolu_010000000000000000000050";
+    click(cx, &format!("activity-row-{read_text}"));
+    assert!(shows(cx, &format!("tool-text-{read_text}-page")));
+    click(cx, &format!("tool-raw-{read_text}-toggle"));
+    assert!(shows(cx, &format!("tool-text-{read_text}-output")));
     thread.shutdown(cx);
 }
 
@@ -1614,28 +1622,6 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
         (
             notify,
             read("Set a watch on", None, Some("00000053, 00000065"), None),
-        ),
-        (
-            "toolu_010000000000000000000102",
-            with(
-                read(
-                    "Dispatched",
-                    None,
-                    Some("Investigate cache persistence/replay lifecycle"),
-                    None,
-                ),
-                Some("codex · gpt-5.6-sol"),
-                Vec::new(),
-            ),
-        ),
-        (
-            "toolu_010000000000000000000104",
-            read(
-                "Read the result of",
-                None,
-                Some("00000067"),
-                Some("thread is still running"),
-            ),
         ),
     ] {
         assert_eq!(thread.header(id, cx), expected, "{id}");

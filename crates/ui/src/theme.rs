@@ -1,9 +1,9 @@
-use std::{collections::HashMap, sync::Arc, sync::LazyLock};
+use std::{collections::HashMap, sync::Arc, sync::LazyLock, time::Duration};
 
 use gpui::{App, Global, Hsla, Rgba, SharedString, Window, WindowAppearance, px};
 use gpui_base::{
-    ColorTokens, RadiusTokens, ScrollbarMode, ScrollbarMotion, ScrollbarStyles, ScrollbarTheme,
-    SemanticThemeTokens, ThemeAppearance, TypographyTokens,
+    ColorTokens, RadiusTokens, ScrollbarEntrance, ScrollbarMode, ScrollbarMotion, ScrollbarStyles,
+    ScrollbarTheme, SemanticThemeTokens, ThemeAppearance, TypographyTokens,
 };
 use serde::Deserialize;
 
@@ -377,17 +377,25 @@ fn install(theme: Theme, cx: &mut App) {
         ThemeMode::Dark => ThemeAppearance::Dark,
     };
     base_theme.tokens = theme.tokens.clone();
+    let mode = if cx.should_auto_hide_scrollbars() {
+        ScrollbarMode::Scrolling
+    } else {
+        ScrollbarMode::Hover
+    };
     base_theme.scrollbar = ScrollbarTheme::new()
-        .with_mode(if cx.should_auto_hide_scrollbars() {
-            ScrollbarMode::Scrolling
-        } else {
-            ScrollbarMode::Hover
-        })
+        .with_mode(mode)
+        // gpui-base ships no scrollbar motion; this is the one gpui-kit's
+        // styled layer projects onto it (gpui-component's `scrollbar_motion`),
+        // which keeps it private.
         .with_motion(
             ScrollbarMotion::default()
-                .with_enter(crate::widgets::scrollbar::MOTION)
-                .with_exit(crate::widgets::scrollbar::MOTION)
-                .with_expand(crate::widgets::scrollbar::MOTION),
+                .with_enter(Duration::from_millis(300))
+                .with_exit(Duration::from_millis(500))
+                .with_expand(Duration::from_millis(300))
+                .with_thumb_hover_entrance(match mode {
+                    ScrollbarMode::Hover => ScrollbarEntrance::SlideAndFade,
+                    ScrollbarMode::Scrolling | ScrollbarMode::Always => ScrollbarEntrance::Fade,
+                }),
         )
         .with_styles(
             ScrollbarStyles::default()

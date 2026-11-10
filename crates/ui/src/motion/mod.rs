@@ -47,44 +47,39 @@ pub(crate) mod resize_glide;
 pub(crate) mod owned;
 pub(crate) use owned::Clock;
 
-/// How a value travels to a new target: over a duration, easing out as
-/// gpui-base's `Transition::new` does. gpui-base has no default duration
-/// ("base components do not install default motion"), so whoever owns a
-/// behaviour names the duration it takes and hands it to the sampler.
+/// How a value travels to a new target: over a duration, along gpui-base's
+/// `Transition::new` easing. gpui-base has no default duration ("base
+/// components do not install default motion"), so whoever owns a behaviour
+/// names the duration it takes and hands it to the sampler.
 #[derive(Clone)]
 pub(crate) struct Curve {
     duration: std::time::Duration,
-    easing: gpui_base::motion::Easing,
 }
 
 impl Curve {
     pub(crate) fn new(duration: std::time::Duration) -> Self {
-        Self {
-            duration,
-            easing: gpui_base::motion::Easing::Custom(std::rc::Rc::new(
-                gpui_base::animation::ease_out_cubic,
-            )),
-        }
+        Self { duration }
     }
 
     pub(crate) fn duration(&self) -> std::time::Duration {
         self.duration
     }
 
-    pub(crate) fn easing(&self) -> gpui_base::motion::Easing {
-        self.easing.clone()
-    }
-
-    /// The curve as gpui-base's transition policy.
+    /// The curve as gpui-base's transition policy, its easing gpui-base's
+    /// default.
     pub(crate) fn transition(&self) -> Transition {
-        Transition::new(self.duration).easing(self.easing.clone())
+        Transition::new(self.duration)
     }
 
     /// How far the curve has come `elapsed` after it started, from 0 to 1,
-    /// for motion that keeps its own clock.
+    /// for motion that keeps its own clock. Gap: gpui-base's `Transition`
+    /// keeps its sampling to itself, so this samples its default easing
+    /// (`ease_out_cubic`) over the duration with gpui-base's `Timing`.
     pub(crate) fn progress(&self, elapsed: std::time::Duration) -> f32 {
         gpui_base::motion::Timing::new(self.duration)
-            .ease(self.easing.clone())
+            .ease(gpui_base::motion::Easing::Custom(std::rc::Rc::new(
+                gpui_base::animation::ease_out_cubic,
+            )))
             .sample(elapsed)
             .directed_progress
     }
@@ -918,7 +913,7 @@ mod tests {
         cx.simulate_click(leaving.center(), Default::default());
         assert_eq!(clicks.get(), 1, "a leaving state takes no clicks");
 
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        cx.executor().advance_clock(CHANGE);
         draw(cx);
         assert!(cx.debug_bounds("first").is_none(), "gone once faded out");
         assert!(cx.debug_bounds("second").is_some());
@@ -981,7 +976,7 @@ mod tests {
             draw(cx);
         };
         set(false, cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.executor().advance_clock(SHOW / 2);
         draw(cx);
         let leaving = cx
             .debug_bounds("section-body-1")
@@ -1055,12 +1050,15 @@ mod tests {
         });
         draw(cx);
         let mut seen = vec![fold(cx)];
-        for _ in 0..16 {
+        loop {
             cx.executor()
                 .advance_clock(std::time::Duration::from_millis(16));
-            cx.update(|window, cx| window.simulate_next_frame(cx));
+            let asked = cx.update(|window, cx| window.simulate_next_frame(cx));
             draw(cx);
             seen.push(fold(cx));
+            if asked == 0 {
+                break;
+            }
         }
         assert_eq!(*seen.last().unwrap(), px(80.), "{seen:?}");
         assert!(
@@ -1259,7 +1257,7 @@ mod tests {
     /// takes no clicks.
     #[gpui::test]
     fn a_chip_widens_into_its_row_and_narrows_out(cx: &mut TestAppContext) {
-        use crate::test_frames::{draw, draw_settled};
+        use crate::test_frames::draw;
         let clicks = Rc::new(Cell::new(0));
         let (pill, cx) = cx.add_window_view(|_, _| Pill {
             chip: false,
@@ -1282,15 +1280,16 @@ mod tests {
                 let leaving = cx.debug_bounds("chip").expect("drawn while it goes");
                 cx.simulate_click(leaving.center(), Default::default());
             }
-            for _ in 0..16 {
+            loop {
                 cx.executor()
                     .advance_clock(std::time::Duration::from_millis(16));
-                cx.update(|window, cx| window.simulate_next_frame(cx));
+                let asked = cx.update(|window, cx| window.simulate_next_frame(cx));
                 draw(cx);
                 seen.push(before(cx));
+                if asked == 0 {
+                    break;
+                }
             }
-            draw_settled(cx);
-            seen.push(before(cx));
             assert!((seen[0] - from).abs() <= px(1.), "{chip}: jumped: {seen:?}");
             assert_eq!(*seen.last().unwrap(), to, "{chip}: {seen:?}");
             assert!(

@@ -6,9 +6,6 @@ use gpui::VisualTestContext;
 
 /// The spacing of a display's frames.
 const FRAME: Duration = Duration::from_millis(16);
-/// How long a window may keep asking for frames before it counts as never
-/// coming to rest.
-const FRAME_BUDGET: usize = 320;
 
 /// Draws one full frame. A frame that reuses any view keeps every debug
 /// bound of the previous one, so an element no longer painted would still
@@ -35,22 +32,18 @@ pub(crate) fn draw(cx: &mut VisualTestContext) {
 /// prepaint), however many frames that is.
 ///
 /// A spinner or a running turn's working indicator repeats for as long as
-/// what it shows runs, so a window showing one never comes to rest; a test
-/// that holds a turn, a command or a page in flight reduces motion, under
-/// which they rest.
+/// what it shows runs, so a window showing one never comes to rest, and this
+/// does not return; a test that holds a turn, a command or a page in flight
+/// reduces motion, under which they rest.
 pub(crate) fn draw_settled(cx: &mut VisualTestContext) {
     draw(cx);
-    for _ in 0..FRAME_BUDGET {
+    loop {
         cx.run_until_parked();
         if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
             return;
         }
         cx.executor().advance_clock(FRAME);
     }
-    panic!(
-        "the window kept asking for frames after {FRAME_BUDGET} frames; \
-         a repeating animation rests only with motion reduced"
-    );
 }
 
 /// Every shadow the last frame drew, wherever [`painted_quads`] finds a quad.

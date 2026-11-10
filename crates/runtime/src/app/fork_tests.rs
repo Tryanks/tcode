@@ -46,7 +46,6 @@ fn turn(
             parent_item_id: None,
             content: ItemContent::UserMessage {
                 text: prompt.into(),
-                context_len: None,
                 attachments: attachments.iter().map(|path| (*path).to_owned()).collect(),
             },
         }),
@@ -373,7 +372,6 @@ fn a_fork_through_a_turn_goes_only_where_the_harness_can() {
                         parent_item_id: None,
                         content: ItemContent::UserMessage {
                             text: "third".into(),
-                            context_len: None,
                             attachments: Vec::new(),
                         },
                     });
@@ -768,7 +766,6 @@ fn the_branch_a_branch_thread_left_opens_again_as_a_thread_of_its_own() {
                 parent_item_id: None,
                 content: ItemContent::UserMessage {
                     text: "second, again".into(),
-                    context_len: None,
                     attachments: Vec::new(),
                 },
             }),
@@ -847,7 +844,6 @@ fn background_work_open_at_a_fork_point_ends_as_interrupted_in_the_fork() {
                     parent_item_id: None,
                     content: ItemContent::UserMessage {
                         text: "first".into(),
-                        context_len: None,
                         attachments: Vec::new(),
                     },
                 }),

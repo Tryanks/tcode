@@ -37,6 +37,9 @@ pub(crate) enum PreviewState {
     Checking,
     Ready(RewindPreview),
     Refused(RewindFailure),
+    /// The question did not reach the Harness, or its answer did not come
+    /// back: the client's error.
+    Failed(String),
 }
 
 impl PreviewState {
@@ -45,7 +48,7 @@ impl PreviewState {
         match self {
             Self::Ready(preview) => preview.files.files.is_empty() && preview.conflicts.is_empty(),
             Self::Refused(failure) => failure.reason == RewindFailureReason::NothingToRestore,
-            Self::Checking => false,
+            Self::Checking | Self::Failed(_) => false,
         }
     }
 }
@@ -389,10 +392,15 @@ fn preview_block(
             .child(
                 crate::tr!(
                     "rewind.preview.unavailable",
-                    reason = super::dividers::rewind_reason(failure.reason, harness)
+                    reason = super::dividers::rewind_reason(failure, harness)
                 )
                 .into_owned(),
             )
+            .into_any_element(),
+        PreviewState::Failed(error) => div()
+            .text_token(xs)
+            .text_color(cx.theme().warning)
+            .child(crate::tr!("rewind.preview.unavailable", reason = error).into_owned())
             .into_any_element(),
         PreviewState::Ready(preview) => {
             let files = &preview.files;
@@ -537,7 +545,7 @@ pub(crate) fn rewound_divider(
     cx: &App,
 ) -> AnyElement {
     let EntryContent::Rewound(rewound) = &entry.content else {
-        return super::dividers::rewind_divider(entry, &harness, cx);
+        unreachable!("a rewound divider is drawn for a rewind the harness made");
     };
     let key = entry.id.clone();
     let label = super::dividers::rewound_label(rewound, &harness);
@@ -708,20 +716,9 @@ fn removed_turns(key: &str, rewound: &Rewound, harness: &str, cx: &App) -> AnyEl
     };
     for entry in &rewound.removed {
         match &entry.content {
-            EntryContent::Item(ItemContent::UserMessage {
-                text, context_len, ..
-            })
-            | EntryContent::Steer {
-                text, context_len, ..
-            } => {
-                flush(&mut work, &mut rows);
-                let visible = context_len
-                    .and_then(|len| text.get(len..))
-                    .unwrap_or(text)
-                    .trim();
-                rows.push(said(crate::tr!("rewind.you").into_owned(), visible));
-            }
-            EntryContent::Feedback { text } => {
+            EntryContent::Item(ItemContent::UserMessage { text, .. })
+            | EntryContent::Steer { text, .. }
+            | EntryContent::Feedback { text } => {
                 flush(&mut work, &mut rows);
                 rows.push(said(crate::tr!("rewind.you").into_owned(), text.trim()));
             }

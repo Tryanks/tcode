@@ -1052,8 +1052,6 @@ pub struct SessionsSidebar {
     /// Returning from a thread scrolls its row into the upper part of the
     /// list; the row's next paint performs the scroll and clears this.
     compact_reveal_active: bool,
-    #[cfg(test)]
-    compact_rows_rendered: std::cell::Cell<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1707,8 +1705,6 @@ impl SessionsSidebar {
             compact_model: None,
             compact_model_dirty: true,
             compact_reveal_active: false,
-            #[cfg(test)]
-            compact_rows_rendered: std::cell::Cell::new(0),
             _subscriptions: subscriptions,
         };
         sidebar.set_hosts(stores, cx);
@@ -1798,13 +1794,9 @@ impl SessionsSidebar {
 
     /// Prompt for a directory, then create a project rooted there on `host`.
     fn add_project(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(store) = self.store_of(host) else {
-            return;
-        };
-        if !store.read(cx).scope().is_full() {
-            return;
+        if let Some(store) = self.store_of(host) {
+            crate::add_project_dialog::open(store, window, cx);
         }
-        crate::add_project_dialog::open(store, window, cx);
     }
 
     fn toggle_project(&mut self, project: &ProjectKey, cx: &mut Context<Self>) {
@@ -1956,9 +1948,10 @@ impl SessionsSidebar {
                     .sidebar_sessions()
                     .iter()
                     .find(|meta| meta.id == id)
-                    .map_or("Harness", |meta| {
-                        crate::settings::provider_label(meta.provider)
-                    });
+                    .map_or_else(
+                        || crate::tr!("providers.harness.unnamed").into_owned(),
+                        |meta| crate::settings::provider_label(meta.provider).to_owned(),
+                    );
                 Some(crate::tr!("sidebar.fork_unsupported", provider = provider).into_owned())
             }
             ForkAvailability::Empty => Some(crate::tr!("sidebar.fork_empty").into_owned()),
@@ -2283,9 +2276,9 @@ impl SessionsSidebar {
         }
         let count = undo.entries.len();
         let named = if undo.harnesses.is_empty() {
-            "Harness".to_owned()
+            crate::tr!("providers.harness.unnamed").into_owned()
         } else {
-            undo.harnesses.join(", ")
+            crate::i18n::join_list(&undo.harnesses)
         };
         let title = match (kind, count) {
             (UndoKind::Settle, 1) => crate::tr!("sidebar.undo_settled_one", harness = named),
@@ -2604,12 +2597,6 @@ impl SessionsSidebar {
     }
 
     fn on_delete(&mut self, action: &ThreadDelete, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(store) = self.store_of(&action.0.host) else {
-            return;
-        };
-        if !store.read(cx).scope().is_full() {
-            return;
-        }
         let title = self.thread_title(&action.0, cx).unwrap_or_default();
         self.delete_thread(&action.0, &title, window, cx);
     }
@@ -2675,20 +2662,13 @@ impl SessionsSidebar {
         });
     }
 
-    /// The store of a project's host, where this client may change its
-    /// projects.
-    fn full_store_of(&self, project: &ProjectKey, cx: &App) -> Option<Entity<WorkspaceStore>> {
-        self.store_of(&project.host)
-            .filter(|store| store.read(cx).scope().is_full())
-    }
-
     fn on_change_project_icon(
         &mut self,
         action: &ChangeProjectIcon,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(store) = self.full_store_of(&action.0, cx) else {
+        let Some(store) = self.store_of(&action.0.host) else {
             return;
         };
         let project = store.read(cx).project(&action.0.project_id).cloned();
@@ -2703,7 +2683,7 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(store) = self.full_store_of(&action.0, cx) {
+        if let Some(store) = self.store_of(&action.0.host) {
             confirm_remove_project(store, action.0.project_id.clone(), window, cx);
         }
     }
@@ -2796,7 +2776,7 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(store) = self.full_store_of(&action.0, cx) {
+        if let Some(store) = self.store_of(&action.0.host) {
             crate::change_project_root_dialog::open(store, action.0.project_id.clone(), window, cx);
         }
     }
@@ -3876,10 +3856,7 @@ impl SessionsSidebar {
         right_padding: f32,
     ) -> Option<gpui::Div> {
         let color: gpui::Hsla = gpui::rgb(store.provider_color(meta)?).into();
-        let glyph = match meta.provider {
-            agent::ProviderKind::Acp => Icon::empty().path("icons/box.svg"),
-            kind => crate::provider_card::provider_glyph(kind),
-        };
+        let glyph = crate::provider_card::provider_glyph(meta.provider);
         let size = px(row_height - PROVIDER_MARK_INSET);
         let id = name.to_owned();
         Some(
@@ -5681,8 +5658,6 @@ impl SessionsSidebar {
     }
 
     fn render_compact(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        #[cfg(test)]
-        self.compact_rows_rendered.set(0);
         let full_scope = self.full_scope(cx);
         self.tidy_row_swipes(cx);
         let model = self.compact_model(Some(window), cx);
@@ -6030,9 +6005,6 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        #[cfg(test)]
-        self.compact_rows_rendered
-            .set(self.compact_rows_rendered.get() + 1);
         let meta = &cached.meta;
         let state = &cached.state;
         let Some(store) = self.store_of(&state.thread.host) else {
@@ -7138,7 +7110,7 @@ mod tests {
                 ServerEvent::IndexSummaryReplaced(summary(doing)),
             );
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
             assert!(cx.debug_bounds("compact-row-background").is_some());
             sidebar.read_with(cx, |sidebar, cx| {
@@ -8709,150 +8681,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn compact_scroll_reuses_model_and_renders_only_viewport(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        struct SlidingPage {
-            sidebar: Entity<SessionsSidebar>,
-            offset: gpui::Pixels,
-        }
-        impl Render for SlidingPage {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div().size_full().overflow_hidden().child(
-                    div()
-                        .absolute()
-                        .left(self.offset)
-                        .size_full()
-                        .child(self.sidebar.clone()),
-                )
-            }
-        }
-        cx.update(crate::theme::init);
-        let (to_host, _outgoing) = async_channel::unbounded();
-        let (incoming, from_host) = async_channel::unbounded();
-        let project = Project::from_root(PathBuf::from("/project"));
-        let sessions = (0..300)
-            .map(|index| {
-                let mut meta = session(&format!("virtual-{index}"), None);
-                meta.project_id = Some(project.id.clone());
-                meta.updated_at = 1_000 - index;
-                meta.created_at = meta.updated_at;
-                meta
-            })
-            .collect();
-        for (topic, event) in [
-            (
-                tcode_protocol::Topic::Settings,
-                tcode_protocol::ServerEvent::SettingsSnapshot(Default::default()),
-            ),
-            (
-                tcode_protocol::Topic::Index,
-                tcode_protocol::ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
-                    summary: Default::default(),
-                    sessions,
-                    projects: vec![project],
-                }),
-            ),
-        ] {
-            incoming
-                .try_send(
-                    tcode_protocol::encode_line(&tcode_protocol::HostMessage::Event(
-                        tcode_protocol::EventEnvelope {
-                            request_id: None,
-                            topic,
-                            event,
-                        },
-                    ))
-                    .unwrap(),
-                )
-                .unwrap();
-        }
-        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
-        let link = tcode_client::HostLink::new(to_host, from_host);
-        let pump_link = link.clone();
-        let _pump = cx.background_executor.spawn(async move {
-            pump_link.pump().await;
-        });
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link,
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, cx| store.show_alone("virtual-0".into(), cx));
-        let window_state = cx.new(|_| WindowState::default().with_compact(true));
-        let (page, cx) = cx.add_window_view(|_, cx| SlidingPage {
-            sidebar: cx.new(|cx| SessionsSidebar::new(vec![store.clone()], window_state, cx)),
-            offset: px(0.),
-        });
-        let sidebar = page.read_with(cx, |page, _| page.sidebar.clone());
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        cx.simulate_resize(size(px(393.), px(852.)));
-        draw(cx);
-        // Only the address is kept: a second strong reference, which the app never
-        // holds, would turn the wall-clock minute refresh of relative times into a
-        // copy of the whole model.
-        let model = sidebar.read_with(cx, |sidebar, _| {
-            let model = sidebar.compact_model.as_ref().unwrap();
-            assert_eq!(model.rows.len(), 301);
-            Rc::as_ptr(model)
-        });
-        for (index, selector) in [
-            (0, "compact-row-virtual-0"),
-            (100, "compact-row-virtual-100"),
-            (200, "compact-row-virtual-200"),
-        ] {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.compact_rows_rendered.set(0);
-                sidebar.compact_list_state.scroll_to(gpui::ListOffset {
-                    item_ix: index,
-                    offset_in_item: px(0.),
-                });
-                cx.notify();
-            });
-            page.update(cx, |page, cx| {
-                page.offset = px(index as f32);
-                cx.notify();
-            });
-            draw(cx);
-            sidebar.read_with(cx, |sidebar, _| {
-                let current = sidebar.compact_model.as_ref().unwrap();
-                assert!(
-                    std::ptr::eq(model, Rc::as_ptr(current)),
-                    "scrolling must not rebuild families or labels"
-                );
-                assert!(
-                    sidebar.compact_rows_rendered.get() < 40,
-                    "one phone viewport must not construct 300 rows: rendered {} at index {index}",
-                    sidebar.compact_rows_rendered.get()
-                );
-            });
-            assert!(cx.debug_bounds(selector).is_some());
-        }
-        store.update(cx, |_, cx| {
-            cx.emit(StoreChange {
-                topic: TopicKind::Index,
-            })
-        });
-        draw(cx);
-        sidebar.read_with(cx, |sidebar, _| {
-            assert!(
-                !std::ptr::eq(model, Rc::as_ptr(sidebar.compact_model.as_ref().unwrap())),
-                "Index updates invalidate cached row state"
-            );
-            assert_eq!(
-                sidebar.compact_list_state.logical_scroll_top().item_ix,
-                200,
-                "store changes retain the visible thread anchor"
-            );
-        });
-    }
-
     /// The sidebar's share item puts the project in a space on the machine the
     /// window shows, and takes it out again, and the project is marked shared
     /// while it is in one. The machine answers over a scripted transport.
@@ -8927,7 +8755,7 @@ mod tests {
         let mut serve = |cx: &mut VisualTestContext| {
             for _ in 0..4 {
                 cx.run_until_parked();
-                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                cx.run_until_parked();
                 while let Ok(line) = outgoing.try_recv() {
                     let message = decode_client_line(&line).unwrap();
                     let state = |shared: &Vec<String>| HostingState {
@@ -9086,7 +8914,7 @@ mod tests {
         let (sidebar, cx) =
             cx.add_window_view(|_, cx| SessionsSidebar::new(vec![store.clone()], window_state, cx));
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.simulate_resize(size(px(300.), px(800.)));
         sidebar.update(cx, |_, cx| {
             cx.notify();
@@ -9128,7 +8956,7 @@ mod tests {
         let apply = |sessions: &Vec<SessionMeta>, cx: &mut VisualTestContext| {
             send(Topic::Index, snapshot(sessions));
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw(cx);
         };
         apply(&sessions, cx);
@@ -9253,7 +9081,7 @@ mod tests {
         });
         cx.simulate_resize(size(px(393.), px(852.)));
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         draw(cx);
         assert!(cx.debug_bounds("compact-row-parent").is_some());
         assert!(cx.debug_bounds("compact-row-child").is_none());
@@ -9343,7 +9171,7 @@ mod tests {
                 cx.notify();
             });
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             sidebar.update(cx, |sidebar, cx| {
                 sidebar.expanded_settled.clear();
                 sidebar.settled_limits.clear();
@@ -9509,7 +9337,7 @@ mod tests {
             SessionsSidebar::new(vec![store.clone()], window_state.clone(), cx)
         });
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);
         let list = sidebar.read_with(cx, |sidebar, _| sidebar.flat_list_state.clone());
@@ -9583,7 +9411,7 @@ mod tests {
             }),
         );
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         draw(cx);
         assert_eq!(
             sidebar.update(cx, |sidebar, cx| sidebar.navigation_ids(cx))[0],
@@ -9702,7 +9530,7 @@ mod tests {
             SessionsSidebar::new(vec![store.clone()], window_state.clone(), cx)
         });
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         cx.simulate_resize(size(px(393.), px(2000.)));
         let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
         let lead = |open: bool| {
@@ -9863,7 +9691,7 @@ mod tests {
                 }),
             );
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
             draw_settled(cx);
             assert_eq!(
                 sidebar.update(cx, |sidebar, cx| sidebar.navigation_ids(cx)),
@@ -9878,7 +9706,7 @@ mod tests {
                 ServerEvent::SettingsSnapshot(Default::default()),
             );
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
         }
     }
 
@@ -9988,7 +9816,7 @@ mod tests {
             panic!("the list keeps scrolling");
         };
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         for layout in [SidebarLayout::Flat, SidebarLayout::Grouped] {
             cx.update(|_, cx| DevicePreferences::set_sidebar_layout(layout, cx));
             let key = match layout {

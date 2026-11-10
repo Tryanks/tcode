@@ -327,11 +327,14 @@ fn push_merged(
 
 /// Syntaxes whose parsing has panicked; they render unhighlighted afterwards.
 ///
-/// syntect compiles each grammar regex lazily on first use and panics when one
-/// fails to compile, and its parser has further internal panic paths. A panic
-/// mid-render unwinds through GPUI's element tree and has crashed the app with
-/// a double panic (see `examples/sanitize_syntaxes.rs`), so a syntax that
-/// panicked once is never handed to syntect again in this process.
+/// Carries a syntect 5.3 behaviour: it compiles each grammar regex lazily on
+/// first use and panics ("regex string should be pre-tested",
+/// `parsing/regex.rs`) when the fancy-regex backend rejects one the bundled
+/// dump's Oniguruma-tested grammars hold. `examples/sanitize_syntaxes.rs`
+/// replaces the patterns it finds when the dump is regenerated; one that slips
+/// through panics mid-render, which unwound through GPUI's element tree into a
+/// double panic and aborted the app (bbd7f9ae5, a JSX arrow function). A
+/// syntax that panicked once is never handed to syntect again in this process.
 static POISONED_SYNTAXES: LazyLock<Mutex<HashSet<&'static str>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 

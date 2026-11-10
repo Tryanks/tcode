@@ -1146,17 +1146,6 @@ pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla, cx: &Ap
     chip_surface(bg, fg, cx).child(label.into())
 }
 
-/// A [`semantic_chip`] led by a glyph, sized by the chip's text.
-pub fn semantic_chip_with_icon(
-    icon: crate::icon::Icon,
-    label: impl Into<SharedString>,
-    bg: Hsla,
-    fg: Hsla,
-    cx: &App,
-) -> Div {
-    chip_surface(bg, fg, cx).child(icon).child(label.into())
-}
-
 /// A [`semantic_chip`]'s surface, for a label that is not plain text.
 pub fn chip_surface(bg: Hsla, fg: Hsla, cx: &App) -> Div {
     let theme = cx.theme();

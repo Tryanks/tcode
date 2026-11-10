@@ -3,7 +3,7 @@ use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::ops::Range;
 use std::sync::{Arc, Weak};
 
-use agent::{ItemContent, ItemStatus, TurnStatus};
+use agent::{ItemContent, TurnStatus};
 use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta};
 
 use crate::chat::model::{
@@ -438,26 +438,19 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
         std::mem::discriminant(item).hash(hash);
     }
     match content {
-        EntryContent::Item(ItemContent::UserMessage {
-            text,
-            context_len,
-            attachments,
-        }) => {
+        EntryContent::Item(ItemContent::UserMessage { text, attachments }) => {
             attachments.len().hash(hash);
             text.len().hash(hash);
             Option::<SteeringStatus>::None.hash(hash);
-            context_len.hash(hash);
         }
         EntryContent::Steer {
             text,
             status,
-            context_len,
             attachments,
         } => {
             attachments.len().hash(hash);
             text.len().hash(hash);
             status.hash(hash);
-            context_len.hash(hash);
         }
         EntryContent::Item(ItemContent::AssistantMessage { text, .. })
         | EntryContent::Item(ItemContent::Plan { markdown: text })
@@ -560,26 +553,13 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
         }
         EntryContent::RewindFailed { failure, .. } => failure.reason.hash(hash),
         EntryContent::Item(ItemContent::ImageRead { path, .. }) => path.hash(hash),
-        EntryContent::Item(ItemContent::WebSearch { query }) => {
-            "web_search".len().hash(hash);
-            serde_json::json!({ "query": query })
-                .to_string()
-                .len()
-                .hash(hash);
-            Option::<usize>::None.hash(hash);
-            std::mem::discriminant(&ItemStatus::Completed).hash(hash);
-        }
+        EntryContent::Item(ItemContent::WebSearch { query }) => query.len().hash(hash),
         EntryContent::Item(ItemContent::Other {
             provider_kind,
             summary,
         }) => {
             provider_kind.len().hash(hash);
-            serde_json::json!({ "summary": summary })
-                .to_string()
-                .len()
-                .hash(hash);
-            Option::<usize>::None.hash(hash);
-            std::mem::discriminant(&ItemStatus::Completed).hash(hash);
+            summary.len().hash(hash);
         }
     }
 }
@@ -803,7 +783,7 @@ mod tests {
     use crate::chat::model::tests::{
         REAL_DIFF, assistant, at_turn, command, entry, file_change, reasoning, user_item,
     };
-    use agent::{FileChange, FileChangeKind};
+    use agent::{FileChange, FileChangeKind, ItemStatus};
 
     /// The cache re-indexes only from the first turn a change reaches; the
     /// rows it keeps must be the rows a full index of the new timeline gives,
@@ -861,22 +841,16 @@ mod tests {
             .push(at_turn(entry("user-1", user_item("next")), 1));
         let mut tail_replaced = new_turn.clone();
         tail_replaced.entries[4] = at_turn(entry("user-1", user_item("next, updated")), 1);
-        let mut context = tail_replaced.clone();
-        context.entries[4] = at_turn(
+        let mut notice = tail_replaced.clone();
+        notice.entries[4] = at_turn(
             entry(
                 "user-1",
-                EntryContent::Item(ItemContent::UserMessage {
-                    text: "context\nquestion".into(),
-                    context_len: Some(8),
-                    attachments: Vec::new(),
-                }),
+                user_item(tcode_core::notice::CHILD_REPORT_REMINDER),
             ),
             1,
         );
-        let mut expanded = context.clone();
-        expanded
-            .expanded
-            .insert("orchestrate-context-user-1".into());
+        let mut expanded = notice.clone();
+        expanded.expanded.insert("report-reminder-user-1".into());
         let mut scenarios = vec![Scenario {
             name: "stream append, tail updates and reset",
             initial: initial.clone(),
@@ -885,7 +859,7 @@ mod tests {
                 step("grow activity run", run_grows),
                 step("append turn", new_turn),
                 step("replace tail", tail_replaced),
-                step("add disclosure", context),
+                step("add disclosure", notice),
                 step("expand disclosure", expanded),
                 step("truncate", initial.clone()),
                 Step {
@@ -1076,7 +1050,6 @@ mod tests {
                     EntryContent::Steer {
                         text: "redirect".into(),
                         status: SteeringStatus::Pending,
-                        context_len: None,
                         attachments: Vec::new(),
                     },
                 ),

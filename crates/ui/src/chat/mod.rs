@@ -129,8 +129,8 @@ use self::model::{
     LimitResumeAction, RowRenderArgs, Segment, activity_run_duration_ms, displayed_error_text,
     divergent_served_model, latest_message_ids, limit_resume_action, live_edit_counts, notice_keys,
     partition_activity_run, plain_text_as_markdown, segment_entries, start_hub_projects,
-    timeline_overdraw, user_content, user_notice, user_visible_text, work_log_capsule_label,
-    work_log_counts, work_log_key, work_log_outcome,
+    timeline_overdraw, user_content, user_notice, work_log_capsule_label, work_log_counts,
+    work_log_key, work_log_outcome,
 };
 use self::timeline::rows::{
     ListSync, RowPart, TimelineContinuity, TimelineRow, TurnIndexCache, row_of_entry, rows_of_turn,
@@ -1118,8 +1118,9 @@ impl ChatView {
                                     .debug_selector(|| "retry-delivery".into())
                                     .label(crate::tr!("chat.retry_delivery"))
                                     .on_click(move |_, _, cx| {
-                                        retry_store
-                                            .update(cx, |store, _| store.retry_delivery(&retry_key))
+                                        retry_store.update(cx, |store, cx| {
+                                            store.retry_delivery(&retry_key, cx)
+                                        })
                                     }),
                             )
                             .child(
@@ -1757,7 +1758,6 @@ pub(crate) mod tests {
     pub(crate) fn user_item(text: &str) -> EntryContent {
         EntryContent::Item(ItemContent::UserMessage {
             text: text.into(),
-            context_len: None,
             attachments: Vec::new(),
         })
     }
@@ -2161,7 +2161,6 @@ pub(crate) mod tests {
             parent_item_id: None,
             content: agent::ItemContent::UserMessage {
                 text: text.into(),
-                context_len: None,
                 attachments: Vec::new(),
             },
         })
@@ -2362,8 +2361,6 @@ pub(crate) mod tests {
         /// Deliver what the host sent.
         pub(in crate::chat) fn deliver(&self, cx: &mut VisualTestContext) {
             cx.run_until_parked();
-            self.store
-                .update(cx, |store, cx| store.drain_host_events_for_test(cx));
         }
 
         /// A chat view on the thread, at desktop size.

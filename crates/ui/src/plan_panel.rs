@@ -431,7 +431,7 @@ mod tests {
         use PlanStepStatus::{Completed, Pending};
         plan(&[("Read", Completed), ("Plan", Pending), ("Build", Pending)]);
         cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
         let (_, cx) =
             cx.add_window_view(|_, _| PlanPanel::new(store.clone(), Some("thread".to_owned())));
         let cx: &mut VisualTestContext = cx;
@@ -453,7 +453,7 @@ mod tests {
             ] {
                 plan(steps);
                 cx.run_until_parked();
-                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                cx.run_until_parked();
                 draw(cx);
                 let mut frames = Vec::new();
                 for _ in 0..20 {

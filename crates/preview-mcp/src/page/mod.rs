@@ -171,8 +171,7 @@ mod tests {
     /// `doc` to each; `ready` is the last statement, `reply` is the `reply` helper's
     /// two objects, `input` is sent from `userActed`, `url` from `checkUrl`, and
     /// `console` from `relay`, whose `location` is optional. Contents are invented.
-    /// Only a real engine shows that the script still sends these: the preview
-    /// smoke run (`--preview-smoke`).
+    /// Only a real engine shows that the script still sends these.
     #[test]
     fn agent_messages_parse() {
         let cases = [

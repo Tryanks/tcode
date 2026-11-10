@@ -71,9 +71,8 @@ pub(super) fn body(
     let last = rail
         .motion
         .keep::<Rc<RefCell<Rc<[AgentLine]>>>>("rail-agents-lines");
-    if let Some(agents) = agents(rail, cx) {
+    if let (Some(lead), Some(agents)) = (rail.session_id.as_deref(), agents(rail, cx)) {
         let store = rail.workspace_store.read(cx);
-        let lead = rail.session_id.as_deref().unwrap_or_default();
         last.replace(agents.with_results(store, lead, cx).lines().into());
     }
     let lines = last.borrow().clone();

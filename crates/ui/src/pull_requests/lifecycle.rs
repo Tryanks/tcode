@@ -146,11 +146,7 @@ impl Offer {
         let state = snapshot
             .map(|snapshot| snapshot.state)
             .or(layer.map(|layer| layer.state))?;
-        let url = link
-            .map(|link| link.url.clone())
-            .filter(|url| !url.is_empty())
-            .or(layer.map(|layer| layer.url.clone()))
-            .unwrap_or_default();
+        let url = super::page_url(links, key).unwrap_or_default();
         let method = action
             .as_ref()
             .and_then(|action| merge_method(&action.merge_methods, chosen, project_default));
@@ -310,7 +306,7 @@ impl Offer {
             && action.can_update_branch
             && action.capabilities.update_branch
         {
-            if merges_base(Some(action)) {
+            if merges_base(action) {
                 menu = write(
                     menu,
                     "pull_requests.actions.update_branch",
@@ -754,18 +750,10 @@ impl Target {
             if failing.is_empty() {
                 crate::tr!("pull_requests.actions.ask_checks_unnamed", number = number).into_owned()
             } else {
-                let mut names = crate::i18n::join_list(failing.iter().take(5));
-                if failing.len() > 5 {
-                    names.push(' ');
-                    names.push_str(&crate::tr!(
-                        "pull_requests.actions.and_more",
-                        count = (failing.len() - 5).to_string()
-                    ));
-                }
                 crate::tr!(
                     "pull_requests.actions.ask_checks",
                     number = number,
-                    names = names
+                    names = crate::i18n::join_list(failing.iter())
                 )
                 .into_owned()
             }
@@ -1885,7 +1873,8 @@ pub(super) fn primary_element(
             super::stack::operation_chip(Some(target.clone()), operation, &links, compact, cx)
         }
         // A host that only rebases offers its rebase, which asks first.
-        Primary::UpdateBranch if !merges_base(target.offer.action.as_ref()) => button(
+        // `primary` offers an update only from a read action state.
+        Primary::UpdateBranch if !target.offer.action.as_ref().is_some_and(merges_base) => button(
             IconName::ArrowUpDown,
             crate::tr!("pull_requests.actions.update_rebase_menu").into_owned(),
         )
@@ -1934,8 +1923,7 @@ pub(super) fn primary_element(
     }
 }
 
-/// Whether the host brings the base in by a merge commit as well as by a rebase; an unread
-/// state is taken as yes, as before hosts said.
-pub(super) fn merges_base(action: Option<&PullRequestActionState>) -> bool {
-    action.is_none_or(|action| action.capabilities.update_merge)
+/// Whether the host brings the base in by a merge commit as well as by a rebase.
+pub(super) fn merges_base(action: &PullRequestActionState) -> bool {
+    action.capabilities.update_merge
 }

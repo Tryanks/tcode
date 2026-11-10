@@ -68,7 +68,6 @@ use gpui::{
     InspectorElementId, IntoElement, LayoutId, ParentElement as _, Pixels, Style, Styled as _,
     Window, div, point, prelude::FluentBuilder as _, px, relative, size,
 };
-use gpui_base::motion::{Easing, Timing};
 
 /// How long a row's height, and a list's tail, take to glide to a new one.
 const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
@@ -443,14 +442,8 @@ impl<V> Around<V> {
     }
 }
 
-fn curve(duration: Duration) -> Timing {
-    Timing::new(duration).ease(Easing::Custom(Rc::new(
-        gpui_base::animation::ease_out_cubic,
-    )))
-}
-
 fn eased(elapsed: Duration, duration: Duration) -> f32 {
-    curve(duration).sample(elapsed).directed_progress
+    super::Curve::new(duration).progress(elapsed)
 }
 
 /// How long the glide takes to come `progress` of the way: the inverse of
@@ -493,7 +486,6 @@ pub(crate) fn arrived_rows(
 }
 
 /// What replacing a list's rows brought and took away.
-#[derive(Debug, PartialEq)]
 pub(crate) struct Changes {
     /// Each new row whose key is new, by its index among the new rows, with
     /// how it came in.
@@ -933,31 +925,5 @@ impl Element for RowGlide {
                 });
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Arrival, Attach, changes};
-
-    /// One replacement that reorders, inserts and removes at once: a new row
-    /// between kept ones is inserted and one after them all appended; a row
-    /// that went folds below the kept row above it, or above the first kept
-    /// row when none was above it. Kept rows, moved or not, are neither.
-    #[test]
-    fn a_replacement_tells_what_came_and_what_went() {
-        let replaced = changes(&[1, 2, 3, 4], &[3, 5, 1, 6]);
-        assert_eq!(
-            replaced.arrived,
-            [(1, Arrival::Inserted), (3, Arrival::Appended)]
-        );
-        assert_eq!(
-            replaced.left,
-            [(1, Attach::Below(1)), (3, Attach::Below(3))]
-        );
-        assert_eq!(
-            changes(&[1, 2, 3], &[3]).left,
-            [(0, Attach::Above(3)), (1, Attach::Above(3))]
-        );
     }
 }

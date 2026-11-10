@@ -44,7 +44,6 @@ fn serve_long_thread(host: &MountedShell, id: &str) {
             format!("{id}-ask-{turn}"),
             agent::ItemContent::UserMessage {
                 text: format!("What changes in step {turn}, and which crates does it reach?"),
-                context_len: None,
                 attachments: vec![],
             },
         ));
