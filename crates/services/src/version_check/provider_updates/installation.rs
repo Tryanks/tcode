@@ -421,24 +421,7 @@ async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Option<String> {
             cask,
         } => {
             let json: Value = serde_json::from_str(&probe.output(command).await?).ok()?;
-            let records = json
-                .get(if *cask { "casks" } else { "formulae" })?
-                .as_array()?;
-            let record = records
-                .iter()
-                .find(|record| brew_name(record, *cask) == Some(target.as_str()))?;
-            if record.get("pinned").and_then(Value::as_bool) == Some(true) {
-                return None;
-            }
-            if *cask {
-                record.get("version")?.as_str().map(str::to_string)
-            } else {
-                record
-                    .get("versions")?
-                    .get("stable")?
-                    .as_str()
-                    .map(str::to_string)
-            }
+            brew_latest(&json, target, *cask)
         }
         LatestQuery::System(query) => super::system_managers::latest(probe, query).await,
     }
@@ -696,6 +679,28 @@ async fn version_managers(context: &Context<'_>) -> Option<Installation> {
         return Some(context.managed(InstallSource::Asdf, None));
     }
     None
+}
+
+/// The version `brew info --json=v2` offers `target`, unless the formula is
+/// pinned: a formula's `versions.stable`, a cask's `version`.
+fn brew_latest(info: &Value, target: &str, cask: bool) -> Option<String> {
+    let record = info
+        .get(if cask { "casks" } else { "formulae" })?
+        .as_array()?
+        .iter()
+        .find(|record| brew_name(record, cask) == Some(target))?;
+    if record.get("pinned").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    if cask {
+        record.get("version")?.as_str().map(str::to_string)
+    } else {
+        record
+            .get("versions")?
+            .get("stable")?
+            .as_str()
+            .map(str::to_string)
+    }
 }
 
 fn brew_name(record: &Value, cask: bool) -> Option<&str> {
@@ -1242,6 +1247,34 @@ mod tests {
     /// npm 12.2.2 and pnpm 10.34.9 answer `view <package>@latest version
     /// --json` with a one-element array, bun 1.4.4's `info` with the bare
     /// string; the version is invented.
+    /// `brew info --json=v2` as Homebrew 7.0.13 builds it (`cmd/info.rb`
+    /// wraps `Formula#to_hash` and `Cask#to_h`); names and versions invented.
+    #[test]
+    fn brew_offers_a_formulas_stable_or_a_casks_version() {
+        let info = serde_json::json!({
+            "formulae": [{
+                "name": "codex",
+                "full_name": "codex",
+                "tap": "homebrew/core",
+                "versions": {"stable": "9.8.7", "head": null, "bottle": true},
+                "installed": [{"version": "9.8.6", "installed_on_request": true}],
+                "pinned": false
+            }],
+            "casks": [{
+                "token": "claude-code",
+                "full_token": "claude-code",
+                "tap": "homebrew/cask",
+                "version": "6.5.4",
+                "installed": "6.5.3"
+            }]
+        });
+        assert_eq!(brew_latest(&info, "codex", false).as_deref(), Some("9.8.7"));
+        assert_eq!(
+            brew_latest(&info, "claude-code", true).as_deref(),
+            Some("6.5.4")
+        );
+    }
+
     #[test]
     fn a_package_managers_latest_version_is_read_in_its_own_shape() {
         assert_eq!(
