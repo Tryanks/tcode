@@ -123,6 +123,13 @@ impl Default for ProviderLauncher {
 }
 
 /// Test-controlled provider adapter paired with its launcher.
+///
+/// Not a stand-in for a harness: it sits where every adapter's
+/// [`SessionHandle`] meets the host, so the host runs its real launch,
+/// command and event paths, and the test plays the adapter's half of the
+/// canonical stream (`AgentEvent` in, `SessionCommand` out), as a fixture
+/// fed to an actor plays a harness's lines. What a harness itself sends is
+/// proven in `crates/agent`, not through this.
 #[cfg(any(test, feature = "test-support"))]
 pub struct ScriptedProvider {
     pub launcher: ProviderLauncher,
