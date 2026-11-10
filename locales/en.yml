@@ -933,6 +933,7 @@ providers:
     trust_project_extensions: "Trust project extensions"
     trust_project_extensions_help: "Launch pi with --approve so extensions, settings, and skills in the project's .pi directory are loaded."
   harness:
+    unnamed: "Harness"
     default_permission: "Default permissions"
     default_permission_help: "What a new thread may do without asking, where its project doesn't say."
     native_mcp: "MCP servers"

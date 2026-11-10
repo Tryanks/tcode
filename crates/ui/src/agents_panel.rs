@@ -1143,7 +1143,10 @@ impl Entries {
             Entry::NativeCaption(provider) => material::list_caption(
                 crate::tr!(
                     "agents.provider_subagents",
-                    provider = provider.unwrap_or("Harness")
+                    provider = provider.map_or_else(
+                        || crate::tr!("providers.harness.unnamed").into_owned(),
+                        str::to_owned
+                    )
                 )
                 .into_owned()
                 .into(),

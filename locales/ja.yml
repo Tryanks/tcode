@@ -933,6 +933,7 @@ providers:
     trust_project_extensions: "プロジェクトの拡張機能を信頼"
     trust_project_extensions_help: "pi を --approve 付きで起動し、プロジェクトの .pi ディレクトリにある拡張機能、設定、スキルを読み込みます。"
   harness:
+    unnamed: "ハーネス"
     default_permission: "デフォルトの権限"
     default_permission_help: "プロジェクトで指定がないとき、新しいスレッドが確認なしで行えることです。"
     native_mcp: "MCP サーバー"

@@ -4144,7 +4144,7 @@ impl WorkspaceStore {
     /// product's with its account.
     pub fn harness_name_for(&self, session_id: Option<&str>, cx: &App) -> String {
         let Some(status) = self.thread_status(session_id, cx) else {
-            return "Harness".to_owned();
+            return crate::tr!("providers.harness.unnamed").into_owned();
         };
         self.harness_name(
             status.acp_agent_id.as_deref(),

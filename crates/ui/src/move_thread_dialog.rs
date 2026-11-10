@@ -205,9 +205,10 @@ impl Render for MoveThreadDialog {
             .sidebar_sessions()
             .iter()
             .find(|meta| meta.id == self.session_id)
-            .map_or("Harness", |meta| {
-                crate::settings::provider_label(meta.provider)
-            });
+            .map_or_else(
+                || crate::tr!("providers.harness.unnamed").into_owned(),
+                |meta| crate::settings::provider_label(meta.provider).to_owned(),
+            );
         v_flex()
             .gap_3()
             .child(list)

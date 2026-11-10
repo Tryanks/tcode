@@ -1948,9 +1948,10 @@ impl SessionsSidebar {
                     .sidebar_sessions()
                     .iter()
                     .find(|meta| meta.id == id)
-                    .map_or("Harness", |meta| {
-                        crate::settings::provider_label(meta.provider)
-                    });
+                    .map_or_else(
+                        || crate::tr!("providers.harness.unnamed").into_owned(),
+                        |meta| crate::settings::provider_label(meta.provider).to_owned(),
+                    );
                 Some(crate::tr!("sidebar.fork_unsupported", provider = provider).into_owned())
             }
             ForkAvailability::Empty => Some(crate::tr!("sidebar.fork_empty").into_owned()),
@@ -2275,9 +2276,9 @@ impl SessionsSidebar {
         }
         let count = undo.entries.len();
         let named = if undo.harnesses.is_empty() {
-            "Harness".to_owned()
+            crate::tr!("providers.harness.unnamed").into_owned()
         } else {
-            undo.harnesses.join(", ")
+            crate::i18n::join_list(&undo.harnesses)
         };
         let title = match (kind, count) {
             (UndoKind::Settle, 1) => crate::tr!("sidebar.undo_settled_one", harness = named),
