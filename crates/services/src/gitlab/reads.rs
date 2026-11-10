@@ -295,18 +295,11 @@ pub(super) fn state(mr: &Value) -> Option<PullRequestState> {
 /// What one read says of conflicts; a check GitLab has yet to finish is pending.
 pub(super) fn mergeability(mr: &Value) -> Mergeability {
     let detailed = mr["detailed_merge_status"].as_str().unwrap_or_default();
-    let status = mr["merge_status"].as_str().unwrap_or_default();
-    if mr["has_conflicts"].as_bool() == Some(true)
-        || detailed == "conflict"
-        || status == "cannot_be_merged"
-    {
+    if mr["has_conflicts"].as_bool() == Some(true) || detailed == "conflict" {
         Mergeability::Conflicting
     } else if matches!(
         detailed,
         "checking" | "unchecked" | "preparing" | "approvals_syncing"
-    ) || matches!(
-        status,
-        "checking" | "unchecked" | "cannot_be_merged_recheck"
     ) {
         Mergeability::Pending
     } else {
