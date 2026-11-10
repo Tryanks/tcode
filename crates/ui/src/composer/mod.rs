@@ -791,15 +791,6 @@ impl Composer {
         if self.subagent(cx) {
             return;
         }
-        if self.compact
-            && !self
-                .workspace_store
-                .read(cx)
-                .connection_state()
-                .is_connected()
-        {
-            return;
-        }
         #[cfg(feature = "voice")]
         if self.submit_after_dictation(steer, cx) {
             return;
