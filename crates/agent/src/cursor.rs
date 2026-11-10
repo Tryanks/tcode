@@ -364,15 +364,9 @@ impl Dialect for Cursor {
         method: String,
         params: Value,
     ) -> Result<Value, acp::Error> {
-        // None of these is sent while `session/load` replays, but a replay
-        // must never put a question to the user.
-        let replaying = session.with_state(|state| state.loading());
         match method.as_str() {
             ASK_QUESTION => {
                 let questions = Questions::parse(&params)?;
-                if replaying {
-                    return Ok(json!({ "outcome": { "outcome": "cancelled" } }));
-                }
                 let answers = session.ask_user(questions.canonical()).await;
                 let (reply, unsent) = questions.reply(answers);
                 if !unsent.is_empty() {
@@ -388,9 +382,6 @@ impl Dialect for Cursor {
                 Ok(reply)
             }
             CREATE_PLAN => {
-                if replaying {
-                    return Ok(json!({"outcome": {"outcome": "cancelled"}}));
-                }
                 let decision = session
                     .ask_plan(
                         &params,
@@ -417,17 +408,15 @@ impl Dialect for Cursor {
                 })
             }
             UPDATE_TODOS => {
-                if !replaying {
-                    let steps = self.update_todos(&params);
-                    let turn_id = session.with_state(|state| state.turn().map(str::to_owned));
-                    session
-                        .emit(AgentEvent::PlanUpdated {
-                            turn_id,
-                            explanation: None,
-                            steps,
-                        })
-                        .await;
-                }
+                let steps = self.update_todos(&params);
+                let turn_id = session.with_state(|state| state.turn().map(str::to_owned));
+                session
+                    .emit(AgentEvent::PlanUpdated {
+                        turn_id,
+                        explanation: None,
+                        steps,
+                    })
+                    .await;
                 Ok(json!({}))
             }
             // Sent once the task or image tool has finished; Cursor ignores
