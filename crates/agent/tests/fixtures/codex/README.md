@@ -13,5 +13,7 @@
   `v2/ThreadTokenUsageUpdatedNotification.ts`. Ids, paths, times and text
   are invented.
 - `mcp_tool_results.jsonl`: `item/completed` notifications of `mcpToolCall`
-  items recorded from a real app-server session (`df411764c`), the image
-  data swapped for a 1x1 JPEG.
+  items in the shape an app-server session sent them (`df411764c`; the
+  `mcpToolCall` item of `v2/ThreadItem.ts`, with the `_meta` keys it
+  carried). The content is invented: ids, titles, code, app ids and the
+  query are made up, and the image is a 1x1 JPEG.

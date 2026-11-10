@@ -6628,8 +6628,8 @@ mod tests {
         });
     }
 
-    /// MCP results recorded from the app-server (each `result` as Tcode
-    /// stored it, base64 swapped for a 1x1 JPEG): the timeline keeps the text
+    /// MCP results in the shape the app-server sends them (each `result` as
+    /// Tcode stores it, the image a 1x1 JPEG): the timeline keeps the text
     /// the model read and moves image parts into `image_reads`, typed by their
     /// bytes, whatever the tool.
     #[test]
@@ -6807,7 +6807,7 @@ mod tests {
     /// saved it.
     #[test]
     fn sleeps_and_image_generations_arrive_as_their_calls() {
-        let sleep = json!({"type":"sleep","id":"call_wmvrnLAr0GTnBoYQog6Gvjq0","durationMs":20000});
+        let sleep = json!({"type":"sleep","id":"call_000000000000000000000003","durationMs":20000});
         let call = |status| ItemContent::ToolCall {
             image_reads: Vec::new(),
             name: "sleep".into(),
@@ -6825,8 +6825,8 @@ mod tests {
         );
 
         let picture = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
-        let saved = "/Users/me/.codex/generated_images/01a196f6-db20-7941-b9de-d73415937480/exec-89f575db-4c35-4d77-a024-611fdd5d1d50.png";
-        let generation = json!({"type":"imageGeneration","id":"exec-89f575db-4c35-4d77-a024-611fdd5d1d50","status":"completed","revisedPrompt":"Edit the reference image: keep the subject, make the background transparent.","result":picture,"transparentBackground":true,"failure":null,"savedPath":saved,"inputImages":[{"path":"/Users/me/project/assets/reference.png","sha256":"f5000811e1aa0c2f9f23baeb7fc932e2d4e41974204fb409ece85cd70197840d"}],"generationId":"695e31e3-b3a3-4def-afce-27493b36fb7e","startedAtMs":1_793_534_383_829_u64,"completedAtMs":1_793_534_414_873_u64});
+        let saved = "/home/user/.codex/generated_images/00000000-0000-7000-8000-000000000066/exec-00000000-0000-4000-8000-000000000067.png";
+        let generation = json!({"type":"imageGeneration","id":"exec-00000000-0000-4000-8000-000000000067","status":"completed","revisedPrompt":"Edit the reference image: keep the subject, make the background transparent.","result":picture,"transparentBackground":true,"failure":null,"savedPath":saved,"inputImages":[{"path":"/home/user/project/assets/reference.png","sha256":"0000000000000000000000000000000000000000000000000000000000000001"}],"generationId":"00000000-0000-4000-8000-000000000068","startedAtMs":1_793_534_383_829_u64,"completedAtMs":1_793_534_414_873_u64});
         let generated = ItemContent::ToolCall {
             image_reads: vec![Attachment {
                 media_type: "image/png".into(),
@@ -6836,7 +6836,7 @@ mod tests {
             name: "image_generation".into(),
             input: json!({
                 "revised_prompt": "Edit the reference image: keep the subject, make the background transparent.",
-                "input_images": ["/Users/me/project/assets/reference.png"],
+                "input_images": ["/home/user/project/assets/reference.png"],
             }),
             output: None,
             status: ItemStatus::Completed,
