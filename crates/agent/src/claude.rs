@@ -8069,7 +8069,9 @@ mod tests {
             .map(|line| format!("{line}\n"))
             .collect();
         std::fs::write(&output_file, transcript).unwrap();
-        let trace = trace.replace(RECORDED_OUTPUT, output_file.to_str().unwrap());
+        // The path goes into JSON text, where a Windows separator is an escape.
+        let escaped = serde_json::to_string(output_file.to_str().unwrap()).unwrap();
+        let trace = trace.replace(RECORDED_OUTPUT, escaped.trim_matches('"'));
 
         smol::block_on(async {
             let mut mapper = Mapper::new();
