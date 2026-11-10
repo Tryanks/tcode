@@ -754,7 +754,7 @@ to destinations; OS routing and global TUNs apply. Tcode does not read
 upstream-proxy environment variables or system proxy settings.
 
 One attachment holds at most 56 tunnels at once. Dialling a destination times
-out after 10 seconds, and a tunnel idle for 60 seconds is closed. Revoking a
+out after 10 seconds; a tunnel stays open while both ends hold it. Revoking a
 device or stopping hosting closes its connection and every tunnel on it; while
 the attachment is reconnecting, opening a tunnel fails at once, and after it
 reconnects new tunnels use the new connection. Connection logs contain the

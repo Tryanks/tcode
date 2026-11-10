@@ -27,8 +27,7 @@
 //! connection to the machine's own SSH server, which runs in the host process
 //! and listens on no port. The machine answers `connected` before the first
 //! SSH byte, or `refused` when the device may not open one. These streams
-//! share the tunnel bound but never idle out: an editor leaves its connection
-//! quiet for long stretches and SSH keeps it alive itself.
+//! share the tunnel bound.
 use std::{io, time::Duration};
 
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress};
@@ -53,8 +52,6 @@ pub const MAX_TUNNELS: usize = MAX_STREAMS as usize - 8;
 /// How long the machine dials a tunnel target before answering
 /// `connect_failed`.
 pub const TUNNEL_CONNECT: Duration = Duration::from_secs(10);
-/// A tunnel with no bytes in either direction for this long is closed.
-pub const TUNNEL_IDLE: Duration = Duration::from_secs(60);
 
 pub const KEEP_ALIVE: Duration = Duration::from_secs(10);
 pub const MAX_IDLE: Duration = Duration::from_secs(30);
