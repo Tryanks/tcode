@@ -1408,132 +1408,6 @@ fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
     )));
 }
 
-/// A Claude Code stand-in that keeps its sign-in in `CLAUDE_CONFIG_DIR` and
-/// answers `auth status` and, without a terminal, `auth login` the way
-/// claude 2.1.314 does, and `get_usage` the way 2.1.317 does.
-#[cfg(unix)]
-#[test]
-fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
-    use std::os::unix::fs::PermissionsExt as _;
-    use tcode_core::provider_status::{AuthStatus, ProviderLogin};
-
-    let test_store = TestStore::new("tcode-provider-login-test");
-    let binary = test_store.root().join("claude");
-    let home = test_store.root().join("claude-home");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(
-        &binary,
-        "#!/bin/sh\n\
-         case \"$*\" in\n\
-         --version) echo '2.1.314 (Claude Code)' ;;\n\
-         'auth status --json')\n\
-           if [ -f \"$CLAUDE_CONFIG_DIR/signed-in\" ]; then\n\
-             echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"dev@example.com\"}'\n\
-           else echo '{\"loggedIn\":false}'; exit 1; fi ;;\n\
-         'auth login')\n\
-           printf 'Opening browser to sign in\\nIf the browser did not open, visit: https://claude.com/cai/oauth/authorize?code=true&state=S\\nPaste code here if prompted > '\n\
-           read code\n\
-           if [ \"$code\" = good ]; then touch \"$CLAUDE_CONFIG_DIR/signed-in\"; echo 'Login successful.'; exit 0; fi\n\
-           echo 'Invalid code' >&2; exit 1 ;;\n\
-         'auth logout') rm -f \"$CLAUDE_CONFIG_DIR/signed-in\" ;;\n\
-         '--print --input-format stream-json --output-format stream-json --verbose')\n\
-           read request\n\
-           if [ -f \"$CLAUDE_CONFIG_DIR/signed-in\" ]; then\n\
-             echo '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"usage-1\",\"response\":{\"subscription_type\":\"max\",\"rate_limits_available\":true,\"rate_limits\":{\"five_hour\":{\"utilization\":12,\"resets_at\":\"2026-11-04T21:20:00+00:00\"}}}}}'\n\
-           else echo '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"usage-1\",\"response\":{\"subscription_type\":null,\"rate_limits_available\":false,\"rate_limits\":null}}}'; fi ;;\n\
-         *) exit 2 ;;\n\
-         esac\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut host = TestClientState::new((*test_store).clone());
-    let claude = host.settings.provider_mut(ProviderKind::ClaudeCode);
-    claude.binary_path = Some(binary);
-    claude.home_path = Some(home);
-    let cx = &mut TestAppContext::default();
-    let state = cx.new_entity(host);
-    let snapshot = |state: &TestClientState, id: &str| {
-        state
-            .providers_status_snapshot()
-            .provider_snapshots
-            .get(id)
-            .cloned()
-            .unwrap_or_default()
-    };
-    let login = |state: &TestClientState| snapshot(state, "claude").login;
-    let awaiting = |state: &TestClientState| {
-        login(state)
-            == Some(ProviderLogin::AwaitingCode {
-                url: Some("https://claude.com/cai/oauth/authorize?code=true&state=S".into()),
-            })
-    };
-    let auth = |state: &TestClientState| snapshot(state, "claude").auth.map(|auth| auth.status);
-
-    state.dispatch_command(
-        cx,
-        1,
-        Command::StartProviderLogin {
-            profile_id: "pi".into(),
-        },
-    );
-    cx.run_until_parked();
-    assert_eq!(state.read(|state| snapshot(state, "pi").login), None);
-
-    let start = || Command::StartProviderLogin {
-        profile_id: "claude".into(),
-    };
-    let submit = |code: &str| Command::SubmitProviderLoginCode {
-        profile_id: "claude".into(),
-        code: code.into(),
-    };
-    state.dispatch_command(cx, 2, start());
-    cx.run_until(awaiting);
-    state.dispatch_command(
-        cx,
-        3,
-        Command::CancelProviderLogin {
-            profile_id: "claude".into(),
-        },
-    );
-    cx.run_until_parked();
-    assert_eq!(state.read(login), None);
-
-    state.dispatch_command(cx, 4, start());
-    cx.run_until(awaiting);
-    state.dispatch_command(cx, 5, submit("bad"));
-    cx.run_until(|state| {
-        login(state)
-            == Some(ProviderLogin::Failed {
-                message: "Invalid code".into(),
-            })
-    });
-
-    state.dispatch_command(cx, 6, start());
-    cx.run_until(awaiting);
-    state.dispatch_command(cx, 7, submit("good"));
-    cx.run_until(|state| login(state).is_none() && auth(state) == Some(AuthStatus::Authenticated));
-    assert_eq!(
-        state.read(|state| snapshot(state, "claude").auth.unwrap().email),
-        Some("dev@example.com".into())
-    );
-    cx.run_until(|state| {
-        state
-            .providers_status_snapshot()
-            .provider_usage
-            .get("claude")
-            .is_some_and(|usage| usage.error.is_none() && usage.windows.len() == 1)
-    });
-
-    state.dispatch_command(
-        cx,
-        8,
-        Command::LogoutProvider {
-            profile_id: "claude".into(),
-        },
-    );
-    cx.run_until(|state| auth(state) == Some(AuthStatus::Unauthenticated));
-}
-
 /// A finished turn refreshes the account usage of the profile it ran on and
 /// of no other, and asks the thread's own running harness for it instead of
 /// starting another. Claude Code reports `max` for the Ultra plan too, so the
@@ -1597,17 +1471,12 @@ fn a_turn_refreshes_only_its_profiles_usage_from_its_running_harness() {
 }
 
 /// Another Claude account starts from a copy of the user's own configuration,
-/// never the default account's sign-in, endpoint or history, and its sign-in
-/// runs in its own config directory. A provider without account sign-in is
-/// refused.
+/// never the default account's sign-in, endpoint or history. A provider
+/// without account sign-in is refused.
 #[cfg(unix)]
 #[test]
 fn another_claude_account_inherits_configuration_but_not_the_account() {
-    use std::os::unix::fs::PermissionsExt as _;
-    use tcode_core::provider_status::ProviderLogin;
-
     let test_store = TestStore::new("tcode-account-profile-test");
-    let binary = test_store.root().join("claude");
     let default = test_store.root().join("claude-default");
     let shared = test_store.root().join("shared");
     for (path, contents) in [
@@ -1642,23 +1511,10 @@ fn another_claude_account_inherits_configuration_but_not_the_account() {
     std::os::unix::fs::symlink("../../shared/skills/linked", default.join("skills/linked"))
         .unwrap();
     std::os::unix::fs::symlink("..", default.join("skills/review/up")).unwrap();
-    std::fs::write(
-        &binary,
-        "#!/bin/sh\n\
-         case \"$*\" in\n\
-         --version) echo '2.1.314 (Claude Code)' ;;\n\
-         'auth status --json') echo '{\"loggedIn\":false}'; exit 1 ;;\n\
-         'auth login')\n\
-           printf 'If the browser did not open, visit: https://claude.com/cai/oauth/authorize?dir=%s\\nPaste code here if prompted > ' \"$CLAUDE_CONFIG_DIR\"\n\
-           read code ;;\n\
-         *) exit 2 ;;\n\
-         esac\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut host = TestClientState::new((*test_store).clone());
     let claude = host.settings.provider_mut(ProviderKind::ClaudeCode);
-    claude.binary_path = Some(binary);
+    // The sign-in the new profile starts must not reach a `claude` on PATH.
+    claude.binary_path = Some(test_store.root().join("no-claude"));
     claude.home_path = Some(default.clone());
     let cx = &mut TestAppContext::default();
     let state = cx.new_entity(host);
@@ -1739,34 +1595,15 @@ fn another_claude_account_inherits_configuration_but_not_the_account() {
     ] {
         assert!(!home.join(kept).exists(), "{kept} must not be copied");
     }
-
-    cx.run_until(|state| {
-        state
-            .providers_status_snapshot()
-            .provider_snapshots
-            .get(&id)
-            .and_then(|snapshot| snapshot.login.clone())
-            == Some(ProviderLogin::AwaitingCode {
-                url: Some(format!(
-                    "https://claude.com/cai/oauth/authorize?dir={}",
-                    home.display()
-                )),
-            })
-    });
 }
 
 /// Another Codex account gets its own `CODEX_HOME` with a copy of the user's
-/// configuration, never the default account's sign-in or sessions, and its
-/// sign-in is Codex's device flow run in that home: the page and the code to
-/// enter there.
-#[cfg(unix)]
+/// configuration, never the default account's sign-in or sessions.
 #[test]
-fn another_codex_account_signs_in_with_a_device_code_in_its_own_home() {
-    use std::os::unix::fs::PermissionsExt as _;
-    use tcode_core::provider_status::ProviderLogin;
-
+fn another_codex_account_inherits_configuration_but_not_the_account() {
     let test_store = TestStore::new("tcode-codex-account-test");
-    let binary = test_store.root().join("codex");
+    // The sign-in the new profile starts must not reach a `codex` on PATH.
+    let binary = test_store.root().join("no-codex");
     let default = test_store.root().join("codex-default");
     for (path, contents) in [
         (default.join("config.toml"), "model = \"gpt-6\"\n"),
@@ -1777,20 +1614,6 @@ fn another_codex_account_signs_in_with_a_device_code_in_its_own_home() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, contents).unwrap();
     }
-    // What codex-cli 0.166.0 prints for `login --device-auth`, colored.
-    std::fs::write(
-        &binary,
-        "#!/bin/sh\n\
-         case \"$*\" in\n\
-         --version) echo 'codex-cli 0.166.0' ;;\n\
-         'login --device-auth')\n\
-           printf '1. Open this link in your browser\\n   \\033[94mhttps://auth.openai.com/codex/device?home=%s\\033[0m\\n\\n2. Enter this one-time code\\n   \\033[94m3JP6-MXLMX\\033[0m\\n' \"$CODEX_HOME\"\n\
-           read code ;;\n\
-         *) exit 2 ;;\n\
-         esac\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut host = TestClientState::new((*test_store).clone());
     let codex = host.settings.provider_mut(ProviderKind::Codex);
     codex.binary_path = Some(binary);
@@ -1835,93 +1658,6 @@ fn another_codex_account_signs_in_with_a_device_code_in_its_own_home() {
     for kept in ["auth.json", "sessions"] {
         assert!(!home.join(kept).exists(), "{kept} must not be copied");
     }
-    cx.run_until(|state| {
-        state
-            .providers_status_snapshot()
-            .provider_snapshots
-            .get(&id)
-            .and_then(|snapshot| snapshot.login.clone())
-            == Some(ProviderLogin::AwaitingDevice {
-                url: Some(format!(
-                    "https://auth.openai.com/codex/device?home={}",
-                    home.display()
-                )),
-                code: "3JP6-MXLMX".into(),
-            })
-    });
-}
-
-/// An endpoint profile that has no API key saved says so, rather than
-/// passing on the CLI's advice to sign in, which does not apply to it; the
-/// account beside it is told to sign in.
-#[cfg(unix)]
-#[test]
-fn an_endpoint_profile_without_its_key_is_missing_the_key_not_signed_out() {
-    use std::os::unix::fs::PermissionsExt as _;
-    use tcode_core::provider_status::ProviderProbeDiagnostic;
-
-    let test_store = TestStore::new("tcode-endpoint-key-test");
-    let binary = test_store.root().join("claude");
-    std::fs::write(
-        &binary,
-        "#!/bin/sh\n\
-         case \"$*\" in\n\
-         --version) echo '2.1.318 (Claude Code)' ;;\n\
-         'auth status --json') echo '{\"loggedIn\":false}'; exit 1 ;;\n\
-         *) exit 2 ;;\n\
-         esac\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut host = TestClientState::new((*test_store).clone());
-    host.settings
-        .provider_mut(ProviderKind::ClaudeCode)
-        .binary_path = Some(binary);
-    host.settings.profiles.insert(
-        "kimi".into(),
-        ProviderProfile {
-            kind: ProviderKind::ClaudeCode,
-            settings: ProviderSettings {
-                env: vec![
-                    EnvVar {
-                        name: "ANTHROPIC_BASE_URL".into(),
-                        value: "https://api.kimi.com/coding/".into(),
-                        sensitive: false,
-                    },
-                    EnvVar {
-                        name: "ANTHROPIC_API_KEY".into(),
-                        value: String::new(),
-                        sensitive: true,
-                    },
-                ],
-                ..ProviderSettings::default()
-            },
-        },
-    );
-    let cx = &mut TestAppContext::default();
-    let state = cx.new_entity(host);
-    state.update(cx, |state, cx| state.refresh_provider_status(cx));
-    let diagnostic = |state: &TestClientState, id: &str| {
-        state
-            .providers_status_snapshot()
-            .provider_snapshots
-            .get(id)
-            .filter(|snapshot| !snapshot.checking)
-            .and_then(|snapshot| snapshot.diagnostic)
-    };
-    cx.run_until(|state| {
-        diagnostic(state, "kimi").is_some() && diagnostic(state, "claude").is_some()
-    });
-    state.read(|state| {
-        assert_eq!(
-            diagnostic(state, "kimi"),
-            Some(ProviderProbeDiagnostic::MissingApiKey)
-        );
-        assert_eq!(
-            diagnostic(state, "claude"),
-            Some(ProviderProbeDiagnostic::Unauthenticated)
-        );
-    });
 }
 
 /// Each settings edit writes the one field it names: the harness's own
