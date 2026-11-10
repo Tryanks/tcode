@@ -5841,32 +5841,6 @@ mod tests {
     }
 
     #[test]
-    fn version_gating_follows_manifest_bounds() {
-        let catalog = crate::claude_manifest::test_catalog();
-        let ids = |version: Option<(u32, u32, u32)>| -> Vec<String> {
-            catalog
-                .models_for_version(version)
-                .into_iter()
-                .map(|model| model.id)
-                .collect()
-        };
-        // minVersion is inclusive; maxVersionExclusive is not.
-        assert_eq!(
-            ids(Some((2, 1, 256))),
-            ["test-fixed", "test-narrow", "test-plain"]
-        );
-        assert_eq!(
-            ids(Some((2, 1, 257))),
-            ["test-wide", "test-fixed", "test-narrow", "test-plain"]
-        );
-        assert_eq!(ids(Some((2, 1, 110))), ["test-narrow", "test-plain"]);
-        assert_eq!(
-            ids(Some((3, 0, 0))),
-            ["test-wide", "test-narrow", "test-plain"]
-        );
-    }
-
-    #[test]
     fn parse_semver_from_version_output() {
         assert_eq!(
             crate::parse_semver("2.1.206 (Claude Code)"),
@@ -6273,12 +6247,6 @@ mod tests {
         }
     }
 
-    /// Captured from Claude Code 2.1.294 with claude-opus-5-5: the thinking
-    /// block opens with `content_block_start`, every `thinking_delta` is empty
-    /// and the `assistant` line repeats the block with no text. The block's
-    /// start is the one event that can announce the thinking, so it must
-    /// become an in-progress reasoning item that the empty deltas and the
-    /// empty completion leave alone.
     /// Captured from Claude Code 2.1.312 with claude-opus-5-5 and thinking on:
     /// the prose the model wrote between two tool calls arrives as a second
     /// thinking block holding the server's summary of it, and only the
@@ -6314,6 +6282,12 @@ mod tests {
         );
     }
 
+    /// Captured from Claude Code 2.1.294 with claude-opus-5-5: the thinking
+    /// block opens with `content_block_start`, every `thinking_delta` is empty
+    /// and the `assistant` line repeats the block with no text. The block's
+    /// start is the one event that can announce the thinking, so it must
+    /// become an in-progress reasoning item that the empty deltas and the
+    /// empty completion leave alone.
     #[test]
     fn hidden_thinking_announces_itself_from_the_block_start() {
         let mut m = Mapper::new();

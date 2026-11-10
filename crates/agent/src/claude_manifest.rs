@@ -961,6 +961,32 @@ mod tests {
     }
 
     #[test]
+    fn version_gating_follows_manifest_bounds() {
+        let catalog = test_catalog();
+        let ids = |version: Option<(u32, u32, u32)>| -> Vec<String> {
+            catalog
+                .models_for_version(version)
+                .into_iter()
+                .map(|model| model.id)
+                .collect()
+        };
+        // minVersion is inclusive; maxVersionExclusive is not.
+        assert_eq!(
+            ids(Some((2, 1, 256))),
+            ["test-fixed", "test-narrow", "test-plain"]
+        );
+        assert_eq!(
+            ids(Some((2, 1, 257))),
+            ["test-wide", "test-fixed", "test-narrow", "test-plain"]
+        );
+        assert_eq!(ids(Some((2, 1, 110))), ["test-narrow", "test-plain"]);
+        assert_eq!(
+            ids(Some((3, 0, 0))),
+            ["test-wide", "test-narrow", "test-plain"]
+        );
+    }
+
+    #[test]
     fn invalid_manifests_are_rejected() {
         let mutate = |edit: fn(&mut Value)| {
             let mut value: Value = serde_json::from_str(TEST_MANIFEST).unwrap();
