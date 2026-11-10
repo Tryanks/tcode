@@ -82,9 +82,6 @@ pub(crate) fn config_selection<'a>(
         .and_then(|selection| selection.value.as_str())
 }
 
-/// Cap on captured terminal output when the agent sets none (1 MiB).
-const DEFAULT_TERMINAL_OUTPUT_LIMIT: u64 = 1 << 20;
-
 /// How long we wait for an agent to answer `initialize` before declaring it
 /// broken. Generous: an `npm exec` recipe may have to fetch the package first.
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -2684,8 +2681,7 @@ impl Client {
             &args.args,
             &args.env,
             &cwd,
-            args.output_byte_limit
-                .unwrap_or(DEFAULT_TERMINAL_OUTPUT_LIMIT),
+            args.output_byte_limit,
         )?;
         let id = {
             let mut state = self.state.lock_recover();
@@ -2775,7 +2771,7 @@ impl Terminal {
         args: &[String],
         env: &[acp::EnvVariable],
         cwd: &Path,
-        limit: u64,
+        limit: Option<u64>,
     ) -> Result<Arc<Self>, acp::Error> {
         let program = crate::resolve_binary(None, command)
             .map_err(|err| acp::Error::new(-32603, err.to_string()))?;
@@ -2854,11 +2850,12 @@ impl Terminal {
         Ok(terminal)
     }
 
-    fn append(&self, bytes: &[u8], limit: u64) {
+    fn append(&self, bytes: &[u8], limit: Option<u64>) {
         let mut output = self.output.lock_recover();
         output.push_str(&String::from_utf8_lossy(bytes));
-        let limit = limit as usize;
-        if output.len() > limit {
+        if let Some(limit) = limit.map(|limit| limit as usize)
+            && output.len() > limit
+        {
             // Keep the tail (what ACP asks for), cutting on a char boundary.
             let mut cut = output.len() - limit;
             while !output.is_char_boundary(cut) {
