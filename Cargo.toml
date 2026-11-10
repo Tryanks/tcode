@@ -47,3 +47,21 @@ panic = "unwind"
 inherits = "release"
 strip = false
 debug = 1
+
+# These dependencies do in a debug build the work the tests around them are
+# about: decoding pictures past the picture budget, hashing a browser password
+# at its real iteration count, training and using a compression dictionary.
+# Unoptimized they cost seconds a test; nothing here is stepped through.
+[profile.dev.package]
+image = { opt-level = 3 }
+zune-jpeg = { opt-level = 3 }
+jpeg-decoder = { opt-level = 3 }
+png = { opt-level = 3 }
+fdeflate = { opt-level = 3 }
+miniz_oxide = { opt-level = 3 }
+pbkdf2 = { opt-level = 3 }
+hmac = { opt-level = 3 }
+sha2 = { opt-level = 3 }
+zstd = { opt-level = 3 }
+zstd-safe = { opt-level = 3 }
+zstd-sys = { opt-level = 3 }
