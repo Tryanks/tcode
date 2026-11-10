@@ -185,14 +185,11 @@ pub(crate) struct CatalogModel {
 }
 
 impl CatalogModel {
-    /// Whether the installed CLI can run this model. Gated models need a
-    /// known version; unknown versions hide them.
+    /// Whether the installed CLI can run this model. With its version
+    /// unknown every model is offered, and the CLI rejects one it cannot run.
     fn available(&self, version: Option<Version>) -> bool {
-        if self.min_version.is_none() && self.max_version_exclusive.is_none() {
-            return true;
-        }
         let Some(version) = version else {
-            return false;
+            return true;
         };
         self.min_version.is_none_or(|min| version >= min)
             && self.max_version_exclusive.is_none_or(|max| version < max)
