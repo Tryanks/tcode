@@ -1,11 +1,11 @@
 use super::{
-    Credential, CredentialError, Credentials, Identity,
+    Credential, CredentialError, Credentials,
     graphql::Document,
     normalize_host,
     quota::{Ledger, number},
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     io::Read as _,
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant, SystemTime},
@@ -161,17 +161,11 @@ impl Drop for Permit<'_> {
     }
 }
 
-struct CachedIdentity {
-    identity: Identity,
-    expires: Instant,
-}
-
 pub struct GitHubApi {
     credentials: Arc<Credentials>,
     pub(super) agent: ureq::Agent,
     pub(super) gate: Gate,
     ledger: Mutex<Ledger>,
-    identities: Mutex<HashMap<String, CachedIdentity>>,
 }
 
 impl GitHubApi {
@@ -186,7 +180,6 @@ impl GitHubApi {
                 .build(),
             gate: Gate::default(),
             ledger: Mutex::new(Ledger::default()),
-            identities: Mutex::new(HashMap::new()),
         })
     }
 
@@ -223,38 +216,6 @@ impl GitHubApi {
             Some(&document.query),
             options,
         )
-    }
-
-    /// Capture and verify once before a multi-request operation to prevent account changes mid-page.
-    pub fn verified_credential(&self, host: &str) -> Result<(Credential, Identity), GitHubError> {
-        let credential = self.credentials.get(host)?;
-        {
-            let mut cache = self.identities.lock().unwrap();
-            cache.retain(|_, value| value.expires > Instant::now());
-            if let Some(cached) = cache.get(&credential.fingerprint) {
-                return Ok((credential, cached.identity.clone()));
-            }
-        }
-        let response = self.rest(
-            host,
-            RestRequest::get("/user"),
-            &RequestOptions {
-                authentication: Authentication::Pinned(credential.clone()),
-                interactive: true,
-                operation: "Identity",
-                ..Default::default()
-            },
-        )?;
-        let identity: Identity = response.json()?;
-        self.credentials.recognized(&credential, &identity.login);
-        self.identities.lock().unwrap().insert(
-            credential.fingerprint.clone(),
-            CachedIdentity {
-                identity: identity.clone(),
-                expires: Instant::now() + Duration::from_secs(600),
-            },
-        );
-        Ok((credential, identity))
     }
 
     /// Whose `token` is on the host, and which of the scopes Tcode needs a classic token

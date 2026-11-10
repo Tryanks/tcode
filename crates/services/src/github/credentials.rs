@@ -58,12 +58,6 @@ impl Credential {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
-pub struct Identity {
-    pub id: u64,
-    pub login: String,
-}
-
 struct Cached {
     value: Result<Credential, CredentialError>,
     expires: Instant,
@@ -182,24 +176,6 @@ impl Credentials {
             &credential.verification,
             accepted,
         );
-    }
-
-    /// Records the account the host said `credential` signs in as.
-    pub(super) fn recognized(&self, credential: &Credential, login: &str) {
-        if matches!(credential.source, CredentialSource::Cli { .. }) {
-            return;
-        }
-        let verdict = crate::settings::Verdict::Accepted {
-            login: Some(login.to_owned()),
-        };
-        if let Err(error) = self.store.record_check(
-            HostKind::Github,
-            &credential.host,
-            &credential.verification,
-            verdict,
-        ) {
-            log::warn!("failed to save credential check: {error}");
-        }
     }
 
     pub(super) fn identify(
