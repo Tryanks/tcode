@@ -423,39 +423,10 @@ pub fn build_commit_prompt(stat: &str, patch: &str) -> String {
     )
 }
 
-/// Sanitize a model-produced commit message: strip surrounding code fences,
-/// trim, and cap the subject line at 72 chars. Empty output falls back to the
-/// caller (which re-generates), so an empty string is returned as-is.
+/// The model's reply as the commit message the dialog offers for editing,
+/// without the whitespace around it; empty when the model wrote nothing.
 pub fn sanitize_commit_message(raw: &str) -> String {
-    let mut text = raw.trim();
-    // Strip a leading/trailing ``` fence block if present.
-    if let Some(rest) = text.strip_prefix("```") {
-        // Drop the fence's info line.
-        let rest = rest.split_once('\n').map(|x| x.1).unwrap_or("");
-        text = rest.trim_end().strip_suffix("```").unwrap_or(rest).trim();
-    }
-    let mut lines = text.lines();
-    let Some(subject_raw) = lines.next() else {
-        return String::new();
-    };
-    let subject: String = subject_raw
-        .trim()
-        .trim_end_matches('.')
-        .chars()
-        .take(72)
-        .collect();
-    let subject = subject.trim().to_string();
-    let body: Vec<&str> = lines.collect();
-    let body = body.join("\n");
-    let body = body.trim();
-    if subject.is_empty() {
-        return String::new();
-    }
-    if body.is_empty() {
-        subject
-    } else {
-        format!("{subject}\n\n{body}")
-    }
+    raw.trim().to_string()
 }
 
 /// Parse `git status --porcelain=2 --branch` output plus the numstat rows of
@@ -895,21 +866,6 @@ mod tests {
             feature_branch_name("feat: add toast system!"),
             "tcode/feat-add-toast-system"
         );
-    }
-
-    #[test]
-    fn commit_message_sanitizer() {
-        assert_eq!(
-            sanitize_commit_message("feat: do the thing."),
-            "feat: do the thing"
-        );
-        assert_eq!(
-            sanitize_commit_message("```\nfix: bug\n\nbody line\n```"),
-            "fix: bug\n\nbody line"
-        );
-        let long = "x".repeat(100);
-        assert_eq!(sanitize_commit_message(&long).len(), 72);
-        assert_eq!(sanitize_commit_message("   "), "");
     }
 
     /// Line shapes from git-status(1), "Porcelain Format Version 2", as of
