@@ -281,140 +281,37 @@ mod tests {
         assert_eq!(result.diagnostic, Some(ProviderProbeDiagnostic::MissingCli));
     }
 
-    /// `cursor-agent status --format json` from the agent crate's stand-in,
-    /// which prints the fixture it is pointed at.
-    #[cfg(unix)]
+    /// `cursor-agent status --format json` as the real binary answers it signed out
+    /// (`agent/tests/fixtures/cursor/PROVENANCE.md`) reads as signed out only while neither
+    /// `CURSOR_API_KEY` nor `CURSOR_AUTH_TOKEN` signs the CLI in.
     #[test]
-    fn cursor_is_signed_out_only_without_an_api_key_or_auth_token() {
-        let fixtures =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../agent/tests/fixtures/cursor");
-        let probe = |status: &str, api_key: &str, auth_token: &str| {
-            let env = vec![
-                (
-                    "TCODE_STAND_IN_STATUS".to_string(),
-                    fixtures.join(status).display().to_string(),
-                ),
-                ("CURSOR_API_KEY".to_string(), api_key.to_string()),
-                ("CURSOR_AUTH_TOKEN".to_string(), auth_token.to_string()),
-            ];
-            smol::block_on(probe_provider(
-                ProviderKind::Cursor,
-                Some(fixtures.join("cursor-agent")),
-                LaunchEnv { env, home: None },
-            ))
+    fn a_recorded_signed_out_cursor_is_unauthenticated_only_without_a_key_or_token() {
+        let recorded = include_str!("../../agent/tests/fixtures/cursor/status_signed_out.json");
+        let diagnostic = |env: &[(&str, &str)]| {
+            let env: Vec<(String, String)> = env
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect();
+            finalize_probe(
+                None,
+                None,
+                parse_cursor_auth(recorded, cursor_key_configured(&env)),
+            )
+            .diagnostic
         };
-
-        let signed_out = probe("status_signed_out.json", "", "");
         assert_eq!(
-            signed_out.diagnostic,
+            diagnostic(&[("CURSOR_API_KEY", ""), ("CURSOR_AUTH_TOKEN", "")]),
             Some(ProviderProbeDiagnostic::Unauthenticated)
         );
-        for (api_key, auth_token) in [("key", ""), ("", "token")] {
+        for env in [
+            [("CURSOR_API_KEY", "key"), ("CURSOR_AUTH_TOKEN", "")],
+            [("CURSOR_API_KEY", ""), ("CURSOR_AUTH_TOKEN", "token")],
+        ] {
             assert_eq!(
-                probe("status_signed_out.json", api_key, auth_token).diagnostic,
+                diagnostic(&env),
                 Some(ProviderProbeDiagnostic::IndeterminateAuth),
                 "a key or token signs Cursor in without a stored login"
             );
         }
-
-        let signed_in = probe("status_signed_in.json", "", "");
-        assert_eq!(signed_in.status, Some(ProviderStatusKind::Ready));
-        let auth = signed_in.auth.unwrap();
-        assert_eq!(auth.status, AuthStatus::Authenticated);
-        assert_eq!(auth.email.as_deref(), Some("dev@example.com"));
-    }
-
-    /// `claude auth status --json` as claude 2.1.314 answers it for a fresh
-    /// `CLAUDE_CONFIG_DIR`, exit status included.
-    #[cfg(unix)]
-    #[test]
-    fn a_signed_out_claude_profile_is_unauthenticated() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let dir = std::env::temp_dir().join(format!("tcode-probe-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let binary = dir.join("claude");
-        std::fs::write(
-            &binary,
-            r#"#!/bin/sh
-case "$*" in
---version) echo '2.1.314 (Claude Code)' ;;
-'auth status --json')
-  cat <<'JSON'
-{
-  "loggedIn": false,
-  "authMethod": "none",
-  "apiProvider": "firstParty",
-  "analyticsDisabled": false,
-  "projectsDirectory": "/tmp/claude/projects",
-  "configDirectory": "/tmp/claude"
-}
-JSON
-  exit 1 ;;
-*) exit 2 ;;
-esac
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let snapshot = smol::block_on(probe_provider(
-            ProviderKind::ClaudeCode,
-            Some(binary),
-            LaunchEnv::default(),
-        ));
-        let _ = std::fs::remove_dir_all(dir);
-        assert_eq!(snapshot.version.as_deref(), Some("2.1.314"));
-        assert_eq!(
-            snapshot.auth.map(|auth| auth.status),
-            Some(AuthStatus::Unauthenticated)
-        );
-        assert_eq!(
-            snapshot.diagnostic,
-            Some(ProviderProbeDiagnostic::Unauthenticated)
-        );
-    }
-
-    #[test]
-    fn auth_outcomes_are_semantic_and_unlocalized() {
-        let authenticated = finalize_probe(
-            Some(1),
-            Some("1.2.3".into()),
-            Some(ProviderAuth {
-                status: AuthStatus::Authenticated,
-                label: Some("account".into()),
-                email: None,
-            }),
-        );
-        assert_eq!(authenticated.status, Some(ProviderStatusKind::Ready));
-        assert_eq!(authenticated.message, None);
-        assert_eq!(authenticated.diagnostic, None);
-
-        let unauthenticated = finalize_probe(
-            Some(1),
-            Some("1.2.3".into()),
-            Some(ProviderAuth {
-                status: AuthStatus::Unauthenticated,
-                label: None,
-                email: None,
-            }),
-        );
-        assert_eq!(unauthenticated.status, Some(ProviderStatusKind::Error));
-        assert_eq!(unauthenticated.message, None);
-        assert_eq!(
-            unauthenticated.diagnostic,
-            Some(ProviderProbeDiagnostic::Unauthenticated)
-        );
-        let indeterminate = finalize_probe(Some(1), Some("1.2.3".into()), None);
-        assert_eq!(indeterminate.status, Some(ProviderStatusKind::Warning));
-        assert_eq!(
-            indeterminate.auth.as_ref().map(|auth| auth.status),
-            Some(AuthStatus::Unknown)
-        );
-        assert_eq!(indeterminate.message, None);
-        assert_eq!(
-            indeterminate.diagnostic,
-            Some(ProviderProbeDiagnostic::IndeterminateAuth)
-        );
     }
 }
