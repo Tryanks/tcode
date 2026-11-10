@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::fmt;
-use std::os::raw::{c_char, c_int};
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -37,19 +36,9 @@ const MAX_DEPTH: usize = 18;
 const MAX_NODES: usize = 3_000;
 const MAX_CHILDREN_PER_NODE: usize = 500;
 
-type AddNotificationAndCheckRemote =
-    unsafe extern "C" fn(AXObserverRef, AXUIElementRef, CFStringRef, *mut c_void) -> AXError;
-
 static ACTIVATED_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 static WEB_SPARSE_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 static AX_OBSERVERS: OnceLock<Mutex<HashMap<u32, usize>>> = OnceLock::new();
-
-const RTLD_LAZY: c_int = 1;
-
-unsafe extern "C" {
-    fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-}
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
@@ -423,54 +412,9 @@ fn add_chromium_notification(
     application: AXUIElementRef,
     notification: CFStringRef,
 ) -> AXError {
-    if let Some(add_remote) = remote_notification_adder() {
-        // SAFETY: the function pointer was resolved with the verified private
-        // AX observer ABI and all supplied AX/CF references are live.
-        return unsafe { add_remote(observer, application, notification, ptr::null_mut()) };
-    }
     // SAFETY: observer, application, and notification are live values using
     // the public AXObserverAddNotification ABI; null refcon is permitted.
     unsafe { AXObserverAddNotification(observer, application, notification, ptr::null_mut()) }
-}
-
-fn remote_notification_adder() -> Option<AddNotificationAndCheckRemote> {
-    static ADDER: OnceLock<Option<AddNotificationAndCheckRemote>> = OnceLock::new();
-    *ADDER.get_or_init(|| {
-        // SAFETY: the framework path and flags are valid C inputs; null means
-        // the optional private helper is unavailable.
-        let handle = unsafe {
-            dlopen(
-                c"/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices".as_ptr(),
-                RTLD_LAZY,
-            )
-        };
-        if handle.is_null() {
-            log::debug!(
-                "HIServices private AX helpers are unavailable; using public observer registration"
-            );
-            return None;
-        }
-        // SAFETY: RTLD_DEFAULT is the verified macOS sentinel and the private
-        // symbol name is a static NUL-terminated C string.
-        let symbol = unsafe {
-            dlsym(
-                (-2_isize) as *mut c_void,
-                c"_AXObserverAddNotificationAndCheckRemote".as_ptr(),
-            )
-        };
-        if symbol.is_null() {
-            log::debug!(
-                "remote AX observer registration helper is unavailable; using public API"
-            );
-            None
-        } else {
-            // SAFETY: the symbol uses the verified private AX observer
-            // registration ABI represented by AddNotificationAndCheckRemote.
-            Some(unsafe {
-                std::mem::transmute::<*mut c_void, AddNotificationAndCheckRemote>(symbol)
-            })
-        }
-    })
 }
 
 struct ObserverRunLoop {
