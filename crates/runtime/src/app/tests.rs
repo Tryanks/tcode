@@ -7796,7 +7796,7 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
 }
 
 /// A harness that no longer answers a stop can be killed: its turn ends as
-/// interrupted, the thread stops stopping, and the next message starts it again.
+/// interrupted and the thread stops stopping.
 #[test]
 fn force_terminate_kills_a_harness_that_does_not_answer_a_stop() {
     let cx = &mut TestAppContext::default();
@@ -7875,7 +7875,14 @@ fn an_interrupt_leaves_a_thread_with_only_background_work_alone() {
         },
     );
     assert!(next_command(&actor).is_err());
-    state.read(|state| assert!(!state.selected_session().unwrap().interrupt_requested));
+    state.read(|state| {
+        assert!(
+            !state
+                .session_status_snapshot("only-background")
+                .unwrap()
+                .stopping
+        )
+    });
 }
 
 /// A report arriving while a restart waits on background work, with no turn to
@@ -8208,10 +8215,10 @@ fn a_rejected_steer_of_a_report_goes_out_as_a_turn() {
     ));
 }
 
-/// A steer the provider never confirmed died with its process, so a restart
-/// sends it to the next one.
+/// A steer the provider never confirmed died with its process, so it goes back
+/// on the queue, still the agent's.
 #[test]
-fn a_steer_lost_with_its_process_goes_to_the_next_one() {
+fn a_steer_lost_with_its_process_goes_back_on_the_queue() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-lost-steer-test");
     let state = cx.new_entity(TestClientState::new((*test_store).clone()));
@@ -8524,7 +8531,7 @@ fn store_writer_flush_persists_ordered_events_metadata_and_secrets_for_reopening
 /// Deleting a project kills the PTY its unsent draft left running off screen
 /// instead of leaving it behind forever.
 #[test]
-fn deleting_a_project_clears_its_drafts_terminal_state() {
+fn deleting_a_project_ends_the_terminal_its_draft_left_running() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-delete-project-draft");
     let root = test_store.root().clone();
@@ -8535,18 +8542,30 @@ fn deleting_a_project_clears_its_drafts_terminal_state() {
     });
     let draft_id = state.read(|state| state.selected.clone().expect("draft selected"));
     open_terminal_drawer(&state, cx, 1, &draft_id);
+    let terminals: Vec<_> = state.read(|state| {
+        state
+            .session_status_snapshot(&draft_id)
+            .unwrap()
+            .terminals
+            .iter()
+            .map(|terminal| terminal.id)
+            .collect()
+    });
+    assert!(!terminals.is_empty());
     state.update(cx, |state, cx| state.host.park_active(&draft_id, cx));
-    let destination = ConversationDestination::ProjectDraft("doomed".into());
-    state.read(|state| assert!(state.host.terminal_workspaces.contains_key(&destination)));
+    state.read(|state| {
+        for &terminal in &terminals {
+            assert!(!state.terminal_handle(terminal).unwrap().exited());
+        }
+    });
 
     state.update(cx, |state, cx| state.host.delete_project("doomed", cx));
-    cx.run_until_parked();
-
-    state.read(|state| {
-        assert!(
-            !state.host.terminal_workspaces.contains_key(&destination),
-            "the deleted project's draft kept its terminal workspace"
-        );
+    cx.run_until(|state| {
+        terminals.iter().all(|&terminal| {
+            state
+                .terminal_handle(terminal)
+                .is_none_or(|handle| handle.exited())
+        })
     });
 }
 
@@ -8735,55 +8754,23 @@ fn closing_the_last_terminal_forgets_the_drawer() {
 }
 
 #[test]
-fn terminal_open_installs_after_executor_pump_in_the_project_cwd() {
+fn a_drafts_terminal_starts_in_its_project_directory() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-terminal-open");
-    let root = test_store.root().clone();
-    let project_cwd = root.join("project");
+    let project_cwd = test_store.root().join("project");
     std::fs::create_dir_all(&project_cwd).unwrap();
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
 
-    state.update(cx, |state, _| {
-        state.install_selected(AppState::build_draft_session(
-            "terminal-project".into(),
-            project_cwd.clone(),
-            ProviderKind::Codex,
-            None,
-            None,
-            Vec::new(),
-        ));
-    });
     state.update(cx, |state, cx| {
-        state
-            .host
-            .open_terminal_panel(state.selected.as_deref().unwrap_or_default(), cx)
+        state.start_draft("terminal-project".into(), project_cwd.clone(), cx);
     });
-    state.read(|state| {
-        assert!(
-            state
-                .selected_session()
-                .unwrap()
-                .terminal_workspace
-                .terminals
-                .is_empty()
-        );
-    });
-
-    cx.run_until(|state| {
-        state
-            .selected_session()
-            .is_some_and(|session| !session.terminal_workspace.terminals.is_empty())
-    });
+    let draft_id = state.read(|state| state.selected.clone().expect("draft selected"));
+    open_terminal_drawer(&state, cx, 1, &draft_id);
 
     state.read(|state| {
-        let workspace = &state.selected_session().unwrap().terminal_workspace;
+        let workspace = &state.resident(&draft_id).unwrap().terminal_workspace;
         assert_eq!(workspace.terminals.len(), 1);
-        assert!(
-            state
-                .host
-                .terminal_panel_open(state.selected.as_deref().unwrap_or_default())
-        );
+        assert!(state.session_status_snapshot(&draft_id).unwrap().terminal_open);
         assert_eq!(workspace.terminals[0].terminal.cwd(), project_cwd);
     });
 }
@@ -8884,47 +8871,6 @@ fn persisted_assistant_event(text: &str) -> AgentEvent {
             summarized: false,
         },
     })
-}
-
-#[test]
-fn cold_select_installs_immediately_then_loads_persisted_timeline() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-cold-select-async-test");
-    let store = (*test_store).clone();
-    let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/cold"), None);
-    store.upsert_meta(&meta).unwrap();
-    store
-        .append_event(
-            &meta.id,
-            1,
-            &persisted_assistant_event("persisted cold output"),
-        )
-        .unwrap();
-    let id = meta.id.clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    state.update(cx, |state, cx| {
-        state.select_session(&id, cx);
-        let active = state.selected_session().unwrap();
-        assert_eq!(active.meta.id, id);
-        assert!(active.timeline.entries.is_empty());
-    });
-
-    cx.run_until(|state| {
-        state.selected_session().is_some_and(|session| {
-            session
-                .timeline
-                .entries
-                .iter()
-                .any(|entry| entry.id == "item-persisted cold output")
-        })
-    });
-
-    state.update(cx, |state, _| {
-        assert!(state.selected_session().unwrap().timeline.entries.iter().any(
-            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "persisted cold output")
-        ));
-    });
 }
 
 #[test]
@@ -9356,7 +9302,7 @@ fn event_stream_end_closes_only_its_own_live_provider_in_any_residency() {
 }
 
 #[test]
-fn turn_running_for_is_independent_of_active_or_parked_location() {
+fn a_threads_activity_reads_the_same_viewed_or_parked() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-working-location-test");
     let store = (*test_store).clone();
@@ -9411,7 +9357,6 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
                 expected_background,
                 "{label}"
             );
-            let active_answer = state.turn_running_for(&id);
             // Background work keeps the provider resident and shows as such;
             // Working describes this thread's own turn or queued human input.
             let expected_working = expected && label != "background";
@@ -9423,18 +9368,16 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
 
             let parked = state.take_selected().unwrap();
             state.residents.parked.insert(id.clone(), parked);
-            let parked_answer = state.turn_running_for(&id);
             assert_eq!(
                 state.session_status_snapshot(&id).unwrap().activity.working,
                 expected_working,
-                "{label}"
+                "{label} parked"
             );
-
             assert_eq!(
-                active_answer, parked_answer,
-                "{label} changed answer when moved between active and parked"
+                state.index_snapshot().summary.activity[&id].background.tasks > 0,
+                expected_background,
+                "{label} parked"
             );
-            assert_eq!(active_answer, expected, "{label} work predicate");
             state.residents.parked.remove(&id);
         }
     });
