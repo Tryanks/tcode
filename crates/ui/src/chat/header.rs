@@ -1630,6 +1630,8 @@ impl ChatView {
             .content(move |_state, _window, cx| {
                 let zed_cwd = menu_cwd.clone();
                 let zed_store = store.clone();
+                // Another machine's directory is not on this client to reveal.
+                let local = !store.read(cx).is_remote();
                 let reveal_cwd = menu_cwd.clone();
                 let copy_cwd = menu_cwd.clone();
                 let popover = cx.entity();
@@ -1671,19 +1673,21 @@ impl ChatView {
                             p1.update(cx, |st, cx| st.dismiss(window, cx));
                         }),
                     )
-                    .child(
-                        menu_item(
-                            "reveal-in-file-manager",
-                            IconName::FolderOpen,
-                            crate::tr!("chat.reveal_in_file_manager")
-                                .into_owned()
-                                .into(),
+                    .when(local, |menu| {
+                        menu.child(
+                            menu_item(
+                                "reveal-in-file-manager",
+                                IconName::FolderOpen,
+                                crate::tr!("chat.reveal_in_file_manager")
+                                    .into_owned()
+                                    .into(),
+                            )
+                            .on_click(move |_, window, cx| {
+                                cx.reveal_path(&reveal_cwd);
+                                p2.update(cx, |st, cx| st.dismiss(window, cx));
+                            }),
                         )
-                        .on_click(move |_, window, cx| {
-                            cx.reveal_path(&reveal_cwd);
-                            p2.update(cx, |st, cx| st.dismiss(window, cx));
-                        }),
-                    )
+                    })
                     .child(
                         menu_item(
                             "copy-path",

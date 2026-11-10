@@ -3479,6 +3479,8 @@ impl SessionsSidebar {
             return header.into_any_element();
         }
         let scope = store.read(cx).scope().clone();
+        // Another machine's project is not on this client to reveal.
+        let local = !store.read(cx).is_remote();
         header
             .context_menu(move |menu, _window, cx| {
                 let id = menu_project.clone();
@@ -3512,10 +3514,12 @@ impl SessionsSidebar {
                             .child(delete_label.clone())
                     })
                 })
-                .menu(
-                    crate::tr!("sidebar.reveal_project").into_owned(),
-                    Box::new(ProjectReveal(id)),
-                )
+                .when(local, |menu| {
+                    menu.menu(
+                        crate::tr!("sidebar.reveal_project").into_owned(),
+                        Box::new(ProjectReveal(id)),
+                    )
+                })
                 .when_some(share.as_ref(), |menu, share| {
                     spaces::share_items(menu, share, false, cx)
                 })
