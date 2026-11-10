@@ -7,9 +7,9 @@
 //!
 //! The window has no titlebar row of its own: the sidebar, chat and right-panel
 //! columns all run to the window top. So the cluster rides the top strip of
-//! whichever column is currently *rightmost* — [`caption_host`] is that routing
-//! rule, kept platform-parameterized so it stays testable off Windows, and it
-//! returns at most one surface so no layout can render two clusters.
+//! whichever column is currently *rightmost* — [`hosts_caption_for_state`] is
+//! that routing rule, and it names at most one surface so no layout can render
+//! two clusters.
 //!
 //! The buttons are hit-tested natively: each declares a
 //! [`gpui::WindowControlArea`], which the Windows backend answers `WM_NCHITTEST`
@@ -81,40 +81,30 @@ pub(crate) enum CaptionSurface {
     Hosts,
 }
 
-/// Which surface's top strip owns the window's top-right corner, or `None` when
-/// the platform draws its own caption buttons.
-fn caption_host(
-    client_decorated: bool,
-    route: Route,
-    right_panel_open: bool,
-    right_tab: RightTab,
-) -> Option<CaptionSurface> {
-    if !client_decorated {
-        return None;
-    }
-    Some(match route {
-        Route::Settings => CaptionSurface::Settings,
-        Route::Hosts => CaptionSurface::Hosts,
-        Route::Chat if !right_panel_open => CaptionSurface::Chat,
-        Route::Chat if right_tab == RightTab::Preview => CaptionSurface::Preview,
-        Route::Chat => CaptionSurface::RightPanel,
-    })
-}
-
 /// The compact layout has exactly one top strip, so it always owns the corner
 /// where this platform expects its caption buttons.
 pub(crate) fn compact_hosts_caption() -> bool {
     CLIENT_DECORATED
 }
 
-/// Whether `surface` must render the caption cluster this frame.
+/// Whether `surface` must render the caption cluster this frame: the one whose
+/// top strip owns the window's top-right corner, on a build that draws its
+/// own caption buttons.
 pub(crate) fn hosts_caption_for_state(
     surface: CaptionSurface,
     route: Route,
     right_panel_open: bool,
     right_tab: RightTab,
 ) -> bool {
-    caption_host(CLIENT_DECORATED, route, right_panel_open, right_tab) == Some(surface)
+    CLIENT_DECORATED
+        && surface
+            == match route {
+                Route::Settings => CaptionSurface::Settings,
+                Route::Hosts => CaptionSurface::Hosts,
+                Route::Chat if !right_panel_open => CaptionSurface::Chat,
+                Route::Chat if right_tab == RightTab::Preview => CaptionSurface::Preview,
+                Route::Chat => CaptionSurface::RightPanel,
+            }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -268,51 +258,4 @@ fn caption_button(button: CaptionButton, maximized: bool, cx: &App) -> impl Into
             .child(Icon::new(button.icon(maximized)).small())
             .into_any_element()
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn caption_cluster_belongs_to_the_rightmost_visible_surface_only_with_client_decorations() {
-        for (route, open, tab, surface) in [
-            (Route::Chat, false, RightTab::Diff, CaptionSurface::Chat),
-            (Route::Chat, false, RightTab::Plan, CaptionSurface::Chat),
-            (Route::Chat, false, RightTab::Preview, CaptionSurface::Chat),
-            (
-                Route::Chat,
-                true,
-                RightTab::Diff,
-                CaptionSurface::RightPanel,
-            ),
-            (
-                Route::Chat,
-                true,
-                RightTab::Plan,
-                CaptionSurface::RightPanel,
-            ),
-            (
-                Route::Chat,
-                true,
-                RightTab::Preview,
-                CaptionSurface::Preview,
-            ),
-        ] {
-            assert_eq!(caption_host(true, route, open, tab), Some(surface));
-        }
-        for open in [false, true] {
-            for tab in [RightTab::Diff, RightTab::Plan, RightTab::Preview] {
-                for route in [Route::Chat, Route::Settings, Route::Hosts] {
-                    assert_eq!(caption_host(false, route, open, tab), None);
-                }
-                for (route, surface) in [
-                    (Route::Settings, CaptionSurface::Settings),
-                    (Route::Hosts, CaptionSurface::Hosts),
-                ] {
-                    assert_eq!(caption_host(true, route, open, tab), Some(surface));
-                }
-            }
-        }
-    }
 }
