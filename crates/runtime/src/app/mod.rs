@@ -703,7 +703,6 @@ impl AppState {
                 while let Ok(failure) = failures.recv().await {
                     host_cx.enqueue(move |state, cx| match failure {
                         StoreWriteFailure::Error(error) => state.report_error(error, cx),
-                        StoreWriteFailure::Warning(message) => log::warn!("{message}"),
                         StoreWriteFailure::StoreFailed(reason) => state.store_failed(&reason, cx),
                     });
                 }

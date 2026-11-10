@@ -142,7 +142,10 @@ impl MoveReport {
                 waiting_for_space: false,
             }),
             Err(error) => {
-                log::warn!("could not read how far the move has come: {error}");
+                let message = format!("could not read how far the move has come: {error}");
+                host_cx.enqueue(move |state, cx| {
+                    state.report_error(RuntimeError::External(message), cx)
+                });
                 return;
             }
         };
