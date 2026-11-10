@@ -92,24 +92,6 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             push_item(&mut entries, ts, &mut next_id, content, None);
                         }
                     }
-                    "agent_message" => {
-                        if let Some(text) = payload
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .or_else(|| payload.get("text").and_then(Value::as_str))
-                        {
-                            push_item(
-                                &mut entries,
-                                ts,
-                                &mut next_id,
-                                ItemContent::AssistantMessage {
-                                    text: text.to_string(),
-                                    summarized: false,
-                                },
-                                None,
-                            );
-                        }
-                    }
                     "reasoning" => {
                         let text = payload
                             .get("summary")
