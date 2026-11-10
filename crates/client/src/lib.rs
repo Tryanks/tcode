@@ -455,14 +455,6 @@ impl HostLink {
     /// Restore before starting the pump or admitting new work.
     pub fn restore_outbox(&self, storage: Arc<dyn outbox::Storage>) -> Result<(), ProtocolError> {
         let entries = storage.load()?;
-        if entries.len() > outbox::MAX_ITEMS
-            || serde_json::to_vec(&entries)
-                .map_err(outbox::storage_error)?
-                .len()
-                > outbox::MAX_BYTES
-        {
-            return Err(outbox::storage_error("Persisted outbox exceeds its bounds"));
-        }
         let mut delivery = self.inner.delivery.lock().unwrap();
         delivery.storage = Some(storage);
         for entry in entries {
