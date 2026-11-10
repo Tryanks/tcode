@@ -386,23 +386,7 @@ async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Option<String> {
             json.get("version")?.as_str().map(str::to_string)
         }
         LatestQuery::Package { command, yarn } => {
-            let output = probe.output(command).await?;
-            if *yarn {
-                output
-                    .lines()
-                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                    .find_map(|value| {
-                        value
-                            .get("data")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    })
-            } else {
-                serde_json::from_str::<Value>(&output)
-                    .ok()?
-                    .as_str()
-                    .map(str::to_string)
-            }
+            package_latest(&probe.output(command).await?, *yarn)
         }
         LatestQuery::Claude { channel, maximum } => {
             let url = format!("https://downloads.claude.ai/claude-code-releases/{channel}");
@@ -457,6 +441,33 @@ async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Option<String> {
             }
         }
         LatestQuery::System(query) => super::system_managers::latest(probe, query).await,
+    }
+}
+
+/// The version a package manager's `view`/`info <package>@latest version --json`
+/// printed. npm 12.2.2 prints the one matching version as a one-element array
+/// (`lib/commands/view.js`), and pnpm 10.34.9's `view` prints the same; bun
+/// 1.4.4's `info` prints the bare string; yarn's `info --json` prints lines of
+/// `{"type":"inspect","data":...}`.
+fn package_latest(output: &str, yarn: bool) -> Option<String> {
+    if yarn {
+        return output
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find_map(|value| {
+                value
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+    }
+    match serde_json::from_str::<Value>(output).ok()? {
+        Value::String(version) => Some(version),
+        Value::Array(versions) => match versions.as_slice() {
+            [Value::String(version)] => Some(version.clone()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -1227,6 +1238,21 @@ fn claude_channel(context: &Context<'_>, home: &Path) -> Option<(LatestQuery, Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// npm 12.2.2 and pnpm 10.34.9 answer `view <package>@latest version
+    /// --json` with a one-element array, bun 1.4.4's `info` with the bare
+    /// string; the version is invented.
+    #[test]
+    fn a_package_managers_latest_version_is_read_in_its_own_shape() {
+        assert_eq!(
+            package_latest("[\n  \"9.8.7\"\n]\n", false).as_deref(),
+            Some("9.8.7")
+        );
+        assert_eq!(
+            package_latest("\"9.8.7\"\n", false).as_deref(),
+            Some("9.8.7")
+        );
+    }
 
     #[test]
     fn display_quotes_paths_and_preserves_ownership_context_without_secrets() {
