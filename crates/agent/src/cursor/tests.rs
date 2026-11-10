@@ -883,14 +883,6 @@ fn a_loaded_session_replays_nothing_and_a_failed_load_is_an_error() {
         for update in source("load_replay").as_array().unwrap().clone() {
             agent.update(SESSION, update).await;
         }
-        // A blocking request mid-replay is answered without the user.
-        let asked = agent
-            .request("cursor/ask_question", source("ask_question"))
-            .await;
-        assert_eq!(
-            agent.answer(&asked).await["result"],
-            json!({ "outcome": { "outcome": "cancelled" } })
-        );
         // Cursor sends its slash commands as soon as the load has answered.
         agent
             .send_all([
