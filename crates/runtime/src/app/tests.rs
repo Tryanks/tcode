@@ -9621,7 +9621,7 @@ fn failed_provider_start_keeps_the_queued_message() {
         state
             .settings
             .provider_mut(ProviderKind::ClaudeCode)
-            .display_name = Some("tryanks".into());
+            .display_name = Some("work".into());
         state.start_draft("proj-fail".into(), cwd.clone(), cx);
         state.host.send_turn(
             state.selected.as_deref().unwrap_or_default(),
@@ -9668,7 +9668,7 @@ fn failed_provider_start_keeps_the_queued_message() {
                     ..
                 })),
                 ..
-            }) if harness == "Claude Code (tryanks)"
+            }) if harness == "Claude Code (work)"
         )),
         "the failure names the Harness and its account"
     );
