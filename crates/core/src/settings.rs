@@ -483,7 +483,6 @@ pub enum ChildApprovalMode {
     AlwaysAllow,
     Manual,
     #[default]
-    #[serde(other)]
     Auto,
 }
 
@@ -1611,10 +1610,6 @@ mod tests {
                 ChildApprovalMode::AlwaysAllow,
             ),
             (r#"{"child_approval":"manual"}"#, ChildApprovalMode::Manual),
-            (
-                r#"{"child_approval":"future_value"}"#,
-                ChildApprovalMode::Auto,
-            ),
         ] {
             let settings: SubagentSettings = serde_json::from_str(json).unwrap();
             assert_eq!(settings.child_approval, expected, "{json}");
