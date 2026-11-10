@@ -311,7 +311,8 @@ pub use wire::{
 // Unreleased: a field may be missing only where the sender leaves it out at
 // its empty value; a message missing any other field no longer decodes, and
 // nothing stands in for it (a principal, scope or space without a policy was
-// read as unrestricted). HostingAction no longer reads new_code.
+// read as unrestricted). HostingAction no longer reads new_code. HostProblem's
+// credentials_unreadable.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

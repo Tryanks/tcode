@@ -1901,6 +1901,7 @@ member:
 
 source_control:
   unverified: "保存済み、未検証"
+  credentials_unreadable: "保存済みのアクセストークンを読み込めません（%{error}）。ファイルを直すまでリクエストは送信されません"
   token_label: "%{host} のアクセストークン"
   description: "Tcode はこれらの Git サービスを通じてプルリクエストとマージリクエストを読み書きします。アクセストークンは Tcode を実行しているホストにだけ保存され、保存後は再び表示されません。"
   detection_note: "gh、glab、tea、az のログインや環境変数で指定された Git サービスは自動的に表示されます。セルフホストの GitHub Enterprise、GitLab、Forgejo、Gitea は手動で追加してください。"

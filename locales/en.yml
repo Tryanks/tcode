@@ -1901,6 +1901,7 @@ member:
 
 source_control:
   unverified: "Saved, not yet verified"
+  credentials_unreadable: "Saved tokens could not be read (%{error}); nothing is sent until the file is fixed"
   token_label: "Token for %{host}"
   description: "Tcode reads and writes pull requests and merge requests through these Git platforms. Tokens are kept on the machine running Tcode and never shown again."
   detection_note: "Platforms a gh, glab, tea or az login or an environment variable names appear on their own. Add self-hosted GitHub Enterprise, GitLab, Forgejo and Gitea servers yourself."

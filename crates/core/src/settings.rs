@@ -105,6 +105,8 @@ pub enum HostProblem {
     /// The host refused the token in use, saved or from the environment, with `status` at
     /// `at` (seconds since the Unix epoch). It stays refused until the token changes.
     Rejected { status: u16, at: u64 },
+    /// The machine's saved tokens could not be read, so no request is sent with any token.
+    CredentialsUnreadable { error: String },
 }
 
 /// The account a token signs in as. Only names cross to clients, never the token.

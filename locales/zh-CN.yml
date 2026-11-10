@@ -1894,6 +1894,7 @@ member:
 
 source_control:
   unverified: "已保存，尚未验证"
+  credentials_unreadable: "无法读取保存的访问令牌（%{error}），修复该文件之前不会发送任何请求"
   token_label: "%{host} 的访问令牌"
   description: "Tcode 通过这些代码平台读取和写入拉取请求与合并请求。访问令牌只保存在运行 Tcode 的主机上，保存后不会再显示。"
   detection_note: "gh、glab、tea、az 的登录和环境变量指向的代码平台会自动出现。自托管的 GitHub Enterprise、GitLab、Forgejo、Gitea 请自行添加。"

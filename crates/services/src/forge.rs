@@ -26,7 +26,7 @@ use tcode_core::{
     },
     pull_request_watch::{PullRequestRemark, PullRequestWatchRead},
     session::ReviewSide,
-    settings::{HostSettings, HostStatus, TokenCheck},
+    settings::{HostProblem, HostSettings, HostStatus, TokenCheck},
 };
 use tcode_protocol::{
     PullRequestAction, PullRequestActionResult as Outcome, PullRequestCapabilities,
@@ -51,8 +51,8 @@ pub fn connect(
     let gitlab = crate::gitlab::GitLab::new(store.clone(), environment.clone(), viewed.clone());
     let bitbucket =
         crate::bitbucket::Bitbucket::new(store.clone(), environment.clone(), viewed.clone());
-    let azure = crate::azure::Azure::new(store, environment, viewed);
-    Hosts::new(github, forgejo, gitlab, bitbucket, azure)
+    let azure = crate::azure::Azure::new(store.clone(), environment, viewed);
+    Hosts::new(store, github, forgejo, gitlab, bitbucket, azure)
 }
 
 /// A pull request host. Each entry answers for the host the key names.
@@ -376,6 +376,7 @@ fn offered(capabilities: &PullRequestCapabilities, action: &PullRequestAction) -
 /// Routes each key and host to the implementation of its kind: the kind settings give it, else
 /// the one its name says, else GitHub, as every host was before hosts had kinds.
 struct Hosts {
+    store: SettingsStore,
     github: Arc<dyn Forge>,
     forgejo: Arc<dyn Forge>,
     gitlab: Arc<dyn Forge>,
@@ -386,6 +387,7 @@ struct Hosts {
 
 impl Hosts {
     fn new(
+        store: SettingsStore,
         github: Arc<dyn Forge>,
         forgejo: Arc<dyn Forge>,
         gitlab: Arc<dyn Forge>,
@@ -393,6 +395,7 @@ impl Hosts {
         azure: Arc<dyn Forge>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            store,
             github,
             forgejo,
             gitlab,
@@ -485,6 +488,14 @@ impl Forge for Hosts {
         for (host, github) in self.github.credential_status() {
             if self.kind(&host) == HostKind::Github {
                 status.insert(host, github);
+            }
+        }
+        // Every kind reads its saved token from the one file.
+        if let Some(error) = self.store.secrets_unreadable() {
+            for found in status.values_mut() {
+                found.problem = Some(HostProblem::CredentialsUnreadable {
+                    error: error.clone(),
+                });
             }
         }
         let mut kinds = self.kinds.write().unwrap();

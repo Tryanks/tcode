@@ -159,6 +159,11 @@ impl SettingsStore {
         read_own(&self.secrets_path).map(Option::unwrap_or_default)
     }
 
+    /// Why the saved secrets cannot be read, when they cannot.
+    pub(crate) fn secrets_unreadable(&self) -> Option<String> {
+        self.read_secrets().err().map(|error| error.to_string())
+    }
+
     /// The sensitive env values for one profile id: a built-in profile's
     /// [`Settings::builtin_profile_id`] or a user profile's slug.
     pub fn profile_secrets(&self, profile_id: &str) -> std::io::Result<BTreeMap<String, String>> {
