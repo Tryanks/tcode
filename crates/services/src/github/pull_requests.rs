@@ -97,11 +97,8 @@ impl PullRequests {
             25,
             Duration::from_millis(10),
             |keys| match self.read_summaries(keys, &options) {
-                Ok(rows) => self.complete_summaries(keys, rows, &options),
-                Err(error @ (GitHubError::Paused { .. } | GitHubError::RateLimited { .. })) => {
-                    keys.iter().map(|_| Err(error.clone())).collect()
-                }
-                Err(_) => self.complete_summaries(keys, vec![None; keys.len()], &options),
+                Ok(rows) => rows,
+                Err(error) => keys.iter().map(|_| Err(error.clone())).collect(),
             },
         )
     }
@@ -109,7 +106,7 @@ impl PullRequests {
         &self,
         keys: &[PullRequestKey],
         options: &RequestOptions,
-    ) -> Result<Vec<Option<Summary>>, GitHubError> {
+    ) -> Result<Vec<Result<Summary, GitHubError>>, GitHubError> {
         let items: Option<Vec<_>> = keys
             .iter()
             .enumerate()
@@ -149,44 +146,8 @@ impl PullRequests {
             |fields| fields,
         )
         .ok_or(GitHubError::InvalidInput)?;
-        let response: Value = self.api.graphql(host, &document, options)?.json()?;
-        Ok((0..keys.len())
-            .map(|index| decode_summary(&response["data"][format!("s{index}")]["pullRequest"]))
-            .collect())
-    }
-    fn complete_summaries(
-        &self,
-        keys: &[PullRequestKey],
-        rows: Vec<Option<Summary>>,
-        options: &RequestOptions,
-    ) -> Vec<Result<Summary, GitHubError>> {
-        if rows.iter().all(Option::is_some) {
-            return rows.into_iter().map(|row| Ok(row.unwrap())).collect();
-        }
-        let results = Mutex::new(rows.into_iter().map(|row| row.map(Ok)).collect::<Vec<_>>());
-        // Missing/malformed aliases and failed documents retry single GraphQL reads, at most four at once.
-        std::thread::scope(|scope| {
-            for lane in 0..4 {
-                let results = &results;
-                scope.spawn(move || {
-                    for index in (lane..keys.len()).step_by(4) {
-                        if results.lock().unwrap()[index].is_some() {
-                            continue;
-                        }
-                        let result = self
-                            .read_summaries(&keys[index..index + 1], options)
-                            .and_then(|mut rows| rows.remove(0).ok_or(GitHubError::NotFound));
-                        results.lock().unwrap()[index] = Some(result);
-                    }
-                });
-            }
-        });
-        results
-            .into_inner()
-            .unwrap()
-            .into_iter()
-            .map(|result| result.unwrap())
-            .collect()
+        let response: Value = self.api.graphql_partial(host, &document, options)?.json()?;
+        Ok(summaries(&response, keys.len()))
     }
     pub fn stack(&self, key: &PullRequestKey) -> Result<PullRequestStackState, GitHubError> {
         if key.host != "github.com" {
@@ -283,6 +244,44 @@ fn decode_summary(raw: &Value) -> Option<Summary> {
         stack_number: raw.get("stack").map(|stack| stack["number"].as_u64()),
     })
 }
+/// Each of `count` summaries a batched answer holds, alias `s{index}` for the index-th: the pull
+/// request its `data` names, or the errors whose `path` begins at that alias, and any that
+/// name no path. A field under the alias that failed fails the alias: its `null` would read as
+/// an answer. GitHub types an error `NOT_FOUND` for a repository or pull request the
+/// credential cannot see.
+fn summaries(response: &Value, count: usize) -> Vec<Result<Summary, GitHubError>> {
+    let errors = response["errors"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    (0..count)
+        .map(|index| {
+            let alias = format!("s{index}");
+            let own: Vec<_> = errors
+                .iter()
+                .filter(|error| {
+                    error.get("path").is_none_or(Value::is_null)
+                        || error["path"][0].as_str() == Some(alias.as_str())
+                })
+                .collect();
+            if own.is_empty() {
+                return decode_summary(&response["data"][&alias]["pullRequest"])
+                    .ok_or(GitHubError::InvalidResponse);
+            }
+            if own.iter().all(|error| error["type"] == "NOT_FOUND") {
+                return Err(GitHubError::NotFound);
+            }
+            Err(GitHubError::Response {
+                status: 200,
+                messages: own
+                    .iter()
+                    .filter_map(|error| error["message"].as_str().map(str::to_owned))
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
 pub(super) fn decode_stack(raw: &Value, repository: &Repository) -> Option<PullRequestStack> {
     let number = raw["number"].as_u64()?;
     let id = raw["id"].as_u64()?.to_string();
@@ -354,6 +353,43 @@ mod tests {
             "latestReviews": { "nodes": [] },
             "commits": { "nodes": [{ "commit": { "statusCheckRollup": { "state": "EXPECTED" } } }] }
         })
+    }
+
+    /// A batched answer in which some aliases failed. Shape: the GraphQL specification's
+    /// response, `data` beside `errors` whose `path` names the failed field (spec.graphql.org,
+    /// "Response", "Errors"), and GitHub's `type` on each error, `NOT_FOUND` for a repository
+    /// the credential cannot see; each alias is the `repository` field the summary document
+    /// asks for. Content is invented.
+    #[test]
+    fn a_batch_answers_each_pull_request_by_its_own_alias() {
+        let response = json!({
+            "data": {
+                "s0": { "pullRequest": node() },
+                "s1": null,
+                "s2": { "pullRequest": null },
+            },
+            "errors": [
+                { "type": "NOT_FOUND", "path": ["s1"],
+                  "message": "Could not resolve to a Repository with the name 'example-org/gone'." },
+                { "type": "FORBIDDEN", "path": ["s2", "pullRequest"],
+                  "message": "Resource not accessible by integration" },
+            ]
+        });
+        let read = summaries(&response, 3);
+        assert_eq!(
+            read[0]
+                .as_ref()
+                .map(|summary| summary.snapshot.title.as_str()),
+            Ok("Teach the parser tabs")
+        );
+        assert_eq!(read[1].as_ref().err(), Some(&GitHubError::NotFound));
+        assert_eq!(
+            read[2].as_ref().err(),
+            Some(&GitHubError::Response {
+                status: 200,
+                messages: vec!["Resource not accessible by integration".into()],
+            })
+        );
     }
 
     #[test]

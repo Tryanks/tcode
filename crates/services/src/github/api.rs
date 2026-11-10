@@ -193,13 +193,36 @@ impl GitHubApi {
         request: RestRequest<'_>,
         options: &RequestOptions,
     ) -> Result<Response, GitHubError> {
-        self.execute(host, request, None, options)
+        self.execute(host, request, None, false, options)
     }
 
     pub fn graphql(
         &self,
         host: &str,
         document: &Document,
+        options: &RequestOptions,
+    ) -> Result<Response, GitHubError> {
+        self.graphql_answer(host, document, false, options)
+    }
+
+    /// A GraphQL answer whose `data` stands beside its `errors`, for the caller to read field by
+    /// field: the GraphQL specification ("Response", "Errors") lets a field fail on its own,
+    /// with an error naming its `path` and the rest of `data` still answered. An answer
+    /// without `data` fails as [`Self::graphql`] does.
+    pub fn graphql_partial(
+        &self,
+        host: &str,
+        document: &Document,
+        options: &RequestOptions,
+    ) -> Result<Response, GitHubError> {
+        self.graphql_answer(host, document, true, options)
+    }
+
+    fn graphql_answer(
+        &self,
+        host: &str,
+        document: &Document,
+        partial: bool,
         options: &RequestOptions,
     ) -> Result<Response, GitHubError> {
         let body = serde_json::json!({"query": document.query, "variables": document.variables});
@@ -214,6 +237,7 @@ impl GitHubApi {
                 answers: &[],
             },
             Some(&document.query),
+            partial,
             options,
         )
     }
@@ -269,6 +293,7 @@ impl GitHubApi {
         raw_host: &str,
         input: RestRequest<'_>,
         graphql: Option<&str>,
+        partial: bool,
         options: &RequestOptions,
     ) -> Result<Response, GitHubError> {
         let host = normalize_host(raw_host)?;
@@ -444,16 +469,18 @@ impl GitHubApi {
             self.credentials.invalidate(host);
             return Err(GitHubError::Unauthorized);
         }
+        let partial = partial && parsed.get("data").is_some_and(|data| data.is_object());
         if status == 404
-            || errors.is_some_and(|errors| {
-                errors.iter().all(|error| {
-                    error.get("type").and_then(|value| value.as_str()) == Some("NOT_FOUND")
+            || !partial
+                && errors.is_some_and(|errors| {
+                    errors.iter().all(|error| {
+                        error.get("type").and_then(|value| value.as_str()) == Some("NOT_FOUND")
+                    })
                 })
-            })
         {
             return Err(GitHubError::NotFound);
         }
-        if errors.is_some() {
+        if errors.is_some() && !partial {
             return Err(GitHubError::Response { status, messages });
         }
         if (200..300).contains(&status)
