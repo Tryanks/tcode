@@ -115,7 +115,7 @@ impl TestAppContext {
                 let mut host_cx = self.host_cx();
                 let mut state = state.borrow_mut();
                 message(&mut state, &mut host_cx);
-                state.sync_terminal_handles();
+                self.after_input(&mut state);
             }
             while let Ok(line) = self.outgoing_rx.try_recv() {
                 self.outgoing.push(line);
@@ -136,12 +136,19 @@ impl TestAppContext {
             }
             break;
         }
+        // What a test changed through `TestEntity::update` reaches clients too.
+        self.after_input(&mut state.borrow_mut());
+    }
+
+    /// What `pipe.rs::host_loop` does after each input it handles.
+    fn after_input(&mut self, state: &mut TestClientState) {
         let mut host_cx = self.host_cx();
-        state.borrow().sync_terminal_handles();
+        state.sync_terminal_handles();
+        state.reap_terminal_projections();
         self.domain_diff
             .as_mut()
             .expect("test domain diff must be initialized")
-            .emit_changes(&mut state.borrow_mut(), &mut host_cx);
+            .emit_changes(state, &mut host_cx);
     }
 
     /// Park repeatedly until `done` observes the state a background chain
@@ -227,6 +234,7 @@ impl TestAppContext {
         };
         let mut host_cx = self.host_cx();
         message(&mut state.borrow_mut(), &mut host_cx);
+        self.after_input(&mut state.borrow_mut());
         while let Ok(line) = self.outgoing_rx.try_recv() {
             self.outgoing.push(line);
         }
@@ -277,8 +285,9 @@ impl TestEntity {
 
     pub(super) fn deliver(&self, cx: &mut TestAppContext, id: u64, payload: ClientPayload) {
         let mut host_cx = cx.host_cx();
+        let mut state = self.0.borrow_mut();
         crate::pipe::handle_client_message(
-            &mut self.0.borrow_mut(),
+            &mut state,
             &mut host_cx,
             ClientMessage {
                 principal: None,
@@ -288,6 +297,7 @@ impl TestEntity {
             },
             tcode_client::attachment::AttachmentPolicy::LOCAL,
         );
+        cx.after_input(&mut state);
     }
 
     pub(super) fn update<R>(
