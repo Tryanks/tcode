@@ -4,10 +4,6 @@ use control_mcp::{BatchResult, CancelNotifyParams, NotifyWhenParams, Outcome};
 use tcode_core::control::{ControlWatch, WatchEvent, action};
 use tcode_core::notice::CONTROL_CALLBACK_PREFIX;
 
-/// How much of a question or opening message a callback quotes; the rest is one
-/// `get_thread` or `outline` away.
-const QUOTE_HEAD_CHARS: usize = 120;
-
 #[derive(Serialize)]
 struct WatchAnswer<'a> {
     id: &'a str,
@@ -49,16 +45,6 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn one_line_head(text: &str, chars: usize) -> String {
-    let line = one_line(text);
-    if line.chars().count() <= chars {
-        return line;
-    }
-    let mut head: String = line.chars().take(chars).collect();
-    head.push('…');
-    head
-}
-
 /// `[<status>, ]turn <n> from "<opening message>"`: which turn ended, numbered as `outline`
 /// numbers them, so a watcher can tell one turn of the thread from the next.
 fn last_turn_detail(timeline: &Timeline, event: WatchEvent) -> Option<String> {
@@ -77,10 +63,7 @@ fn last_turn_detail(timeline: &Timeline, event: WatchEvent) -> Option<String> {
             }) => {
                 let own = context_len.and_then(|len| text.get(len..)).unwrap_or(text);
                 let (own, _) = tcode_services::thread_index::redact(own);
-                Some(format!(
-                    " from {}",
-                    quoted(&one_line_head(&own, QUOTE_HEAD_CHARS))
-                ))
+                Some(format!(" from {}", quoted(&one_line(&own))))
             }
             _ => None,
         });
@@ -268,7 +251,7 @@ impl AppState {
                     let question = pending
                         .questions
                         .first()
-                        .map(|question| one_line_head(&question.question, QUOTE_HEAD_CHARS))
+                        .map(|question| one_line(&question.question))
                         .unwrap_or_default();
                     format!("{} (request_id: {})", quoted(&question), pending.request_id)
                 }),
