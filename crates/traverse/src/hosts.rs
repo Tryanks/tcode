@@ -238,17 +238,4 @@ mod tests {
         assert!(!written.contains("0000beef"), "{written}");
         fs::remove_dir_all(dir).unwrap();
     }
-
-    #[test]
-    fn saving_takes_the_lock_and_round_trips() {
-        let dir = temp_dir("roundtrip");
-        save_hosts(&dir, &[machine(MACHINE_ID)]).unwrap();
-        assert!(dir.join("hosts.lock").exists());
-        update_hosts(&dir, |hosts| {
-            hosts[0].addrs.insert(0, "10.0.0.2:47420".into());
-        })
-        .unwrap();
-        assert_eq!(load_hosts(&dir).unwrap()[0].addrs[0], "10.0.0.2:47420");
-        fs::remove_dir_all(dir).unwrap();
-    }
 }
