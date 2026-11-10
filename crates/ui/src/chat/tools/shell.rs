@@ -505,7 +505,6 @@ fn output_handlers(id: &str, ctx: &mut ToolCtx<'_, '_>) -> OutputHandlers {
 const DEFAULT_COLS: u16 = 80;
 /// Grid rows one panel shows, command line included.
 const MAX_ROWS: usize = 16;
-const MAX_COMMAND_ROWS: usize = 4;
 /// Rows of output a panel lays out from text at most: a screen and the
 /// scrollback a host's frame of a finished command carries.
 const FRAME_ROWS: usize = MAX_ROWS + tcode_protocol::STORED_OUTPUT_HISTORY;
@@ -1150,7 +1149,7 @@ fn command_model(
     command_theme: Option<&CommandTheme>,
 ) -> (TerminalModel, usize) {
     let cols = cols.max(2);
-    let command = clamp_command(command, cols);
+    let command = command.replace('\r', "");
     let highlights = command_theme
         .map(|theme| highlight::highlight_source(&command, "bash", &theme.highlight_theme))
         .unwrap_or_default();
@@ -1238,37 +1237,6 @@ fn faded_command_rgb(foreground: Hsla, background: Hsla) -> (u8, u8, u8) {
     )
 }
 
-fn clamp_command(command: &str, cols: u16) -> String {
-    let cols = usize::from(cols.max(2));
-    let command = command.replace('\r', "");
-    let mut result = String::new();
-    let mut row = 0;
-    let mut col = 0;
-    for text in command.graphemes(true) {
-        let width = text.width().min(2);
-        let next_row = text == "\n" || col + width > cols;
-        if next_row && row + 1 == MAX_COMMAND_ROWS {
-            // Make room on the last visible row without splitting a grapheme
-            // or putting the ellipsis onto a fifth row.
-            if col == cols {
-                let (offset, _) = result.grapheme_indices(true).next_back().unwrap();
-                result.truncate(offset);
-            }
-            result.push('…');
-            break;
-        }
-        if next_row {
-            row += 1;
-            col = 0;
-        }
-        result.push_str(text);
-        if text != "\n" {
-            col += width;
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use gpui::rgb;
@@ -1313,17 +1281,7 @@ mod tests {
     }
 
     #[test]
-    fn command_cells_preserve_graphemes_and_cell_width_with_bounded_wrapping() {
-        {
-            let command = "x".repeat(usize::from(DEFAULT_COLS) * MAX_COMMAND_ROWS + 1);
-            let (model, rows) = command_model(&command, DEFAULT_COLS, Some(&dark_command_theme()));
-            assert_eq!(rows, MAX_COMMAND_ROWS);
-            assert!(
-                model
-                    .cell(MAX_COMMAND_ROWS - 1, usize::from(DEFAULT_COLS) - 1)
-                    .is_some_and(|cell| cell.text == "…")
-            );
-        }
+    fn command_cells_preserve_graphemes_and_cell_width_as_they_wrap() {
         {
             let (model, rows) = command_model("a中文b", 8, Some(&dark_command_theme()));
             assert_eq!(rows, 1);
@@ -1354,14 +1312,6 @@ mod tests {
                 (2, 3, "z"),
             ] {
                 assert_eq!(model.cell(row, col).unwrap().text, text);
-            }
-
-            for command in ["中文".repeat(5), "中文\n".repeat(5)] {
-                let (model, rows) = command_model(&command, 4, None);
-                assert_eq!(rows, MAX_COMMAND_ROWS);
-                assert_eq!(model.cell(3, 0).unwrap().text, "中");
-                assert_eq!(model.cell(3, 2).unwrap().text, "…");
-                assert!(model.cell(3, 3).is_none_or(|cell| cell.text.is_empty()));
             }
         }
         {
