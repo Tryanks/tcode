@@ -319,11 +319,6 @@ impl CommandPalette {
         self.select_current = self.window_state.read(cx).palette_picker.is_some();
     }
 
-    #[cfg(test)]
-    pub(crate) fn query_focus_handle(&self, cx: &gpui::App) -> FocusHandle {
-        self.query.read(cx).focus_handle(cx)
-    }
-
     /// Debounce, then ask each host for content hits. The index, cache and
     /// session metadata are host-owned; this keeps only the debounce and the
     /// generation guard that discards an answer a newer query superseded.

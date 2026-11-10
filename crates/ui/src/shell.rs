@@ -13870,11 +13870,14 @@ pub(crate) mod tests {
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         state.update(cx, |state, cx| state.open_palette(cx));
         crate::test_frames::draw_settled(cx);
-        let query = shell.read_with(cx, |shell, cx| {
-            let palette = shell.palette.read(cx);
-            palette.query_focus_handle(cx)
-        });
-        cx.update(|window, _| assert!(query.is_focused(window)));
+        // Its query, inside it, holds the keyboard, not the palette itself.
+        let palette = shell.read_with(cx, |shell, cx| shell.palette.focus_handle(cx));
+        let query_held = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                palette.contains_focused(window, cx) && !palette.is_focused(window)
+            })
+        };
+        assert!(query_held(cx));
         serve_thread(&host, "thread-1");
         store.update(cx, |store, cx| store.put_back_thread("thread-1".into(), cx));
         await_restore_update(&shell, cx, |store, cx| {
@@ -13882,7 +13885,7 @@ pub(crate) mod tests {
         });
         crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
-        cx.update(|window, _| assert!(query.is_focused(window), "it keeps the keyboard"));
+        assert!(query_held(cx), "it keeps the keyboard");
         state.update(cx, |state, cx| state.close_palette(cx));
         crate::test_frames::draw_settled(cx);
 
@@ -14294,8 +14297,10 @@ pub(crate) mod tests {
             if project_count > 1 {
                 cx.update(|window, cx| {
                     let palette = &shell.read(cx).palette;
+                    // Its query holds the keyboard where the palette
+                    // itself does not.
                     assert_eq!(
-                        palette.read(cx).query_focus_handle(cx).is_focused(window),
+                        !palette.read(cx).focus_handle(cx).is_focused(window),
                         !(compact && mobile),
                         "the chooser raises the keyboard only off a phone"
                     );
