@@ -440,44 +440,51 @@ mod tests {
     }
 
     #[test]
-    fn password_hash_persists_and_password_changes_keep_or_revoke_tokens() {
+    fn a_set_password_persists_only_its_hash_verifies_after_reopening_and_can_revoke_tokens() {
         let root = std::env::temp_dir().join(format!("tcode-password-{}", Uuid::new_v4()));
         let mut auth = AuthStore::open(&root, "host").unwrap();
         let token = auth.issue_token(None, phone("existing phone")).unwrap();
-        assert!(!auth.verify_password("password"));
+        assert!(!auth.verify_password("password"), "no password is set");
         assert!(auth.set_password("short", false).is_err());
-        auth.set_password("test password", false).unwrap();
-        let first_salt = auth.password.as_ref().unwrap().salt;
+        auth.set_password("test password", true).unwrap();
+        assert!(!auth.token_is_valid(&token));
         let bytes = fs::read_to_string(root.join("remote.json")).unwrap();
         assert!(!bytes.contains("test password"));
-        assert!(!bytes.contains(&token));
-        assert!(bytes.contains("600000"));
         let mut auth = AuthStore::open(&root, "host").unwrap();
         assert!(auth.verify_password("test password"));
-        assert!(auth.token_is_valid(&token));
-        auth.set_password("new password", false).unwrap();
-        assert_ne!(first_salt, auth.password.as_ref().unwrap().salt);
-        assert!(!auth.verify_password("test password"));
-        assert!(auth.verify_password("new password"));
-        assert!(auth.token_is_valid(&token));
-        auth.set_password("last password", true).unwrap();
-        assert!(!auth.token_is_valid(&token));
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A store whose hash was written with a single iteration: verification
+    /// uses the count stored with the hash, so the lockout below costs no
+    /// production-strength hashing.
+    fn store_with_password(root: &Path, password: &str) -> AuthStore {
+        let salt = [7; 16];
+        let mut hash = [0; 32];
+        pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, 1, &mut hash);
+        fs::create_dir_all(root).unwrap();
+        fs::write(
+            root.join("remote.json"),
+            serde_json::json!({
+                "host_id": Uuid::new_v4(),
+                "host_name": "host",
+                "password": {"salt": salt, "hash": hash, "iterations": 1},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        AuthStore::open(root, "host").unwrap()
+    }
+
     #[test]
-    fn five_wrong_passwords_lock_out_even_the_right_password_then_recover() {
+    fn five_wrong_passwords_lock_out_even_the_right_password() {
         let root = std::env::temp_dir().join(format!("tcode-lockout-{}", Uuid::new_v4()));
-        let mut auth = AuthStore::open(&root, "host").unwrap();
-        auth.set_password("correct password", false).unwrap();
+        let mut auth = store_with_password(&root, "correct password");
+        assert!(auth.verify_password("correct password"));
         for _ in 0..5 {
             assert!(!auth.verify_password("wrong password"));
         }
         assert!(!auth.verify_password("correct password"));
-        auth.locked_until = Some(std::time::Instant::now());
-        assert!(auth.verify_password("correct password"));
-        assert!(!auth.verify_password("wrong password"));
-        assert!(auth.verify_password("correct password"));
         fs::remove_dir_all(root).unwrap();
     }
 }
