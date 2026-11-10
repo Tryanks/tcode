@@ -9358,16 +9358,18 @@ fn submitted_queue_head_cannot_leak_delivery_after_turn_completion() {
 
 #[test]
 fn event_stream_end_closes_only_its_own_live_provider_in_any_residency() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-stream-ownership");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
     for parked in [false, true] {
         for (live, current) in [(true, true), (true, false), (false, false)] {
-            let cx = &mut TestAppContext::default();
-            let store = TestStore::new("tcode-stream-ownership");
-            let state = cx.new_entity(TestClientState::new((*store).clone()));
+            let id = format!("session-{parked}-{live}-{current}");
+            let id = id.as_str();
             let (commands, _receiver) = smol::channel::unbounded();
             let (old_commands, _old_receiver) = smol::channel::unbounded();
             state.update(cx, |state, cx| {
                 let mut session = live_session(ProviderKind::ClaudeCode, commands.clone());
-                session.meta.id = "session".into();
+                session.meta.id = id.into();
                 session.turn_in_flight = live;
                 session.background_task_count = if live { 2 } else { 0 };
                 if !live {
@@ -9376,21 +9378,21 @@ fn event_stream_end_closes_only_its_own_live_provider_in_any_residency() {
                 state.store.upsert_meta(&session.meta).unwrap();
                 state.sessions.push(session.meta.clone());
                 if parked {
-                    state.residents.parked.insert("session".into(), session);
+                    state.residents.parked.insert(id.into(), session);
                 } else {
                     state.install_selected(session);
                 }
                 state.on_event_stream_ended(
-                    "session",
+                    id,
                     if current { &commands } else { &old_commands },
                     cx,
                 );
                 assert_eq!(
-                    state.turn_running_for("session"),
+                    state.turn_running_for(id),
                     live && !current,
                     "parked={parked}, live={live}, current={current}"
                 );
-                if let Some(session) = state.resident("session") {
+                if let Some(session) = state.resident(id) {
                     assert_eq!(
                         matches!(session.runtime, Runtime::Live(_)),
                         live && !current
@@ -9401,7 +9403,7 @@ fn event_stream_end_closes_only_its_own_live_provider_in_any_residency() {
             });
             cx.run_until_parked();
             let closes = store
-                .read_events("session")
+                .read_events(id)
                 .unwrap()
                 .iter()
                 .filter(|stored| matches!(stored.event, AgentEvent::SessionClosed { .. }))
@@ -13267,6 +13269,9 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
 
 #[test]
 fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("completion-admission");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
     for case in [
         "valid",
         "renamed",
@@ -13274,43 +13279,43 @@ fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one()
         "archived_parent",
         "deleted_parent",
     ] {
-        let cx = &mut TestAppContext::default();
-        let store = TestStore::new("completion-admission");
-        let state = cx.new_entity(TestClientState::new((*store).clone()));
+        let ancestor_id = format!("{case}-ancestor");
+        let parent_id = format!("{case}-parent");
+        let child_id = format!("{case}-child");
         let (parent_commands, parent_received) = smol::channel::unbounded();
         let (child_commands, _child_received) = smol::channel::unbounded();
         state.update(cx, |state, _| {
             let mut ancestor = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
-            ancestor.id = "ancestor".into();
+            ancestor.id = ancestor_id.clone();
             ancestor.settled_at = Some(1);
             let mut parent = live_session(ProviderKind::Codex, parent_commands);
-            parent.meta.id = "parent".into();
-            parent.meta.parent_session_id = Some("ancestor".into());
+            parent.meta.id = parent_id.clone();
+            parent.meta.parent_session_id = Some(ancestor_id.clone());
             parent.meta.settled_at = Some(1);
             let mut child = live_session(ProviderKind::Codex, child_commands);
-            child.meta.id = "child".into();
-            child.meta.parent_session_id = Some("parent".into());
+            child.meta.id = child_id.clone();
+            child.meta.parent_session_id = Some(parent_id.clone());
             child.meta.expectation = Some(ChildExpectation::opened(1));
             state
                 .sessions
                 .extend([ancestor, parent.meta.clone(), child.meta.clone()]);
-            state.residents.parked.insert("parent".into(), parent);
+            state.residents.parked.insert(parent_id.clone(), parent);
             state.install_selected(child);
         });
         // Each command lands before the child runs and reports.
         let command = match case {
             "renamed" => Some(Command::RenameSession {
-                session_id: "child".into(),
+                session_id: child_id.clone(),
                 title: "Renamed".into(),
             }),
             "archived_child" => Some(Command::ArchiveSession {
-                session_id: "child".into(),
+                session_id: child_id.clone(),
             }),
             "archived_parent" => Some(Command::ArchiveSession {
-                session_id: "parent".into(),
+                session_id: parent_id.clone(),
             }),
             "deleted_parent" => Some(Command::DeleteSession {
-                session_id: "parent".into(),
+                session_id: parent_id.clone(),
                 remove_worktree: false,
             }),
             _ => None,
@@ -13320,7 +13325,7 @@ fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one()
         }
         cx.run_until_parked();
         state.update(cx, |state, cx| {
-            if state.resident("child").is_none() {
+            if state.resident(&child_id).is_none() {
                 return;
             }
             for event in [
@@ -13330,7 +13335,7 @@ fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one()
                 report_result_event("rep", "completion evidence"),
                 completed_turn("finished-run"),
             ] {
-                state.on_event("child", event, cx);
+                state.on_event(&child_id, event, cx);
             }
         });
         if case == "valid" || case == "renamed" {
@@ -13338,11 +13343,11 @@ fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one()
             assert!(
                 matches!(parent_received.try_recv().unwrap(), SessionCommand::SendTurn { text, .. } if text.contains("completion evidence"))
             );
-            state.read(|state| assert!(!state.find_meta("parent").unwrap().is_settled()));
+            state.read(|state| assert!(!state.find_meta(&parent_id).unwrap().is_settled()));
         } else {
             cx.run_until_parked();
             state.read(|state| {
-                if let Some(parent) = state.find_meta("parent") {
+                if let Some(parent) = state.find_meta(&parent_id) {
                     assert!(parent.is_settled(), "{case}");
                 }
             });
@@ -13354,7 +13359,12 @@ fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one()
                 "{case}"
             );
         }
-        state.read(|state| assert!(state.find_meta("ancestor").unwrap().is_settled(), "{case}"));
+        state.read(|state| {
+            assert!(
+                state.find_meta(&ancestor_id).unwrap().is_settled(),
+                "{case}"
+            )
+        });
     }
 }
 
