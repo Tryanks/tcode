@@ -206,11 +206,8 @@ mod tests {
         });
         crate::store::tests::seed_full_scope(&store, &replies, deferred, cx);
         let pump_link = link.clone();
-        let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            pump_link
-                .pump_with_timer(|delay| executor.timer(delay))
-                .await;
+            pump_link.pump().await;
         });
         let baseline = || {
             for (topic, event) in [

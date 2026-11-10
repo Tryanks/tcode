@@ -975,9 +975,8 @@ mod tests {
             let (replies, from_host) = async_channel::unbounded();
             let link = HostLink::new(to_host, from_host);
             let image = cx.update(|cx| HostImages::open(link.clone(), cx));
-            let executor = cx.background_executor.clone();
             let pump = cx.background_executor.spawn(async move {
-                link.pump_with_timer(|delay| executor.timer(delay)).await;
+                link.pump().await;
             });
             Self {
                 image,
@@ -1419,9 +1418,8 @@ mod tests {
         crate::store::tests::seed_full_scope(&store, &replies, Vec::new(), cx);
         // Keep navigation out of this test when its Index baseline arrives.
         store.update(cx, |store, cx| store.show_alone("selected".into(), cx));
-        let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            link.pump_with_timer(|delay| executor.timer(delay)).await;
+            link.pump().await;
         });
         let project = Project::from_root(PathBuf::from("/host/project"));
         let drawn = Rc::new(RefCell::new(Vec::new()));
@@ -1583,9 +1581,8 @@ mod tests {
         let (replies, from_host) = async_channel::unbounded();
         let link = HostLink::new(to_host, from_host);
         let host = cx.update(|cx| HostImages::open(link.clone(), cx));
-        let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            link.pump_with_timer(|delay| executor.timer(delay)).await;
+            link.pump().await;
         });
         // These paths exist only on the scripted host, never on the viewing client.
         let cwd = std::env::current_dir().unwrap().join("host-only-images");

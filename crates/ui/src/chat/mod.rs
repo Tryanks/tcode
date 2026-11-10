@@ -2217,11 +2217,10 @@ pub(crate) mod tests {
             let (to_host, outgoing) = async_channel::unbounded::<String>();
             let (incoming, from_host) = async_channel::unbounded::<String>();
             let link = tcode_client::HostLink::new(to_host, from_host);
-            let executor = cx.background_executor.clone();
             let pump = cx.background_executor.spawn({
                 let link = link.clone();
                 async move {
-                    link.pump_with_timer(|delay| executor.timer(delay)).await;
+                    link.pump().await;
                 }
             });
             let store = cx.new(|cx| {

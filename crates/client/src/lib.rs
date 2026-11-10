@@ -13,7 +13,6 @@ pub mod speech;
 pub mod words;
 
 use std::collections::{HashMap, VecDeque};
-use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -352,16 +351,6 @@ impl HostLink {
         self.save_outbox();
         self.inner.pending.lock().unwrap().clear();
         self.inner.events_tx.close();
-    }
-
-    /// [`HostLink::pump`]: the link arms no timer, so `timer` is never
-    /// called. `crates/ui` still passes one.
-    pub async fn pump_with_timer<F, T>(&self, _timer: F)
-    where
-        F: Fn(std::time::Duration) -> T,
-        T: Future,
-    {
-        self.pump().await;
     }
 
     /// Save the outbox when it changed, without holding it locked while the

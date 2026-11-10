@@ -420,11 +420,8 @@ mod tests {
         let deferred: Vec<String> = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
-        let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            pump_link
-                .pump_with_timer(|delay| executor.timer(delay))
-                .await;
+            pump_link.pump().await;
         });
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
