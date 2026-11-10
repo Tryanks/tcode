@@ -405,15 +405,7 @@ impl TraversePanel {
                         compact,
                         set_enabled,
                     )
-                    .accessory(chip.map(|chip| {
-                        // The accessory takes the room the labels leave, so the
-                        // chip sits by the switch at the row's end.
-                        h_flex()
-                            .flex_1()
-                            .justify_end()
-                            .child(chip)
-                            .into_any_element()
-                    }))
+                    .accessory(chip.map(IntoElement::into_any_element))
                     .into_any_element(),
                 };
                 v_flex()

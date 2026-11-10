@@ -525,7 +525,6 @@ impl RenderOnce for ToggleRow {
             .clone();
         let row_focus = focus.clone();
         let key_toggle = on_toggle.clone();
-        let has_accessory = accessory.is_some();
         let error = crate::motion::shown(
             SharedString::from(format!("{id}-error")),
             error,
@@ -573,19 +572,18 @@ impl RenderOnce for ToggleRow {
                 .on_click(move |_, window, cx| on_toggle(&!checked, window, cx))
         })
         .child(
-            row_labels(title, description, reset, compact, cx)
-                .children(error.map(|error| {
-                    error.fold(
-                        div()
-                            .text_secondary(compact, cx)
-                            .text_color(cx.theme().danger_foreground)
-                            .child(error.value.clone()),
-                    )
-                }))
-                // An accessory takes the room the labels leave.
-                .when(has_accessory, |labels| labels.flex_none()),
+            row_labels(title, description, reset, compact, cx).children(error.map(|error| {
+                error.fold(
+                    div()
+                        .text_secondary(compact, cx)
+                        .text_color(cx.theme().danger_foreground)
+                        .child(error.value.clone()),
+                )
+            })),
         )
-        .children(accessory)
+        // The labels give up room to an accessory, which keeps its own width
+        // beside the switch.
+        .children(accessory.map(|accessory| div().flex_none().child(accessory)))
         .child(Switch::new(id).checked(checked).disabled(disabled))
     }
 }
@@ -801,5 +799,45 @@ mod tests {
                 "compact {compact}: labels {labels:?} past the row {row:?}"
             );
         }
+    }
+
+    /// A switch row with a long title and an accessory between the two.
+    struct AccessoryRow;
+
+    impl Render for AccessoryRow {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w_full().child(
+                ToggleRow::new(
+                    "row",
+                    "インターネット".repeat(10),
+                    true,
+                    false,
+                    |_, _, _| {},
+                )
+                .accessory(Some(
+                    div()
+                        .debug_selector(|| "accessory".into())
+                        .w(px(80.))
+                        .h(px(20.))
+                        .into_any_element(),
+                )),
+            )
+        }
+    }
+
+    /// The labels give up room to the accessory, which sits inside the row
+    /// with the switch after it: labels as wide as the row pushed both out,
+    /// and a space's agent lost its switch when its models button showed.
+    #[gpui::test]
+    fn an_accessory_leaves_the_switch_in_its_row(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| AccessoryRow);
+        cx.simulate_resize(size(px(320.), px(600.)));
+        crate::test_frames::draw_settled(cx);
+        let row = cx.debug_bounds("row").unwrap();
+        let accessory = cx.debug_bounds("accessory").unwrap();
+        assert!(
+            accessory.size.width > px(0.) && accessory.right() < row.right(),
+            "accessory {accessory:?} leaves no room for the switch in the row {row:?}"
+        );
     }
 }
