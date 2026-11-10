@@ -253,7 +253,6 @@ fn http_get(url: &str) -> Result<Vec<u8>, RegistryError> {
     let mut bytes = Vec::new();
     response
         .into_reader()
-        .take(64 * 1024 * 1024)
         .read_to_end(&mut bytes)
         .map_err(|err| RegistryError::Network(err.to_string()))?;
     Ok(bytes)
@@ -352,7 +351,7 @@ fn download(
     let total: Option<u64> = response
         .header("Content-Length")
         .and_then(|len| len.parse().ok());
-    let mut reader = response.into_reader().take(1024 * 1024 * 1024);
+    let mut reader = response.into_reader();
     let mut bytes = Vec::with_capacity(total.unwrap_or(0) as usize);
     let mut buf = [0u8; 64 * 1024];
     loop {
@@ -436,24 +435,11 @@ fn resolve_cmd(dir: &Path, cmd: &str) -> Result<Command, RegistryError> {
         )));
     }
     let path = dir.join(relative);
-    // A bare-executable download keeps the archive's file name, which need not
-    // match `cmd`; fall back to the single file we wrote.
-    let path = if path.exists() {
-        path
-    } else {
-        let mut entries = std::fs::read_dir(dir)?
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.is_file())
-            .collect::<Vec<_>>();
-        if entries.len() == 1 {
-            entries.remove(0)
-        } else {
-            return Err(RegistryError::Install(format!(
-                "`{cmd}` is missing from the downloaded archive"
-            )));
-        }
-    };
+    if !path.exists() {
+        return Err(RegistryError::Install(format!(
+            "`{cmd}` is missing from the downloaded archive"
+        )));
+    }
     let canonical_path = path.canonicalize()?;
     if !canonical_path.starts_with(dir.canonicalize()?) || !canonical_path.is_file() {
         return Err(RegistryError::Install(format!(
