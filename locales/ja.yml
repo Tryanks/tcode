@@ -1720,6 +1720,7 @@ spaces:
   intro: "共有スペースでは、選んだプロジェクトだけを再利用できる 1 つのリンクで共有します。"
   new: "新しい共有スペース"
   not_hosting: "このマシンではリモートアクセスがオフになっています。"
+  machine_unnamed: "そのマシン"
   detached: "ホストへの接続が解除されました。"
   missing: "その共有スペースはもう存在しません。"
   failed: "共有スペースを更新できませんでした：%{error}"
@@ -1730,7 +1731,7 @@ spaces:
   rename_action: "保存"
   delete: "共有スペースを削除"
   delete_title: "「%{name}」を削除しますか？"
-  delete_description: "メンバーとこのマシンとのペアリングは解除されます。プロジェクトとそのスレッドは残ります。"
+  delete_description: "メンバーと %{machine} とのペアリングは解除されます。プロジェクトとそのスレッドは残ります。"
   delete_description_empty: "リンクは使えなくなります。プロジェクトとそのスレッドは残ります。"
   delete_action: "削除"
   summary:
@@ -1746,7 +1747,7 @@ spaces:
     title: "新しい共有スペース"
     share_title: "新しい共有スペースを作成して共有"
     placeholder: "共有スペース名"
-    disclosure: "メンバーはこのマシンのハーネスと権限でコマンドを実行します。"
+    disclosure: "メンバーは %{machine} のハーネスと権限でコマンドを実行します。"
     action: "作成"
   link:
     description: "QR コードをスキャンするか、このリンクを送信してください。参加した人に表示されるのは「%{name}」だけです。"
@@ -1756,14 +1757,14 @@ spaces:
     enabled: "リンクを有効にする"
     paused: "リンクは一時停止中です。メンバーは引き続きアクセスできます。新しい人が参加できるようにするには、オンにしてください。"
     dead: "5 回失敗したため、リンクが無効になりました。リンクを再生成してください。"
-    pairing_off: "このマシンは新しいデバイスを受け入れていません。リンクを使うには「新しいデバイスを受け入れる」をオンにしてください。"
+    pairing_off: "%{machine} は新しいデバイスを受け入れていません。リンクを使うには「新しいデバイスを受け入れる」をオンにしてください。"
     unavailable: "リンクはまだ利用できません。"
   projects:
     title: "プロジェクト"
     empty: "プロジェクトはまだありません。ここで追加するか、サイドバーのプロジェクトのメニューで「共有」を選んでください。"
     add: "プロジェクトを追加"
     removed: "削除されたプロジェクト"
-    unknown: "このマシン上のプロジェクト"
+    unknown: "%{machine} 上のプロジェクト"
     remove: "%{name} の共有を停止"
   members:
     title: "メンバー"
@@ -1771,7 +1772,7 @@ spaces:
     move: "移動先…"
     remove: "削除"
     remove_title: "「%{name}」を「%{space}」から削除しますか？"
-    remove_description: "このデバイスは切断され、このマシンとのペアリングが解除されます。"
+    remove_description: "このデバイスは切断され、%{machine} とのペアリングが解除されます。"
     regenerate: "リンクも再生成する"
   share:
     to: "「%{name}」に共有"
@@ -1795,7 +1796,7 @@ space_policy:
     title: "メンバーが使える agent"
     every: "すべての agent とモデル（今後追加されるものを含む）。"
     choose: "agent を選ぶ"
-    none_available: "このマシンには許可できる有効な agent がありません。"
+    none_available: "%{machine} には許可できる有効な agent がありません。"
     blocked: "この権限モードの設定では使えません: 許可されたモードがありません。"
   models:
     every: "すべてのモデル"
@@ -1815,19 +1816,19 @@ space_policy:
     title: "スレッド以外"
   terminals:
     title: "ターミナル"
-    description: "ターミナルはこのマシンのアカウントのシェルです。有効にすると、上の agent と承認の制限を回避できます。"
+    description: "ターミナルは %{machine} のアカウントのシェルです。有効にすると、上の agent と承認の制限を回避できます。"
   git_remote:
     title: "プッシュ、プル、プルリクエスト"
-    description: "このマシン自身の git とフォージの認証情報を使います。"
+    description: "%{machine} 自身の git とフォージの認証情報を使います。"
   preview:
     title: "プレビュー"
-    description: "メンバーがこのマシンのローカルサービスにアクセスでき、メンバーのために動く agent がプレビューブラウザーを操作できます。"
+    description: "メンバーが %{machine} のローカルサービスにアクセスでき、メンバーのために動く agent がプレビューブラウザーを操作できます。"
   computer_use:
     title: "メンバーのターンでのコンピューター操作"
-    description: "メンバーのために動く agent がこのマシンのデスクトップを操作できるようにします。"
+    description: "メンバーのために動く agent が %{machine} のデスクトップを操作できるようにします。"
   editor:
     title: "エディターで開く"
-    description: "エディターのリモート接続は、共有スペースのプロジェクトに限られないこのマシンのアカウントのシェルです。有効にすると、ここにある他の制限を回避できます。"
+    description: "エディターのリモート接続は、共有スペースのプロジェクトに限られない %{machine} のアカウントのシェルです。有効にすると、ここにある他の制限を回避できます。"
 group:
   section: "ホストグループ"
   intro: "ホストグループはお使いのホストどうしをつなぎ、どれか 1 台とペアリングしたデバイスからすべてのホストを開けるようにします。"

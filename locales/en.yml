@@ -1720,6 +1720,7 @@ spaces:
   intro: "A space shares only the projects you choose, through one reusable link."
   new: "New space"
   not_hosting: "Remote access is off on this machine."
+  machine_unnamed: "the machine"
   detached: "The machine is no longer attached."
   missing: "That space no longer exists."
   failed: "Could not update the space: %{error}"
@@ -1730,7 +1731,7 @@ spaces:
   rename_action: "Save"
   delete: "Delete space"
   delete_title: "Delete «%{name}»?"
-  delete_description: "Its members are unpaired from this machine; the projects and their threads stay."
+  delete_description: "Its members are unpaired from %{machine}; the projects and their threads stay."
   delete_description_empty: "The link stops working; the projects and their threads stay."
   delete_action: "Delete"
   summary:
@@ -1746,7 +1747,7 @@ spaces:
     title: "New space"
     share_title: "New space and share"
     placeholder: "Space name"
-    disclosure: "Members run commands with this machine's Harnesses and permissions."
+    disclosure: "Members run commands with %{machine}'s Harnesses and permissions."
     action: "Create"
   link:
     description: "Scan or send this link; whoever joins sees only «%{name}»."
@@ -1756,14 +1757,14 @@ spaces:
     enabled: "Link enabled"
     paused: "The link is paused. Members keep their access; turn it on to let new people join."
     dead: "Link disabled after 5 failed attempts — regenerate it."
-    pairing_off: "This machine is not accepting new devices. Turn on Accept new devices to use the link."
+    pairing_off: "New devices are not accepted on %{machine}. Turn on Accept new devices to use the link."
     unavailable: "The link is not available yet."
   projects:
     title: "Projects"
     empty: "No projects yet. Add one here, or choose Share in a project's menu in the sidebar."
     add: "Add project"
     removed: "Removed project"
-    unknown: "Project on this machine"
+    unknown: "Project on %{machine}"
     remove: "Stop sharing %{name}"
   members:
     title: "Members"
@@ -1771,7 +1772,7 @@ spaces:
     move: "Move to…"
     remove: "Remove"
     remove_title: "Remove «%{name}» from «%{space}»?"
-    remove_description: "The device is disconnected and unpaired from this machine."
+    remove_description: "The device is disconnected and unpaired from %{machine}."
     regenerate: "Also regenerate the link"
   share:
     to: "Share to «%{name}»"
@@ -1795,7 +1796,7 @@ space_policy:
     title: "Agents members may use"
     every: "Every agent and model, including ones added later."
     choose: "Choose agents"
-    none_available: "This machine has no enabled agent to allow."
+    none_available: "No enabled agent on %{machine} to allow."
     blocked: "Unavailable under these permission modes: it has no mode they allow."
   models:
     every: "All models"
@@ -1815,19 +1816,19 @@ space_policy:
     title: "Beyond threads"
   terminals:
     title: "Terminals"
-    description: "A terminal is a shell under this machine's account: with it, the limits on agents and approvals above can be bypassed."
+    description: "A terminal is a shell under %{machine}'s account: with it, the limits on agents and approvals above can be bypassed."
   git_remote:
     title: "Push, pull and pull requests"
-    description: "Uses this machine's own git and forge credentials."
+    description: "Uses %{machine}'s own git and forge credentials."
   preview:
     title: "Preview"
-    description: "Members reach this machine's local services, and an agent working for a member drives the preview browser."
+    description: "Members reach %{machine}'s local services, and an agent working for a member drives the preview browser."
   computer_use:
     title: "Computer use in members' turns"
-    description: "Lets an agent working for a member operate this machine's desktop."
+    description: "Lets an agent working for a member operate %{machine}'s desktop."
   editor:
     title: "Open in an editor"
-    description: "An editor's remote connection is a shell under this machine's account, beyond the space's projects: with it, every other limit here can be bypassed."
+    description: "An editor's remote connection is a shell under %{machine}'s account, beyond the space's projects: with it, every other limit here can be bypassed."
 group:
   section: "MACHINE GROUP"
   intro: "A group links your machines, so a device paired with one can open all of them."
