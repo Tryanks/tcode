@@ -144,7 +144,6 @@ impl ZedRemote {
             .ok_or_else(|| tcode_ui::tr!("errors.zed_cli_missing").into_owned())?;
         self.listen()?;
         let exe = process::current_exe()
-            .or_else(|| std::env::current_exe().ok())
             .ok_or_else(|| "Tcode could not find its own executable".to_owned())?;
         let hosts = tcode_traverse::hosts::load_hosts(&inner.data_dir).unwrap_or_default();
         let mut machines: Vec<(String, String)> = hosts
