@@ -2007,9 +2007,7 @@ impl Composer {
                         if !this.interactive(cx) {
                             return;
                         }
-                        for path in paths {
-                            this.add_path(path, window, cx);
-                        }
+                        this.add_paths(paths, window, cx);
                     });
                 },
             )

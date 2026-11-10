@@ -425,20 +425,29 @@ impl Composer {
         self.add_image(name, mime, PendingImageSource::Bytes(bytes), window, cx)
     }
 
-    /// Attach a dropped or pasted path: as an image when it is one the model
-    /// can see, otherwise as a file. Returns whether it was accepted.
-    pub(in super::super) fn add_path(
+    /// Attach dropped or pasted paths, in their order: each as an image when
+    /// it is one the model can see, otherwise as a file. Returns whether any
+    /// was accepted.
+    pub(in super::super) fn add_paths(
         &mut self,
-        path: PathBuf,
+        paths: impl IntoIterator<Item = PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if tcode_core::attachments::is_image_attachment(&mime_from_path(&path)) {
-            self.add_image_path(path, window, cx)
-        } else {
-            self.add_file_path(path, window, cx);
-            true
+        let mut accepted = false;
+        let mut files = Vec::new();
+        for path in paths {
+            if tcode_core::attachments::is_image_attachment(&mime_from_path(&path)) {
+                accepted |= self.add_image_path(path, window, cx);
+            } else {
+                files.push(path);
+            }
         }
+        if !files.is_empty() {
+            self.add_file_paths(files, window, cx);
+            accepted = true;
+        }
+        accepted
     }
 
     /// Add an image from a dropped file path.
@@ -491,9 +500,7 @@ impl Composer {
                         self.add_image_bytes("pasted-image".to_string(), mime, bytes, window, cx);
                 }
                 ClipboardEntry::ExternalPaths(paths) => {
-                    for path in paths.paths() {
-                        accepted_image |= self.add_path(path.clone(), window, cx);
-                    }
+                    accepted_image |= self.add_paths(paths.paths().to_vec(), window, cx);
                 }
                 ClipboardEntry::String(_) => {}
             }

@@ -140,36 +140,45 @@ async fn upload(
 }
 
 impl Composer {
-    /// Attach a file or folder from a path on this client.
-    pub(in super::super) fn add_file_path(
+    /// Attach files or folders from paths on this client, in the order given.
+    pub(in super::super) fn add_file_paths(
         &mut self,
-        path: PathBuf,
+        paths: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.sync_images_session(cx);
         let session_id = self.session_id.clone();
         let generation = self.image_load_generation;
-        let probed = path.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let metadata = cx
+            let probed = cx
                 .background_executor()
-                .spawn(async move { std::fs::metadata(probed) })
+                .spawn(async move {
+                    paths
+                        .into_iter()
+                        .map(|path| {
+                            let metadata = std::fs::metadata(&path);
+                            (path, metadata)
+                        })
+                        .collect::<Vec<_>>()
+                })
                 .await;
             let _ = this.update_in(cx, |composer, window, cx| {
                 if !composer.owns_image_load(generation, &session_id) {
                     return;
                 }
-                let name = file_name_of(&path);
-                match metadata {
-                    Ok(metadata) => composer.admit_file(path, name, metadata, window, cx),
-                    Err(error) => window.push_notification(
-                        Notification::error(
-                            crate::tr!("attach.read_failed", name = name, error = error)
-                                .into_owned(),
+                for (path, metadata) in probed {
+                    let name = file_name_of(&path);
+                    match metadata {
+                        Ok(metadata) => composer.admit_file(path, name, metadata, window, cx),
+                        Err(error) => window.push_notification(
+                            Notification::error(
+                                crate::tr!("attach.read_failed", name = name, error = error)
+                                    .into_owned(),
+                            ),
+                            cx,
                         ),
-                        cx,
-                    ),
+                    }
                 }
             });
         })
@@ -493,9 +502,7 @@ impl Composer {
                 }
             };
             let _ = this.update_in(cx, |composer, window, cx| {
-                for path in paths {
-                    composer.add_path(path, window, cx);
-                }
+                composer.add_paths(paths, window, cx);
                 // The field takes the keys again, as it does after a drop.
                 composer.focus(window, cx);
             });
