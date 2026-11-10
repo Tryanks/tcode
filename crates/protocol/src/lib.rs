@@ -42,16 +42,16 @@ pub use event::{
     BackgroundTaskStatus, ControlActivityEntry, ControlStatus, DiskUsage, DiskUsagePart,
     DiskUsageState, EndpointDescription, EndpointPresetDescription, EventEnvelope,
     ExternalImportState, ExternalImportStatus, ForkAvailability, ForkStatus, GitActionRequest,
-    GitStatusStatus, HarnessDescription, HarnessPermission, IndexSnapshot, IndexSummary,
-    InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools, MergeWorktreeFailure,
-    NoticeSeverity, PendingRewind, PluginCatalogState, PluginChallenge, PluginChallengeKind,
-    PluginOperationTarget, PluginStaleReason, ProviderDiskUsage, ProviderPluginCatalog,
-    ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus,
-    QueuedMessageStatus, RewindBlocked, RewindStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
-    RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice,
-    ServerEvent, SessionActivity, SessionPlan, SessionStatus, StorageMigration, TcodeDiskUsage,
-    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
-    ThreadReferenceStatus, ThreadWakes, Topic,
+    GitStatusStatus, HarnessDescription, HarnessPermission, ImportFailure, IndexSnapshot,
+    IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools,
+    MergeWorktreeFailure, NoticeSeverity, PendingRewind, PluginCatalogState, PluginChallenge,
+    PluginChallengeKind, PluginOperationTarget, PluginStaleReason, ProviderDiskUsage,
+    ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus,
+    ProvidersStatus, QueuedMessageStatus, RewindBlocked, RewindStatus, RuntimeEffect, RuntimeError,
+    RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope,
+    ScopedProviderChoice, ServerEvent, SessionActivity, SessionPlan, SessionStatus,
+    StorageMigration, TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus,
+    TerminalSplitStatus, TerminalStatus, ThreadReferenceStatus, ThreadWakes, Topic,
 };
 pub use query::{
     AgentAccess, AgentGrant, ControlActivityFilter, ControlActivityPage, ControlActivityThread,
@@ -321,7 +321,9 @@ pub use wire::{
 // tcode/group/1 no longer has the full rejection. RuntimeError gains
 // file_unreadable. GitStatusStatus carries git's error. HostProblem gains
 // cli_failed. PullRequestStack's url may be absent (GitHub gives none).
-// GitDiffScope and SourceTool have no unknown value.
+// GitDiffScope and SourceTool have no unknown value. ExternalImportState's
+// finished carries failed, the ImportFailure {file, error} of each thread an
+// import could not bring in, which skipped no longer counts.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

@@ -338,8 +338,19 @@ pub enum ExternalImportState {
     },
     Finished {
         imported: usize,
+        /// Already imported, or holding nothing to import.
         skipped: usize,
+        /// The threads that could not be imported, and why.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        failed: Vec<ImportFailure>,
     },
+}
+
+/// A thread an import could not bring in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportFailure {
+    pub file: PathBuf,
+    pub error: String,
 }
 
 /// Full provider/settings-page read projection.

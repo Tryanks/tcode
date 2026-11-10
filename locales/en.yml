@@ -371,6 +371,7 @@ sidebar:
   importing: "Importing threads…"
   import_progress: "%{done} / %{total} · %{tool}"
   import_summary: "Imported %{imported}, skipped %{skipped}"
+  import_failures: "%{count} could not be imported:"
   import_ok: "OK"
   create_thread: "Create new thread"
   create_thread_on: "Create new thread on %{host}"

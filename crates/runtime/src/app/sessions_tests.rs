@@ -341,3 +341,65 @@ fn a_changed_root_waits_for_a_live_provider() {
         ));
     });
 }
+
+/// A thread the importer cannot read is reported with its file and its reason, not counted
+/// among the threads skipped as already imported or empty.
+#[test]
+fn an_import_that_fails_names_the_thread_and_why() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-import-failed");
+    let project = Project::from_root(store.root().join("project"));
+    std::fs::create_dir_all(&project.root).unwrap();
+    store.upsert_project(&project).unwrap();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.deliver(
+        cx,
+        100,
+        ClientPayload::Subscribe(Subscription {
+            known_index: None,
+            topic: Topic::ExternalImport {
+                project_id: project.id.clone(),
+            },
+            after: None,
+        }),
+    );
+    let missing = store.root().join("history/gone.jsonl");
+    let thread = tcode_protocol::ExternalThread {
+        source: tcode_protocol::SourceTool::ClaudeCode,
+        file: missing.clone(),
+        external_id: "gone".into(),
+        title_hint: None,
+        last_active_ms: 1,
+    };
+    state.dispatch_command(
+        cx,
+        1,
+        Command::StartExternalImport {
+            project_id: project.id.clone(),
+            threads: vec![thread],
+        },
+    );
+    let (finished, _) = cx.run_until_sent(|message| match message {
+        HostMessage::Event(EventEnvelope {
+            event:
+                ServerEvent::ExternalImportStatusReplaced {
+                    status: Some(status),
+                    ..
+                },
+            ..
+        }) => match &status.state {
+            tcode_protocol::ExternalImportState::Finished {
+                imported,
+                skipped,
+                failed,
+            } => Some((*imported, *skipped, failed.clone())),
+            _ => None,
+        },
+        _ => None,
+    });
+    let (imported, skipped, failed) = finished;
+    assert_eq!((imported, skipped), (0, 0));
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].file, missing);
+    assert!(!failed[0].error.is_empty());
+}

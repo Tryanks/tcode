@@ -1109,7 +1109,11 @@ impl Render for ImportProgress {
             _ => None,
         };
         let summary = match state {
-            Some(ExternalImportState::Finished { imported, skipped }) => Some((imported, skipped)),
+            Some(ExternalImportState::Finished {
+                imported,
+                skipped,
+                failed,
+            }) => Some((imported, skipped, failed)),
             _ => None,
         };
         // A run with nothing to import is complete the moment it starts; a
@@ -1148,7 +1152,30 @@ impl Render for ImportProgress {
                     .into_any_element(),
             ));
         }
-        if let Some((imported, skipped)) = summary {
+        if let Some((imported, skipped, failed)) = summary {
+            let failures = (!failed.is_empty()).then(|| {
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_secondary(false, cx)
+                            .child(crate::tr!("sidebar.import_failures", count = failed.len())),
+                    )
+                    .child(
+                        div()
+                            .id("external-import-failures")
+                            .max_h(px(160.))
+                            .overflow_y_scroll_area()
+                            .text_code(cx)
+                            .children(failed.into_iter().map(|failure| {
+                                div().child(format!(
+                                    "{}: {}",
+                                    failure.file.display(),
+                                    failure.error
+                                ))
+                            })),
+                    )
+            });
             layers.push((
                 1,
                 v_flex()
@@ -1158,6 +1185,7 @@ impl Render for ImportProgress {
                         imported = imported,
                         skipped = skipped
                     )))
+                    .children(failures)
                     .child(
                         h_flex().w_full().justify_end().child(
                             Button::new("external-import-ok")

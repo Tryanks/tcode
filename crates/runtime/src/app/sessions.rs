@@ -788,14 +788,17 @@ impl AppState {
         cx.unblock(move || {
             let mut imported = 0;
             let mut skipped = 0;
+            let mut failed = Vec::new();
             let mut existing = existing_external_ids(&metas);
             for (index, thread) in threads.into_iter().enumerate() {
                 let tool = thread.source.display_name().to_string();
                 match import_thread(&store, &project, &thread, &mut existing) {
                     ImportOutcome::Imported => imported += 1,
-                    ImportOutcome::SkippedDuplicate
-                    | ImportOutcome::SkippedEmpty
-                    | ImportOutcome::Failed(_) => skipped += 1,
+                    ImportOutcome::SkippedDuplicate | ImportOutcome::SkippedEmpty => skipped += 1,
+                    ImportOutcome::Failed(error) => failed.push(ImportFailure {
+                        file: thread.file.clone(),
+                        error,
+                    }),
                 }
                 let (id, done) = (id.clone(), index + 1);
                 updates.enqueue(move |state, cx| {
@@ -808,7 +811,7 @@ impl AppState {
                 });
             }
             updates.enqueue(move |state, cx| {
-                state.complete_external_import(&id, run_id, imported, skipped, cx);
+                state.complete_external_import(&id, run_id, imported, skipped, failed, cx);
             });
         })
         .detach();
@@ -849,6 +852,7 @@ impl AppState {
         run_id: u64,
         imported: usize,
         skipped: usize,
+        failed: Vec<ImportFailure>,
         cx: &mut HostCx,
     ) {
         if self
@@ -865,7 +869,11 @@ impl AppState {
             state.advance_external_import(
                 &project_id,
                 run_id,
-                ExternalImportState::Finished { imported, skipped },
+                ExternalImportState::Finished {
+                    imported,
+                    skipped,
+                    failed,
+                },
                 cx,
             );
         });

@@ -371,6 +371,7 @@ sidebar:
   importing: "スレッドをインポート中…"
   import_progress: "%{done} / %{total} · %{tool}"
   import_summary: "%{imported} 件をインポート、%{skipped} 件をスキップしました"
+  import_failures: "%{count} 件をインポートできませんでした："
   import_ok: "OK"
   create_thread: "新しいスレッドを作成"
   create_thread_on: "%{host} で新しいスレッドを作成"

@@ -371,6 +371,7 @@ sidebar:
   importing: "正在导入线程…"
   import_progress: "%{done} / %{total} · %{tool}"
   import_summary: "已导入 %{imported} 条，跳过 %{skipped} 条"
+  import_failures: "有 %{count} 条无法导入："
   import_ok: "确定"
   create_thread: "新建线程"
   create_thread_on: "在 %{host} 上新建线程"
