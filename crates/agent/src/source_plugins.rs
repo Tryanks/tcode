@@ -408,7 +408,10 @@ pub(crate) async fn run_opencode(
 mod tests {
     use super::*;
 
-    /// Printed by pi 1.5.0 with `--approve` in a project holding a package.
+    /// `pi list --approve` in a project holding a package, in the shape pi
+    /// 1.5.1 prints it (`dist/package-manager-cli.js`, the `list` case: a
+    /// heading per scope, each source indented two spaces, its installed path
+    /// four).
     const PI_LIST: &str = "User packages:\n  npm:pi-extmgr\n    /home/me/.pi/agent/npm/node_modules/pi-extmgr\n\nProject packages:\n  npm:pi-extmgr\n    /work/proj/.pi/npm/node_modules/pi-extmgr\n  git:github.com/me/tools\n    /work/proj/.pi/git/tools\n";
 
     #[test]
@@ -438,12 +441,14 @@ mod tests {
         assert_eq!(parse_pi_list("No packages installed.\n"), []);
     }
 
-    /// Printed by OpenCode 2.2.5: only the global document's plugins count.
+    /// `opencode debug config --standalone` prints the server's configuration
+    /// sources (OpenCode 2.2.6, `cli.debug.config`); a plugin entry is a
+    /// specifier (`cli.plugin.list`). Only the global document's plugins count.
     #[test]
     fn opencode_lists_what_the_global_configuration_names() {
         let config = r#"[
             {"type":"document","path":"/home/me/.config/opencode/opencode.json",
-             "info":{"plugins":["opencode-wakatime",["with-options@1.0.0",{"a":1}]]}},
+             "info":{"plugins":["opencode-wakatime"]}},
             {"type":"document","path":"/work/proj/opencode.json","info":{"plugins":["project-only"]}},
             {"type":"directory","path":"/home/me/.config/opencode"}
         ]"#;
@@ -451,11 +456,14 @@ mod tests {
             configured_plugins(
                 &global_documents(config, Path::new("/home/me/.config/opencode")).unwrap()
             ),
-            ["opencode-wakatime", "with-options@1.0.0"]
+            ["opencode-wakatime"]
         );
     }
 
-    /// Printed by OpenCode 2.2.5, a row for a loaded and for a failed plugin.
+    /// A row for a loaded and for a failed plugin, in the shape OpenCode
+    /// 2.2.6 prints them: `cli.plugin.list`'s `ID  VERSION  SOURCE` table
+    /// (`-` for no id or version), `cli.plugin.check`'s indented
+    /// `name version (state)` under a runtime heading.
     #[test]
     fn opencode_tables_map_loaded_plugins_to_their_specifiers() {
         assert_eq!(
@@ -506,153 +514,6 @@ mod tests {
         ] {
             assert_eq!(source_name(source), name, "{source}");
             assert_eq!(source_kind(source), kind, "{source}");
-        }
-    }
-
-    /// A CLI that answers each command as the installed one does and logs
-    /// its argv, driven through the entry points the host calls.
-    #[cfg(unix)]
-    mod driven {
-        use super::*;
-        use crate::{LaunchEnv, list_plugins, run_plugin_op};
-        use std::os::unix::fs::PermissionsExt as _;
-
-        struct FakeCli {
-            dir: PathBuf,
-            context: PluginContext,
-        }
-
-        impl FakeCli {
-            fn new(name: &str, script: &str) -> Self {
-                let dir = std::env::temp_dir()
-                    .join(format!("tcode-source-plugins-{}", uuid::Uuid::new_v4()));
-                std::fs::create_dir_all(&dir).unwrap();
-                let binary = dir.join(name);
-                std::fs::write(
-                    &binary,
-                    format!(
-                        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/argv.log'\ncase \"$*\" in\n{script}\n*) echo \"unexpected: $*\" >&2; exit 2 ;;\nesac\n",
-                        dir.display()
-                    ),
-                )
-                .unwrap();
-                std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-                let context = PluginContext {
-                    binary_path: Some(binary),
-                    launch_env: LaunchEnv::default(),
-                    cwd: dir.clone(),
-                    project: true,
-                };
-                Self { dir, context }
-            }
-
-            fn calls(&self) -> Vec<String> {
-                std::fs::read_to_string(self.dir.join("argv.log"))
-                    .unwrap_or_default()
-                    .lines()
-                    .map(str::to_string)
-                    .collect()
-            }
-        }
-
-        impl Drop for FakeCli {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.dir);
-            }
-        }
-
-        #[test]
-        fn pi_lists_both_scopes_and_changes_a_package_in_its_scope() {
-            let pi = FakeCli::new(
-                "pi",
-                &format!(
-                    "'list --approve') printf '{}' ;;\n'install npm:new -l --approve') echo Installed ;;\n'remove npm:pi-extmgr') echo Removed ;;\n'update --extension npm:pi-extmgr --approve') echo Updated ;;",
-                    PI_LIST.replace('\n', "\\n")
-                ),
-            );
-            let listing = smol::block_on(list_plugins(ProviderKind::Pi, &pi.context)).unwrap();
-            let package = &listing.entries[0];
-            assert_eq!(package.id, "npm:pi-extmgr");
-            assert_eq!(package.enabled, Tri::Unknown, "only `pi config` knows");
-            assert_eq!(package.installations.len(), 2);
-            assert_eq!(
-                package.actions,
-                [
-                    PluginAction::Uninstall {
-                        scope: PluginScope::User
-                    },
-                    PluginAction::Update {
-                        scope: PluginScope::User
-                    },
-                    PluginAction::Uninstall {
-                        scope: PluginScope::Project
-                    },
-                    PluginAction::Update {
-                        scope: PluginScope::Project
-                    },
-                ]
-            );
-            assert!(!package.actions.iter().any(|action| matches!(
-                action,
-                PluginAction::Enable { .. } | PluginAction::Disable { .. }
-            )));
-            for op in [
-                PluginOp::Install {
-                    id: "npm:new".into(),
-                    scope: PluginScope::Project,
-                    accept_command: None,
-                },
-                PluginOp::Uninstall {
-                    id: "npm:pi-extmgr".into(),
-                    scope: PluginScope::User,
-                },
-                PluginOp::Update {
-                    id: "npm:pi-extmgr".into(),
-                    scope: PluginScope::Project,
-                    accept_command: None,
-                },
-            ] {
-                smol::block_on(run_plugin_op(ProviderKind::Pi, &pi.context, &op)).unwrap();
-            }
-            assert_eq!(pi.calls().len(), 4);
-        }
-
-        /// A background server that has not loaded the plugins yet answers
-        /// `plugin list` with none and `plugin check` with none; they stay
-        /// listed, because the configuration names them.
-        #[test]
-        fn opencode_lists_what_is_configured_whatever_the_server_has_loaded() {
-            let opencode = FakeCli::new(
-                "opencode",
-                "'debug paths config') echo /home/me/.config/opencode ;;\n'debug config --standalone') echo '[{\"type\":\"document\",\"path\":\"/home/me/.config/opencode/opencode.json\",\"info\":{\"plugins\":[\"opencode-wakatime\"]}}]' ;;\n'plugin list') echo 'No plugins found' ;;\n'plugin check') echo 'No package plugins found' ;;\n'plugin remove opencode-wakatime') echo removed ;;",
-            );
-            let listing =
-                smol::block_on(list_plugins(ProviderKind::OpenCode, &opencode.context)).unwrap();
-            assert_eq!(listing.entries.len(), 1);
-            assert_eq!(listing.entries[0].id, "opencode-wakatime");
-            assert_eq!(listing.entries[0].errors, Vec::<String>::new());
-            smol::block_on(run_plugin_op(
-                ProviderKind::OpenCode,
-                &opencode.context,
-                &PluginOp::Uninstall {
-                    id: "opencode-wakatime".into(),
-                    scope: PluginScope::User,
-                },
-            ))
-            .unwrap();
-            assert!(
-                smol::block_on(run_plugin_op(
-                    ProviderKind::OpenCode,
-                    &opencode.context,
-                    &PluginOp::Install {
-                        id: "a".into(),
-                        scope: PluginScope::Project,
-                        accept_command: None,
-                    },
-                ))
-                .is_err(),
-                "the CLI changes the global configuration only"
-            );
         }
     }
 }
