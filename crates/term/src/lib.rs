@@ -539,7 +539,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[ignore = "queries a real foreground PTY process group"]
     fn tracks_real_pty_foreground_cwd() {
         let terminal = Terminal::spawn_command(
             PathBuf::from("/"),
