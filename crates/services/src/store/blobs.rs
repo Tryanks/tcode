@@ -83,13 +83,6 @@ impl Blobs {
         for dir in &dirs {
             flush_dir(dir)?;
         }
-        // Apple drives keep what a plain fsync handed them in a volatile
-        // cache: one F_FULLFSYNC (what `sync_all` issues there) commits every
-        // file and entry above before any row naming them can commit.
-        #[cfg(target_vendor = "apple")]
-        if let Some(dir) = dirs.first() {
-            File::open(dir)?.sync_all()?;
-        }
         Ok(())
     }
 
@@ -195,7 +188,9 @@ fn flush_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// Hand a file's data or a directory's entries to the drive.
+/// Hand a file's data or a directory's entries to the drive, as the
+/// database's own commits do: on Apple platforms `sync_all` is F_FULLFSYNC,
+/// which the database does not issue.
 fn flush(file: &File) -> io::Result<()> {
     #[cfg(target_vendor = "apple")]
     {
@@ -206,11 +201,7 @@ fn flush(file: &File) -> io::Result<()> {
         }
         Ok(())
     }
-    #[cfg(all(unix, not(target_vendor = "apple")))]
-    {
-        file.sync_all()
-    }
-    #[cfg(not(unix))]
+    #[cfg(not(target_vendor = "apple"))]
     {
         file.sync_all()
     }

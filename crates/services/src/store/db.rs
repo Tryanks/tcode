@@ -117,16 +117,9 @@ impl Db {
             writer: Mutex::new(writer),
             readers: Mutex::new(Vec::new()),
         };
-        {
-            let writer = db.writer()?;
-            // Every commit syncs the WAL (Turso's default, synchronous FULL);
-            // on Apple platforms only F_FULLFSYNC also flushes the drive's
-            // write cache, so a committed batch survives power loss.
-            db.execute(&writer, "PRAGMA fullfsync = ON", ())?;
-            if let Some(schema) = schema {
-                block_on(writer.execute_batch(schema))
-                    .map_err(|error| sql_error(path, "create schema", error))?;
-            }
+        if let Some(schema) = schema {
+            block_on(db.writer()?.execute_batch(schema))
+                .map_err(|error| sql_error(path, "create schema", error))?;
         }
         Ok(db)
     }
