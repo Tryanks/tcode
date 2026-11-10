@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::rc::Weak;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[cfg(target_os = "android")]
 use super::android::WebView;
@@ -322,7 +322,7 @@ impl BrowserLifecycle {
         // after this navigation cannot read the old page or fail on
         // its record.
         if let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) {
-            let outcome = page.events.navigate();
+            let outcome = page.events.navigate(cx.background_executor().now());
             self.apply(key, outcome, cx);
         }
         let raw = webview.read(cx).raw();
@@ -366,11 +366,14 @@ impl BrowserLifecycle {
         cx: &mut Context<Self>,
     ) {
         if let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) {
-            let outcome = page.events.handle(Event::Failed(LoadError {
-                url: url.to_owned(),
-                code: code.to_owned(),
-                message,
-            }));
+            let outcome = page.events.handle(
+                Event::Failed(LoadError {
+                    url: url.to_owned(),
+                    code: code.to_owned(),
+                    message,
+                }),
+                cx.background_executor().now(),
+            );
             self.apply(key, outcome, cx);
         }
     }
@@ -735,7 +738,7 @@ impl BrowserLifecycle {
         let Some(page) = self.slots.get_mut(&key).and_then(WebViewSlot::page_mut) else {
             return;
         };
-        let outcome = page.events.handle(event);
+        let outcome = page.events.handle(event, cx.background_executor().now());
         self.apply(&key, outcome, cx);
     }
 
@@ -799,7 +802,9 @@ impl BrowserLifecycle {
             let _ = answer.try_send(Err("preview browser is not open".into()));
             return answered;
         };
-        let (id, outcome) = page.events.call(method, args, answer);
+        let (id, outcome) = page
+            .events
+            .call(method, args, answer, cx.background_executor().now());
         self.apply(key, outcome, cx);
         self.bound(key, id, CALL_BOUND, cx);
         answered
@@ -831,14 +836,16 @@ impl BrowserLifecycle {
             let _ = answer.try_send(Err("preview browser is not open".into()));
             return answered;
         };
+        let now = cx.background_executor().now();
         let (id, outcome) = page.events.wait(
             WaitFor {
                 selector,
                 text,
                 url,
-                deadline: Instant::now() + timeout,
+                deadline: now + timeout,
             },
             answer,
+            now,
         );
         self.apply(key, outcome, cx);
         self.bound(key, id, timeout, cx);
@@ -858,7 +865,7 @@ impl BrowserLifecycle {
         }) else {
             return;
         };
-        let outcome = page.events.navigate();
+        let outcome = page.events.navigate(cx.background_executor().now());
         self.apply(&key, outcome, cx);
     }
 

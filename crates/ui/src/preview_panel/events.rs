@@ -103,6 +103,7 @@ pub(crate) struct WaitFor {
     pub(crate) selector: Option<String>,
     pub(crate) text: Option<String>,
     pub(crate) url: Option<UrlMatch>,
+    /// When the wait ends, by the lifecycle's clock.
     pub(crate) deadline: Instant,
 }
 
@@ -232,11 +233,12 @@ impl PageEvents {
     }
 
     /// Tcode loads a URL: until the next document is ready, calls wait.
-    pub(crate) fn navigate(&mut self) -> Outcome {
-        self.handle(Event::Started)
+    pub(crate) fn navigate(&mut self, now: Instant) -> Outcome {
+        self.handle(Event::Started, now)
     }
 
-    pub(crate) fn handle(&mut self, event: Event) -> Outcome {
+    /// What `event` does to the page at `now`, the lifecycle's time.
+    pub(crate) fn handle(&mut self, event: Event, now: Instant) -> Outcome {
         let mut outcome = Outcome::default();
         match event {
             Event::Started => {
@@ -246,7 +248,7 @@ impl PageEvents {
             }
             Event::Finished => {
                 self.navigating = false;
-                self.flush(&mut outcome);
+                self.flush(&mut outcome, now);
             }
             Event::Failed(error) => {
                 self.navigating = false;
@@ -264,9 +266,9 @@ impl PageEvents {
                         let _ = call.answer.try_send(Err(failure.clone()));
                     }
                 }
-                self.flush(&mut outcome);
+                self.flush(&mut outcome, now);
             }
-            Event::Message(raw) => self.message(&raw, &mut outcome),
+            Event::Message(raw) => self.message(&raw, &mut outcome, now),
             Event::Console(entry) => self.console.record(Logged {
                 entry,
                 source: Source::Engine,
@@ -277,7 +279,7 @@ impl PageEvents {
         outcome
     }
 
-    fn message(&mut self, raw: &str, outcome: &mut Outcome) {
+    fn message(&mut self, raw: &str, outcome: &mut Outcome, now: Instant) {
         let Some(envelope) = Envelope::parse(raw) else {
             log::debug!("preview: unreadable page agent message {raw:.200}");
             return;
@@ -295,7 +297,7 @@ impl PageEvents {
                 }
                 self.navigating = false;
                 self.check_urls();
-                self.flush(outcome);
+                self.flush(outcome, now);
             }
             Message::Reply {
                 id,
@@ -405,7 +407,7 @@ impl PageEvents {
     }
 
     /// Send what waited for the page to settle.
-    fn flush(&mut self, outcome: &mut Outcome) {
+    fn flush(&mut self, outcome: &mut Outcome, now: Instant) {
         if self.navigating {
             return;
         }
@@ -417,11 +419,11 @@ impl PageEvents {
             .map(|(id, _)| *id)
             .collect();
         for id in waiting {
-            self.send(id, outcome);
+            self.send(id, outcome, now);
         }
     }
 
-    fn send(&mut self, id: u64, outcome: &mut Outcome) {
+    fn send(&mut self, id: u64, outcome: &mut Outcome, now: Instant) {
         let Some(doc) = self.doc.clone() else {
             if let Some(call) = self.calls.remove(&id) {
                 let _ = call.answer.try_send(Err(NO_AGENT.into()));
@@ -438,10 +440,7 @@ impl PageEvents {
                 return;
             }
             Some(wait) => {
-                let remaining = wait
-                    .conditions
-                    .deadline
-                    .saturating_duration_since(Instant::now());
+                let remaining = wait.conditions.deadline.saturating_duration_since(now);
                 serde_json::json!({
                     "selector": wait.conditions.selector,
                     "text": wait.conditions.text,
@@ -460,6 +459,7 @@ impl PageEvents {
         args: Value,
         answer: Answer,
         wait: Option<Wait>,
+        now: Instant,
     ) -> (u64, Outcome) {
         self.next_call += 1;
         let id = self.next_call;
@@ -479,7 +479,7 @@ impl PageEvents {
             },
         );
         if !self.navigating {
-            self.send(id, &mut outcome);
+            self.send(id, &mut outcome, now);
         }
         (id, outcome)
     }
@@ -490,12 +490,18 @@ impl PageEvents {
         method: &'static str,
         args: Value,
         answer: Answer,
+        now: Instant,
     ) -> (u64, Outcome) {
-        self.register(method, args, answer, None)
+        self.register(method, args, answer, None, now)
     }
 
     /// Wait until every condition holds or the deadline passes.
-    pub(crate) fn wait(&mut self, conditions: WaitFor, answer: Answer) -> (u64, Outcome) {
+    pub(crate) fn wait(
+        &mut self,
+        conditions: WaitFor,
+        answer: Answer,
+        now: Instant,
+    ) -> (u64, Outcome) {
         let wait = Wait {
             pending: [
                 conditions.selector.as_ref().map(|_| "selector".to_owned()),
@@ -517,7 +523,7 @@ impl PageEvents {
             let _ = answer.try_send(Ok(self.matched()));
             return (0, Outcome::default());
         }
-        self.register("wait", Value::Null, answer, Some(wait))
+        self.register("wait", Value::Null, answer, Some(wait), now)
     }
 
     /// The call's time is up: a wait says what is still unmet.
@@ -619,6 +625,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The moment the page's events happen at in these tests: an opaque
+    /// origin, which no test moves.
+    fn at() -> Instant {
+        static AT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        *AT.get_or_init(Instant::now)
+    }
+
     fn message(doc: &str, body: Value) -> Event {
         let mut body = body;
         body["n"] = "nonce".into();
@@ -645,8 +658,8 @@ mod tests {
 
     fn page_on(url: &str) -> PageEvents {
         let mut page = PageEvents::new("nonce".into(), true);
-        let _ = page.handle(ready("d1", url));
-        let _ = page.handle(Event::Finished);
+        let _ = page.handle(ready("d1", url), at());
+        let _ = page.handle(Event::Finished, at());
         page
     }
 
@@ -655,17 +668,20 @@ mod tests {
     #[test]
     fn calls_during_a_navigation_go_to_the_next_document() {
         let mut page = page_on("http://localhost/a");
-        let _ = page.navigate();
+        let _ = page.navigate(at());
         let (answer, answered) = async_channel::bounded(1);
-        let (id, outcome) = page.call("snapshot", json!({}), answer);
+        let (id, outcome) = page.call("snapshot", json!({}), answer, at());
         assert!(outcome.scripts.is_empty());
 
-        let outcome = page.handle(ready("d2", "http://localhost/b"));
+        let outcome = page.handle(ready("d2", "http://localhost/b"), at());
         assert_eq!(sent_ids(&outcome), [id]);
-        let _ = page.handle(message(
-            "d2",
-            json!({"t": "reply", "id": id, "ok": true, "value": {"title": "B"}}),
-        ));
+        let _ = page.handle(
+            message(
+                "d2",
+                json!({"t": "reply", "id": id, "ok": true, "value": {"title": "B"}}),
+            ),
+            at(),
+        );
         assert_eq!(answered.try_recv().unwrap(), Ok(json!({"title": "B"})));
     }
 
@@ -675,26 +691,27 @@ mod tests {
     fn a_new_document_fails_calls_and_rearms_waits() {
         let mut page = page_on("http://localhost/a");
         let (click, clicked) = async_channel::bounded(1);
-        let (_, _) = page.call("click", json!({"ref": "e1"}), click);
+        let (_, _) = page.call("click", json!({"ref": "e1"}), click, at());
         let (wait, waited) = async_channel::bounded(1);
         let (wait_id, _) = page.wait(
             WaitFor {
                 selector: None,
                 text: Some("Saved".into()),
                 url: None,
-                deadline: Instant::now() + std::time::Duration::from_secs(30),
+                deadline: at() + std::time::Duration::from_secs(30),
             },
             wait,
+            at(),
         );
 
-        let _ = page.handle(Event::Started);
-        let outcome = page.handle(ready("d2", "http://localhost/saved"));
+        let _ = page.handle(Event::Started, at());
+        let outcome = page.handle(ready("d2", "http://localhost/saved"), at());
         assert_eq!(clicked.try_recv().unwrap(), Err(NAVIGATED.into()));
         assert_eq!(sent_ids(&outcome), [wait_id]);
         let _ = page.handle(message(
             "d2",
             json!({"t": "reply", "id": wait_id, "ok": true, "value": {"matched": true, "pending": []}}),
-        ));
+        ), at());
         assert_eq!(waited.try_recv().unwrap().unwrap()["matched"], true);
     }
 
@@ -709,16 +726,17 @@ mod tests {
                 selector: None,
                 text: None,
                 url: Some(Box::new(|url: &str| url.contains("/done"))),
-                deadline: Instant::now() + std::time::Duration::from_secs(30),
+                deadline: at() + std::time::Duration::from_secs(30),
             },
             wait,
+            at(),
         );
-        let _ = page.handle(message(
-            "d1",
-            json!({"t": "url", "url": "http://localhost/#step"}),
-        ));
+        let _ = page.handle(
+            message("d1", json!({"t": "url", "url": "http://localhost/#step"})),
+            at(),
+        );
         assert!(waited.try_recv().is_err());
-        let _ = page.handle(ready("d2", "http://localhost/done"));
+        let _ = page.handle(ready("d2", "http://localhost/done"), at());
         assert_eq!(
             waited.try_recv().unwrap().unwrap()["url"],
             "http://localhost/done"
@@ -730,16 +748,17 @@ mod tests {
                 selector: Some("#never".into()),
                 text: None,
                 url: None,
-                deadline: Instant::now() + std::time::Duration::from_secs(30),
+                deadline: at() + std::time::Duration::from_secs(30),
             },
             wait,
+            at(),
         );
         let failure = LoadError {
             url: "https://localhost:8443/".into(),
             code: "NSURLErrorDomain -1202".into(),
             message: "The certificate for this server is invalid.".into(),
         };
-        let outcome = page.handle(Event::Failed(failure));
+        let outcome = page.handle(Event::Failed(failure), at());
         assert!(outcome.changed);
         assert_eq!(
             waited.try_recv().unwrap(),
@@ -755,9 +774,13 @@ mod tests {
     fn only_the_agent_reports_user_input() {
         let mut page = page_on("http://localhost/");
         let forged = json!({"t": "input", "generation": 1, "n": "guess", "doc": "d1"});
-        assert!(!page.handle(Event::Message(forged.to_string())).user_acted);
         assert!(
-            page.handle(message("d1", json!({"t": "input", "generation": 1})))
+            !page
+                .handle(Event::Message(forged.to_string()), at())
+                .user_acted
+        );
+        assert!(
+            page.handle(message("d1", json!({"t": "input", "generation": 1})), at())
                 .user_acted
         );
     }
@@ -769,9 +792,9 @@ mod tests {
         let mut page = page_on("http://localhost/");
         let console =
             |level: &str| message("d1", json!({"t": "console", "level": level, "text": "x"}));
-        let _ = page.handle(console("error"));
+        let _ = page.handle(console("error"), at());
         for _ in 0..1000 {
-            let _ = page.handle(console("log"));
+            let _ = page.handle(console("log"), at());
         }
         let summary = page.summary();
         assert_eq!(summary["console"]["entries"], 1001);
@@ -792,15 +815,17 @@ mod tests {
                 android_event(kind, "https://dead.invalid/".into(), code, "failure".into()),
                 android_event(1, "https://dead.invalid/".into(), 0, String::new()),
             ] {
-                let _ = page.handle(event.unwrap());
+                let _ = page.handle(event.unwrap(), at());
             }
             assert_eq!(
                 page.load_error().unwrap().to_json(),
                 json!({"url": "https://dead.invalid/", "code": expected, "message": "failure"})
             );
         }
-        let _ =
-            page.handle(android_event(0, "https://example.com/".into(), 0, String::new()).unwrap());
+        let _ = page.handle(
+            android_event(0, "https://example.com/".into(), 0, String::new()).unwrap(),
+            at(),
+        );
         assert_eq!(page.load_error(), None);
     }
 }
