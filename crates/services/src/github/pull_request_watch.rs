@@ -699,3 +699,64 @@ fn read_tail(
     }
     Ok(Some(comments))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Status check rollup contexts as GitHub's GraphQL API returns them for the detail
+    /// selection. Shape: the `CheckRun` and `StatusContext` objects and the `CheckStatusState`,
+    /// `CheckConclusionState` and `StatusState` enums of docs.github.com/en/graphql/reference
+    /// (/checks and /commits). Content is invented.
+    fn run(name: &str, run_number: i64, status: &str, conclusion: Option<&str>) -> Value {
+        json!({
+            "__typename": "CheckRun",
+            "name": name,
+            "status": status,
+            "conclusion": conclusion,
+            "startedAt": "2026-01-02T03:00:00Z",
+            "completedAt": conclusion.map(|_| "2026-01-02T03:05:00Z"),
+            "detailsUrl": format!("https://ci.example.test/runs/{run_number}"),
+            "isRequired": true,
+            "checkSuite": { "workflowRun": {
+                "runNumber": run_number,
+                "workflow": { "databaseId": 77, "name": "CI" }
+            } }
+        })
+    }
+
+    #[test]
+    fn checks_read_each_runs_status_and_a_rerun_speaks_for_its_workflow() {
+        let contexts = [
+            // The first run of the workflow, superseded by the second.
+            run("test", 1, "COMPLETED", Some("FAILURE")),
+            run("lint", 1, "COMPLETED", Some("SUCCESS")),
+            run("test", 2, "IN_PROGRESS", None),
+            run("lint", 2, "COMPLETED", Some("STARTUP_FAILURE")),
+            json!({
+                "__typename": "StatusContext",
+                "context": "deploy/preview",
+                "state": "EXPECTED",
+                "targetUrl": null,
+                "createdAt": "2026-01-02T03:00:00Z",
+                "isRequired": false
+            }),
+        ];
+        let checks: Vec<_> = checks(&contexts)
+            .into_iter()
+            .map(|check| (check.name, check.status, check.required))
+            .collect();
+        assert_eq!(
+            checks,
+            [
+                ("test".to_owned(), CheckStatus::Pending, Some(true)),
+                ("lint".to_owned(), CheckStatus::Failure, Some(true)),
+                (
+                    "deploy/preview".to_owned(),
+                    CheckStatus::Pending,
+                    Some(false)
+                ),
+            ]
+        );
+    }
+}
