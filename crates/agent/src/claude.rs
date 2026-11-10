@@ -3032,7 +3032,12 @@ impl Mapper {
         // `background_tasks_changed` drops it: removing it here lets a drain
         // that follows this notification publish zero before the follow-up
         // turn (see `on_background_tasks_changed`).
-        if let Some(path) = msg.get("output_file").and_then(Value::as_str) {
+        // Claude Code sends "" for a task with no output file.
+        if let Some(path) = msg
+            .get("output_file")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+        {
             self.tail_requests.push(TailRequest::PreferPath {
                 parent_id: tool_use_id.clone(),
                 path: PathBuf::from(path),
@@ -7829,6 +7834,29 @@ mod tests {
             "{events:?}"
         );
         assert!(mapper.take_pending_subagent_terminals().is_empty());
+    }
+
+    /// Claude Code 2.1.322 builds a `task_notification` with
+    /// `output_file: outputFile ?? ""`: an empty string is no file, and a
+    /// tail told to prefer it would read nothing and stop looking for the
+    /// subagent's transcript.
+    #[test]
+    fn a_notification_without_an_output_file_names_no_path_to_tail() {
+        let mut mapper = Mapper::new();
+        feed(
+            &mut mapper,
+            r#"{"type":"system","subtype":"task_notification","session_id":"session","task_id":"a-child","tool_use_id":"toolu_child","status":"completed","output_file":"","summary":"Done"}"#,
+        );
+        let requests = mapper.take_tail_requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|request| matches!(request, TailRequest::PreferPath { .. }))
+        );
+        assert!(matches!(
+            &requests[..],
+            [TailRequest::Stop { parent_id }] if parent_id == "toolu_child"
+        ));
     }
 
     /// A recorded stdout trace driven as the actor drives it: every line, then
