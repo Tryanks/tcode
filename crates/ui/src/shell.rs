@@ -5414,15 +5414,6 @@ impl AppShell {
             })
             .collect();
         let body = fade.fill().render(layers).size_full();
-        // The drawer sizes its grid from the space it is actually given.
-        if terminal {
-            let size = window.viewport_size();
-            let drawer = column.chat(cx).read(cx).terminal_drawer();
-            let (width, height) = (f32::from(size.width), f32::from(size.height) - 110.);
-            if !drawer.read(cx).is_size(width, height) {
-                drawer.update(cx, |drawer, cx| drawer.resize(width, height, cx));
-            }
-        }
 
         page_surface(window, cx)
             .child(nav_bar(
@@ -17810,6 +17801,33 @@ pub(crate) mod tests {
         let _ = sent(&host);
 
         resize(cx, 1800.);
+        crate::test_frames::draw_settled(cx);
+        let heights: Vec<_> = sent(&host)
+            .into_iter()
+            .filter(|payload| {
+                matches!(
+                    payload,
+                    ClientPayload::Command(Command::SetTerminalHeight { .. })
+                )
+            })
+            .collect();
+        assert!(heights.is_empty(), "{heights:?}");
+    }
+
+    /// A phone opening the terminal page tells the host no drawer height:
+    /// the page has no drawer, and the height is the desktop's.
+    #[gpui::test]
+    fn the_compact_terminal_page_sends_the_host_no_terminal_height(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_thread_with(cx, Vec::new());
+        as_mobile(cx);
+        resize(cx, 393.);
+        let _ = sent(&host);
+
+        shell.update(cx, |shell, cx| {
+            shell.show_panel("terminal", cx);
+            shell.go(Destination::Panel, cx);
+        });
         crate::test_frames::draw_settled(cx);
         let heights: Vec<_> = sent(&host)
             .into_iter()
