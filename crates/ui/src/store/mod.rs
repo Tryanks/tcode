@@ -272,6 +272,9 @@ pub struct WorkspaceStore {
     /// can still follow it to its parent.
     removed_session: Option<SessionMeta>,
     settings_replica: Settings,
+    /// The settings this device keeps for the space it is a member of could
+    /// not be read: the workspace runs on defaults and writes none over them.
+    member_settings_unreadable: bool,
     /// Whether `settings_replica` is the host's settings or still the local
     /// defaults it was constructed with. Views that copy a setting into an
     /// editable input must not treat the defaults as the host's answer.
@@ -476,6 +479,7 @@ impl WorkspaceStore {
             disk_usage_holds: 0,
             removed_session: None,
             settings_replica: Settings::default(),
+            member_settings_unreadable: false,
             settings_hydrated: false,
             baseline_topics: HashSet::new(),
             applied_scope_request: None,
@@ -675,6 +679,9 @@ impl WorkspaceStore {
     }
 
     fn save_member_settings(&self) {
+        if self.member_settings_unreadable {
+            return;
+        }
         if let Some(host) = &self.client_host {
             let mut preferences = host.load_preferences();
             let navigation = preferences
@@ -759,12 +766,13 @@ impl WorkspaceStore {
             }
             Scope::Full => {}
             Scope::Space {
+                space_name,
                 projects,
                 providers,
                 ..
             } => {
                 if changed {
-                    self.settings_replica = self
+                    let saved = self
                         .client_host
                         .as_ref()
                         .and_then(|host| host.load_preferences().navigation)
@@ -773,9 +781,23 @@ impl WorkspaceStore {
                                 .get("member_settings")?
                                 .get(self.member_settings_key())
                                 .cloned()
-                        })
-                        .and_then(|settings| serde_json::from_value(settings).ok())
-                        .unwrap_or_default();
+                        });
+                    self.member_settings_unreadable = false;
+                    self.settings_replica = match saved.map(serde_json::from_value) {
+                        None => Settings::default(),
+                        Some(Ok(settings)) => settings,
+                        Some(Err(error)) => {
+                            self.member_settings_unreadable = true;
+                            cx.emit(RuntimeEvent::Error(
+                                tcode_protocol::RuntimeError::FileUnreadable {
+                                    error: format!(
+                                        "this device's settings for {space_name}: {error}"
+                                    ),
+                                },
+                            ));
+                            Settings::default()
+                        }
+                    };
                 }
                 self.settings_hydrated = true;
                 self.index_replica.1 = projects.clone();
@@ -4678,6 +4700,94 @@ pub(crate) mod tests {
             self.link.close();
             self.worker.take().unwrap().join().unwrap();
         }
+    }
+
+    /// The settings a member device keeps for its space cannot be read: the
+    /// user is told, the workspace runs on defaults, and a change made there
+    /// writes nothing over what the device saved.
+    #[gpui::test]
+    fn unreadable_member_settings_are_reported_and_never_written_over(cx: &mut TestAppContext) {
+        use std::cell::RefCell;
+        use tcode_client::host::{ClientHost, ClientPreferences, Transport};
+        use tcode_client::pairing::PairedHost;
+        struct Device(RefCell<ClientPreferences>);
+        impl ClientHost for Device {
+            fn device_name(&self) -> String {
+                "member".into()
+            }
+            fn device_id(&self) -> String {
+                "member-device".into()
+            }
+            fn device_platform(&self) -> Option<String> {
+                None
+            }
+            fn load_preferences(&self) -> ClientPreferences {
+                self.0.borrow().clone()
+            }
+            fn save_preferences(&self, preferences: &ClientPreferences) {
+                *self.0.borrow_mut() = preferences.clone();
+            }
+            fn load_hosts(&self) -> Vec<PairedHost> {
+                Vec::new()
+            }
+            fn save_hosts(&self, _: &[PairedHost]) {}
+            fn last_host_id(&self) -> Option<String> {
+                None
+            }
+            fn set_last_host_id(&self, _: Option<&str>) {}
+            fn connect(&self, _: &PairedHost) -> Transport {
+                unreachable!("the store is handed its link")
+            }
+        }
+        cx.update(crate::theme::init);
+        let saved = serde_json::json!("not this device's settings");
+        let device = std::rc::Rc::new(Device(RefCell::new(ClientPreferences {
+            navigation: Some(serde_json::json!({
+                "member_settings": { "machine:space-one": saved.clone() }
+            })),
+            ..ClientPreferences::default()
+        })));
+        let mut space = ScriptedSpace::new();
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                space.link.clone(),
+                WorkspaceAttachment::Remote {
+                    host_id: "machine".into(),
+                    host_name: "Studio".into(),
+                },
+                Some(device.clone()),
+                None,
+                cx,
+            )
+        });
+        let reported = std::rc::Rc::new(RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let reported = reported.clone();
+            cx.subscribe(&workspace, move |_, event: &super::RuntimeEvent, _| {
+                reported.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        space
+            .driver
+            .wait_until(cx, &workspace, "space baseline", |cx| {
+                workspace.read_with(cx, |store, _| store.baseline_ready())
+            });
+        assert!(matches!(
+            reported.borrow().as_slice(),
+            [super::RuntimeEvent::Error(
+                tcode_protocol::RuntimeError::FileUnreadable { .. }
+            )]
+        ));
+        workspace.update(cx, |store, cx| store.cycle_project_sort(cx));
+        assert_ne!(
+            workspace.read_with(cx, |store, _| store.project_sort()),
+            Settings::default().project_sort
+        );
+        assert_eq!(
+            device.0.borrow().navigation.as_ref().unwrap()["member_settings"]["machine:space-one"],
+            saved
+        );
     }
 
     /// Another account runs the CLI the default one does, so both pickers list
