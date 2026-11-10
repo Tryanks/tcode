@@ -2666,6 +2666,10 @@ impl Actor {
             self.handle_auto_review(params).await;
             return;
         }
+        if method == "serverRequest/resolved" {
+            self.on_server_request_resolved(params).await;
+            return;
+        }
         let thread_id = params.get("threadId").and_then(Value::as_str);
         let is_child = thread_id.is_some_and(|id| id != self.thread_id);
         if let Some(activity) = find_subagent_activity(params) {
@@ -2771,7 +2775,15 @@ impl Actor {
                     self.clear_retry().await;
                 }
                 self.active_turn = None;
-                self.async_questions = None;
+                // An answer can only steer the turn that asked.
+                if let Some((request_id, _)) = self.async_questions.take() {
+                    self.events
+                        .emit(AgentEvent::UserInputResolved {
+                            request_id,
+                            answers: serde_json::Map::new(),
+                        })
+                        .await;
+                }
                 if status == TurnStatus::Completed {
                     // The turn ended without waiting on a subagent still at
                     // work: it goes on in the background.
@@ -3234,6 +3246,32 @@ impl Actor {
                 delivery: UserInputDelivery::Async,
             })
             .await;
+    }
+
+    /// `serverRequest/resolved`: Codex no longer waits on one of its requests.
+    /// One Tcode answered is already gone; one still here was settled by Codex
+    /// itself, as when the turn it belongs to ends or is interrupted.
+    async fn on_server_request_resolved(&mut self, params: &Value) {
+        let Some(id) = params.get("requestId") else {
+            return;
+        };
+        let request_id = request_id_string(id);
+        let event = if self.approvals.remove(&request_id).is_some() {
+            AgentEvent::ApprovalResolved {
+                request_id,
+                decision: ApprovalDecision::Cancel,
+            }
+        } else if self.user_inputs.remove(&request_id).is_some()
+            || self.elicitations.remove(&request_id).is_some()
+        {
+            AgentEvent::UserInputResolved {
+                request_id,
+                answers: serde_json::Map::new(),
+            }
+        } else {
+            return;
+        };
+        self.events.emit(event).await;
     }
 
     /// Settle every outstanding native user-input request and MCP elicitation
@@ -4660,6 +4698,68 @@ mod tests {
         });
     }
 
+    /// Codex 0.167.0 settles its own open requests when their turn ends or is
+    /// interrupted and says so with `serverRequest/resolved` (`v2/ServerRequestResolvedNotification.ts`;
+    /// `abort_pending_server_requests` and `resolve_server_request` in
+    /// `codex-rs/app-server` at `rust-v0.167.0`). It also follows an answer
+    /// Tcode gave, which is then already settled.
+    #[test]
+    fn requests_codex_settles_itself_are_reported_resolved() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor
+                .handle_line(&json!({"id":7,"method":"item/commandExecution/requestApproval","params":{
+                    "kind":"command","threadId":"thread-1","turnId":"turn-1","itemId":"cmd-1","startedAtMs":1,
+                    "environmentId":null,"command":"cargo test","cwd":"/workspace"
+                }}).to_string())
+                .await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::ApprovalRequested(ref request) if request.id == "7"
+            ));
+            actor
+                .handle_line(&json!({"id":"q-8","method":"item/tool/requestUserInput","params":{
+                    "threadId":"thread-1","turnId":"turn-1","itemId":"ask-1","isBlocking":true,"autoResolutionMs":null,
+                    "questions":[{"id":"db","header":"DB","question":"Which DB?","isOther":false,"isSecret":false,"options":null}]
+                }}).to_string())
+                .await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::UserInputRequested { ref request_id, .. } if request_id == "q-8"
+            ));
+            for request_id in [json!(7), json!("q-8")] {
+                actor
+                    .handle_line(
+                        &json!({"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":request_id}})
+                            .to_string(),
+                    )
+                    .await;
+            }
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::ApprovalResolved { ref request_id, decision: ApprovalDecision::Cancel }
+                    if request_id == "7"
+            ));
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::UserInputResolved { ref request_id, ref answers }
+                    if request_id == "q-8" && answers.is_empty()
+            ));
+            actor
+                .handle_line(
+                    r#"{"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":7}}"#,
+                )
+                .await;
+            assert!(events.try_recv().is_err());
+            assert!(
+                written(&mut actor).await.is_empty(),
+                "Codex is not answered"
+            );
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
     #[test]
     fn permission_requests_reply_with_native_grants_and_cancel_aborts() {
         smol::block_on(async {
@@ -5510,6 +5610,11 @@ mod tests {
             actor
                 .handle_line(&json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}).to_string())
                 .await;
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::UserInputResolved { ref request_id, ref answers }
+                    if request_id == "call_r" && answers.is_empty()
+            ));
             assert!(matches!(
                 events.try_recv().unwrap(),
                 AgentEvent::TurnCompleted { .. }
