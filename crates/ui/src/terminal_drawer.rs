@@ -631,8 +631,10 @@ impl TerminalDrawer {
                 terminal.modify_other_keys(),
             )
         });
-        terminal.write_input(bytes);
-        self.note_input(cx);
+        if let Some(bytes) = bytes {
+            terminal.write_input(bytes);
+            self.note_input(cx);
+        }
     }
 
     fn send_committed_text(&mut self, terminal_id: u64, text: &str, cx: &mut Context<Self>) {
