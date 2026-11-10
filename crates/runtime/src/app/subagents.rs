@@ -426,12 +426,5 @@ fn strip_parent_item_id(event: &AgentEvent) -> AgentEvent {
 
 fn mirror_title(agent_type: &str, description: &str) -> String {
     let first_line = description.lines().next().unwrap_or_default().trim();
-    let title = format!("{agent_type}: {first_line}");
-    let mut chars = title.chars();
-    let truncated: String = chars.by_ref().take(60).collect();
-    if chars.next().is_some() {
-        format!("{}…", truncated.trim_end())
-    } else {
-        truncated
-    }
+    format!("{agent_type}: {first_line}")
 }
