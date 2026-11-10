@@ -55,16 +55,14 @@ pub use event::{
 };
 pub use query::{
     AgentAccess, AgentGrant, ControlActivityFilter, ControlActivityPage, ControlActivityThread,
-    DeviceAccess, DirectoryListing, ExternalThread, GitDiffResult, GitDiffScope, GitFileText,
-    GroupAction, GroupInfo, GroupMachineInfo, HostedDevice, HostingAction, HostingState,
-    IconImageEntry, MAX_THREAD_EXPORT_BYTES, ModelGrant, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo,
-    PathKind, Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES,
-    STORED_OUTPUT_BYTES, STORED_OUTPUT_COLS, STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS,
-    SessionSearchHit, SourceTool, SpaceAction, SpaceAgents, SpaceApproval, SpaceInfo, SpacePolicy,
-    TraverseLookupState, TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus,
-    TraverseRelayStatus, TraverseSourceStatus,
-// DeviceAccess, DirectoryListing, ExternalHistory, ExternalThread, GitDiffResult, GitDiffScope,.
-// HostingState, IconImageEntry, MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, ModelGrant,.
+    DeviceAccess, DirectoryListing, ExternalHistory, ExternalThread, GitDiffResult, GitDiffScope,
+    GitFileText, GroupAction, GroupInfo, GroupMachineInfo, HostedDevice, HostingAction,
+    HostingState, IconImageEntry, MAX_THREAD_EXPORT_BYTES, ModelGrant, OUTPUT_PREVIEW_BYTES,
+    PathEntry, PathInfo, PathKind, Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS,
+    SESSION_WINDOW_BYTES, STORED_OUTPUT_BYTES, STORED_OUTPUT_COLS, STORED_OUTPUT_HISTORY,
+    STORED_OUTPUT_ROWS, SessionContentHits, SessionSearchHit, SourceTool, SpaceAction, SpaceAgents,
+    SpaceApproval, SpaceInfo, SpacePolicy, TraverseLookupState, TraverseLookupStatus,
+    TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus, TraverseSourceStatus,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
@@ -313,13 +311,12 @@ pub use wire::{
 // Unreleased: a field may be missing only where the sender leaves it out at
 // its empty value; a message missing any other field no longer decodes, and
 // nothing stands in for it (a principal, scope or space without a policy was
-// read as unrestricted). HostingAction no longer reads new_code. HostProblem's
-// credentials_unreadable.
-// RuntimeNotice::WorktreeSeeded has no limit_reached.
-// RewindStatus's.
-// running_turn has no "refuse" and its blocked no "turn_running".
-// SourceTool gains claude_agent_sdk. QueryResponse::ExternalHistory carries
-// an ExternalHistory {dirs, unreadable}.
+// read as unrestricted). HostingAction no longer reads new_code. HostProblem
+// gains credentials_unreadable. RuntimeNotice::WorktreeSeeded has no
+// limit_reached. RewindStatus's running_turn has no "refuse" and its blocked
+// no "turn_running". SourceTool gains claude_agent_sdk.
+// QueryResponse::ExternalHistory carries an ExternalHistory {dirs,
+// unreadable}, and SessionContentHits a SessionContentHits {hits, unreadable}.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

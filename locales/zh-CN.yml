@@ -1026,6 +1026,7 @@ palette:
   threads_on: "%{host} 上的线程"
   messages: "消息"
   messages_on: "%{host} 上的消息"
+  messages_unreadable: "有些线程无法搜索：%{reason}"
   no_matches: "没有匹配项"
   navigate: "↑↓ 导航"
   select: "Enter 选择"

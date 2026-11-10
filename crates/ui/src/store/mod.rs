@@ -23,7 +23,7 @@ use tcode_protocol::{
     ArchivedSessions, Command, CommandResponse, DiskUsageState, EventEnvelope,
     ExternalImportStatus, ExternalThread, GitDiffResult, GitDiffScope, GitStatusStatus,
     IndexSummary, PathEntry, ProtocolError, ProviderVersionStatus, ProvidersStatus, Query,
-    QueryResponse, Scope, ScopedProviderChoice, ServerEvent, SessionPlan, SessionSearchHit,
+    QueryResponse, Scope, ScopedProviderChoice, ServerEvent, SessionContentHits, SessionPlan,
     SessionStatus, StorageMigration, Subscription, Topic,
 };
 pub(crate) mod terminal;
@@ -3152,28 +3152,28 @@ impl WorkspaceStore {
     }
 
     /// Ask the host to search its own stored sessions. The index, cache and
-    /// session order live there; this client keeps only the answer.
+    /// session order live there; this client keeps only the answer. A search
+    /// that failed whole answers with its failure as what could not be
+    /// searched.
     pub fn search_session_content(
         &self,
         query: String,
         limit: u32,
         cx: &mut App,
-    ) -> Task<Vec<SessionSearchHit>> {
+    ) -> Task<SessionContentHits> {
         let host = self.host.clone();
         cx.spawn(async move |_| {
+            let failed = |reason: String| SessionContentHits {
+                hits: Vec::new(),
+                unreadable: vec![reason],
+            };
             match host
                 .query(Query::SearchSessionContent { query, limit })
                 .await
             {
-                Ok(QueryResponse::SessionContentHits(hits)) => hits,
-                Ok(other) => {
-                    log::error!("unexpected session-content response: {other:?}");
-                    Vec::new()
-                }
-                Err(error) => {
-                    log::error!("session-content query failed: {}", error.message);
-                    Vec::new()
-                }
+                Ok(QueryResponse::SessionContentHits(found)) => found,
+                Ok(other) => failed(format!("unexpected session-content response: {other:?}")),
+                Err(error) => failed(error.message),
             }
         })
     }

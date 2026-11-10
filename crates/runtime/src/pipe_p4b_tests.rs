@@ -861,7 +861,7 @@ fn content_search_is_host_owned_and_survives_appends_limits_and_blank_queries() 
         }))
         .unwrap()
         {
-            QueryResponse::SessionContentHits(hits) => hits,
+            QueryResponse::SessionContentHits(found) => found.hits,
             other => panic!("unexpected search response: {other:?}"),
         }
     };

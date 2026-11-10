@@ -11,7 +11,7 @@ use agent::ItemContent;
 use serde::{Deserialize, Serialize};
 use tcode_core::project::SessionMeta;
 use tcode_core::session::EntryContent;
-use tcode_protocol::SessionSearchHit;
+use tcode_protocol::{SessionContentHits, SessionSearchHit};
 
 use crate::store::{EventLog, IndexedEntry, SearchMatch, SessionStore};
 use crate::thread_index::IndexedLog;
@@ -89,6 +89,12 @@ pub struct SearchResults {
     pub total: usize,
     /// Hits exist beyond the returned page.
     pub truncated: bool,
+    /// A thread that could not be searched, and why, one per entry.
+    pub unreadable: Vec<String>,
+}
+
+fn unreadable_session(meta: &SessionMeta, error: &std::io::Error) -> String {
+    format!("{} ({}): {error}", meta.title, meta.id)
 }
 
 /// Content search over one [`SessionStore`].
@@ -108,23 +114,25 @@ impl SessionSearch {
         }
     }
 
-    /// Search sessions in the supplied order, returning at most `limit` hits.
-    /// Empty and whitespace-only queries intentionally return no content hits.
+    /// Search sessions in the supplied order, returning at most `limit` hits
+    /// and every thread that could not be searched. Empty and
+    /// whitespace-only queries intentionally return no content hits.
     pub fn search(
         &self,
         sessions: &[SessionMeta],
         query: &str,
         limit: usize,
-    ) -> Vec<SessionSearchHit> {
+    ) -> SessionContentHits {
+        let mut answer = SessionContentHits::default();
         let query = query.trim();
         if query.is_empty() || limit == 0 {
-            return Vec::new();
+            return answer;
         }
         let folded = query.to_lowercase();
-        let mut hits = Vec::new();
+        let hits = &mut answer.hits;
         for meta in sessions {
             if let Err(error) = self.refresh(&meta.id) {
-                log::warn!("cannot search session {}: {error}", meta.id);
+                answer.unreadable.push(unreadable_session(meta, &error));
                 continue;
             }
             let visited = self
@@ -136,13 +144,13 @@ impl SessionSearch {
                     hits.len() < limit
                 });
             if let Err(error) = visited {
-                log::warn!("cannot search session {}: {error}", meta.id);
+                answer.unreadable.push(unreadable_session(meta, &error));
             }
             if hits.len() == limit {
                 break;
             }
         }
-        hits
+        answer
     }
 
     /// [`SessionSearch::search`] narrowed by `filter`, counting every hit it
@@ -161,7 +169,7 @@ impl SessionSearch {
         let folded = query.to_lowercase();
         for meta in sessions {
             if let Err(error) = self.refresh(&meta.id) {
-                log::warn!("cannot search session {}: {error}", meta.id);
+                results.unreadable.push(unreadable_session(meta, &error));
                 continue;
             }
             let mut in_thread = 0;
@@ -201,7 +209,7 @@ impl SessionSearch {
                     true
                 });
             if let Err(error) = visited {
-                log::warn!("cannot search session {}: {error}", meta.id);
+                results.unreadable.push(unreadable_session(meta, &error));
             }
             if in_thread > 0 {
                 results.per_thread.push((meta.id.clone(), in_thread));
@@ -502,6 +510,7 @@ mod tests {
         let hits = |query: &str| {
             search
                 .search(sessions, query, 10)
+                .hits
                 .into_iter()
                 .map(|hit| (hit.entry_id, hit.snippet))
                 .collect::<Vec<_>>()
@@ -529,7 +538,7 @@ mod tests {
         meta.title = "Authentication cleanup".into();
         let search = SessionSearch::new(store.clone());
         let sessions = std::slice::from_ref(&meta);
-        assert!(search.search(sessions, "auth.rs", 10).is_empty());
+        assert!(search.search(sessions, "auth.rs", 10).hits.is_empty());
 
         let events = [
             AgentEvent::TurnStarted {
@@ -597,7 +606,7 @@ mod tests {
         for event in &events {
             store.append_event(&meta.id, 1, event).unwrap();
         }
-        let hits = search.search(sessions, " AUTH.RS ", 10);
+        let hits = search.search(sessions, " AUTH.RS ", 10).hits;
         assert_eq!(
             hits.iter()
                 .map(|hit| hit.entry_id.as_str())
@@ -608,15 +617,18 @@ mod tests {
             && hit.session_title == meta.title
             && hit.turn == 0));
         assert_eq!(hits[3].snippet, "I updated crates/runtime/src/auth.rs");
-        assert_eq!(search.search(sessions, "auth.rs", 2).len(), 2);
+        assert_eq!(search.search(sessions, "auth.rs", 2).hits.len(), 2);
         assert_eq!(
-            search.search(sessions, "diagram.png", 10)[0].entry_id,
+            search.search(sessions, "diagram.png", 10).hits[0].entry_id,
             "user"
         );
         for query in ["DO_NOT_INDEX", "obsolete draft", "  "] {
-            assert!(search.search(sessions, query, 10).is_empty(), "{query}");
+            assert!(
+                search.search(sessions, query, 10).hits.is_empty(),
+                "{query}"
+            );
         }
-        assert!(search.search(sessions, "auth.rs", 0).is_empty());
+        assert!(search.search(sessions, "auth.rs", 0).hits.is_empty());
 
         store
             .append_event(
@@ -641,7 +653,7 @@ mod tests {
                 .event,
             )
             .unwrap();
-        let updated = search.search(sessions, "auth.rs", 10);
+        let updated = search.search(sessions, "auth.rs", 10).hits;
         assert_eq!(updated.len(), 5);
         assert_eq!(updated[4].entry_id, "next");
         assert_eq!(updated[4].turn, 1);
@@ -653,10 +665,10 @@ mod tests {
         store
             .apply(&[Mutation::replace_event_log(&meta.id, replaced.into_bytes())])
             .unwrap();
-        assert!(search.search(sessions, "auth.rs", 10).is_empty());
-        assert_eq!(search.search(sessions, "xyzw.rs", 10).len(), 5);
+        assert!(search.search(sessions, "auth.rs", 10).hits.is_empty());
+        assert_eq!(search.search(sessions, "xyzw.rs", 10).hits.len(), 5);
         store.remove_session(&meta.id).unwrap();
-        assert!(search.search(sessions, "xyzw.rs", 10).is_empty());
+        assert!(search.search(sessions, "xyzw.rs", 10).hits.is_empty());
         for (text, query, expected) in [
             ("  中文\nCAFÉ\t😀 ", " café ", Some("中文 CAFÉ 😀")),
             ("İstanbul", "i\u{307}stan", Some("İstanbul")),
@@ -680,7 +692,9 @@ mod tests {
                     .event,
                 )
                 .unwrap();
-            let hits = search.search(std::slice::from_ref(&snippet_meta), query, 10);
+            let hits = search
+                .search(std::slice::from_ref(&snippet_meta), query, 10)
+                .hits;
             assert_eq!(
                 hits.iter()
                     .map(|hit| hit.snippet.as_str())
@@ -704,7 +718,9 @@ mod tests {
                 .event,
             )
             .unwrap();
-        let hits = search.search(std::slice::from_ref(&snippet_meta), "auth.RS", 10);
+        let hits = search
+            .search(std::slice::from_ref(&snippet_meta), "auth.RS", 10)
+            .hits;
         assert_eq!(hits.len(), 1);
         assert!(hits[0].snippet.contains("AUTH.rs"));
         assert!(hits[0].snippet.chars().count() <= 142);
@@ -860,7 +876,7 @@ mod tests {
         assert_eq!((page.total, page.truncated), (6, true));
         let last = search.search_filtered(&sessions, "auth.rs", &all(10, 5));
         assert_eq!((last.hits.len(), last.truncated), (1, false));
-        assert_eq!(search.search(&sessions, "auth.rs", 50).len(), 6);
+        assert_eq!(search.search(&sessions, "auth.rs", 50).hits.len(), 6);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

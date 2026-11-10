@@ -957,6 +957,12 @@ impl AppState {
         let search = self.session_search.clone();
         Answer::Later(cx.unblock(move || {
             let results = search.search_filtered(&sessions, &query, &filter);
+            omitted.extend(
+                results
+                    .unreadable
+                    .iter()
+                    .map(|thread| format!("a thread that could not be searched: {thread}")),
+            );
             let mut redacted = 0;
             let hits: Vec<SearchHitRow> = results
                 .hits

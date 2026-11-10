@@ -268,7 +268,7 @@ pub enum QueryResponse {
         suggested_name: String,
         mime: String,
     },
-    SessionContentHits(Vec<SessionSearchHit>),
+    SessionContentHits(SessionContentHits),
     ItemOutput(String),
     /// `None` when no entry was recorded at or before the position.
     ThreadAnchorTurn(Option<usize>),
@@ -281,6 +281,14 @@ pub enum QueryResponse {
         /// Unix seconds after which the host answers this read afresh.
         expires_at: u64,
     },
+}
+
+/// A content search's matches, and the sessions it could not search.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionContentHits {
+    pub hits: Vec<SessionSearchHit>,
+    /// A session that could not be searched, and why, one per entry.
+    pub unreadable: Vec<String>,
 }
 
 /// One content match in a stored session, addressed by the folded timeline

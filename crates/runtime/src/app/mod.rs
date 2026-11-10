@@ -50,7 +50,7 @@ use tcode_protocol::{
     ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueryResponse,
     QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
     RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast, ServerEvent,
-    SessionActivity, SessionEventRecord, SessionPlan, SessionSearchHit, SessionStatus,
+    SessionActivity, SessionContentHits, SessionEventRecord, SessionPlan, SessionStatus,
     TcodeUpdateStatus, TerminalStatus, ThreadExportFormat, Topic,
 };
 use tcode_services::acp_registry::{

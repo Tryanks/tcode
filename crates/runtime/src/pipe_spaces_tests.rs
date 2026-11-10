@@ -759,7 +759,7 @@ fn space_drafts_are_bound_to_workspace_and_device_and_search_filters_before_limi
     ) else {
         panic!("owner search")
     };
-    assert_eq!(owner_hits[0].session_id, "b");
+    assert_eq!(owner_hits.hits[0].session_id, "b");
     let QueryResponse::SessionContentHits(hits) = host.query(
         one.clone(),
         Query::SearchSessionContent {
@@ -769,8 +769,8 @@ fn space_drafts_are_bound_to_workspace_and_device_and_search_filters_before_limi
     ) else {
         panic!("space search")
     };
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].session_id, "a");
+    assert_eq!(hits.hits.len(), 1);
+    assert_eq!(hits.hits[0].session_id, "a");
     let QueryResponse::ArchivedSessions(archived) =
         host.query(one.clone(), Query::ArchivedSessions)
     else {

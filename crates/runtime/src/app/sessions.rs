@@ -905,7 +905,7 @@ impl AppState {
         query: String,
         limit: u32,
         executor: &HostCx,
-    ) -> HostTask<Vec<SessionSearchHit>> {
+    ) -> HostTask<SessionContentHits> {
         let limit = usize::try_from(limit).unwrap_or(usize::MAX).min(50);
         let sessions = self
             .sessions
