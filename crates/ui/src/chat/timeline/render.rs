@@ -1638,13 +1638,18 @@ impl TimelineView {
         });
         // A running command or agent the harness can move into the
         // background, as its own Ctrl+B does; for a harness without
-        // background commands, a `task_run` of Tcode's task tools.
+        // background commands, a `task_run` of Tcode's task tools, and a
+        // shell call it runs through them.
         let movable = thread.is_some_and(|status| {
             let caps = status.provider.caps();
             match &entry.content {
-                EntryContent::Item(
-                    ItemContent::CommandExecution { .. } | ItemContent::Subagent { .. },
-                ) => caps.background.is_some_and(|control| control.move_running),
+                EntryContent::Item(ItemContent::CommandExecution { .. }) => {
+                    caps.background.is_some_and(|control| control.move_running)
+                        || caps.shell_through_tasks
+                }
+                EntryContent::Item(ItemContent::Subagent { .. }) => {
+                    caps.background.is_some_and(|control| control.move_running)
+                }
                 EntryContent::Item(ItemContent::ToolCall { name, .. }) => {
                     !caps.native_background && agent::is_task_run(name)
                 }

@@ -180,6 +180,11 @@ pub struct Caps {
     /// ends, starts a turn that reports it. Tcode's own task tools
     /// (`tcode_tasks`) are attached only to the sessions of a harness without.
     pub native_background: bool,
+    /// The harness's own shell tool runs its commands through Tcode's task
+    /// tools, so a running one moves to the background like a `task_run`:
+    /// pi's `bash`, which Tcode's extension replaces unless another extension
+    /// replaced it first.
+    pub shell_through_tasks: bool,
     /// The running process can be asked to take a new model and options
     /// ([`SessionCommand::ApplySettings`]) rather than restart for them.
     pub live_settings: bool,
@@ -388,6 +393,7 @@ impl ProviderKind {
                 }),
                 // `set_model` and `apply_flag_settings` (2.1.318).
                 native_background: true,
+                shell_through_tasks: false,
                 live_settings: true,
                 mcp_servers: true,
                 native_computer_use: false,
@@ -444,6 +450,7 @@ impl ProviderKind {
                     move_running: false,
                 }),
                 native_background: true,
+                shell_through_tasks: false,
                 live_settings: true,
                 mcp_servers: true,
                 // `codex features list` reports `computer_use stable` (0.159.3).
@@ -483,6 +490,7 @@ impl ProviderKind {
                 live_option_push: LiveOptionPush::All,
                 background: None,
                 native_background: false,
+                shell_through_tasks: false,
                 live_settings: false,
                 // ACP support is negotiated per agent; capable agents receive
                 // every tcode HTTP MCP registration in session/new or load.
@@ -522,6 +530,7 @@ impl ProviderKind {
                 live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
                 background: None,
                 native_background: false,
+                shell_through_tasks: true,
                 live_settings: true,
                 mcp_servers: false,
                 native_computer_use: false,
@@ -569,6 +578,7 @@ impl ProviderKind {
                 live_option_push: LiveOptionPush::Only(&["agent"]),
                 background: None,
                 native_background: false,
+                shell_through_tasks: false,
                 live_settings: true,
                 mcp_servers: true,
                 native_computer_use: false,
@@ -605,6 +615,7 @@ impl ProviderKind {
                 live_option_push: LiveOptionPush::All,
                 background: None,
                 native_background: false,
+                shell_through_tasks: false,
                 live_settings: false,
                 mcp_servers: true,
                 native_computer_use: false,
@@ -656,6 +667,7 @@ impl ProviderKind {
                 // Grok runs a prompt of its own reporting a background task that
                 // finished (see `grok::Activity`).
                 native_background: true,
+                shell_through_tasks: false,
                 live_settings: false,
                 mcp_servers: true,
                 native_computer_use: false,
