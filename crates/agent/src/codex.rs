@@ -7839,139 +7839,140 @@ mod tests {
         });
     }
 
+    /// Replies queued in the order Codex sends them, for a startup step that
+    /// reads its own replies off the transport.
+    async fn replies(replies: impl IntoIterator<Item = (i64, Value)>) -> Receiver<ChildOutput> {
+        let (tx, rx) = smol::channel::unbounded();
+        for (id, result) in replies {
+            let reply = json!({"id": id, "result": result}).to_string();
+            tx.send(ChildOutput::Line(reply)).await.unwrap();
+        }
+        rx
+    }
+
+    /// A finished turn as `v2/Turn.ts` of the 0.167.0 schema shapes it.
+    fn turn(id: &str) -> Value {
+        json!({"id": id, "rootTurnId": null, "items": [], "itemsView": "summary",
+            "status": "completed", "error": null, "startedAt": 1767225600,
+            "completedAt": 1767225601, "durationMs": 1000})
+    }
+
     /// `thread/fork` keeps through a turn, so a fork before a turn asks
-    /// `thread/turns/list` (newest first, as 0.167.0 pages it, across pages)
-    /// for the turn before it. The first turn has none.
-    #[cfg(unix)]
+    /// `thread/turns/list` (newest first, page after page, as
+    /// `v2/ThreadTurnsListResponse.ts` of 0.167.0 pages it) for the turn
+    /// before it. The first turn has none, and a turn the thread does not
+    /// have is not guessed at.
     #[test]
     fn a_fork_before_a_turn_keeps_through_the_turn_before_it() {
-        use std::os::unix::fs::PermissionsExt;
-        for (before, forked) in [("turn-3", Some("turn-2")), ("turn-1", None), ("gone", None)] {
-            let dir =
-                std::env::temp_dir().join(format!("agent-codex-fork-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&dir).unwrap();
-            let bin = dir.join("codex");
-            let requests = dir.join("requests");
-            let script = format!(
-                r#"#!/bin/sh
-while IFS= read -r line; do
-  printf '%s\n' "$line" >> '{requests}'
-  id=$(printf '%s' "$line" | sed -n 's/^{{"id":\([0-9]*\).*/\1/p')
-  [ -z "$id" ] && continue
-  case "$line" in
-    *'"thread/turns/list"'*'"cursor":"older"'*) echo "{{\"id\":$id,\"result\":{{\"data\":[{{\"id\":\"turn-1\"}}]}}}}" ;;
-    *'"thread/turns/list"'*) echo "{{\"id\":$id,\"result\":{{\"data\":[{{\"id\":\"turn-3\"}},{{\"id\":\"turn-2\"}}],\"nextCursor\":\"older\"}}}}" ;;
-    *'"thread/fork"'*) echo "{{\"id\":$id,\"result\":{{\"thread\":{{\"id\":\"forked\",\"historyMode\":\"paginated\"}}}}}}" ;;
-    *'"initialize"'*) echo "{{\"id\":$id,\"result\":{{}}}}" ;;
-    *) echo "{{\"id\":$id,\"error\":{{\"code\":-32601,\"message\":\"no\"}}}}" ;;
-  esac
-done
-"#,
-                requests = requests.display()
-            );
-            std::fs::write(&bin, script).unwrap();
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-            smol::block_on(async {
-                let started = start(SessionOptions {
-                    cwd: dir.clone(),
-                    model: None,
-                    resume: Some(ResumeCursor(json!({"thread_id": "source"}))),
-                    fork: Some(ForkPoint::Before {
-                        checkpoint_id: before.into(),
-                    }),
-                    binary_path: Some(bin.clone()),
-                    option_selections: Vec::new(),
-                    mcp_servers: Vec::new(),
-                    launch_env: LaunchEnv::default(),
-                    extra_args: Vec::new(),
-                    acp: None,
-                    instructions: None,
-                })
+        smol::block_on(async {
+            let list = |cursor: Value| json!({"threadId": "source", "cursor": cursor, "sortDirection": "desc"});
+            for (before, forked, pages) in [
+                ("turn-3", Some("turn-2"), 1),
+                ("turn-2", Some("turn-1"), 2),
+                ("turn-1", None, 2),
+                ("gone", None, 2),
+            ] {
+                let (mut actor, _events) = test_actor();
+                let replies = replies([
+                    (
+                        FIRST_TURN_LIST_REQUEST,
+                        json!({"data": [turn("turn-3"), turn("turn-2")],
+                            "nextCursor": "page-2", "backwardsCursor": "page-0"}),
+                    ),
+                    (
+                        FIRST_TURN_LIST_REQUEST + 1,
+                        json!({"data": [turn("turn-1")], "nextCursor": null,
+                            "backwardsCursor": "page-1"}),
+                    ),
+                ])
                 .await;
+                let found = turn_before(&mut actor.stdin, &replies, "source", before).await;
                 match forked {
-                    Some(forked) => {
-                        let handle = started.unwrap();
-                        let fork = std::fs::read_to_string(&requests)
-                            .unwrap()
-                            .lines()
-                            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-                            .find(|request| request["method"] == "thread/fork")
-                            .unwrap();
-                        assert_eq!(fork["params"]["threadId"], "source");
-                        assert_eq!(fork["params"]["lastTurnId"], forked);
-                        let _ = handle.commands.send(SessionCommand::Shutdown).await;
-                    }
-                    None => assert!(matches!(started, Err(AgentError::Provider(_))), "{before}"),
+                    Some(forked) => assert_eq!(found.unwrap(), forked, "{before}"),
+                    None => assert!(matches!(found, Err(AgentError::Provider(_))), "{before}"),
                 }
-            });
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
+                let requests = written(&mut actor).await;
+                assert_eq!(
+                    requests,
+                    [
+                        json!({"id": FIRST_TURN_LIST_REQUEST, "method": "thread/turns/list",
+                            "params": list(Value::Null)}),
+                        json!({"id": FIRST_TURN_LIST_REQUEST + 1, "method": "thread/turns/list",
+                            "params": list(json!("page-2"))}),
+                    ][..pages],
+                    "{before}"
+                );
+                let _ = actor.child.kill();
+                let _ = actor.child.wait();
+            }
+        });
     }
 
     /// Only a paginated thread written to disk can be reverted, so each
-    /// session says whether its thread can (0.166.0 `Thread.historyMode`,
-    /// `Thread.ephemeral`).
-    #[cfg(unix)]
+    /// session says whether its thread can, from the `thread/start` result
+    /// (`v2/ThreadStartResponse.ts` and `v2/Thread.ts` of 0.167.0).
     #[test]
     fn a_thread_says_whether_it_can_be_reverted() {
-        use std::os::unix::fs::PermissionsExt;
-        for (history_mode, unavailable) in [
-            ("paginated", None),
-            ("legacy", Some(RewindFailureReason::Unsupported)),
-        ] {
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let dir = std::env::temp_dir().join(format!("agent-codex-history-{nonce}"));
-            std::fs::create_dir_all(&dir).unwrap();
-            let bin = dir.join("codex");
-            let thread =
-                json!({"thread": {"id": "t", "historyMode": history_mode, "ephemeral": false}});
-            let script = format!(
-                r#"#!/bin/sh
-while IFS= read -r line; do
-  id=$(printf '%s' "$line" | sed -n 's/^{{"id":\([0-9]*\).*/\1/p')
-  [ -z "$id" ] && continue
-  case "$line" in
-    *'"thread/start"'*) echo "{{\"id\":$id,\"result\":{thread}}}" ;;
-    *'"initialize"'*) echo "{{\"id\":$id,\"result\":{{}}}}" ;;
-    *) echo "{{\"id\":$id,\"error\":{{\"code\":-32601,\"message\":\"no\"}}}}" ;;
-  esac
-done
-"#,
-                thread = thread.to_string().replace('"', "\\\"")
-            );
-            std::fs::write(&bin, script).unwrap();
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-            smol::block_on(async {
-                let handle = start(SessionOptions {
-                    cwd: dir.clone(),
+        smol::block_on(async {
+            for (history_mode, ephemeral, unrevertable) in [
+                ("paginated", false, None),
+                ("legacy", false, Some(RewindFailureReason::Unsupported)),
+                ("paginated", true, Some(RewindFailureReason::Unsupported)),
+            ] {
+                let (mut actor, _events) = test_actor();
+                let thread = json!({
+                    "id": "thread-1", "sessionId": "session-1", "forkedFromId": null,
+                    "parentThreadId": null, "preview": "", "ephemeral": ephemeral,
+                    "historyMode": history_mode, "modelProvider": "openai",
+                    "model": "gpt-5.5", "reasoningEffort": null, "createdAt": 1767225600,
+                    "updatedAt": 1767225600, "status": {"type": "idle"}, "path": null,
+                    "cwd": "/home/user/project", "cliVersion": "0.167.0",
+                    "source": "appServer", "projectId": null, "turns": []
+                });
+                let replies = replies([
+                    (
+                        1,
+                        json!({"userAgent": "codex_cli_rs/0.167.0", "codexHome": "/home/user/.codex",
+                            "platformFamily": "unix", "platformOs": "linux"}),
+                    ),
+                    (
+                        2,
+                        json!({"thread": thread, "model": "gpt-5.5", "modelProvider": "openai",
+                            "serviceTier": null, "cwd": "/home/user/project",
+                            "approvalPolicy": "on-request", "approvalsReviewer": "user",
+                            "sandbox": {"type": "workspaceWrite", "writableRoots": [],
+                                "networkAccess": false, "excludeTmpdirEnvVar": false,
+                                "excludeSlashTmp": false},
+                            "activePermissionProfile": null, "reasoningEffort": null}),
+                    ),
+                    (3, json!({"data": [], "nextCursor": null})),
+                    (4, json!({"data": []})),
+                ])
+                .await;
+                let options = SessionOptions {
+                    cwd: PathBuf::from("/home/user/project"),
                     model: None,
                     resume: None,
                     fork: None,
-                    binary_path: Some(bin.clone()),
+                    binary_path: None,
                     option_selections: Vec::new(),
                     mcp_servers: Vec::new(),
                     launch_env: LaunchEnv::default(),
                     extra_args: Vec::new(),
                     acp: None,
                     instructions: None,
-                })
-                .await
-                .unwrap();
-                loop {
-                    if let AgentEvent::RewindAvailability {
-                        unavailable: reported,
-                    } = handle.events.recv().await.unwrap()
-                    {
-                        assert_eq!(reported, unavailable, "{history_mode}");
-                        break;
-                    }
-                }
-                let _ = handle.commands.send(SessionCommand::Shutdown).await;
-            });
-            let _ = std::fs::remove_dir_all(dir);
-        }
+                };
+                let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    opened.unrevertable, unrevertable,
+                    "{history_mode} {ephemeral}"
+                );
+                assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
+                let _ = actor.child.kill();
+                let _ = actor.child.wait();
+            }
+        });
     }
 }
