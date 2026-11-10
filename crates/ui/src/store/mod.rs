@@ -1290,9 +1290,7 @@ impl WorkspaceStore {
             &envelope.topic
         };
         match (topic, &envelope.event) {
-            (Topic::SessionStatus { session_id }, ServerEvent::SessionStatusReplaced(status))
-                if status.session_id == *session_id =>
-            {
+            (Topic::SessionStatus { session_id }, ServerEvent::SessionStatusReplaced(status)) => {
                 for message in &status.queued_messages {
                     if let Some(key) = &message.delivery_key {
                         self.retire_delivery_for(session_id, key);
@@ -1383,15 +1381,9 @@ impl WorkspaceStore {
                 }
                 None
             }
-            (
-                Topic::Terminal { terminal_id },
-                ServerEvent::TerminalFrame {
-                    terminal_id: frame_id,
-                    frame,
-                },
-            ) if *terminal_id == frame_id => {
-                self.apply_terminal_frame(frame_id, *frame, cx);
-                reach = Reach::Terminal(frame_id);
+            (Topic::Terminal { terminal_id }, ServerEvent::TerminalFrame { frame, .. }) => {
+                self.apply_terminal_frame(*terminal_id, *frame, cx);
+                reach = Reach::Terminal(*terminal_id);
                 None
             }
             (
@@ -1422,13 +1414,7 @@ impl WorkspaceStore {
                         event,
                     });
                 }
-                (
-                    Topic::Terminal { terminal_id },
-                    ServerEvent::TerminalDelta {
-                        terminal_id: delta_id,
-                        delta,
-                    },
-                ) if terminal_id == delta_id => {
+                (Topic::Terminal { terminal_id }, ServerEvent::TerminalDelta { delta, .. }) => {
                     self.apply_terminal_delta(*terminal_id, delta, cx);
                     reach = Reach::Terminal(*terminal_id);
                 }
@@ -1504,11 +1490,8 @@ impl WorkspaceStore {
                 }
                 (
                     Topic::ExternalImport { project_id },
-                    ServerEvent::ExternalImportStatusReplaced {
-                        project_id: replaced,
-                        status,
-                    },
-                ) if project_id == replaced => {
+                    ServerEvent::ExternalImportStatusReplaced { status, .. },
+                ) => {
                     self.import_statuses
                         .insert(project_id.clone(), status.clone());
                 }
@@ -1662,7 +1645,7 @@ impl WorkspaceStore {
                 (
                     Topic::SessionStatus { session_id },
                     ServerEvent::SessionStatusReplaced(status),
-                ) if status.session_id == *session_id => {
+                ) => {
                     let loaded = self.baseline_topics.insert(envelope_topic.clone());
                     if let Some(thread) = self.threads.get_mut(session_id) {
                         let status = status.as_ref().clone();
@@ -1714,9 +1697,7 @@ impl WorkspaceStore {
                         reach = Reach::Thread(session_id.clone(), &[Part::Status]);
                     }
                 }
-                (Topic::SessionPlan { session_id }, ServerEvent::SessionPlanReplaced(plan))
-                    if plan.session_id == *session_id =>
-                {
+                (Topic::SessionPlan { session_id }, ServerEvent::SessionPlanReplaced(plan)) => {
                     let loaded = self.baseline_topics.insert(envelope_topic.clone());
                     if let Some(thread) = self.threads.get_mut(session_id) {
                         thread.plan = Some(plan.clone());
@@ -1734,12 +1715,12 @@ impl WorkspaceStore {
                 (
                     Topic::SessionStatus { session_id },
                     ServerEvent::RewindPrefill {
-                        session_id: event_session,
                         client_id,
                         text,
                         attachments,
+                        ..
                     },
-                ) if session_id == event_session && *client_id == self.client_id() => {
+                ) if *client_id == self.client_id() => {
                     self.native_rewind_prefills.insert(
                         session_id.clone(),
                         RewindPrefill {
