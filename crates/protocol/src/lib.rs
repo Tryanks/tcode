@@ -300,27 +300,14 @@ pub use wire::{
 // new_project_dir, project_start and project_start_custom with their
 // patches, and CreateNewProject's parent.
 //
-// Unreleased: the agent event stream gains session_moved and the timeline
-// the session_moved entry (from, to), a moved thread whose native session
-// went along. ApprovalRequest carries reason, why the harness asks a person,
-// which moves off the exec_command and file_change kinds, and blocked_path;
-// the exec_command kind carries description.
-//
-// Unreleased: session_moved gains an optional parent_item_id (a native
-// subagent's own directory); the agent event stream gains worktree_requested
-// and worktree_resolved (request: create {cwd, name} | remove {path}; answer:
-// ready {path, reused} | removed | refused {error}), the timeline the
-// worktree entry, and SessionMeta other_worktrees ({path, root_project_path,
-// base, branch}).
-//
-// Unreleased: spaces gain a policy (SpacePolicy: agents, approval, terminals,
-// git_remote, preview, computer_use, editor), carried by SpaceInfo, the Space
-// principal and the Space scope, and set by SpaceAction set_policy.
-//
-// Unreleased: a tcode/1 stream may open with {"type":"ssh"} after hello and
-// then carry an SSH connection to the machine (answered connected or refused;
-// a space member needs the policy's editor).
-pub const PROTOCOL_VERSION: u32 = 26;
+// Version 27 (v0.4.0): the session_moved agent event (with parent_item_id)
+// and timeline entry; ApprovalRequest's reason and blocked_path, and the
+// exec_command kind's description; the worktree_requested and
+// worktree_resolved agent events, the worktree timeline entry and
+// SessionMeta's other_worktrees; spaces' SpacePolicy, carried by SpaceInfo,
+// the Space principal and scope and set by SpaceAction set_policy; and the
+// {"type":"ssh"} stream carrying an SSH connection to the machine.
+pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]
 mod tests;
