@@ -288,7 +288,7 @@ covers persistence, agent selection, login and `PUID`/`PGID` ownership.
    (`--traverse official --traverse https://a.example --traverse
    https://b.example`), or give `--traverse off` alone for none; see
    [Traverse](#traverse). `--browser-listen ADDR:PORT` binds the browser page
-   elsewhere (`--listen` is accepted as an alias); `serve` refuses a bind
+   elsewhere; `serve` refuses a bind
    beyond loopback until a password exists and exits before starting anything
    else. To preset the browser password, supply `serve --password PASSWORD`
    or set `TCODE_PASSWORD` in the service environment; the CLI option takes
