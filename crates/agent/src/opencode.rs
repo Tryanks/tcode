@@ -206,7 +206,7 @@ async fn run_actor(
             .await;
     }
     if ready.send(Ok(())).await.is_err() {
-        actor.shutdown().await;
+        actor.shutdown();
         return;
     }
     actor::run(actor, &commands).await;
@@ -740,7 +740,7 @@ impl SessionActor for OpenCodeActor {
     }
 
     async fn teardown(mut self, reason: Option<String>) -> Option<String> {
-        self.shutdown().await;
+        self.shutdown();
         reason.map(|reason| self.server.tail.append_to(reason, "\nserver output:\n"))
     }
 }
@@ -1245,19 +1245,11 @@ impl OpenCodeActor {
             _ => {}
         }
         let mapped = self.mapper.on_event(event)?;
-        let turn_completed = mapped
-            .events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }));
         for event in mapped.events {
             self.events.emit(event).await;
         }
         for action in mapped.actions {
             self.perform(action).await;
-        }
-        if turn_completed {
-            let root = self.mapper.root.clone();
-            self.cancel_forms(Some(&root)).await;
         }
         Ok(())
     }
@@ -1445,47 +1437,9 @@ impl OpenCodeActor {
             .await;
     }
 
-    /// Cancels the forms still open in `session` (every session when `None`).
-    async fn cancel_forms(&mut self, session: Option<&str>) {
-        let pending: Vec<String> = self
-            .forms
-            .iter()
-            .filter(|(_, form)| session.is_none_or(|session| form.session_id == session))
-            .map(|(id, _)| id.clone())
-            .collect();
-        for form_id in pending {
-            let Some(form) = self.forms.remove(&form_id) else {
-                continue;
-            };
-            if let Err(err) = self
-                .http
-                .delete(&format!("/api/session/{}/form/{form_id}", form.session_id))
-            {
-                self.events
-                    .emit(AgentEvent::Warning {
-                        message: format!("failed to cancel OpenCode question {form_id}: {err}"),
-                    })
-                    .await;
-            }
-            self.events
-                .emit(AgentEvent::UserInputResolved {
-                    request_id: form_id,
-                    answers: Map::new(),
-                })
-                .await;
-        }
-    }
-
-    async fn shutdown(&mut self) {
+    fn shutdown(&mut self) {
         for stop in self.shell_polls.values() {
             stop.store(true, Ordering::Relaxed);
-        }
-        self.cancel_forms(None).await;
-        for (request_id, session_id) in std::mem::take(&mut self.permissions) {
-            let _ = self.http.post_empty(
-                &format!("/api/session/{session_id}/permission/{request_id}/reply"),
-                &json!({ "decision": "reject", "message": "Tcode session closed" }),
-            );
         }
         self.server.stop();
     }
