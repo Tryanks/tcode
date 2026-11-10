@@ -24,7 +24,7 @@ use tcode_protocol::{
     PullRequestRead, PullRequestReadResponse, PullRequestViewedFiles,
 };
 
-use super::{ChangeLink, ChangeWatch, appearance, row_menu, row_state, source};
+use super::{ChangeLink, ChangeWatch, appearance, row_menu, row_state};
 use crate::{
     icon::{Icon, IconName},
     material,
@@ -919,15 +919,7 @@ impl PullRequestView {
                     .font_family(cx.theme().mono_font_family.clone())
                     .child(format!("#{}", key.number))
                     .with_tooltip({
-                        let label = crate::tr!(
-                            "pull_requests.number_tooltip",
-                            source = crate::tr!(source(link.as_ref())).into_owned(),
-                            ago = ago(link
-                                .as_ref()
-                                .and_then(|link| link.linked_at)
-                                .unwrap_or_default())
-                        )
-                        .into_owned();
+                        let label = super::number_tooltip(link.as_ref());
                         move |_, _| Tooltip::new(label.clone())
                     }),
             )
