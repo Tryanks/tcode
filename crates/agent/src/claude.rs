@@ -350,43 +350,10 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         effective_permission_mode(launch_permission_mode, &opts.extra_args);
 
     let mut cmd = crate::process::async_harness_command(&binary);
-    cmd.arg("--print")
-        .arg("--input-format")
-        .arg("stream-json")
-        .arg("--output-format")
-        .arg("stream-json")
-        .arg("--include-partial-messages")
-        .arg("--verbose")
-        .arg("--permission-prompt-tool")
-        .arg("stdio")
-        .arg("--permission-mode")
-        .arg(launch_permission_mode)
-        .arg("--allow-dangerously-skip-permissions");
-
     if native_rewind {
-        // User-message UUIDs are Claude's native checkpoint ids. SDK file
-        // checkpointing is opt-in for print/stream-json hosts even though the
-        // interactive CLI enables it automatically.
-        cmd.arg("--replay-user-messages")
-            .env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
-    }
-
-    if let Some(model) = &launch.model_id {
-        cmd.arg("--model").arg(model);
-    }
-    if let Some(effort) = &launch.effort {
-        cmd.arg("--effort").arg(effort);
-    }
-    if let Some(settings) = &launch.settings_json {
-        cmd.arg("--settings").arg(settings);
-    }
-    for arg in resume_args(&opts.resume, opts.fork.is_some(), fork_anchor.as_deref()) {
-        cmd.arg(arg);
-    }
-    // Register tcode's enabled HTTP MCP servers. Tokens ride in Authorization
-    // headers inside the merged `--mcp-config` JSON.
-    for arg in mcp_args(&opts.mcp_servers) {
-        cmd.arg(arg);
+        // SDK file checkpointing is opt-in for print/stream-json hosts even
+        // though the interactive CLI enables it automatically.
+        cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
     }
     // Passed on every launch: the CLI records the rendered system prompt with the conversation
     // and renders it again from the current launch after a compaction.
@@ -399,20 +366,21 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
             InstructionsFile::write(text)
                 .map_err(|err| AgentError::Spawn(format!("writing Tcode's instructions: {err}")))?,
         ),
-        Some(text) => {
-            cmd.arg("--append-system-prompt").arg(text);
-            None
-        }
-        None => None,
+        _ => None,
     };
-    if let Some(file) = &instructions_file {
-        cmd.arg("--append-system-prompt-file").arg(&file.0);
-    }
-    // Settings → Harnesses "Launch arguments", appended last so the user can
-    // override anything we set above.
-    for arg in &opts.extra_args {
-        cmd.arg(arg);
-    }
+    let system_prompt = match &instructions_file {
+        Some(file) => Some(SystemPrompt::File(&file.0)),
+        None => opts.instructions.as_deref().map(SystemPrompt::Text),
+    };
+    cmd.args(launch_args(
+        launch_permission_mode,
+        native_rewind,
+        &launch,
+        resume_args(&opts.resume, opts.fork.is_some(), fork_anchor.as_deref()),
+        &opts.mcp_servers,
+        system_prompt,
+        &opts.extra_args,
+    ));
     log::debug!(
         "claude spawn args: model={:?} effort={:?} settings={:?} permission-mode={} effective-permission-mode={}",
         launch.model_id,
@@ -527,6 +495,72 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         commands: cmd_tx,
         events: event_rx,
     })
+}
+
+/// How Tcode's instructions reach the system prompt.
+enum SystemPrompt<'a> {
+    /// The text itself, for a CLI without `--append-system-prompt-file`.
+    Text(&'a str),
+    /// A file holding the text.
+    File(&'a Path),
+}
+
+/// The arguments a session launches Claude Code with.
+fn launch_args(
+    permission_mode: &str,
+    native_rewind: bool,
+    launch: &ClaudeLaunchOptions,
+    resume: Vec<String>,
+    mcp_servers: &[crate::McpRegistration],
+    system_prompt: Option<SystemPrompt<'_>>,
+    extra_args: &[String],
+) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--verbose",
+        "--permission-prompt-tool",
+        "stdio",
+        "--permission-mode",
+        permission_mode,
+        "--allow-dangerously-skip-permissions",
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
+    if native_rewind {
+        // User-message UUIDs are Claude's native checkpoint ids.
+        args.push("--replay-user-messages".into());
+    }
+    for (flag, value) in [
+        ("--model", &launch.model_id),
+        ("--effort", &launch.effort),
+        ("--settings", &launch.settings_json),
+    ] {
+        if let Some(value) = value {
+            args.extend([flag.into(), value.into()]);
+        }
+    }
+    args.extend(resume.into_iter().map(Into::into));
+    // Tokens ride in Authorization headers inside the merged `--mcp-config` JSON.
+    args.extend(mcp_args(mcp_servers).into_iter().map(Into::into));
+    match system_prompt {
+        Some(SystemPrompt::Text(text)) => {
+            args.extend(["--append-system-prompt".into(), text.into()]);
+        }
+        Some(SystemPrompt::File(path)) => {
+            args.extend(["--append-system-prompt-file".into(), path.into()]);
+        }
+        None => {}
+    }
+    // Settings → Harnesses "Launch arguments", last so the user can override
+    // anything Tcode set.
+    args.extend(extra_args.iter().map(Into::into));
+    args
 }
 
 /// Tcode's instructions for `--append-system-prompt-file`, removed when dropped. Text that spans
@@ -5328,6 +5362,92 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A launch asks for the native permission prompt in the selected mode
+    /// with a live switch to bypass allowed, puts Tcode's instructions in the
+    /// system prompt (a file, or the text for a CLI without the file option),
+    /// and leaves the user's launch arguments last so they win.
+    #[test]
+    fn a_launch_passes_the_selected_mode_and_leaves_the_users_arguments_last() {
+        let base = [
+            "--print",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--verbose",
+            "--permission-prompt-tool",
+            "stdio",
+            "--permission-mode",
+        ];
+        let os =
+            |args: &[&str]| -> Vec<std::ffi::OsString> { args.iter().map(Into::into).collect() };
+        let launch = ClaudeLaunchOptions {
+            model_id: Some("claude-opus-4-8".into()),
+            effort: Some("high".into()),
+            settings_json: Some(r#"{"fastMode":true}"#.into()),
+            ..ClaudeLaunchOptions::default()
+        };
+        let mcp = [crate::McpRegistration {
+            name: "tcode_pull_requests".into(),
+            url: "http://127.0.0.1:1/mcp".into(),
+            bearer_token: "token".into(),
+        }];
+        let mcp_config = mcp_args(&mcp);
+        let mut expected = os(&base);
+        expected.extend(os(&[
+            "auto",
+            "--allow-dangerously-skip-permissions",
+            "--replay-user-messages",
+            "--model",
+            "claude-opus-4-8",
+            "--effort",
+            "high",
+            "--settings",
+            r#"{"fastMode":true}"#,
+            "--resume",
+            "native",
+            &mcp_config[0],
+            &mcp_config[1],
+            "--append-system-prompt-file",
+            "/tmp/instructions.md",
+            "--permission-mode",
+            "plan",
+        ]));
+        assert_eq!(
+            launch_args(
+                "auto",
+                true,
+                &launch,
+                vec!["--resume".into(), "native".into()],
+                &mcp,
+                Some(SystemPrompt::File(Path::new("/tmp/instructions.md"))),
+                &["--permission-mode".into(), "plan".into()],
+            ),
+            expected
+        );
+
+        let mut expected = os(&base);
+        expected.extend(os(&[
+            "default",
+            "--allow-dangerously-skip-permissions",
+            "--append-system-prompt",
+            "Link every PR.",
+        ]));
+        assert_eq!(
+            launch_args(
+                "default",
+                false,
+                &ClaudeLaunchOptions::default(),
+                Vec::new(),
+                &[],
+                Some(SystemPrompt::Text("Link every PR.")),
+                &[],
+            ),
+            expected
+        );
+    }
+
     #[test]
     fn mcp_builder_handles_both_one_and_none() {
         let registrations = [
@@ -5620,6 +5740,25 @@ mod tests {
                     "failure": { "reason": "nothing_to_restore", "detail": error },
                 },
             }])
+        );
+    }
+
+    /// A preview is Claude's dry run of the files a rewind would restore; a
+    /// rewind of the conversation alone restores none and asks nothing.
+    #[test]
+    fn a_rewind_preview_is_a_dry_run_of_the_files() {
+        let mut mapper = Mapper::new();
+        assert_eq!(
+            mapper.begin_preview("checkpoint-2".into(), RewindMode::FilesAndConversation),
+            Some(
+                json!({"type":"control_request","request_id":"tcode-ctrl-1","request":{
+                    "subtype":"rewind_files","user_message_id":"checkpoint-2","dry_run":true
+                }})
+            )
+        );
+        assert_eq!(
+            mapper.begin_preview("checkpoint-2".into(), RewindMode::Conversation),
+            None
         );
     }
 
