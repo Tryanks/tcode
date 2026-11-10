@@ -2138,15 +2138,10 @@ impl Timeline {
     }
 }
 
-/// The tool a subagent reports through: tcode_control's `report_result`, or the
-/// `tcode_report` server's in transcripts recorded before it moved there.
+/// The tool a subagent reports through: tcode_control's `report_result`.
 pub fn is_report_result_tool(name: &str) -> bool {
     let name = agent::ToolName::parse(name);
-    name.tool == "report_result"
-        && matches!(
-            name.server,
-            Some(agent::McpRegistration::SERVER_NAME_CONTROL | "tcode_report")
-        )
+    name.tool == "report_result" && name.server == Some(agent::McpRegistration::SERVER_NAME_CONTROL)
 }
 
 /// Merge an authoritative item snapshot over an existing entry, keeping
