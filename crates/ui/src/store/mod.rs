@@ -3900,20 +3900,14 @@ impl WorkspaceStore {
         &self,
         session_id: Option<&str>,
         cx: &mut App,
-    ) -> Task<Vec<PathEntry>> {
+    ) -> Task<Result<Vec<PathEntry>, String>> {
         let session_id = session_id.unwrap_or_default().to_owned();
         let host = self.host.clone();
         cx.spawn(
             async move |_| match host.query(Query::ListActiveWorkspace { session_id }).await {
-                Ok(QueryResponse::ActiveWorkspace(entries)) => entries,
-                Ok(other) => {
-                    log::error!("unexpected active-workspace response: {other:?}");
-                    Vec::new()
-                }
-                Err(error) => {
-                    log::error!("active-workspace query failed: {}", error.message);
-                    Vec::new()
-                }
+                Ok(QueryResponse::ActiveWorkspace(entries)) => Ok(entries),
+                Ok(other) => Err(format!("unexpected active-workspace response: {other:?}")),
+                Err(error) => Err(error.message),
             },
         )
     }

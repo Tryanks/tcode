@@ -226,7 +226,8 @@ pub struct Composer {
     menu_dismissed: bool,
     /// Cached workspace listing for the active session cwd (for `@`-mentions),
     /// loaded lazily in the background the first time a mention trigger opens.
-    workspace: Option<(PathBuf, Vec<PathEntry>)>,
+    /// The `@` menu's listing of a cwd, or why the host could not give it.
+    workspace: Option<(PathBuf, Result<Vec<PathEntry>, String>)>,
     workspace_loading: bool,
     /// Pending image attachments for the active session, validated + persisted to
     /// disk. Cleared on send and whenever the active session changes.

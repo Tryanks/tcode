@@ -1115,6 +1115,7 @@ composer:
   goal_edit: "Edit goal"
   goal_clear: "Clear goal"
   no_files: "No matching files or folders."
+  files_failed: "Couldn't list the files: %{reason}"
   searching: "Searching…"
   cmd_model_desc: "Open the model picker"
   group_builtin: "Built-in"

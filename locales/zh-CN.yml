@@ -1108,6 +1108,7 @@ composer:
   goal_edit: "编辑目标"
   goal_clear: "清除目标"
   no_files: "没有匹配的文件或文件夹。"
+  files_failed: "无法列出文件：%{reason}"
   searching: "搜索中…"
   cmd_model_desc: "打开模型选择器"
   group_builtin: "内置"

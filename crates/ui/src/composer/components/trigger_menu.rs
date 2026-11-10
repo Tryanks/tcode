@@ -75,11 +75,17 @@ impl Composer {
         };
         match trigger.kind {
             TriggerKind::Path => {
-                let entries = self
-                    .workspace
-                    .as_ref()
-                    .map(|(_, e)| e.as_slice())
-                    .unwrap_or(&[]);
+                let (entries, empty) = match self.workspace.as_ref().map(|(_, listed)| listed) {
+                    Some(Err(reason)) => (
+                        &[][..],
+                        crate::tr!("composer.files_failed", reason = reason).into_owned(),
+                    ),
+                    Some(Ok(entries)) => (
+                        entries.as_slice(),
+                        crate::tr!("composer.no_files").into_owned(),
+                    ),
+                    None => (&[][..], crate::tr!("composer.no_files").into_owned()),
+                };
                 let threads = self.thread_rows(&trigger.query, cx);
                 let file_group = (!threads.is_empty()).then_some("composer.group_files");
                 let files = filter_entries(entries, &trigger.query, FILE_MENU_ROW_CAP)
@@ -97,7 +103,7 @@ impl Composer {
                     });
                 let rows = threads.into_iter().chain(files).collect();
                 let loading = self.workspace_loading && self.workspace.is_none();
-                (rows, crate::tr!("composer.no_files").into_owned(), loading)
+                (rows, empty, loading)
             }
             TriggerKind::Skill => {
                 // Provider-native skills (Claude `skills` / Codex `skills/list`),
@@ -558,7 +564,8 @@ mod tests {
                 .composer_state_for(store.read(cx).sole_thread().as_deref(), cx)
                 .active_cwd
                 .unwrap();
-            composer.workspace = Some((cwd, vec![PathEntry::from_rel("file.rs".into(), false)]));
+            composer.workspace =
+                Some((cwd, Ok(vec![PathEntry::from_rel("file.rs".into(), false)])));
             window.focus(&composer.input.read(cx).focus_handle(cx), cx);
         });
         for (trigger, first_row) in [("/", "/model"), ("@", "file.rs")] {
@@ -647,7 +654,7 @@ mod tests {
             let entries = (0..FILE_MENU_ROW_CAP)
                 .map(|index| PathEntry::from_rel(format!("file-{index:02}.rs"), false))
                 .collect();
-            composer.workspace = Some((cwd, entries));
+            composer.workspace = Some((cwd, Ok(entries)));
             window.focus(&composer.input.read(cx).focus_handle(cx), cx);
         });
         cx.simulate_input("@");

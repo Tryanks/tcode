@@ -1115,6 +1115,7 @@ composer:
   goal_edit: "目標を編集"
   goal_clear: "目標をクリア"
   no_files: "一致するファイルやフォルダーはありません。"
+  files_failed: "ファイルを一覧表示できませんでした: %{reason}"
   searching: "検索中…"
   cmd_model_desc: "モデル選択を開く"
   group_builtin: "組み込み"
