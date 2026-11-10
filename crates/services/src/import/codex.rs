@@ -355,10 +355,9 @@ fn message_texts(payload: &Value, kind: &str) -> Vec<String> {
 
 fn is_harness_text(text: &str) -> bool {
     let text = text.trim_start();
-    text.starts_with('<')
-        && ["<environment_context", "<user_instructions", "<permissions"]
-            .iter()
-            .any(|prefix| text.starts_with(prefix))
+    ["<environment_context", "<permissions"]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
 }
 
 /// What Codex writes as the output of a call it dropped when its turn was

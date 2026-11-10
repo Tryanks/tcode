@@ -189,7 +189,6 @@ fn is_user_noise(text: &str) -> bool {
         "<command-message>",
         "<command-name>",
         "<local-command-stdout>",
-        "Caveat: The messages below",
     ]
     .iter()
     .any(|prefix| text.starts_with(prefix))
