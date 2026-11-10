@@ -12,13 +12,28 @@ use crate::provider_auth::{
     parse_opencode_auth,
 };
 
-/// Return trimmed stdout on success, falling back to stderr when stdout is empty.
-pub async fn run_capture(program: &str, args: &[&str]) -> Option<String> {
-    run_capture_env(program, args, &[]).await
+/// Trimmed stdout of a run that succeeded.
+pub async fn run_capture_env(
+    program: &str,
+    args: &[&str],
+    env: &[(String, String)],
+) -> Option<String> {
+    let output = provider_command(program, env)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
 }
 
-/// [`run_capture`] with extra environment variables applied to the child.
-pub async fn run_capture_env(
+/// [`run_capture_env`], reading stderr when stdout is empty: which stream
+/// `cursor-agent status` and `grok models` answer on has not been checked
+/// against either CLI.
+async fn run_capture_either_env(
     program: &str,
     args: &[&str],
     env: &[(String, String)],
@@ -156,11 +171,13 @@ pub async fn probe_provider(
         .await
         .as_deref()
         .and_then(parse_opencode_auth),
-        ProviderKind::Cursor => run_capture_env(&program, &["status", "--format", "json"], &env)
-            .await
-            .as_deref()
-            .and_then(|json| parse_cursor_auth(json, cursor_key_configured(&env))),
-        ProviderKind::Grok => run_capture_env(&program, &["models"], &env)
+        ProviderKind::Cursor => {
+            run_capture_either_env(&program, &["status", "--format", "json"], &env)
+                .await
+                .as_deref()
+                .and_then(|json| parse_cursor_auth(json, cursor_key_configured(&env)))
+        }
+        ProviderKind::Grok => run_capture_either_env(&program, &["models"], &env)
             .await
             .as_deref()
             .and_then(parse_grok_models_auth),
