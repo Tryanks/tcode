@@ -1029,7 +1029,7 @@ impl Composer {
         let interactive = self.interactive(cx);
         let has_text = interactive && self.draft_has_text;
         let composer_state = self.composer_state(cx);
-        let stopping = turn_running && !has_text;
+        let stopping = (turn_running || composer_state.preparing_turn) && !has_text;
         let stop_pending = composer_state.stopping;
         let steerable = turn_running && has_text && composer_state.steering_supported;
         let armed = self.steer_gesture.as_ref().is_some_and(SteerGesture::armed);
@@ -1212,6 +1212,10 @@ impl Composer {
             } else {
                 &[DesktopAction::Spinner, DesktopAction::Stop]
             }
+        } else if composer_state.preparing_turn {
+            // The provider the next turn waits on can be stopped before it
+            // runs one.
+            &[DesktopAction::Spinner, DesktopAction::Stop]
         } else if composer_state.preparing_worktree {
             // First-send worktree preparation holds the send control.
             &[DesktopAction::Spinner, DesktopAction::Preparing]
@@ -3639,6 +3643,42 @@ mod replica_tests {
                 )
             )),
             "the process is killed only once the user confirms"
+        );
+    }
+
+    /// A provider the next turn waits on, which runs no turn yet, can be
+    /// stopped from the composer.
+    #[gpui::test]
+    fn a_turn_still_being_prepared_offers_stop(cx: &mut TestAppContext) {
+        let (store, incoming, outgoing, mut status) = attach(cx);
+        let session_id = Some(status.session_id.clone());
+        status.preparing_turn = true;
+        replace(
+            &incoming,
+            Topic::SessionStatus {
+                session_id: status.session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        cx.run_until_parked();
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let composer =
+                cx.new(|cx| Composer::new(store.clone(), session_id.clone(), window, cx));
+            gpui_base::Root::new(composer, window, cx)
+        });
+        cx.simulate_resize(gpui::size(px(1024.), px(768.)));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.update(|window, cx| _ = window.draw(cx));
+        while outgoing.try_recv().is_ok() {}
+        let stop = cx.debug_bounds("stop-turn").expect("Stop is offered");
+        cx.simulate_click(stop.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            std::iter::from_fn(|| outgoing.try_recv().ok()).any(|line| matches!(
+                tcode_protocol::decode_client_line(&line).unwrap().payload,
+                tcode_protocol::ClientPayload::Command(tcode_protocol::Command::Interrupt { .. })
+            ))
         );
     }
 

@@ -477,7 +477,7 @@ impl AppState {
         }
         if matches!(command, Command::Interrupt { .. })
             && !active.turn_in_flight
-            && active.delivery_in_flight.is_none()
+            && !active.preparing_turn()
             && !active.timeline.turn_running
             && active.background_task_count == 0
         {
@@ -494,6 +494,7 @@ impl AppState {
         ) {
             match &active.runtime {
                 Runtime::Live(commands) if !commands.is_closed() => {}
+                Runtime::Starting { .. } if matches!(command, Command::Interrupt { .. }) => {}
                 _ => {
                     return Err(error(
                         "no_running_turn",

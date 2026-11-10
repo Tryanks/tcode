@@ -264,7 +264,7 @@ async fn run_actor(
         return;
     }
     let mut child = match cmd.spawn() {
-        Ok(child) => ProcessTree::new(child),
+        Ok(child) => opts.processes.hold(ProcessTree::new(child)),
         Err(err) => {
             let _ = ready
                 .send(Err(AgentError::Spawn(format!(

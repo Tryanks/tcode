@@ -821,6 +821,11 @@ pub struct SessionStatus {
     pub terminal_height: f32,
     pub delivery_in_flight: Option<u64>,
     pub activity: SessionActivity,
+    /// The next turn waits on the provider, which runs none yet: it is
+    /// starting, taking new settings, or taking the message. An interrupt
+    /// stops that.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preparing_turn: bool,
     /// An interrupt was accepted by the provider and its turn has not ended yet.
     pub stopping: bool,
     /// When that first interrupt went out (unix ms).

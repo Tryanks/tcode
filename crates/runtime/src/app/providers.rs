@@ -1934,6 +1934,7 @@ pub(super) fn session_options(
             launch: agent.launch.clone(),
         }),
         instructions: None,
+        processes: Default::default(),
     }
 }
 

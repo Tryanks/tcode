@@ -202,6 +202,59 @@ impl<C: Leader> Drop for ProcessTree<C> {
     }
 }
 
+/// The harness processes one session starts, which whoever started the
+/// session stops without going through its actor: an actor waiting on its
+/// harness reads no command until the harness answers, a session still
+/// starting has no actor to ask, and the harness's answer is what the user
+/// stopped waiting for. A tree held after [`stop`](Self::stop) is stopped as
+/// it is held.
+#[derive(Clone, Default, Debug)]
+pub struct SessionProcesses(Arc<Mutex<HeldTrees>>);
+
+#[derive(Default, Debug)]
+struct HeldTrees {
+    stopped: bool,
+    entries: Vec<u64>,
+}
+
+impl SessionProcesses {
+    fn held(&self) -> std::sync::MutexGuard<'_, HeldTrees> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Hold `tree` as one of this session's.
+    pub(crate) fn hold<C: Leader>(&self, mut tree: ProcessTree<C>) -> ProcessTree<C> {
+        let stopped = {
+            let mut held = self.held();
+            if !held.stopped {
+                held.entries.push(tree.entry);
+            }
+            held.stopped
+        };
+        if stopped {
+            let _ = tree.kill();
+        }
+        tree
+    }
+
+    /// Stop every tree this session holds, and each it holds from now on.
+    pub fn stop(&self) {
+        let entries = {
+            let mut held = self.held();
+            held.stopped = true;
+            std::mem::take(&mut held.entries)
+        };
+        let trees = live_trees();
+        for entry in entries {
+            if let Some(handle) = trees.get(&entry) {
+                stop_tree(handle);
+            }
+        }
+    }
+}
+
 /// Stop every harness tree this process started, for a host that is going
 /// away: the actors its shutdown asked to stop may not run again before the
 /// process exits.
@@ -678,6 +731,40 @@ mod tests {
         everyone_gone
             .recv()
             .unwrap_or_else(|_| panic!("the harness's background work {work} outlived it"));
+    }
+
+    /// A session's harness that waits on its stdin, which the test holds open,
+    /// ends only when the session is stopped; one started after the stop does
+    /// not outlive its start.
+    #[test]
+    fn stopping_a_session_kills_its_harness_whatever_it_waits_on() {
+        const ROLE: &str = "TCODE_TEST_SESSION_HARNESS";
+        if std::env::var_os(ROLE).is_some() {
+            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+            return;
+        }
+        let harness = || {
+            let mut child = harness_command(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "process::tests::stopping_a_session_kills_its_harness_whatever_it_waits_on",
+                    "--quiet",
+                ])
+                .env(ROLE, "1")
+                .stdin(std::process::Stdio::piped());
+            ProcessTree::new(child.spawn().unwrap())
+        };
+        let processes = SessionProcesses::default();
+        let mut running = processes.hold(harness());
+        let _stdin = running.stdin.take();
+
+        processes.stop();
+        assert!(!running.wait().unwrap().success());
+
+        let mut late = processes.hold(harness());
+        let _stdin = late.stdin.take();
+        assert!(!late.wait().unwrap().success());
     }
 
     #[test]

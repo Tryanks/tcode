@@ -834,7 +834,7 @@ async fn run_actor(
     extra_args.extend(opts.extra_args.iter().cloned());
     let (mut child, mut stdin, lines, mut stderr_tail) =
         match spawn_server(opts.binary_path.as_deref(), &extra_args, &opts.launch_env) {
-            Ok(parts) => parts,
+            Ok((child, stdin, lines, tail)) => (opts.processes.hold(child), stdin, lines, tail),
             Err(err) => {
                 let _ = ready.send(Err(err)).await;
                 return;
@@ -7628,6 +7628,7 @@ mod tests {
                     extra_args: Vec::new(),
                     acp: None,
                     instructions: None,
+                    processes: Default::default(),
                 };
                 let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
                     .await
@@ -7716,6 +7717,7 @@ mod tests {
                     extra_args: Vec::new(),
                     acp: None,
                     instructions: None,
+                    processes: Default::default(),
                 };
                 let opened = initialize_and_open_thread(&options, &mut actor.stdin, &replies)
                     .await

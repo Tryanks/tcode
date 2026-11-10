@@ -38,6 +38,7 @@ fn options() -> SessionOptions {
         extra_args: Vec::new(),
         acp: None,
         instructions: None,
+        processes: Default::default(),
     }
 }
 

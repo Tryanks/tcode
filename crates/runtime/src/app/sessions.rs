@@ -359,10 +359,8 @@ impl AppState {
             }
             if self.residents.live.contains_key(id) {
                 self.shutdown_active(id, cx);
-            } else if let Some(parked) = self.residents.evict(id)
-                && let Runtime::Live(commands) = parked.runtime
-            {
-                let _ = commands.try_send(SessionCommand::Shutdown);
+            } else if let Some(parked) = self.residents.evict(id) {
+                parked.stop_provider();
             }
         }
         let worktrees = self

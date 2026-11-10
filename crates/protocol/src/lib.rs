@@ -334,6 +334,7 @@ pub use wire::{
 // SessionActivity gains settle_blocked.
 // WriteRelaunchMarker's session_id is absent rather than empty for no thread.
 // SetFollowUp carries on and note instead of a FollowUp: the host stamps since.
+// SessionStatus gains preparing_turn.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

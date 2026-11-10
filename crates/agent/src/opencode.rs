@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine as _;
 use serde_json::{Map, Value, json};
@@ -44,8 +44,9 @@ const EFFORT: &str = "reasoningEffort";
 const AGENT: &str = "agent";
 /// Tcode's entry among the session's API-managed instructions.
 const INSTRUCTIONS_KEY: &str = "tcode";
-/// A first start migrates OpenCode's database before the server listens.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a model listing, which no one can stop, may take: a first start
+/// migrates OpenCode's database before the server listens.
+const LISTING_TIMEOUT: Duration = Duration::from_secs(60);
 /// The server streams no shell output; its own clients poll the shell's
 /// output route while the command runs.
 const SHELL_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -66,16 +67,36 @@ pub async fn list_models(
     launch_env: LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     require_supported_version(binary_path.as_deref(), &launch_env).await?;
-    crate::process::unblock(move || {
-        let cwd = std::env::current_dir()?;
-        let mut server = Server::spawn(binary_path.as_deref(), &cwd, &launch_env, &[], &[])?;
-        let result = (|| {
-            let models = server.http.get("/api/model")?;
-            let default = server.http.get("/api/model/default")?;
-            Ok(map_models(&models["data"], &default["data"]))
-        })();
-        server.stop();
-        result
+    let processes = crate::SessionProcesses::default();
+    let listing = crate::process::unblock({
+        let processes = processes.clone();
+        move || {
+            let cwd = std::env::current_dir()?;
+            let mut server = Server::spawn(
+                binary_path.as_deref(),
+                &cwd,
+                &launch_env,
+                &[],
+                &[],
+                &processes,
+            )?;
+            let result = (|| {
+                let models = server.http.get("/api/model")?;
+                let default = server.http.get("/api/model/default")?;
+                Ok(map_models(&models["data"], &default["data"]))
+            })();
+            server.stop();
+            result
+        }
+    });
+    future::or(listing, async {
+        smol::Timer::after(LISTING_TIMEOUT).await;
+        // Its server killed, the listing's wait ends with it.
+        processes.stop();
+        Err(AgentError::Provider(format!(
+            "OpenCode did not list its models within {} s",
+            LISTING_TIMEOUT.as_secs()
+        )))
     })
     .await
 }
@@ -113,6 +134,7 @@ async fn run_actor(
                 &opts.launch_env,
                 &opts.extra_args,
                 &opts.mcp_servers.iter().collect::<Vec<_>>(),
+                &opts.processes,
             )?;
             match server.subscribe() {
                 Ok(stream) => Ok((server, stream)),
@@ -1104,19 +1126,8 @@ impl OpenCodeActor {
         self.http
             .post(&self.session_path("interrupt"), &json!({}))
             .map_err(rewind_failure)?;
-        let deadline = Instant::now() + Duration::from_secs(30);
         while self.mapper.active_turn.is_some() {
-            let next = future::or(async { Some(self.transport.recv().await) }, async {
-                smol::Timer::at(deadline).await;
-                None
-            })
-            .await;
-            let Some(item) = next else {
-                return Err(RewindFailure::new(
-                    RewindFailureReason::TurnRunning,
-                    "the interrupted turn did not end within 30 s".to_owned(),
-                ));
-            };
+            let item = self.transport.recv().await;
             if !matches!(
                 self.handle_transport(item).await,
                 TransportOutcome::Continue
@@ -2489,6 +2500,7 @@ impl Server {
         launch_env: &LaunchEnv,
         extra_args: &[String],
         registrations: &[&crate::McpRegistration],
+        processes: &crate::SessionProcesses,
     ) -> Result<Self, AgentError> {
         let binary = crate::resolve_binary(binary_path, "opencode")?;
         let password = uuid::Uuid::new_v4().simple().to_string();
@@ -2510,10 +2522,9 @@ impl Server {
             command.env("OPENCODE_CONFIG_CONTENT", config);
         }
         crate::process::refuse_batch_line_breaks(command.get_program(), command.get_args())?;
-        let mut child =
-            crate::process::ProcessTree::new(command.spawn().map_err(|err| {
-                AgentError::Spawn(format!("spawning `{}`: {err}", binary.display()))
-            })?);
+        let mut child = processes.hold(crate::process::ProcessTree::new(command.spawn().map_err(
+            |err| AgentError::Spawn(format!("spawning `{}`: {err}", binary.display())),
+        )?));
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
@@ -2545,7 +2556,7 @@ impl Server {
                 "spawning OpenCode stdout reader: {err}"
             )));
         }
-        let announced = match receiver.recv_timeout(STARTUP_TIMEOUT) {
+        let announced = match receiver.recv() {
             Ok((Ok(line), stdout)) => {
                 let _ = server.tail.spawn(stdout, "opencode-stdout", "OpenCode");
                 line
@@ -2554,9 +2565,7 @@ impl Server {
                 return Err(server.startup_error(format!("reading OpenCode startup: {err}")));
             }
             Err(_) => {
-                return Err(server.startup_error(
-                    "timed out waiting for the OpenCode server to announce its address".into(),
-                ));
+                return Err(server.startup_error("the OpenCode startup reader ended".into()));
             }
         };
         let Some(url) = serde_json::from_str::<Value>(announced.trim())
@@ -2577,9 +2586,7 @@ impl Server {
     /// The server answers `/api/info` while it is still starting; every other
     /// route waits for it to be ready.
     fn wait_ready(&mut self) -> Result<(), AgentError> {
-        let deadline = Instant::now() + STARTUP_TIMEOUT;
-        let mut last = String::from("no response");
-        while Instant::now() < deadline {
+        loop {
             if let Ok(Some(status)) = self.child.try_wait() {
                 return Err(
                     self.startup_error(format!("OpenCode server exited during startup ({status})"))
@@ -2590,12 +2597,10 @@ impl Server {
                 Ok(500) => {
                     return Err(self.startup_error("OpenCode server failed to start".into()));
                 }
-                Ok(status) => last = format!("HTTP {status}"),
-                Err(err) => last = err.to_string(),
+                Ok(_) | Err(_) => {}
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        Err(self.startup_error(format!("timed out waiting for OpenCode to start: {last}")))
     }
 
     fn startup_error(&mut self, message: String) -> AgentError {
@@ -2605,12 +2610,9 @@ impl Server {
     }
 
     fn subscribe(&self) -> Result<(Receiver<Transport>, Sender<Transport>), AgentError> {
-        // The event stream idles between turns, so it gets its own agent
-        // without the REST read timeout; stopping the server ends the read.
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(1))
-            .build();
-        let response = agent
+        let response = self
+            .http
+            .agent
             .get(&format!("{}/api/event", self.http.base))
             .set("Authorization", &self.http.authorization)
             .call()
@@ -2700,11 +2702,9 @@ impl Http {
                 base64::engine::general_purpose::STANDARD.encode(format!("opencode:{password}"))
             ),
             directory: directory.to_path_buf(),
-            agent: ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(1))
-                .timeout_read(Duration::from_secs(60))
-                .timeout_write(Duration::from_secs(10))
-                .build(),
+            // No deadline: stopping the session kills the server, which ends
+            // every request it has not answered.
+            agent: ureq::AgentBuilder::new().build(),
         }
     }
 
@@ -2864,31 +2864,20 @@ fn read_sse(reader: impl Read, sender: Sender<Transport>) {
 }
 
 async fn wait_for_server_connected(events: &Receiver<Transport>) -> Result<(), AgentError> {
-    future::race(
-        async {
-            loop {
-                match events.recv().await {
-                    Ok(Transport::Event(event)) if event["type"] == "server.connected" => {
-                        return Ok(());
-                    }
-                    Ok(Transport::Event(_) | Transport::ShellOutput { .. }) => {}
-                    Ok(Transport::Error(error)) => return Err(AgentError::Protocol(error)),
-                    Ok(Transport::Eof) | Err(_) => {
-                        return Err(AgentError::Protocol(
-                            "OpenCode event stream closed before server.connected".into(),
-                        ));
-                    }
-                }
+    loop {
+        match events.recv().await {
+            Ok(Transport::Event(event)) if event["type"] == "server.connected" => {
+                return Ok(());
             }
-        },
-        async {
-            smol::Timer::after(Duration::from_secs(10)).await;
-            Err(AgentError::Protocol(
-                "timed out waiting for OpenCode server.connected".into(),
-            ))
-        },
-    )
-    .await
+            Ok(Transport::Event(_) | Transport::ShellOutput { .. }) => {}
+            Ok(Transport::Error(error)) => return Err(AgentError::Protocol(error)),
+            Ok(Transport::Eof) | Err(_) => {
+                return Err(AgentError::Protocol(
+                    "OpenCode event stream closed before server.connected".into(),
+                ));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3275,7 +3264,14 @@ mod tests {
         let binary = directory.join("exits-at-start");
         std::fs::write(&binary, "#!/bin/sh\necho 'cannot start' >&2\nexit 1\n").unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let spawned = Server::spawn(Some(&binary), &directory, &LaunchEnv::default(), &[], &[]);
+        let spawned = Server::spawn(
+            Some(&binary),
+            &directory,
+            &LaunchEnv::default(),
+            &[],
+            &[],
+            &crate::SessionProcesses::default(),
+        );
         std::fs::remove_dir_all(&directory).unwrap();
         let Err(error) = spawned else {
             panic!("the server exited");

@@ -17081,6 +17081,7 @@ pub(crate) mod tests {
                 agent: None,
                 latest_activity: None,
             },
+            preparing_turn: false,
             stopping: false,
             stopping_since: None,
             turn_retry: None,

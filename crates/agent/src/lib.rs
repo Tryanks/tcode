@@ -50,7 +50,7 @@ pub use cmd_shim::CmdShim;
 #[cfg(feature = "process")]
 mod process;
 #[cfg(feature = "process")]
-pub use process::{command, stop_every_tree};
+pub use process::{SessionProcesses, command, stop_every_tree};
 #[cfg(feature = "process")]
 mod subagent_tail;
 mod tool_name;
@@ -1208,6 +1208,10 @@ pub struct SessionOptions {
     /// Tcode's instructions for the model, delivered through the provider's
     /// [`Caps::instruction_channel`]; never part of a user turn's text.
     pub instructions: Option<String>,
+    /// Where the session's harness processes are held, so its starter can
+    /// stop them whatever the session is waiting on.
+    #[cfg(feature = "process")]
+    pub processes: SessionProcesses,
 }
 
 /// The per-provider environment configured in Settings → Harnesses, applied to

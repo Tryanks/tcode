@@ -7,11 +7,9 @@
 //! more about.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use agent_client_protocol::schema::v1 as acp;
 use serde_json::{Value, json};
-use smol::future;
 
 use crate::acp_session::{
     self, Dialect, Established, Launch, Session, Setup, State, TurnEnd, describe, is_auth_required,
@@ -21,11 +19,6 @@ use crate::{
     AcpAgent, AcpLaunch, AgentError, AgentEvent, Attachment, ProviderKind, ResumeCursor,
     SessionHandle, SessionOptions, TokenUsage,
 };
-
-/// How long we let an agent's `authenticate` run before giving up and telling
-/// the user to sign in with the agent's own CLI (Gemini's is a browser OAuth
-/// flow that otherwise blocks session startup for five minutes).
-const AUTH_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Start (or resume) a session with an ACP agent.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
@@ -218,10 +211,9 @@ async fn new_session(
     match connection.send_request(request()).block_task().await {
         Ok(response) => Ok(response),
         Err(err) if is_auth_required(&err) => {
-            // The agent wants credentials. Try its own `authenticate` once —
-            // but on a leash: several agents (Gemini) implement it as an
-            // interactive browser OAuth flow that blocks for minutes, and we
-            // have no auth UI to show meanwhile. On timeout (or failure) we
+            // The agent wants credentials. Try its own `authenticate` once:
+            // Gemini's is a browser sign-in, which runs for as long as the
+            // user takes, or until they stop the thread's start. On failure we
             // surface a clear error naming the methods the agent offers.
             let Some(method) = preferred_auth_method(&init.auth_methods) else {
                 return Err(AgentError::Provider(auth_hint(agent, init)));
@@ -234,39 +226,17 @@ async fn new_session(
                 agent.id,
                 method_id.0
             );
-            let authenticated = future::or(
-                async {
-                    Some(
-                        connection
-                            .send_request(acp::AuthenticateRequest::new(method_id.clone()))
-                            .block_task()
-                            .await,
-                    )
-                },
-                async {
-                    smol::Timer::after(AUTH_TIMEOUT).await;
-                    None
-                },
-            )
-            .await;
-            match authenticated {
-                Some(Ok(_)) => {}
-                Some(Err(err)) => {
-                    return Err(AgentError::Provider(format!(
-                        "{} (authentication via `{}` failed: {})",
-                        auth_hint(agent, init),
-                        method_id.0,
-                        describe(&err)
-                    )));
-                }
-                None => {
-                    return Err(AgentError::Provider(format!(
-                        "{} (its `{}` flow did not complete within {}s — finish it in the agent's own CLI first)",
-                        auth_hint(agent, init),
-                        method_id.0,
-                        AUTH_TIMEOUT.as_secs()
-                    )));
-                }
+            if let Err(err) = connection
+                .send_request(acp::AuthenticateRequest::new(method_id.clone()))
+                .block_task()
+                .await
+            {
+                return Err(AgentError::Provider(format!(
+                    "{} (authentication via `{}` failed: {})",
+                    auth_hint(agent, init),
+                    method_id.0,
+                    describe(&err)
+                )));
             }
             connection
                 .send_request(request())

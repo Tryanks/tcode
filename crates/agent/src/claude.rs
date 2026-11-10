@@ -405,10 +405,11 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     }
 
     crate::process::refuse_batch_line_breaks(cmd.get_program(), cmd.get_args())?;
-    let mut child = crate::process::ProcessTree::new(
-        cmd.spawn()
-            .map_err(|e| AgentError::Spawn(format!("spawning `{binary}`: {e}")))?,
-    );
+    let mut child = opts
+        .processes
+        .hold(crate::process::ProcessTree::new(cmd.spawn().map_err(
+            |e| AgentError::Spawn(format!("spawning `{binary}`: {e}")),
+        )?));
 
     let stdin = child
         .stdin
@@ -858,12 +859,7 @@ struct PendingSettings {
     request_id: String,
     target: ClaudeLaunchOptions,
     flags: Option<Value>,
-    deadline: std::time::Instant,
 }
-
-/// How long the CLI gets to answer before the change takes a restart instead:
-/// the queue is held meanwhile.
-const LIVE_SETTINGS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Per-session config threaded into the actor loop / mapper.
 struct SessionConfig {
@@ -979,42 +975,24 @@ async fn actor_loop(
         // Race a UI command against the next stdout line. `or` biases toward the
         // command channel, which is fine: both channels make independent progress.
         let next_goal_read = goal_poll.map(|(next, _)| next);
-        let settings_deadline = mapper
-            .pending_settings
-            .as_ref()
-            .map(|pending| pending.deadline);
-        let timer = |at: Option<std::time::Instant>, sel: Sel| async move {
-            match at {
-                Some(at) => {
-                    smol::Timer::at(at).await;
-                    sel
-                }
-                None => std::future::pending().await,
-            }
-        };
         let sel = smol::future::or(
             async { Sel::Cmd(cmd_rx.recv().await.ok()) },
             smol::future::or(
                 async { Sel::Line(line_rx.recv().await.ok()) },
-                smol::future::or(
-                    async { Sel::Tail(tail_rx.recv().await.ok()) },
-                    smol::future::or(
-                        timer(next_goal_read, Sel::GoalRead),
-                        timer(settings_deadline, Sel::SettingsDeadline),
-                    ),
-                ),
+                smol::future::or(async { Sel::Tail(tail_rx.recv().await.ok()) }, async {
+                    match next_goal_read {
+                        Some(at) => {
+                            smol::Timer::at(at).await;
+                            Sel::GoalRead
+                        }
+                        None => std::future::pending().await,
+                    }
+                }),
             ),
         )
         .await;
 
         match sel {
-            Sel::SettingsDeadline => {
-                log::warn!("claude: no answer to a live settings change");
-                mapper.pending_settings = None;
-                let _ = event_tx
-                    .send(AgentEvent::SettingsApplied { applied: false })
-                    .await;
-            }
             Sel::GoalRead => {
                 if let Some(mut reader) = goal.take() {
                     let (reader, changed) = crate::process::unblock(move || {
@@ -1158,7 +1136,6 @@ async fn actor_loop(
 
 enum Sel {
     GoalRead,
-    SettingsDeadline,
     Cmd(Option<SessionCommand>),
     Line(Option<String>),
     Tail(Option<SubagentTailNotice>),
@@ -2397,7 +2374,6 @@ impl Mapper {
                 .to_owned(),
             target,
             flags,
-            deadline: std::time::Instant::now() + LIVE_SETTINGS_TIMEOUT,
         });
         Ok(Some(message))
     }
@@ -2419,7 +2395,6 @@ impl Mapper {
                 .as_str()
                 .unwrap_or_default()
                 .to_owned();
-            pending.deadline = std::time::Instant::now() + LIVE_SETTINGS_TIMEOUT;
             self.outgoing.push(message);
             self.pending_settings = Some(pending);
             return Vec::new();

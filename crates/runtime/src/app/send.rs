@@ -977,6 +977,17 @@ impl AppState {
         cx: &mut HostCx,
     ) -> Result<(), tcode_protocol::ProtocolError> {
         self.pause_pull_request_watches(target_id, cx);
+        // Before the next turn starts there is no turn to interrupt: a provider
+        // still starting, or still to answer a live settings change, is stopped,
+        // and the message waits in the queue.
+        if let Some(active) = self
+            .resident_mut(target_id)
+            .filter(|active| active.preparing_turn() && active.delivery_in_flight.is_none())
+        {
+            active.shutdown_to_idle();
+            self.evaluate_thread_settlement(target_id, cx);
+            return Ok(());
+        }
         // An idle provider never answers an interrupt, which would leave the thread
         // stopping, and background work takes no interrupt: Claude Code acknowledges it
         // and the task runs on (2.1.318); `stop_background_task` is what stops one.

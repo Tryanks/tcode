@@ -1362,6 +1362,7 @@ impl AppState {
             terminal_height: session.terminal_workspace.height.clamp(120., 600.),
             delivery_in_flight: session.delivery_in_flight,
             activity: activity.session_activity(meta, Some(session)),
+            preparing_turn: session.preparing_turn(),
             stopping: session.interrupt_requested,
             stopping_since: session
                 .interrupt_requested_at

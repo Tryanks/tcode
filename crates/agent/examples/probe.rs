@@ -429,6 +429,7 @@ async fn run_probe(
         extra_args: Vec::new(),
         acp,
         instructions: None,
+        processes: Default::default(),
     };
     let handle = match start_session(provider, opts).await {
         Ok(handle) => handle,

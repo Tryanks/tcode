@@ -7850,6 +7850,88 @@ fn force_terminate_kills_a_harness_that_does_not_answer_a_stop() {
     });
 }
 
+/// A provider still starting has no turn to interrupt: Stop kills it, which
+/// ends the start it was waiting on, and the message waits in the queue. The
+/// provider is an ACP agent that reads its stdin and never answers
+/// `initialize` (cline 3.0.39 does the same).
+#[test]
+fn a_stop_while_the_provider_starts_kills_it_and_keeps_the_message() {
+    const ROLE: &str = "TCODE_TEST_SILENT_AGENT";
+    const NAME: &str =
+        "app::tests::a_stop_while_the_provider_starts_kills_it_and_keeps_the_message";
+    if std::env::var_os(ROLE).is_some() {
+        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+        return;
+    }
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-stop-while-starting-test");
+    let cwd = test_store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let project = Project::from_root(cwd.clone());
+    test_store.upsert_project(&project).unwrap();
+    let (ended_tx, ended) = smol::channel::unbounded();
+    let launcher = ProviderLauncher(Arc::new(move |_, mut options: SessionOptions| {
+        options.acp = Some(agent::AcpAgent {
+            id: "silent".into(),
+            name: "Silent".into(),
+            launch: agent::AcpLaunch::Binary {
+                command: std::env::current_exe().unwrap(),
+                args: vec!["--exact".into(), NAME.into(), "--quiet".into()],
+                env: vec![(ROLE.into(), "1".into())],
+            },
+        });
+        let ended = ended_tx.clone();
+        Box::pin(async move {
+            let started = agent::start_session(ProviderKind::Acp, options).await;
+            let _ = ended.send(started.is_err()).await;
+            started
+        })
+    }));
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*test_store).clone());
+        state.set_provider_launcher_for_test(launcher);
+        state
+    });
+    state.dispatch_command(
+        cx,
+        1,
+        Command::StartDraft {
+            project_id: project.id.clone(),
+            cwd,
+        },
+    );
+    let session_id = state.read(|state| state.residents.live.keys().next().unwrap().clone());
+    state.update(cx, |state, cx| state.select_session(&session_id, cx));
+    state.dispatch_command(
+        cx,
+        2,
+        Command::SendTurn {
+            session_id: session_id.clone(),
+            text: "start".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    cx.run_until(|state| {
+        state
+            .session_status_snapshot(&session_id)
+            .is_some_and(|status| status.preparing_turn)
+    });
+
+    state.dispatch_command(
+        cx,
+        3,
+        Command::Interrupt {
+            session_id: session_id.clone(),
+        },
+    );
+    assert_eq!(ended.recv_blocking(), Ok(true));
+    state.read(|state| {
+        let status = state.session_status_snapshot(&session_id).unwrap();
+        assert!(!status.preparing_turn && !status.activity.working);
+        assert_eq!(status.queued_messages.len(), 1);
+    });
+}
+
 /// Background work takes no interrupt: Claude Code acknowledges one and the
 /// task runs on, so a thread with nothing else running must not read as stopping.
 #[test]
