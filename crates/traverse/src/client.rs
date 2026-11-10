@@ -32,8 +32,6 @@ use tcode_client::{
 };
 use tcode_protocol::PathInfo;
 
-/// Budget for dialing and completing the QUIC handshake.
-const CONNECT_BUDGET: Duration = Duration::from_secs(20);
 /// Close codes the machine uses; see [`crate::host`].
 const CLOSE_UNPAIRED: u32 = 1;
 const CLOSE_REVOKED: u32 = 3;
@@ -493,8 +491,8 @@ pub enum PairError {
     Busy,
     AlreadyMember,
     SpaceUnavailable,
-    /// No path to the machine opened within the connect budget. The secret
-    /// was never sent, so the invitation is still valid.
+    /// No path to the machine opened. The secret was never sent, so the
+    /// invitation is still valid.
     Unreachable(String),
     /// The connection to the machine ended during the exchange.
     Lost(String),
@@ -587,15 +585,13 @@ async fn pair_exchange(
     invite: &PairInvite,
     device: &DeviceIdentity,
 ) -> Result<PairedHost, PairError> {
-    let connection = tokio::time::timeout(
-        CONNECT_BUDGET,
-        client.endpoint.connect(addr, wire::ALPN_PAIR),
-    )
-    .await
-    .map_err(|_| PairError::Unreachable("connection timed out".into()))?
-    // iroh's plain `Display` stops at "Unable to connect to remote"; the
-    // alternate form carries the cause the user needs to act on.
-    .map_err(|error| PairError::Unreachable(format!("{error:#}")))?;
+    let connection = client
+        .endpoint
+        .connect(addr, wire::ALPN_PAIR)
+        .await
+        // iroh's plain `Display` stops at "Unable to connect to remote"; the
+        // alternate form carries the cause the user needs to act on.
+        .map_err(|error| PairError::Unreachable(format!("{error:#}")))?;
     client.lookups.lan.connected(connection.remote_id());
     let exchange = async {
         let (mut send, recv) = connection
@@ -1038,18 +1034,12 @@ async fn establish(
         ConnectionFailure::Unreachable(Some("invalid machine id".into()))
     })?;
     client.ensure_lookups(&host.traverse).await;
-    let connection = match tokio::time::timeout(
-        CONNECT_BUDGET,
-        client.endpoint.connect(addr, wire::ALPN_MAIN),
-    )
-    .await
-    {
-        Ok(Ok(connection)) => connection,
-        Ok(Err(error)) => {
+    let connection = match client.endpoint.connect(addr, wire::ALPN_MAIN).await {
+        Ok(connection) => connection,
+        Err(error) => {
             log::debug!("connection to {} failed: {error:#}", host.host_id);
             return Err(ConnectionFailure::Unreachable(Some(format!("{error:#}"))));
         }
-        Err(_) => return Err(ConnectionFailure::Timeout),
     };
     client.lookups.lan.connected(connection.remote_id());
     let handshake = async {
