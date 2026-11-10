@@ -13,7 +13,8 @@ pub struct SettleEffects {
     /// Open terminals inspected; the ones at an idle shell are closed.
     pub terminals_checked: usize,
     pub unpinned: bool,
-    /// Pending non-blocking input answered with empty answers.
+    /// A non-blocking question was open; it closes with the provider,
+    /// unanswered.
     pub input_answered: bool,
 }
 
@@ -1328,21 +1329,6 @@ impl AppState {
         let effects = self.settle_effects(id);
         if !meta.is_settled() {
             meta.settled_at = Some(timestamp);
-        }
-        if let Some(input) = self
-            .resident(id)
-            .and_then(|session| session.timeline.pending_user_input.as_ref())
-            .filter(|input| !input.delivery.is_blocking())
-        {
-            let request_id = input.request_id.clone();
-            self.on_event(
-                id,
-                AgentEvent::UserInputResolved {
-                    request_id,
-                    answers: Default::default(),
-                },
-                cx,
-            );
         }
         meta.settled_override = Some(SettledOverride::Settled);
         meta.unsettled_at = None;
