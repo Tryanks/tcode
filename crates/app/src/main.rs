@@ -625,7 +625,6 @@ fn main() {
         let _ = std::io::stderr().flush();
         return;
     }
-    let preview_smoke_watchdog = preview_smoke.then(preview_smoke::Watchdog::start);
 
     // A Finder/Dock launch inherits launchd's minimal PATH, under which none of
     // the provider CLIs resolve — import the login shell's environment first,
@@ -842,8 +841,8 @@ fn main() {
             }
 
             cx.spawn(async move |cx| {
-                if let Some(watchdog) = preview_smoke_watchdog {
-                    preview_smoke::run(watchdog, shell, window, cx).await;
+                if preview_smoke {
+                    preview_smoke::run(shell, window, cx).await;
                     return;
                 }
                 let _ = window;

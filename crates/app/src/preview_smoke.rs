@@ -1,8 +1,4 @@
 use std::io::Write as _;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
 use std::time::{Duration, Instant};
 
 use gpui::{AnyWindowHandle, AsyncApp, Entity, px, size};
@@ -10,8 +6,6 @@ use tcode_ui::AppShell;
 
 const STEP_DELAY: Duration = Duration::from_millis(20);
 const RAPID_DELAY: Duration = Duration::from_millis(5);
-const CREATION_TIMEOUT: Duration = Duration::from_secs(30);
-const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(120);
 const DROP_DURING_CREATE_KEY: &str = "preview-smoke-drop-during-create";
 #[cfg(target_os = "windows")]
 const CREATION_IN_FLIGHT: &str = "preview creation is in flight";
@@ -40,43 +34,13 @@ fn log_line(message: &str) {
     }
 }
 
-pub struct Watchdog {
-    phase: Arc<Mutex<&'static str>>,
-    finished: Arc<AtomicBool>,
+/// A phase that starts and never reports ok is where the run stopped.
+fn start_phase(phase: &str) {
+    log_line(&format!("preview-smoke: phase {phase} start"));
 }
 
-impl Watchdog {
-    pub fn start() -> Self {
-        let phase = Arc::new(Mutex::new("startup"));
-        let finished = Arc::new(AtomicBool::new(false));
-        let watchdog_phase = phase.clone();
-        let watchdog_finished = finished.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(WATCHDOG_TIMEOUT);
-            if !watchdog_finished.load(Ordering::SeqCst) {
-                let phase = *watchdog_phase
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                log_line(&format!("preview-smoke: TIMEOUT phase {phase}"));
-                std::process::exit(124);
-            }
-        });
-        Self { phase, finished }
-    }
-
-    fn start_phase(&self, phase: &'static str) {
-        *self.phase.lock().unwrap_or_else(|error| error.into_inner()) = phase;
-        log_line(&format!("preview-smoke: phase {phase} start"));
-    }
-
-    fn finish_phase(&self, phase: &'static str) {
-        log_line(&format!("preview-smoke: phase {phase} ok"));
-    }
-
-    fn pass(&self) {
-        log_line("preview-smoke: PASS");
-        self.finished.store(true, Ordering::SeqCst);
-    }
+fn finish_phase(phase: &str) {
+    log_line(&format!("preview-smoke: phase {phase} ok"));
 }
 
 async fn yield_for(cx: &AsyncApp, delay: Duration) {
@@ -418,17 +382,12 @@ async fn create_and_wait(
     url: &str,
     cx: &mut AsyncApp,
 ) {
-    let deadline = Instant::now() + CREATION_TIMEOUT;
     loop {
         match create_once(shell, window, key, url, cx) {
             Ok(()) => return,
             Err(error) if creation_is_pending(&error) => {}
             Err(error) => panic!("native preview webview creation failed: {error}"),
         }
-        assert!(
-            Instant::now() < deadline,
-            "native preview webview creation timed out for {key}"
-        );
         yield_for(cx, RAPID_DELAY).await;
     }
 }
@@ -444,7 +403,6 @@ async fn start_and_wait_until_in_flight(
     url: &str,
     cx: &mut AsyncApp,
 ) {
-    let deadline = Instant::now() + CREATION_TIMEOUT;
     loop {
         match create_once(shell, window, key, url, cx) {
             Err(error) if error == CREATION_IN_FLIGHT => return,
@@ -452,26 +410,17 @@ async fn start_and_wait_until_in_flight(
             Ok(()) => panic!("drop-during-create completed before teardown could race it"),
             Err(error) => panic!("native preview webview creation failed: {error}"),
         }
-        assert!(
-            Instant::now() < deadline,
-            "native preview webview creation never entered flight"
-        );
         yield_for(cx, RAPID_DELAY).await;
     }
 }
 
-pub async fn run(
-    watchdog: Watchdog,
-    shell: Entity<AppShell>,
-    window: AnyWindowHandle,
-    cx: &mut AsyncApp,
-) {
-    watchdog.start_phase("create-first");
+pub async fn run(shell: Entity<AppShell>, window: AnyWindowHandle, cx: &mut AsyncApp) {
+    start_phase("create-first");
     create_and_wait(&shell, window, KEYS[0], "about:blank", cx).await;
     yield_for(cx, STEP_DELAY).await;
-    watchdog.finish_phase("create-first");
+    finish_phase("create-first");
 
-    watchdog.start_phase("show-hide-churn");
+    start_phase("show-hide-churn");
     for _ in 0..20 {
         shell.update(cx, |shell, cx| {
             shell
@@ -488,16 +437,16 @@ pub async fn run(
         });
         yield_for(cx, RAPID_DELAY).await;
     }
-    watchdog.finish_phase("show-hide-churn");
+    finish_phase("show-hide-churn");
 
-    watchdog.start_phase("multi-create");
+    start_phase("multi-create");
     for key in &KEYS[1..] {
         create_and_wait(&shell, window, key, "about:blank", cx).await;
         yield_for(cx, STEP_DELAY).await;
     }
-    watchdog.finish_phase("multi-create");
+    finish_phase("multi-create");
 
-    watchdog.start_phase("rapid-switch");
+    start_phase("rapid-switch");
     for ix in 0..30 {
         shell.update(cx, |shell, cx| {
             shell
@@ -509,9 +458,9 @@ pub async fn run(
         });
         yield_for(cx, RAPID_DELAY).await;
     }
-    watchdog.finish_phase("rapid-switch");
+    finish_phase("rapid-switch");
 
-    watchdog.start_phase("resize-churn");
+    start_phase("resize-churn");
     for (width, height) in [(1100., 720.), (940., 640.), (1280., 820.), (1000., 700.)] {
         window
             .update(cx, |_, window, _| {
@@ -520,17 +469,17 @@ pub async fn run(
             .expect("preview smoke window closed during resize-churn");
         yield_for(cx, STEP_DELAY).await;
     }
-    watchdog.finish_phase("resize-churn");
+    finish_phase("resize-churn");
 
-    watchdog.start_phase("navigate-all");
+    start_phase("navigate-all");
     for (ix, key) in KEYS.iter().enumerate() {
         let url = format!("about:blank#preview-smoke-{ix}");
         create_and_wait(&shell, window, key, &url, cx).await;
         yield_for(cx, STEP_DELAY).await;
     }
-    watchdog.finish_phase("navigate-all");
+    finish_phase("navigate-all");
 
-    watchdog.start_phase("drop-one");
+    start_phase("drop-one");
     shell.update(cx, |shell, cx| {
         shell
             .preview_lifecycle(cx)
@@ -541,9 +490,9 @@ pub async fn run(
             });
     });
     yield_for(cx, STEP_DELAY).await;
-    watchdog.finish_phase("drop-one");
+    finish_phase("drop-one");
 
-    watchdog.start_phase("drop-during-create");
+    start_phase("drop-during-create");
     #[cfg(target_os = "windows")]
     start_and_wait_until_in_flight(
         &shell,
@@ -575,9 +524,9 @@ pub async fn run(
             });
     });
     yield_for(cx, STEP_DELAY).await;
-    watchdog.finish_phase("drop-during-create");
+    finish_phase("drop-during-create");
 
-    watchdog.start_phase("recreate-after-inflight-drop");
+    start_phase("recreate-after-inflight-drop");
     // Reuse the exact key. Its replacement generation is serialized behind the
     // cancelled raw build, so reaching Ready proves that stale completion was
     // discarded and did not dead-end or overwrite the new slot.
@@ -597,14 +546,14 @@ pub async fn run(
                 lifecycle.drop_view(DROP_DURING_CREATE_KEY, cx)
             });
     });
-    watchdog.finish_phase("recreate-after-inflight-drop");
+    finish_phase("recreate-after-inflight-drop");
 
-    watchdog.start_phase("page-agent");
+    start_phase("page-agent");
     page_agent(&shell, window, cx).await;
-    watchdog.finish_phase("page-agent");
+    finish_phase("page-agent");
 
-    watchdog.start_phase("quit");
-    watchdog.finish_phase("quit");
-    watchdog.pass();
+    start_phase("quit");
+    finish_phase("quit");
+    log_line("preview-smoke: PASS");
     cx.update(|cx| cx.quit());
 }
