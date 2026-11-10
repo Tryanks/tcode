@@ -1578,8 +1578,10 @@ fn storage_pass(store: &SessionStore, limit: usize) -> usize {
             }
         }
     }
+    // A blob's age is its file's modification time; like the host's grace
+    // period, this cutoff keeps every blob the test has just written.
     for step in store
-        .prepare_sweep(std::time::SystemTime::now() - Duration::from_secs(3600))
+        .prepare_sweep(std::time::SystemTime::UNIX_EPOCH)
         .unwrap()
     {
         if commit(step).is_none() {
@@ -1855,8 +1857,11 @@ fn a_thread_written_while_it_moves_loses_nothing() {
             .count()
     };
     let named = files();
+    // A blob's age is its file's modification time: this cutoff is after
+    // every blob the test writes.
+    let after_every_blob = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(u32::MAX.into());
     let swept: usize = store
-        .prepare_sweep(std::time::SystemTime::now() + Duration::from_secs(1))
+        .prepare_sweep(after_every_blob)
         .unwrap()
         .into_iter()
         .map(|step| match store.commit_storage_step(step).unwrap() {
@@ -1873,7 +1878,7 @@ fn a_thread_written_while_it_moves_loses_nothing() {
         .apply(&[Mutation::remove_session("appended")])
         .unwrap();
     let swept: usize = store
-        .prepare_sweep(std::time::SystemTime::now() + Duration::from_secs(1))
+        .prepare_sweep(after_every_blob)
         .unwrap()
         .into_iter()
         .map(|step| match store.commit_storage_step(step).unwrap() {
