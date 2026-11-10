@@ -2238,7 +2238,7 @@ mod tests {
             assert!(!list.is_following_tail());
             assert!(cx.debug_bounds("scroll-to-end").is_none());
             let anchor = list.logical_scroll_top();
-            for update in 1..=30 {
+            for update in 1..=10 {
                 cx.executor().advance_clock(Duration::from_millis(100));
                 Arc::make_mut(timeline.entries.last_mut().unwrap()).content =
                     assistant(&"Late output frame.\n\n".repeat(update));

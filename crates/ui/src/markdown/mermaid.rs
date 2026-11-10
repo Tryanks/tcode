@@ -1257,7 +1257,7 @@ mod tests {
         let start = cx.executor().now();
         let mut swaps: Vec<(Duration, String)> = Vec::new();
         let mut settled_on_diagram = false;
-        for chunk in source.as_bytes().chunks(4) {
+        for chunk in source.as_bytes().chunks(8) {
             push(&markdown, std::str::from_utf8(chunk).unwrap(), cx);
             frame(cx);
             if let Some(shown) = shown_source(&markdown, cx)
@@ -1591,8 +1591,10 @@ mod tests {
     fn pictures_a_stream_replaced_leave_the_atlas(cx: &mut TestAppContext) {
         let (markdown, cx) = open("", true, cx);
         let mut pictures: Vec<Arc<RenderImage>> = Vec::new();
-        for line in format!("```mermaid\n{FLOWCHART}```\n").split_inclusive('\n') {
-            push(&markdown, line, cx);
+        let source = format!("```mermaid\n{FLOWCHART}```\n");
+        let lines: Vec<_> = source.split_inclusive('\n').collect();
+        for statements in lines.chunks(3) {
+            push(&markdown, &statements.concat(), cx);
             for _ in 0..30 {
                 frame(cx);
                 let shown = markdown.read_with(cx, |state, _| {

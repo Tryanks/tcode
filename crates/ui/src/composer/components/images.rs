@@ -717,14 +717,14 @@ mod tests {
         );
 
         let photo = encoded(
-            image::DynamicImage::new_rgb8(MAX_EDGE_PX + 1, MAX_EDGE_PX + 1),
+            image::DynamicImage::new_rgb8(100, MAX_EDGE_PX * 2),
             image::ImageFormat::Jpeg,
         );
         let (mime, bytes) = fit_for_upload("image/jpeg", photo).unwrap();
         assert_eq!(mime, "image/jpeg");
         assert_eq!(
             image::load_from_memory(&bytes).unwrap().dimensions(),
-            (MAX_EDGE_PX, MAX_EDGE_PX)
+            (50, MAX_EDGE_PX)
         );
 
         let small = encoded(
