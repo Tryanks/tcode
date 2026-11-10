@@ -65,8 +65,6 @@ const UNAUTHENTICATED_DEADLINE: Duration = Duration::from_secs(5);
 /// Idle time before the listener pings a browser; two unanswered pings end
 /// the socket. Browsers answer pings below the page's JavaScript.
 const PING_INTERVAL: Duration = Duration::from_secs(10);
-/// Hello frames are small; anything larger is not a hello.
-const MAX_HELLO_BYTES: usize = 64 * 1024;
 
 /// The device fields a browser sends with `/auth/login`; setup carries
 /// none. `device_id` and `platform` are optional.
@@ -497,7 +495,7 @@ where
     // Apply the HTTP input bound while assembling frames too, before an
     // unauthenticated peer can consume tungstenite's 64 MiB default.
     let config = WebSocketConfig::default()
-        .read_buffer_size(MAX_HELLO_BYTES)
+        .read_buffer_size(crate::http::MAX_BODY_BYTES)
         .max_message_size(Some(crate::http::MAX_BODY_BYTES))
         .max_frame_size(Some(crate::http::MAX_BODY_BYTES));
     let mut websocket = WebSocketStream::from_raw_socket(stream, Role::Server, Some(config)).await;
@@ -791,9 +789,6 @@ where
     let Some(Ok(Message::Text(first))) = websocket.next().await else {
         return None;
     };
-    if first.len() > MAX_HELLO_BYTES {
-        return None;
-    }
     serde_json::from_str(&first).ok()
 }
 
