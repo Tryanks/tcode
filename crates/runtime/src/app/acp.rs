@@ -164,13 +164,22 @@ impl AppState {
         let id = id.to_string();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            host_cx
-                .unblock(move || {
-                    if let Err(err) = uninstall(&data_dir, &id) {
-                        log::warn!("could not remove ACP agent {id}: {err}");
-                    }
+            let removed = host_cx
+                .unblock({
+                    let id = id.clone();
+                    move || uninstall(&data_dir, &id)
                 })
                 .await;
+            if let Err(err) = removed {
+                host_cx.enqueue(move |state, cx| {
+                    state.report_error(
+                        RuntimeError::External(format!(
+                            "could not remove the files of ACP agent {id}: {err}"
+                        )),
+                        cx,
+                    )
+                });
+            }
         });
     }
 
