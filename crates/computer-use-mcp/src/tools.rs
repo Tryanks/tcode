@@ -441,7 +441,12 @@ impl ComputerUseTools {
             .is_some_and(|condition| condition_satisfied(&previous.tree, condition));
         let successor_result = tokio::select! {
             _ = context.ct.cancelled() => return tool_error("computer-use action cancelled"),
-            result = poll_successor(&previous, params.expect.as_ref(), expectation_preexisting) => result,
+            result = poll_successor(
+                &previous,
+                params.expect.as_ref(),
+                expectation_preexisting,
+                stopped_at.is_none(),
+            ) => result,
         };
         let (successor, expectation_status) = match successor_result {
             Ok(result) => result,
@@ -927,10 +932,13 @@ fn prepare_action(tree: &UiNode, action: &UiAction) -> Result<ActionRequest, Str
     })
 }
 
+/// The state after an action and whether it met `condition`; it is waited for
+/// only when `wait`, which a transaction whose step failed does not.
 async fn poll_successor(
     previous: &crate::state::Observation,
     condition: Option<&UiCondition>,
     preexisting: bool,
+    wait: bool,
 ) -> Result<(RootObservation, &'static str), crate::backend::BackendError> {
     let timeout = Duration::from_millis(
         condition
@@ -938,7 +946,7 @@ async fn poll_successor(
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .min(MAX_TIMEOUT_MS),
     );
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now() + if wait { timeout } else { Duration::ZERO };
     loop {
         let mut observed = crate::backend::observe(
             &previous.root,
