@@ -447,7 +447,7 @@ impl AppState {
                 return Err(format!(
                     "refused: `patch_settings` never changes {key}: an agent may change only \
                      display preferences (language, theme, diff word wrap, panels, sidebar \
-                     provider marks, frame throttling, the fallback review advisor)"
+                     provider marks, frame throttling, scrolling to the latest on send)"
                 ));
             }
         }
