@@ -1377,6 +1377,7 @@ errors:
   persist_settings: "設定を保存できませんでした：%{error}"
   settings_unreadable: "Tcode は settings.json を読み込めなかったため（%{error}）、既定の設定で動作しており、このファイルには何も書き込みません。新しいバージョンの Tcode がこのファイルを書き込んだ可能性があります。そのバージョンで開いてください。"
   file_unreadable: "Tcode は自身のファイルを読み込めなかったため（%{error}）、その内容を使わずに動作しており、このファイルには何も書き込みません。新しいバージョンの Tcode がこのファイルを書き込んだ可能性があります。そのバージョンで開いてください。"
+  outbox_unreadable: "このデバイスから %{host} へまだ送っていないメッセージを読み込めなかったため（%{error}）、Tcode はそのホストを開かず、メッセージもそのままにしました。"
   mcp_unavailable: "今回の実行ではエージェントに Tcode のツールを提供できないため（%{error}）、スレッドはツールなしで開始します。"
   delete_session: "スレッドを削除できませんでした：%{error}"
   delete_project: "プロジェクトを削除できませんでした：%{error}"

@@ -1723,7 +1723,23 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<HostKey> {
-        let open = Attachment::open(target, local, self.setup.client_host.clone(), cx)?;
+        let name = match &target {
+            AttachmentTarget::Local => crate::tr!("hosts.this_computer").into_owned(),
+            AttachmentTarget::Remote(host) => host.name.clone(),
+        };
+        let open = match Attachment::open(target, local, self.setup.client_host.clone(), cx) {
+            Ok(open) => open?,
+            Err(error) => {
+                window.push_notification(
+                    Notification::error(
+                        crate::tr!("errors.outbox_unreadable", host = name, error = error)
+                            .into_owned(),
+                    ),
+                    cx,
+                );
+                return None;
+            }
+        };
         let host = open.target.key();
         let store = open.store.clone();
         let preview =

@@ -1377,6 +1377,7 @@ errors:
   persist_settings: "Failed to persist settings: %{error}"
   settings_unreadable: "Tcode could not read settings.json (%{error}), so it is running on default settings and will not save any over the file. A newer version of Tcode may have written it: open that version instead."
   file_unreadable: "Tcode could not read a file of its own (%{error}), so it is running without what the file holds and will not save any over it. A newer version of Tcode may have written it: open that version instead."
+  outbox_unreadable: "Tcode could not read the messages this device still had to send to %{host} (%{error}), so it did not open that host and left them as they are."
   mcp_unavailable: "Tcode's tools could not be offered to agents this run (%{error}), so threads start without them."
   delete_session: "Failed to delete thread: %{error}"
   delete_project: "Failed to remove project: %{error}"
