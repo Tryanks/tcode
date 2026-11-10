@@ -2414,7 +2414,6 @@ impl ProtocolHandler for PairHandler {
                 device,
                 space,
             }) if device.is_valid()
-                && secret.len() <= wire::MAX_CONTROL_LINE
                 && space
                     .as_deref()
                     .is_none_or(tcode_client::pairing::valid_space_id) =>
