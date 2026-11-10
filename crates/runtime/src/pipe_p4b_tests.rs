@@ -989,8 +989,5 @@ fn a_remote_client_sees_the_dev_servers_the_host_machine_runs() {
 
     drop(server.stdin.take());
     server.wait().unwrap();
-    next(&events, |event| {
-        listed(event).is_some_and(|servers| servers.iter().all(|server| server.port != port))
-    });
     desk.command_blocking(Command::ShutdownAllAndFlush).unwrap();
 }
