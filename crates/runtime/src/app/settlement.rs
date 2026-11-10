@@ -94,7 +94,12 @@ impl AppState {
                 let mut activities = match result {
                     Ok(activities) => activities,
                     Err(error) => {
-                        log::warn!("thread activity backfill: {error}");
+                        state.report_error(
+                            RuntimeError::PersistSessionIndex {
+                                error: error.to_string(),
+                            },
+                            cx,
+                        );
                         HashMap::new()
                     }
                 };
@@ -121,6 +126,8 @@ impl AppState {
                 if changed {
                     state.evaluate_all_settlement(cx);
                 }
+                // A failed batch stays queued for the next load instead of
+                // retrying a store that just failed.
                 if !failed {
                     state.load_next_activity_batch(cx);
                 }
