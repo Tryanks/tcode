@@ -44,6 +44,7 @@ pub(super) struct McpWiring {
     /// Why the MCP servers did not start, until the first thread that would have had them
     /// starts and the user is told.
     pub(super) unavailable: Option<String>,
+    pub(super) tasks: super::tasks::TaskWiring,
 }
 
 impl AppState {
@@ -76,15 +77,19 @@ impl AppState {
         use tcode_protocol::{InjectedChannel, InjectedInstructions};
         let meta = &session.meta;
         let provider = meta.provider;
-        if !provider.caps().mcp_servers {
+        // pi attaches the task tools alone.
+        let tasks = self.task_tools_offered(provider);
+        let mcp_servers = provider.caps().mcp_servers;
+        if !mcp_servers && !tasks {
             return None;
         }
         let pull_requests = self.pull_request_tools_offered(provider);
-        let preview = self.mcp.preview_url.is_some();
-        let computer_use =
-            computer_use_attaches(provider, &self.settings) && self.mcp.computer_use_url.is_some();
+        let preview = mcp_servers && self.mcp.preview_url.is_some();
+        let computer_use = mcp_servers
+            && computer_use_attaches(provider, &self.settings)
+            && self.mcp.computer_use_url.is_some();
         let control = self.control_offered(meta);
-        if !(pull_requests || preview || computer_use || control) {
+        if !(pull_requests || preview || computer_use || control || tasks) {
             return None;
         }
         let id = meta.id.as_str();
@@ -118,6 +123,13 @@ impl AppState {
                 agent::McpRegistration::SERVER_NAME_COMPUTER_USE,
                 computer_use_mcp::tools::INSTRUCTIONS,
                 self.mcp.computer_use_registrations.contains_key(id),
+            ),
+            // pi shows the model a server's instructions only for tools it does not
+            // declare, and it declares these.
+            (
+                agent::McpRegistration::SERVER_NAME_TASKS,
+                tasks_mcp::INSTRUCTIONS,
+                self.task_tools_registered(id) && provider != ProviderKind::Pi,
             ),
         ];
         let control_instructions = self
@@ -165,6 +177,12 @@ impl AppState {
             offer(
                 agent::McpRegistration::SERVER_NAME_COMPUTER_USE,
                 computer_use_mcp::tools::tool_descriptions(),
+            );
+        }
+        if tasks {
+            offer(
+                agent::McpRegistration::SERVER_NAME_TASKS,
+                tasks_mcp::tool_descriptions(),
             );
         }
         if control {

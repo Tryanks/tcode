@@ -16,6 +16,7 @@ log = "0.4"
 mcp-host = { path = "../mcp-host" }
 preview-mcp = { path = "../preview-mcp" }
 pull-request-mcp = { path = "../pull-request-mcp" }
+tasks-mcp = { path = "../tasks-mcp" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smol = "2"

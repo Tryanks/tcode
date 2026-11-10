@@ -1030,6 +1030,10 @@ impl AppState {
         let active = self
             .resident(target_id)
             .ok_or_else(|| provider_command_error("The thread is not open."))?;
+        if !active.meta.provider.caps().native_background {
+            let session_id = active.meta.id.clone();
+            return self.move_host_task(&session_id, &item_id);
+        }
         if !active
             .meta
             .provider
@@ -1058,6 +1062,10 @@ impl AppState {
         let active = self
             .resident_mut(target_id)
             .ok_or_else(|| provider_command_error("The thread is not open."))?;
+        if !active.meta.provider.caps().native_background {
+            let session_id = active.meta.id.clone();
+            return self.stop_host_tasks(&session_id, task_id.as_deref());
+        }
         if !active
             .meta
             .provider
@@ -1200,7 +1208,9 @@ impl AppState {
     }
 }
 
-fn provider_command_error(error: impl std::fmt::Display) -> tcode_protocol::ProtocolError {
+pub(super) fn provider_command_error(
+    error: impl std::fmt::Display,
+) -> tcode_protocol::ProtocolError {
     tcode_protocol::ProtocolError {
         code: "provider_unavailable".into(),
         message: error.to_string(),

@@ -202,9 +202,7 @@ impl Agents {
             store.latest_activity(id?).filter(|_| execution.running())
         };
         let status = store.session_status_for(Some(parent_id), cx);
-        let stops = status
-            .and_then(|status| status.provider.caps().background)
-            .is_some_and(|control| control.stop.stops());
+        let stops = status.is_some_and(|status| status.provider.caps().background_stop().stops());
         let stop_task = |item: &str| {
             status?
                 .background_tasks

@@ -540,6 +540,7 @@ impl<'a> ActivityProjection<'a> {
         }) {
             AgentExecution::Working
         } else if resident.is_some_and(|session| session.background_task_count > 0)
+            || self.state.host_tasks_running(&meta.id)
             || self.children_hold(&meta.id)
         {
             AgentExecution::Background
@@ -582,7 +583,10 @@ impl<'a> ActivityProjection<'a> {
                         .any(|message| message.origin == MessageOrigin::Human))
         });
         let tasks = resident.map_or_else(Vec::new, |session| {
-            session.background.statuses(&session.timeline)
+            session.background.statuses(
+                &session.timeline,
+                &self.state.host_background_tasks(&meta.id),
+            )
         });
         let (agents, unsettled) = self.agents_of(&meta.id, &tasks);
         SessionActivity {
@@ -1322,7 +1326,9 @@ impl AppState {
             requested_profile_id: meta.profile_id.clone(),
             acp_agent_id: meta.acp_agent_id.clone(),
             project_id: meta.project_id.clone(),
-            background_tasks: session.background.statuses(&session.timeline),
+            background_tasks: session
+                .background
+                .statuses(&session.timeline, &self.host_background_tasks(&meta.id)),
             queued_messages: session
                 .queue
                 .iter()

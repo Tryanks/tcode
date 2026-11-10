@@ -252,6 +252,20 @@ async fn run_actor(
     if let Some(session) = session {
         cmd.arg("--session").arg(session);
     }
+    let mcp_extension = match McpExtension::write(&opts.mcp_servers) {
+        Ok(extension) => extension,
+        Err(error) => {
+            let _ = ready
+                .send(Err(AgentError::Spawn(format!(
+                    "writing the pi extension that attaches Tcode's tools: {error}"
+                ))))
+                .await;
+            return;
+        }
+    };
+    if let Some(extension) = &mcp_extension {
+        cmd.arg("--extension").arg(&extension.file);
+    }
     cmd.current_dir(&opts.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -323,6 +337,7 @@ async fn run_actor(
         requests: HashMap::new(),
         entries_cursor: None,
         session_file: None,
+        _mcp_extension: mcp_extension,
     };
     let startup = actor.initialize().await;
     if let Err(err) = startup {
@@ -336,7 +351,7 @@ async fn run_actor(
         actor.events
             .emit(AgentEvent::Warning {
                 message: format!(
-                    "pi has no MCP client of its own, so Tcode's {} tools are unavailable in this session",
+                    "Tcode attaches only its task tools to pi sessions, so its {} tools are unavailable in this session",
                     unattached.join(", ")
                 ),
             })
@@ -377,6 +392,8 @@ struct PiActor {
     entries_cursor: Option<String>,
     /// The session file pi works in now: what a fork leaves, to return to.
     session_file: Option<String>,
+    /// The extension attaching Tcode's MCP servers, removed with the actor.
+    _mcp_extension: Option<McpExtension>,
 }
 
 /// What a pi RPC response settles.
@@ -1557,6 +1574,15 @@ impl PiMapper {
         };
         let id = id.to_owned();
         let event_name = event.get("toolName").and_then(Value::as_str);
+        // The `task_run` Tcode's bash runs each command through is that
+        // bash call's own work, which its card shows.
+        if event
+            .get("parentToolCallId")
+            .is_some_and(|parent| !parent.is_null())
+            && event_name.is_some_and(|name| name.starts_with(TASK_TOOL_PREFIX))
+        {
+            return Vec::new();
+        }
         let event_input = event.get("args").filter(|value| !value.is_null()).cloned();
         let result = if event.get("type").and_then(Value::as_str) == Some("tool_execution_update") {
             event.get("partialResult")
@@ -1879,11 +1905,96 @@ fn resume_session(resume: &Option<ResumeCursor>) -> Option<&str> {
     resume.as_ref()?.str_field(&["session_file", "session_id"])
 }
 
+/// The Tcode MCP servers a pi session attaches. pi's built-in MCP client
+/// (pi 1.5) reads servers only from `~/.pi/agent/mcp.json` and the project's
+/// `.pi/mcp.json`, never from its command line, so they are registered for
+/// the one session by an extension Tcode passes with `--extension`
+/// (`pi.registerMcpServer`, docs/extensions.md "MCP Servers"), leaving the
+/// user's files alone. Only the task tools are attached: pi has no background
+/// commands of its own, and the other servers wait on their own review.
+const ATTACHED_SERVERS: &[&str] = &[crate::McpRegistration::SERVER_NAME_TASKS];
+
+/// How pi names the task tools: `mcp__<server>__<tool>`.
+const TASK_TOOL_PREFIX: &str = "mcp__tcode_tasks__";
+
+/// How long pi waits on one request to an attached server, in seconds: past
+/// the longest `task_run` and `task_wait` wait (600 s), which pi's default of
+/// 60 s would cut short when no progress resets it.
+const MCP_REQUEST_TIMEOUT_S: u64 = 660;
+
+/// The extension that registers [`ATTACHED_SERVERS`] for one pi session, in a
+/// directory only this user can read (it holds the servers' bearer tokens),
+/// removed when the session ends.
+struct McpExtension {
+    dir: PathBuf,
+    file: PathBuf,
+}
+
+impl McpExtension {
+    /// The extension for the attached servers among `servers`; `None` when
+    /// none of them is.
+    fn write(servers: &[crate::McpRegistration]) -> std::io::Result<Option<Self>> {
+        let Some(source) = mcp_extension_source(servers) else {
+            return Ok(None);
+        };
+        let dir = std::env::temp_dir().join(format!("tcode-pi-{}", uuid::Uuid::new_v4().simple()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        // Fails on a directory someone else made first.
+        builder.create(&dir)?;
+        let extension = Self {
+            file: dir.join("tcode-mcp.ts"),
+            dir,
+        };
+        std::fs::write(&extension.file, source)?;
+        Ok(Some(extension))
+    }
+}
+
+impl Drop for McpExtension {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The extension, its servers still to fill in: it registers them and runs
+/// pi's own `bash` through `task_run` (pi 1.5 docs/extensions.md "Overriding
+/// Built-in Tools", "Remote Execution", "Calling Other Tools").
+const MCP_EXTENSION: &str = include_str!("pi_extension.ts");
+
+/// The extension's source: each attached server among `servers` as an
+/// `mcpServers` entry of pi's, its tools declared to the model (`direct`
+/// exposure) rather than left to codemode scripts, pi's default.
+fn mcp_extension_source(servers: &[crate::McpRegistration]) -> Option<String> {
+    let entries: serde_json::Map<String, Value> = servers
+        .iter()
+        .filter(|server| ATTACHED_SERVERS.contains(&server.name.as_str()))
+        .map(|server| {
+            (
+                server.name.clone(),
+                json!({
+                    "url": server.url,
+                    "headers": {"Authorization": format!("Bearer {}", server.bearer_token)},
+                    "exposure": "direct",
+                    "timeout": MCP_REQUEST_TIMEOUT_S,
+                    "description": "Tcode's task tools: run long commands in the background and wake this thread when they exit",
+                }),
+            )
+        })
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    Some(MCP_EXTENSION.replace("__TCODE_SERVERS__", &Value::Object(entries).to_string()))
+}
+
 /// The tcode tool families this session does without, named the way the user
 /// knows them from Settings.
 ///
-/// pi has no MCP client (its README: "No MCP"), and its RPC protocol exposes no
-/// registration hook, so explicitly enabled tcode MCP servers stay behind.
 /// Naming them beats a blanket notice: the person reading it wants to know
 /// which opted-in tools went missing, not that a protocol lacks a feature.
 fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
@@ -1945,6 +2056,55 @@ fn send_json(writer: &mut impl Write, value: &Value) -> Result<(), AgentError> {
 mod tests {
     use super::*;
     use crate::TurnStatus;
+
+    /// The task tools reach pi through an extension written for the session alone, which
+    /// declares them to the model with the session's bearer token, past pi's default request
+    /// timeout; the other servers stay behind, and the file goes with the session.
+    #[test]
+    fn the_task_tools_reach_pi_through_an_extension_of_the_sessions_own() {
+        let registration = |name: &str| crate::McpRegistration {
+            name: name.into(),
+            url: format!("http://127.0.0.1:9/{name}"),
+            bearer_token: format!("{name}-token"),
+        };
+        let servers = [
+            registration(crate::McpRegistration::SERVER_NAME_COMPUTER_USE),
+            registration(crate::McpRegistration::SERVER_NAME_TASKS),
+        ];
+        let extension = McpExtension::write(&servers).unwrap().unwrap();
+        let source = std::fs::read_to_string(&extension.file).unwrap();
+        let declared = source
+            .lines()
+            .find_map(|line| line.strip_prefix("const servers = "))
+            .and_then(|line| line.strip_suffix(';'))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(declared).unwrap(),
+            json!({
+                "tcode_tasks": {
+                    "url": "http://127.0.0.1:9/tcode_tasks",
+                    "headers": {"Authorization": "Bearer tcode_tasks-token"},
+                    "exposure": "direct",
+                    "timeout": 660,
+                    "description": "Tcode's task tools: run long commands in the background and wake this thread when they exit",
+                }
+            })
+        );
+        assert!(source.contains("pi.registerMcpServer(name, config)"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&extension.dir)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        let dir = extension.dir.clone();
+        drop(extension);
+        assert!(!dir.exists());
+        assert!(McpExtension::write(&servers[..1]).unwrap().is_none());
+    }
 
     #[test]
     fn responds_to_pending_extension_dialog_with_value_or_cancellation() {
@@ -2334,6 +2494,62 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// pi 1.5.0 running Tcode's `bash` (`tcode_bash.jsonl`, recorded through `-e` with the
+    /// session's extension): the card is the bash call's, its output growing as `task_run`
+    /// streams it, and the nested `task_run` that ran it is not a card of its own. Another
+    /// tool's nested call still is.
+    #[test]
+    fn tcode_bash_is_one_card_whose_output_streams_in() {
+        let mut mapper = PiMapper::new();
+        mapper.on_message(&json!({"type":"agent_start"}));
+        let mut events = Vec::new();
+        for line in include_str!("../tests/fixtures/pi/tcode_bash.jsonl").lines() {
+            events.extend(mapper.on_message(&serde_json::from_str(line).unwrap()));
+        }
+        let cards: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ItemStarted(item)
+                | AgentEvent::ItemUpdated(item)
+                | AgentEvent::ItemCompleted(item) => Some((item.id.as_str(), &item.content)),
+                _ => None,
+            })
+            .collect();
+        assert!(cards.iter().all(|(id, _)| *id == "call-bash"), "{cards:?}");
+        let outputs: Vec<_> = cards
+            .iter()
+            .filter_map(|(_, content)| match content {
+                ItemContent::CommandExecution {
+                    output,
+                    exit_code,
+                    status,
+                    ..
+                } => Some((output.as_str(), *exit_code, *status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            outputs,
+            [
+                ("", None, ItemStatus::InProgress),
+                ("", None, ItemStatus::InProgress),
+                ("a\n", None, ItemStatus::InProgress),
+                ("a\nb\n", None, ItemStatus::InProgress),
+                ("a\nb\n", Some(0), ItemStatus::Completed),
+            ]
+        );
+        let foreign = mapper.on_message(&json!({
+            "type": "tool_execution_start",
+            "toolCallId": "call-code/1",
+            "toolName": "read",
+            "args": {"path": "a.txt"},
+            "parentToolCallId": "call-code",
+        }));
+        assert!(
+            matches!(foreign.as_slice(), [AgentEvent::ItemStarted(item)] if item.id == "call-code/1")
+        );
     }
 
     /// Each `result` is what pi 1.4.0's own `bash`, `edit`, `write` and

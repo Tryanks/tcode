@@ -278,6 +278,7 @@ mod source_control;
 mod space_policy;
 mod store_write;
 mod subagents;
+mod tasks;
 mod terminals;
 
 #[cfg(test)]

@@ -25,6 +25,7 @@ impl AppState {
     }
 
     pub(super) fn clear_approvals(&mut self, session_id: &str) {
+        self.drop_task_approvals(session_id);
         self.approvals.remove(session_id);
     }
 
@@ -46,6 +47,9 @@ impl AppState {
         request_id: String,
         decision: ApprovalDecision,
     ) -> Result<(), String> {
+        if let Some(answered) = self.respond_task_approval(session_id, &request_id, &decision) {
+            return answered;
+        }
         let commands = match &self
             .resident(session_id)
             .ok_or_else(|| "session is not loaded".to_string())?

@@ -12103,6 +12103,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
+name = "tasks-mcp"
+version = "0.1.0"
+dependencies = [
+ "agent",
+ "async-channel",
+ "libc",
+ "log",
+ "mcp-host",
+ "rmcp",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "tauri-winrt-notification"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12260,6 +12277,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
+ "tasks-mcp",
  "tcode-client",
  "tcode-core",
  "tcode-protocol",
