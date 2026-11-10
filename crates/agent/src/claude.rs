@@ -2095,8 +2095,6 @@ pub(crate) struct Mapper {
     rewind_preview: bool,
     /// Last assistant model published to the canonical event stream.
     last_served_model: Option<String>,
-    /// Latest structured stop reason for the active turn.
-    stop_reason: Option<String>,
     /// Reset time reported for a rejected usage window in the active turn.
     limit_resets_at: Option<u64>,
     /// Warning-bearing stop reason already emitted for this occurrence.
@@ -2156,7 +2154,6 @@ impl Mapper {
             native_rewind,
             rewind_preview: native_rewind,
             last_served_model: None,
-            stop_reason: None,
             limit_resets_at: None,
             warned_stop_reason: None,
         }
@@ -2183,7 +2180,6 @@ impl Mapper {
         let id = format!("turn-{}", self.turn_counter);
         self.current_turn_id = Some(id.clone());
         self.awaiting_turn_checkpoint = self.native_rewind;
-        self.stop_reason = None;
         self.warned_stop_reason = None;
         id
     }
@@ -2229,13 +2225,15 @@ impl Mapper {
 
     fn rewind_request(&mut self, pending: PendingRewind) -> Value {
         let checkpoint_id = pending.checkpoint_id.as_str();
+        if matches!(
+            pending.step,
+            RewindStep::Interrupt | RewindStep::Conversation
+        ) && self.current_turn_id.is_some()
+        {
+            self.interrupt_pending = true;
+        }
         let request = match pending.step {
-            RewindStep::Interrupt => {
-                if self.current_turn_id.is_some() {
-                    self.interrupt_pending = true;
-                }
-                json!({ "subtype": "interrupt" })
-            }
+            RewindStep::Interrupt => json!({ "subtype": "interrupt" }),
             RewindStep::Files => {
                 json!({ "subtype": "rewind_files", "user_message_id": checkpoint_id })
             }
@@ -3539,7 +3537,6 @@ impl Mapper {
         let Some(reason) = reason.filter(|reason| !reason.is_empty()) else {
             return Vec::new();
         };
-        self.stop_reason = Some(reason.to_owned());
         let message = match reason {
             "refusal" => Some("Request declined by safety classifiers (stop_reason: refusal)"),
             "max_tokens" => Some("Response truncated: max_tokens limit reached"),
@@ -4256,7 +4253,7 @@ impl Mapper {
             .unwrap_or_else(|| format!("turn-{}", self.turn_counter.max(1)));
         // No message outlives its turn, so the block counters can go.
         self.assistant_messages.clear();
-        let mut status = result_status(msg, self.stop_reason.as_deref());
+        let mut status = result_status(msg);
         if std::mem::take(&mut self.interrupt_pending) && status != TurnStatus::Completed {
             status = TurnStatus::Interrupted;
         }
@@ -4708,36 +4705,11 @@ fn render_structured_patch(value: &Value) -> Option<String> {
     (!rendered.is_empty()).then(|| rendered.join("\n"))
 }
 
-fn result_status(msg: &Value, stop_reason: Option<&str>) -> TurnStatus {
-    let subtype = msg.get("subtype").and_then(Value::as_str);
-    let is_error = msg.get("is_error").and_then(Value::as_bool);
-    if subtype == Some("success") && is_error != Some(true) {
-        return TurnStatus::Completed;
-    }
-    if matches!(
-        subtype,
-        Some("interrupted" | "interrupt" | "cancelled" | "canceled" | "aborted")
-    ) || matches!(
-        stop_reason,
-        Some("interrupted" | "interrupt" | "cancelled" | "canceled" | "aborted")
-    ) {
-        return TurnStatus::Interrupted;
-    }
-    // Older CLI error results have no structured interrupt marker. Restrict the
-    // legacy prose heuristic to those non-success results so ordinary answers
-    // mentioning cancellation cannot be misclassified.
-    let haystack = format!(
-        "{} {}",
-        msg.get("result")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        msg.get("subtype")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-    )
-    .to_lowercase();
-    if haystack.contains("interrupt") || haystack.contains("abort") || haystack.contains("cancel") {
-        TurnStatus::Interrupted
+fn result_status(msg: &Value) -> TurnStatus {
+    if msg.get("subtype").and_then(Value::as_str) == Some("success")
+        && msg.get("is_error").and_then(Value::as_bool) != Some(true)
+    {
+        TurnStatus::Completed
     } else {
         TurnStatus::Failed
     }
@@ -5998,6 +5970,30 @@ mod tests {
                 },
             }])
         );
+    }
+
+    /// `rewind_conversation` stops a running turn itself, so the turn it
+    /// stops ends interrupted rather than failed.
+    #[test]
+    fn a_conversation_rewind_during_a_running_turn_ends_it_interrupted() {
+        let mut mapper = Mapper::new();
+        mapper.native_rewind = true;
+        mapper.start_turn();
+        mapper
+            .begin_rewind("checkpoint-2".into(), RewindMode::Conversation)
+            .unwrap();
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"stopped"}"#,
+        );
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
+        assert!(matches!(
+            turn_completed_after_count(&events, 0),
+            AgentEvent::TurnCompleted {
+                status: TurnStatus::Interrupted,
+                ..
+            }
+        ));
     }
 
     /// A stand-in Claude Code 2.1.318 that answers the rewind controls the way
@@ -7833,20 +7829,6 @@ mod tests {
 
     #[test]
     fn interrupted_result_status() {
-        let mut mapper = Mapper::new();
-        mapper.start_turn();
-        let events = feed(
-            &mut mapper,
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"You can cancel the operation from Settings."}"#,
-        );
-        assert!(matches!(
-            turn_completed_after_count(&events, 0),
-            AgentEvent::TurnCompleted {
-                status: TurnStatus::Completed,
-                ..
-            }
-        ));
-
         let mut idle = Mapper::new();
         idle.interrupt_request();
         assert!(!idle.interrupt_pending);
@@ -7883,18 +7865,6 @@ mod tests {
                 ..
             }
         ));
-
-        m.start_turn();
-        let evs = feed(
-            &mut m,
-            r#"{"type":"result","subtype":"error_during_execution","is_error":false,"result":"Request was aborted"}"#,
-        );
-        match turn_completed_after_count(&evs, 0) {
-            AgentEvent::TurnCompleted { status, .. } => {
-                assert_eq!(*status, TurnStatus::Interrupted)
-            }
-            other => panic!("expected TurnCompleted, got {other:?}"),
-        }
     }
 
     #[test]
