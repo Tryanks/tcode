@@ -3527,7 +3527,6 @@ mod tests {
             assert!(content_top > list.viewport_bounds().top());
             store.update(cx, |store, cx| {
                 store.set_session_replica_for_test(session_id, full, cx);
-                store.suppress_history_prefetch_for_test();
                 cx.notify();
             });
             // The frame that lands the page measures it.
