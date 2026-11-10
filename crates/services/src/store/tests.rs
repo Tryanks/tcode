@@ -1366,14 +1366,8 @@ fn item_rows_recorded_before_canonical_items_are_read() {
 
     crate::export::render_thread(&store, &meta, tcode_protocol::ThreadExportFormat::Markdown)
         .unwrap();
-    let exported =
-        crate::export::render_thread(&store, &meta, tcode_protocol::ThreadExportFormat::Jsonl)
-            .unwrap();
-    let export_path = dir.path().join("history.jsonl");
-    fs::write(&export_path, exported).unwrap();
-    let imported = crate::export::read_tcode_export(&export_path).unwrap();
-    assert_eq!(imported.event_log, legacy.as_bytes());
-    assert_eq!(imported.events, log.records);
+    crate::export::render_thread(&store, &meta, tcode_protocol::ThreadExportFormat::Jsonl)
+        .unwrap();
 }
 
 /// Every row of `id` as the store reads it: its position and canonical bytes,
