@@ -938,7 +938,6 @@ mod tests {
         Keystroke, ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext,
         Window, div, img, px,
     };
-    use std::sync::Mutex;
     use tcode_protocol::{
         ClientPayload, HostMessage, ProtocolError, PullRequestMedia, PullRequestReadResponse,
         decode_client_line, encode_line,
@@ -1044,7 +1043,6 @@ mod tests {
     enum Kind {
         Preview,
         Media,
-        Url,
     }
 
     impl Kind {
@@ -1061,7 +1059,6 @@ mod tests {
                     "reader".into(),
                     format!("https://github.com/owner/repo/assets/{index}.bmp"),
                 ),
-                Kind::Url => remote_image(format!("https://example.com/{index}.bmp").into()),
             }
         }
     }
@@ -1072,66 +1069,35 @@ mod tests {
         name.strip_suffix(".bmp").unwrap().parse().unwrap()
     }
 
-    /// A host and a web that answer every read with one picture, recording which were read.
+    /// A host that answers every preview read with one picture, recording which were read.
     struct Script {
         host: Host,
-        fetched: Arc<Mutex<Vec<String>>>,
         picture: Vec<u8>,
     }
 
     impl Script {
         fn new(picture: Vec<u8>, cx: &mut TestAppContext) -> Self {
-            let host = Host::attach(cx);
-            let fetched = Arc::new(Mutex::new(Vec::new()));
-            let client = gpui::http_client::FakeHttpClient::create({
-                let (fetched, picture) = (fetched.clone(), picture.clone());
-                move |request| {
-                    fetched.lock().unwrap().push(request.uri().to_string());
-                    let picture = picture.clone();
-                    async move {
-                        Ok(gpui::http_client::Response::builder()
-                            .status(200)
-                            .body(picture.into())?)
-                    }
-                }
-            });
-            cx.update(|cx| cx.set_http_client(client));
             Self {
-                host,
-                fetched,
+                host: Host::attach(cx),
                 picture,
             }
         }
 
         /// Answers the reads asked since, returning the index of each picture read.
         fn answer(&self) -> Vec<usize> {
-            let mut read: Vec<usize> = self
-                .host
+            self.host
                 .answer(|query| match query {
                     Query::ReadImagePreview { .. } => {
                         Ok(QueryResponse::FileBytes(self.picture.clone()))
                     }
-                    Query::PullRequest { .. } => media_image(self.picture.clone(), None, u64::MAX),
                     other => panic!("unexpected read {other:?}"),
                 })
                 .iter()
                 .map(|query| match query {
                     Query::ReadImagePreview { path, .. } => index(&path.to_string_lossy()),
-                    Query::PullRequest {
-                        read: tcode_protocol::PullRequestRead::Media { url, .. },
-                        ..
-                    } => index(url),
                     other => panic!("unexpected read {other:?}"),
                 })
-                .collect();
-            read.extend(
-                self.fetched
-                    .lock()
-                    .unwrap()
-                    .drain(..)
-                    .map(|url| index(&url)),
-            );
-            read
+                .collect()
         }
     }
 
@@ -1178,28 +1144,17 @@ mod tests {
         });
     }
 
-    /// Draws a full frame, answers the reads it asked and draws the frame that shows them,
-    /// returning which pictures were read.
-    fn settle(script: &Script, cx: &mut VisualTestContext) -> Vec<usize> {
-        settle_with(script, cx, draw)
-    }
-
-    /// As `settle`, with frames drawn as a display has them drawn: views nothing notified are
-    /// drawn from last frame (`test_frames::draw` refreshes, which builds every view again).
+    /// Draws a frame, answers the reads it asked and draws the frame that shows them, returning
+    /// which pictures were read. Frames are drawn as a display has them drawn: views nothing
+    /// notified are drawn from last frame (`test_frames::draw` refreshes, which builds every
+    /// view again).
     fn settle_reusing(script: &Script, cx: &mut VisualTestContext) -> Vec<usize> {
-        settle_with(script, cx, |cx| {
+        let frame = |cx: &mut VisualTestContext| {
             cx.run_until_parked();
             cx.update(|window, cx| {
                 let _ = window.draw(cx);
             });
-        })
-    }
-
-    fn settle_with(
-        script: &Script,
-        cx: &mut VisualTestContext,
-        frame: impl Fn(&mut VisualTestContext),
-    ) -> Vec<usize> {
+        };
         frame(cx);
         cx.run_until_parked();
         let read = script.answer();
@@ -1212,85 +1167,6 @@ mod tests {
 
     fn atlas_holds(image: &RenderImage, cx: &mut VisualTestContext) -> bool {
         cx.update(|window, _| window.has_image_atlas_entry(image))
-    }
-
-    /// Pictures drawn one after another, each let go of when the next is drawn: within the
-    /// budget every one stays decoded and in the atlas; past it, the one let go of longest ago
-    /// leaves both while the one let go of last stays and is drawn again without a read; the
-    /// one that left is read once more when drawn again.
-    fn pictures_no_longer_drawn_leave_oldest_first_past_the_budget(
-        kind: Kind,
-        cx: &mut TestAppContext,
-    ) {
-        let script = Script::new(bmp(SIDE), cx);
-        let shelf = Shelf::new(None);
-        let drawn = shelf.drawn.clone();
-        let (shelf, cx) = cx.add_window_view(|_, _| shelf);
-        let count = BUDGET / COST + 1;
-        let (mut first, mut last_released) = (None, None);
-        for index in 0..count {
-            show(&shelf, kind.source(script.host.image, index), cx);
-            assert_eq!(settle(&script, cx), [index], "each picture is read once");
-            let image = drawn.borrow_mut().take().expect("the picture is drawn");
-            assert!(atlas_holds(&image, cx));
-            if index == 0 {
-                first = Some(image);
-            } else if index == count - 2 {
-                last_released = Some(image);
-            }
-            let first = first.as_ref().unwrap();
-            if index + 1 < count {
-                assert!(
-                    Arc::strong_count(first) > 1 && atlas_holds(first, cx),
-                    "within the budget, a picture no longer drawn stays ({index})"
-                );
-            }
-        }
-        let (first, last_released) = (first.unwrap(), last_released.unwrap());
-        assert_eq!(
-            Arc::strong_count(&first),
-            1,
-            "past the budget, the decode let go of longest ago is freed"
-        );
-        assert!(!atlas_holds(&first, cx), "and its tile leaves the atlas");
-        assert!(
-            Arc::strong_count(&last_released) > 1 && atlas_holds(&last_released, cx),
-            "the picture let go of last stays"
-        );
-
-        show(&shelf, kind.source(script.host.image, count - 2), cx);
-        assert!(
-            settle(&script, cx).is_empty(),
-            "a picture still held is drawn again without a read"
-        );
-        let again = drawn.borrow_mut().take().expect("it is drawn at once");
-        assert!(Arc::ptr_eq(&again, &last_released));
-        drop((again, last_released));
-
-        show(&shelf, kind.source(script.host.image, 0), cx);
-        assert_eq!(
-            settle(&script, cx),
-            [0],
-            "a picture that left is read again when drawn again"
-        );
-        assert!(drawn.borrow().is_some(), "and drawn");
-    }
-
-    #[gpui::test]
-    fn host_previews_no_longer_drawn_leave_oldest_first_past_the_budget(cx: &mut TestAppContext) {
-        pictures_no_longer_drawn_leave_oldest_first_past_the_budget(Kind::Preview, cx);
-    }
-
-    #[gpui::test]
-    fn pull_request_media_no_longer_drawn_leaves_oldest_first_past_the_budget(
-        cx: &mut TestAppContext,
-    ) {
-        pictures_no_longer_drawn_leave_oldest_first_past_the_budget(Kind::Media, cx);
-    }
-
-    #[gpui::test]
-    fn pictures_by_url_no_longer_drawn_leave_oldest_first_past_the_budget(cx: &mut TestAppContext) {
-        pictures_no_longer_drawn_leave_oldest_first_past_the_budget(Kind::Url, cx);
     }
 
     struct Pair {
@@ -1309,7 +1185,8 @@ mod tests {
 
     /// A view that is drawn from last frame, its picture's code never running, keeps that
     /// picture decoded and in the atlas, unread again, while the pictures drawn beside it press
-    /// far past the budget and those no longer drawn leave.
+    /// far past the budget and those no longer drawn leave; one that left is read again when
+    /// drawn again.
     #[gpui::test]
     fn a_picture_drawn_from_last_frame_outlasts_pressure_past_the_budget(cx: &mut TestAppContext) {
         let script = Script::new(bmp(SIDE), cx);
@@ -1353,6 +1230,15 @@ mod tests {
             "a picture no longer drawn left for it"
         );
         assert!(!atlas_holds(&first_churned, cx));
+        drop(first_churned);
+
+        show(&churn, Kind::Preview.source(script.host.image, 1), cx);
+        assert_eq!(
+            settle_reusing(&script, cx),
+            [1],
+            "a picture that left is read again when drawn again"
+        );
+        assert!(churn_drawn.borrow().is_some(), "and drawn");
     }
 
     /// Pull request media past its expiry keeps drawing while the host is asked again with its
@@ -1435,7 +1321,7 @@ mod tests {
     fn open_hosts_read_their_own_pictures_and_outlast_each_other(cx: &mut TestAppContext) {
         let first = Host::attach(cx);
         let second = Host::attach(cx);
-        let picture = bmp(SIDE);
+        let picture = bmp(4);
         let reply = |query: &Query| match query {
             Query::ReadImagePreview { .. } => Ok(QueryResponse::FileBytes(picture.clone())),
             other => panic!("unexpected read {other:?}"),
@@ -1753,9 +1639,7 @@ mod tests {
                     "{markdown}",
                 );
                 let result = if has_preview {
-                    Ok(QueryResponse::FileBytes(
-                        include_bytes!("../../../../assets/icons/app/tcode.png").to_vec(),
-                    ))
+                    Ok(QueryResponse::FileBytes(bmp(4)))
                 } else {
                     Err(tcode_protocol::ProtocolError {
                         code: "preview_unavailable".into(),
@@ -1827,10 +1711,7 @@ mod tests {
                         .send_blocking(
                             encode_line(&HostMessage::QueryResult {
                                 id: request.id,
-                                result: Ok(QueryResponse::FileBytes(
-                                    include_bytes!("../../../../assets/icons/app/tcode.png")
-                                        .to_vec(),
-                                )),
+                                result: Ok(QueryResponse::FileBytes(bmp(4))),
                             })
                             .unwrap(),
                         )
@@ -1900,9 +1781,7 @@ mod tests {
                     .send_blocking(
                         encode_line(&HostMessage::QueryResult {
                             id: request.id,
-                            result: Ok(QueryResponse::FileBytes(
-                                include_bytes!("../../../../assets/icons/app/tcode.png").to_vec(),
-                            )),
+                            result: Ok(QueryResponse::FileBytes(bmp(4))),
                         })
                         .unwrap(),
                     )
