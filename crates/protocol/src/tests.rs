@@ -1312,10 +1312,10 @@ fn command_key_is_optional_for_v3_and_preserved_for_v4() {
         json!({"type":"space","content":{"policy_revision":0,"space_id":"s","space_name":"Shared","project_ids":["p"],"device_id":"d","device_name":"Phone",
             "policy":{"agents":{"type":"every"},"approval":"any","terminals":true,"git_remote":true,"preview":false,"computer_use":true,"editor":false}}})
     );
-    let keyed = decode_client_line(r#"{"id":9,"key":"951925af-31f3-4f1c-a57b-dac199d82ad7","payload":{"type":"command","content":{"type":"cycle_project_sort"}}}"#).unwrap();
+    let keyed = decode_client_line(r#"{"id":9,"key":"00000000-0000-4000-8000-000000000001","payload":{"type":"command","content":{"type":"cycle_project_sort"}}}"#).unwrap();
     assert_eq!(
         keyed.key.as_deref(),
-        Some("951925af-31f3-4f1c-a57b-dac199d82ad7")
+        Some("00000000-0000-4000-8000-000000000001")
     );
     assert_eq!(keyed.payload, legacy.payload);
 }
