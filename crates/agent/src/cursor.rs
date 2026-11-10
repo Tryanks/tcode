@@ -484,7 +484,8 @@ async fn select_model(
 
 /// Re-select the model parameters this session chose before: a new process
 /// starts on the parameters Cursor last saved for the model, which another
-/// session may have changed. A choice the model no longer offers is dropped.
+/// session may have changed. Cursor judges a choice the model no longer
+/// offers.
 async fn restore_parameters(
     setup: &Setup<'_>,
     session_id: &acp::SessionId,
@@ -492,9 +493,9 @@ async fn restore_parameters(
 ) {
     for option in config_options {
         let id = option.id.0.as_ref();
-        let acp::SessionConfigKind::Select(select) = &option.kind else {
+        if !matches!(option.kind, acp::SessionConfigKind::Select(_)) {
             continue;
-        };
+        }
         let Some(chosen) = acp_session::config_selection(
             &setup.opts.option_selections,
             id,
@@ -502,17 +503,7 @@ async fn restore_parameters(
         ) else {
             continue;
         };
-        let offered = match &select.options {
-            acp::SessionConfigSelectOptions::Ungrouped(options) => options
-                .iter()
-                .any(|option| option.value.0.as_ref() == chosen),
-            acp::SessionConfigSelectOptions::Grouped(groups) => groups
-                .iter()
-                .flat_map(|group| &group.options)
-                .any(|option| option.value.0.as_ref() == chosen),
-            _ => false,
-        };
-        if id == MODEL_CONFIG_ID || select_value(option) == Some(chosen) || !offered {
+        if id == MODEL_CONFIG_ID || select_value(option) == Some(chosen) {
             continue;
         }
         if let Err(err) = set_config_option(setup, session_id, id, chosen).await {
