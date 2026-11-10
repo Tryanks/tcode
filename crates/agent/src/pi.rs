@@ -613,10 +613,6 @@ impl SessionActor for PiActor {
         }
     }
 
-    async fn settle_shutdown(&mut self) {
-        let _ = self.cancel_pending_ui();
-    }
-
     async fn teardown(mut self, reason: Option<String>) -> Option<String> {
         self.stop();
         reason.map(|base| self.stderr_tail.append_to(base, "\nstderr:\n"))
