@@ -1237,10 +1237,9 @@ struct PiMapper {
     interrupt_pending: bool,
     failed: bool,
     tool_items: HashMap<String, PiTool>,
-    finalized_messages: HashSet<String>,
     /// Item ids of this turn's assistant messages, keyed by the message
     /// `timestamp` (the only field present from `message_start` through
-    /// `turn_end`), with a count so two messages stamped in the same
+    /// `message_end`), with a count so two messages stamped in the same
     /// millisecond still get distinct ids.
     assistant_ids: HashMap<u64, (String, u32)>,
     /// Id of the assistant message being streamed. `message_update` carries
@@ -1267,7 +1266,6 @@ impl PiMapper {
             interrupt_pending: false,
             failed: false,
             tool_items: HashMap::new(),
-            finalized_messages: HashSet::new(),
             assistant_ids: HashMap::new(),
             streaming_assistant: None,
         }
@@ -1287,9 +1285,6 @@ impl PiMapper {
             }
             "message_update" => self.message_update(message),
             "message_end" => self.message_end(message),
-            // Current pi emits both message_end and turn_end. Treat turn_end as
-            // a reconciliation fallback; usage is de-duplicated by message id.
-            "turn_end" => self.message_end(message),
             "tool_execution_start" => self.tool_event(message, ItemStatus::InProgress, false),
             "tool_execution_update" => self.tool_event(message, ItemStatus::InProgress, true),
             "tool_execution_end" => self.tool_event(
@@ -1387,7 +1382,6 @@ impl PiMapper {
 
     fn complete_turn(&mut self) -> Vec<AgentEvent> {
         self.assistant_ids.clear();
-        self.finalized_messages.clear();
         self.streaming_assistant = None;
         crate::complete_mapped_turn(
             &mut self.current_turn,
@@ -1502,10 +1496,7 @@ impl PiMapper {
             Some("assistant") => {
                 let mut events = Vec::new();
                 let id = self.assistant_id(message);
-                let first_finalization = self.finalized_messages.insert(id.clone());
-                if first_finalization
-                    && let Some(content) = message.get("content").and_then(Value::as_array)
-                {
+                if let Some(content) = message.get("content").and_then(Value::as_array) {
                     for (index, block) in content.iter().enumerate() {
                         let item = match block.get("type").and_then(Value::as_str) {
                             Some("text") => Some(ItemContent::AssistantMessage {
@@ -1535,7 +1526,7 @@ impl PiMapper {
                         }
                     }
                 }
-                if first_finalization && let Some(usage) = map_usage(message.get("usage")) {
+                if let Some(usage) = map_usage(message.get("usage")) {
                     let processed = crate::processed_tokens(usage);
                     self.cumulative_processed = self.cumulative_processed.saturating_add(processed);
                     let usage = TokenUsage {
@@ -2431,20 +2422,6 @@ mod tests {
             AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::CommandExecution { command, output, .. }, .. })
                 if command == "printf ok" && output == "ok"
         )));
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(
-                    event,
-                    AgentEvent::ItemCompleted(ThreadItem {
-                        content: ItemContent::AssistantMessage { text, .. },
-                        ..
-                    }) if text == "PONG"
-                ))
-                .count(),
-            1,
-            "message_end and turn_end must reconcile the same assistant message"
-        );
         assert!(events.iter().any(|event| matches!(
             event,
             AgentEvent::TokenUsage(TokenUsage {
