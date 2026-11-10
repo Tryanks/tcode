@@ -184,7 +184,7 @@ impl SettingsPage {
         let pending_group =
             self.control_pending_group(pending, &control, &projects, compact, window, cx);
         below = below.children(pending_group);
-        below = below.child(self.control_default_group(&control, &projects, quiet, compact, cx));
+        below = below.child(self.control_default_group(&control, quiet, compact, cx));
         below = below.child(self.control_project_group(&control, &projects, compact, window, cx));
         below = below
             .children(self.control_thread_group(extra, &control, &projects, compact, window, cx));
@@ -369,7 +369,6 @@ impl SettingsPage {
     fn control_default_group(
         &mut self,
         control: &ControlSettings,
-        projects: &[Project],
         quiet: bool,
         compact: bool,
         cx: &mut Context<Self>,
@@ -463,7 +462,6 @@ impl SettingsPage {
                 .choices(scope_choices),
             cx,
         );
-        let _ = projects;
         v_flex()
             .child(crate::material::group_caption(
                 crate::tr!("control.settings.default_grant"),
