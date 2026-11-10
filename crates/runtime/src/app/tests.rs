@@ -11463,74 +11463,6 @@ fn status_carries_the_running_turn_while_in_flight_and_open_requests_while_live(
     assert!(status.pending_approvals.is_empty());
 }
 
-/// Times the initial snapshot plus the pages a client fetches while scrolling
-/// to the top of a real long thread. Run with
-/// `TCODE_HISTORY_BENCH_LOG=/path/to/thread.jsonl cargo test -p tcode-runtime
-/// --release -- --ignored --nocapture history_paging_bench`.
-#[test]
-#[ignore = "manual benchmark: needs TCODE_HISTORY_BENCH_LOG pointing at a large JSONL log"]
-fn history_paging_bench() {
-    let source = std::env::var_os("TCODE_HISTORY_BENCH_LOG").expect("TCODE_HISTORY_BENCH_LOG");
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("tcode-history-paging-bench");
-    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
-    meta.id = "bench".into();
-    store.upsert_meta(&meta).unwrap();
-    store
-        .apply(&[tcode_services::store::Mutation::replace_event_log(
-            "bench",
-            fs::read(&source).unwrap(),
-        )])
-        .unwrap();
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let started = Instant::now();
-    state.update(cx, |state, cx| state.select_session("bench", cx));
-    let opened = started.elapsed();
-    let (snapshot_elapsed, pages) = state.update(cx, |state, _| {
-        let started = Instant::now();
-        let snapshot = events_reply(
-            state,
-            &tcode_protocol::Subscription {
-                known_index: None,
-                topic: Topic::SessionEvents {
-                    session_id: "bench".into(),
-                },
-                after: None,
-            },
-        );
-        let snapshot_elapsed = started.elapsed();
-        let ServerEvent::SessionSnapshot { from, total, .. } = snapshot.event else {
-            panic!("snapshot")
-        };
-        eprintln!("snapshot: {snapshot_elapsed:?} (from {from} of {total} records)");
-        let mut before = from;
-        let mut pages = Vec::new();
-        while before > 0 && pages.len() < 16 {
-            let started = Instant::now();
-            let QueryResponse::SessionHistoryPage { from, records, .. } =
-                state.event_records["bench"]
-                    .history_page(before, tcode_protocol::SESSION_HISTORY_RECORDS as u32)
-                    .unwrap()
-            else {
-                panic!("page")
-            };
-            pages.push((started.elapsed(), records.len()));
-            before = from;
-        }
-        (snapshot_elapsed, pages)
-    });
-    cx.run_until_parked();
-    let paged: Duration = pages.iter().map(|(elapsed, _)| *elapsed).sum();
-    for (index, (elapsed, records)) in pages.iter().enumerate() {
-        eprintln!("page {index}: {elapsed:?} ({records} records)");
-    }
-    eprintln!(
-        "select_session: {opened:?}; snapshot: {snapshot_elapsed:?}; {} pages: {paged:?}; snapshot + pages: {:?}",
-        pages.len(),
-        snapshot_elapsed + paged
-    );
-}
-
 /// Opening or archiving one thread must cost that thread on the wire, not the
 /// whole index or every setting; archived threads leave the index and are
 /// read on demand.
@@ -15283,44 +15215,6 @@ fn settle_all_children_delivers_finished_results_and_skips_running_children() {
         }
         assert!(state.resident("running").unwrap().turn_in_flight);
     });
-}
-
-/// A host over a copy of a real data dir (`TCODE_STORAGE_DATA`), run until
-/// its startup storage pass reports how it ended, logging the pass to
-/// stderr. Killing it anywhere and starting it again must converge on the
-/// same store ([`tcode_services::store`]'s `a_real_data_dir_reads_back_as_its_original`
-/// checks the result).
-#[test]
-#[ignore = "drives the storage pass over a copy of a real data dir named by TCODE_STORAGE_DATA; run deliberately"]
-fn storage_pass_over_a_real_data_dir() {
-    let mut printed = captured_log().len();
-    let root = PathBuf::from(std::env::var_os("TCODE_STORAGE_DATA").unwrap());
-    let started = Instant::now();
-    let host = crate::pipe::spawn_host(
-        SessionStore::open_at(root).unwrap(),
-        crate::pipe::HostServices::default(),
-    )
-    .unwrap();
-    eprintln!("host up in {:.1?}", started.elapsed());
-    loop {
-        let log = captured_log();
-        let mut ended = false;
-        for line in log[printed..]
-            .iter()
-            .filter(|line| line.target.starts_with("tcode"))
-        {
-            eprintln!("{} {}", line.level, line.text);
-            ended |= line.text.starts_with("storage pass ");
-        }
-        printed = log.len();
-        drop(log);
-        if ended {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    eprintln!("pass ended after {:.1?}", started.elapsed());
-    drop(host);
 }
 
 #[test]
