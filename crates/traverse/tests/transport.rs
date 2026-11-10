@@ -1,10 +1,10 @@
 //! Two in-process endpoints using native direct-path selection, without a relay.
 #[path = "common/original.rs"]
 mod original_fixture;
+#[path = "common/host.rs"]
+mod real_host;
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -38,83 +38,29 @@ impl Drop for TestDir {
     }
 }
 
-fn fake_host() -> (
-    HostMux,
-    Arc<AtomicUsize>,
-    Arc<std::sync::Mutex<Vec<String>>>,
-) {
-    let (to_host, host_rx) =
-        async_channel::unbounded::<tcode_client::attachment::AttachmentMessage>();
-    let (host_tx, from_host) = async_channel::unbounded::<String>();
-    let subscribe_count = Arc::new(AtomicUsize::new(0));
-    let keys = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let count = subscribe_count.clone();
-    let seen_keys = keys.clone();
-    std::thread::spawn(move || {
-        while let Ok(message) = host_rx.recv_blocking() {
-            let line = message.line;
-            let request = tcode_protocol::decode_client_line(&line).unwrap();
-            let id = request.id;
-            if let Some(key) = request.key {
-                seen_keys.lock().unwrap().push(key);
-            }
-            if let tcode_protocol::ClientPayload::Subscribe(subscription) = &request.payload {
-                count.fetch_add(1, Ordering::Relaxed);
-                let snapshot = tcode_protocol::HostMessage::Event(tcode_protocol::EventEnvelope {
-                    request_id: Some(id),
-                    topic: subscription.topic.clone(),
-                    event: tcode_protocol::ServerEvent::IndexSnapshot(
-                        tcode_protocol::IndexSnapshot {
-                            summary: tcode_protocol::IndexSummary::default(),
-                            sessions: Vec::new(),
-                            projects: Vec::new(),
-                        },
-                    ),
-                });
-                host_tx
-                    .send_blocking(tcode_protocol::encode_line(&snapshot).unwrap())
-                    .unwrap();
-            }
-            if let tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Ping) =
-                &request.payload
-            {
-                host_tx
-                    .send_blocking(
-                        tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
-                            id,
-                            result: Ok(tcode_protocol::QueryResponse::Pong),
-                        })
-                        .unwrap(),
-                    )
-                    .unwrap();
-                continue;
-            }
-            let mut response = tcode_protocol::CommandResponse::Unit;
-            if let tcode_protocol::ClientPayload::Command(
-                tcode_protocol::Command::CreateProject { root },
-            ) = &request.payload
-            {
-                let broadcast = tcode_protocol::HostMessage::Event(tcode_protocol::EventEnvelope {
-                    request_id: None, topic: tcode_protocol::Topic::Index,
-                    event: serde_json::from_value(json!({"type":"index_upsert_project","content":{"id":"project","name":"Shared","root":root,"created_at":1}})).unwrap(),
-                });
-                host_tx
-                    .send_blocking(tcode_protocol::encode_line(&broadcast).unwrap())
-                    .unwrap();
-                response = tcode_protocol::CommandResponse::ProjectId(Some("project".into()));
-            }
-            host_tx
-                .send_blocking(
-                    tcode_protocol::encode_line(&tcode_protocol::HostMessage::Ack {
-                        id,
-                        result: Ok(response),
-                    })
-                    .unwrap(),
-                )
-                .unwrap();
-        }
-    });
-    (HostMux::new(to_host, from_host), subscribe_count, keys)
+/// A machine whose host is never asked anything: these tests only pair,
+/// connect and use what the transport answers itself.
+struct Silent {
+    mux: HostMux,
+    _host: (
+        async_channel::Receiver<tcode_client::attachment::AttachmentMessage>,
+        async_channel::Sender<String>,
+    ),
+}
+
+fn silent_host() -> Silent {
+    let (to_host, host_rx) = async_channel::unbounded();
+    let (host_tx, from_host) = async_channel::unbounded();
+    Silent {
+        mux: HostMux::new(to_host, from_host),
+        _host: (host_rx, host_tx),
+    }
+}
+
+/// The machine's own host on an empty store, for tests whose devices are
+/// answered by it.
+fn running_host(dir: &TestDir) -> (tcode_runtime::pipe::SpawnedHost, HostMux) {
+    real_host::spawn(&dir.0, Default::default(), |_| {})
 }
 
 fn start_host(mux: HostMux, dir: &TestDir, bind_port: Option<u16>) -> TraverseHost {
@@ -173,33 +119,36 @@ fn syncing_directly(state: &ConnectionState) -> bool {
     )
 }
 
+/// The next message on `channel`, or `None` once `deadline` passes, which
+/// only a failing test reaches.
+fn next<T>(channel: &async_channel::Receiver<T>, deadline: Instant) -> Option<T> {
+    tcode_traverse::block_on(async {
+        tokio::time::timeout_at(deadline.into(), channel.recv()).await
+    })
+    .ok()?
+    .ok()
+}
+
 fn wait_state(transport: &Transport, wanted: impl Fn(&ConnectionState) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut seen = Vec::new();
-    while Instant::now() < deadline {
-        if let Ok(state) = transport.state.try_recv() {
-            if wanted(&state) {
-                return;
-            }
-            seen.push(state);
+    while let Some(state) = next(&transport.state, deadline) {
+        if wanted(&state) {
+            return;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        seen.push(state);
     }
     panic!("did not observe the wanted state; saw {seen:?}");
 }
 
 fn recv_type(transport: &Transport, kind: &str, id: Option<u64>) -> Value {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if let Ok(line) = transport.from_host.try_recv() {
-            let value: Value = serde_json::from_str(line.trim_end()).unwrap();
-            if value["type"] == kind
-                && id.is_none_or(|id| value["content"]["id"].as_u64() == Some(id))
-            {
-                return value;
-            }
+    while let Some(line) = next(&transport.from_host, deadline) {
+        let value: Value = serde_json::from_str(line.trim_end()).unwrap();
+        if value["type"] == kind && id.is_none_or(|id| value["content"]["id"].as_u64() == Some(id))
+        {
+            return value;
         }
-        std::thread::sleep(Duration::from_millis(10));
     }
     panic!("did not receive {kind}");
 }
@@ -221,8 +170,8 @@ fn subscribe(id: u64) -> String {
 #[test]
 fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices_are_rejected() {
     let host_dir = TestDir::new("pair-host");
-    let (mux, _, _) = fake_host();
-    let host = start_host(mux, &host_dir, None);
+    let silent = silent_host();
+    let host = start_host(silent.mux.clone(), &host_dir, None);
     let phone_dir = TestDir::new("pair-phone");
     let phone = device(&phone_dir, "phone");
     let other_dir = TestDir::new("pair-other");
@@ -303,8 +252,8 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
 #[test]
 fn an_invitation_that_finds_no_path_pairs_at_a_typed_address() {
     let host_dir = TestDir::new("typed-host");
-    let (mux, _, _) = fake_host();
-    let host = start_host(mux, &host_dir, None);
+    let silent = silent_host();
+    let host = start_host(silent.mux.clone(), &host_dir, None);
     let dir = TestDir::new("typed-phone");
     let phone = device(&dir, "phone");
     phone.set_lan_options(tcode_traverse::lan::LanOptions {
@@ -350,8 +299,8 @@ fn an_invitation_that_finds_no_path_pairs_at_a_typed_address() {
 #[test]
 fn invitation_changes_are_reported_in_order() {
     let host_dir = TestDir::new("events-host");
-    let (mux, _, _) = fake_host();
-    let host = start_host(mux, &host_dir, None);
+    let silent = silent_host();
+    let host = start_host(silent.mux.clone(), &host_dir, None);
     let phone_dir = TestDir::new("events-phone");
     let phone = device(&phone_dir, "phone");
     let events = host.invitation_events();
@@ -433,15 +382,13 @@ fn wait_relays(device: &DeviceIdentity, wanted: &[&str]) {
 /// caches keep discovery local to the test.
 #[test]
 fn device_relays_follow_the_traverse_instances_of_its_machines() {
+    let silent = silent_host();
     let off_dir = TestDir::new("relays-off-host");
-    let (mux, _, _) = fake_host();
-    let off_host = start_host(mux, &off_dir, None);
+    let off_host = start_host(silent.mux.clone(), &off_dir, None);
     let official_dir = TestDir::new("relays-official-host");
-    let (mux, _, _) = fake_host();
-    let official_host = start_host(mux, &official_dir, None);
+    let official_host = start_host(silent.mux.clone(), &official_dir, None);
     let custom_dir = TestDir::new("relays-custom-host");
-    let (mux, _, _) = fake_host();
-    let custom_host = start_host(mux, &custom_dir, None);
+    let custom_host = start_host(silent.mux.clone(), &custom_dir, None);
     let dir = TestDir::new("relays-phone");
     cache_manifest(&dir.0.join("traverse-manifest-official.json"), "official");
     let custom_base: url::Url = "https://custom.traverse.test/".parse().unwrap();
@@ -531,10 +478,10 @@ fn device_relays_follow_the_traverse_instances_of_its_machines() {
 #[test]
 fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
     let host_dir = TestDir::new("dead-traverse-host");
-    let (mux, _, _) = fake_host();
+    let (runtime, mux) = running_host(&host_dir);
     let dead = url::Url::from_file_path(host_dir.0.join("missing").join("relays.json")).unwrap();
     let host = TraverseHost::start(
-        mux,
+        mux.clone(),
         HostConfig {
             host_name: "Test Host".into(),
             data_dir: host_dir.0.clone(),
@@ -563,6 +510,7 @@ fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
     );
     client.to_host.close();
     host.shutdown();
+    real_host::stop(runtime, &mux);
 }
 
 /// The heartbeat is the transport's own line, never charged to the outbox.
@@ -573,8 +521,8 @@ fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
 #[test]
 fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
     let host_dir = TestDir::new("idle-host");
-    let (mux, _, _) = fake_host();
-    let host = start_host(mux, &host_dir, None);
+    let (runtime, mux) = running_host(&host_dir);
+    let host = start_host(mux.clone(), &host_dir, None);
     let dir = TestDir::new("idle-device");
     let phone = device(&dir, "phone");
     let minted = host.new_invitation();
@@ -598,6 +546,7 @@ fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
     recv_type(&client, "query_result", Some(2));
     assert_eq!(client.state.try_recv().ok(), None);
     host.shutdown();
+    real_host::stop(runtime, &mux);
 }
 
 /// Leaving the app parks its link: the connection closes and so does the
@@ -607,8 +556,8 @@ fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
 #[test]
 fn a_parked_link_closes_the_endpoint_and_the_return_delivers_what_was_written_meanwhile() {
     let host_dir = TestDir::new("park-host");
-    let (mux, _, _) = fake_host();
-    let host = start_host(mux, &host_dir, None);
+    let (runtime, mux) = running_host(&host_dir);
+    let host = start_host(mux.clone(), &host_dir, None);
     let dir = TestDir::new("park-device");
     cache_manifest(&dir.0.join("traverse-manifest-official.json"), "official");
     let phone = device(&dir, "phone");
@@ -628,19 +577,19 @@ fn a_parked_link_closes_the_endpoint_and_the_return_delivers_what_was_written_me
     recv_type(&client, "ack", Some(1));
     wait_state(&client, connected_directly);
 
+    let hosting = host.hosting_events();
     client.to_host.wake(Wake::Park);
     wait_state(&client, |state| {
         matches!(state, ConnectionState::Reconnecting { .. })
     });
     wait_relays(&phone, &[]);
     let deadline = Instant::now() + Duration::from_secs(20);
-    while host.devices()[0].live.is_some() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
+    while host.devices()[0].live.is_some() {
+        assert!(
+            next(&hosting, deadline).is_some(),
+            "the machine saw the device leave"
+        );
     }
-    assert!(
-        host.devices()[0].live.is_none(),
-        "the machine saw the device leave"
-    );
     let open = json!({"id": 2, "payload": {"type": "command", "content": {"type": "open_latest_session"}}});
     client.to_host.send_blocking(open.to_string()).unwrap();
     client.to_host.wake(Wake::Reconnect);
@@ -648,13 +597,14 @@ fn a_parked_link_closes_the_endpoint_and_the_return_delivers_what_was_written_me
     recv_type(&client, "ack", Some(2));
     assert_eq!(phone.relays(), ["https://official.relay.test/"]);
     host.shutdown();
+    real_host::stop(runtime, &mux);
 }
 
 #[test]
 fn two_devices_route_acks_broadcast_events_and_scope_keys() {
     let host_dir = TestDir::new("route-host");
-    let (mux, _, keys) = fake_host();
-    let host = start_host(mux, &host_dir, None);
+    let (runtime, mux) = running_host(&host_dir);
+    let host = start_host(mux.clone(), &host_dir, None);
     let dir_a = TestDir::new("route-a");
     let dir_b = TestDir::new("route-b");
     let device_a = device(&dir_a, "A");
@@ -682,52 +632,62 @@ fn two_devices_route_acks_broadcast_events_and_scope_keys() {
         "the connections are direct: {live:?}"
     );
 
-    let create = json!({
-        "id": 11,
-        "key": "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b",
-        "payload": {"type": "command", "content": {"type": "create_project", "content": {"root": "/tmp/project"}}}
-    })
-    .to_string();
-    client_a.to_host.send_blocking(create).unwrap();
-    recv_type(&client_a, "event", None);
-    recv_type(&client_b, "event", None);
-    recv_type(&client_a, "ack", Some(11));
-    assert_eq!(
-        keys.lock().unwrap().as_slice(),
-        [format!(
-            "{}:3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b",
-            device_a.endpoint_id()
-        )],
-        "keys are scoped by the authenticated device"
-    );
-    // A reply to B, ordered after A's command by the host, bounds the absence check.
+    // The same retained-command key from each device: the host replays a
+    // key's first answer, so only a key scoped by the authenticated device
+    // lets B's command run on its own.
+    let key = "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b";
+    let create = |id: u64, root: &std::path::Path| {
+        std::fs::create_dir_all(root).unwrap();
+        json!({
+            "id": id,
+            "key": key,
+            "payload": {"type": "command", "content": {"type": "create_project", "content": {"root": root}}}
+        })
+        .to_string()
+    };
+    let project = |ack: Value| ack["content"]["result"]["Ok"]["content"].clone();
+    client_a
+        .to_host
+        .send_blocking(create(11, &host_dir.0.join("a")))
+        .unwrap();
+    let from_a = project(recv_type(&client_a, "ack", Some(11)));
+    assert!(from_a.is_string(), "{from_a}");
     client_b
         .to_host
-        .send_blocking(
-            json!({"id": 21, "payload": {"type":"command", "content":{"type":"open_latest_session"}}})
-                .to_string(),
-        )
+        .send_blocking(create(21, &host_dir.0.join("b")))
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        assert!(
-            Instant::now() < deadline,
-            "B's command barrier was not acknowledged"
-        );
-        let Ok(line) = client_b.from_host.try_recv() else {
-            std::thread::sleep(Duration::from_millis(10));
-            continue;
-        };
+    // B's own acknowledgment comes after A's on the host stream, so it also
+    // bounds the check that nothing addressed to A reached B.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let from_b = loop {
+        let line = next(&client_b.from_host, deadline).expect("B's command was acknowledged");
         let value: Value = serde_json::from_str(&line).unwrap();
         assert_ne!(
             value["content"]["id"].as_u64(),
             Some(11),
             "A's acknowledgment leaked to B"
         );
-        if value["type"] == "ack" && value["content"]["id"] == 21 {
-            break;
+        if value["type"] == "event" {
+            assert_eq!(value["content"]["request_id"], Value::Null);
         }
-    }
+        if value["type"] == "ack" && value["content"]["id"] == 21 {
+            break project(value);
+        }
+    };
+    assert!(from_b.is_string(), "{from_b}");
+    assert_ne!(
+        from_a, from_b,
+        "keys are scoped by the authenticated device"
+    );
+    client_a
+        .to_host
+        .send_blocking(create(13, &host_dir.0.join("b")))
+        .unwrap();
+    assert_eq!(
+        project(recv_type(&client_a, "ack", Some(13))),
+        from_a,
+        "A's key is retained: its first answer is replayed"
+    );
     // The hosting query is answered by the transport itself.
     client_a
         .to_host
@@ -744,6 +704,7 @@ fn two_devices_route_acks_broadcast_events_and_scope_keys() {
     client_a.to_host.close();
     client_b.to_host.close();
     host.shutdown();
+    real_host::stop(runtime, &mux);
 }
 
 fn follow_hosting(id: u64) -> String {
@@ -758,17 +719,15 @@ fn follow_hosting(id: u64) -> String {
 #[test]
 fn hosting_followers_hear_of_a_change_made_elsewhere() {
     let host_dir = TestDir::new("follow-host");
-    let (mux, _, _) = fake_host();
-    let host = start_host(mux, &host_dir, None);
+    let silent = silent_host();
+    let host = start_host(silent.mux.clone(), &host_dir, None);
     let window = host.hosting_events();
     let design = host.create_space("Design".into()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        assert!(Instant::now() < deadline, "the window was not told");
-        match window.try_recv() {
-            Ok(state) if state.spaces.iter().any(|space| space.id == design) => break,
-            Ok(_) => {}
-            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        let state = next(&window, deadline).expect("the window was told");
+        if state.spaces.iter().any(|space| space.id == design) {
+            break;
         }
     }
 
@@ -809,8 +768,8 @@ fn hosting_followers_hear_of_a_change_made_elsewhere() {
 #[test]
 fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     let host_dir = TestDir::new("revoke-host");
-    let (mux, _, _) = fake_host();
-    let host = start_host(mux, &host_dir, None);
+    let (runtime, mux) = running_host(&host_dir);
+    let host = start_host(mux.clone(), &host_dir, None);
     let dir = TestDir::new("revoke-phone");
     let phone = device(&dir, "phone");
     let minted = host.new_invitation();
@@ -865,6 +824,7 @@ fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     });
     again.to_host.close();
     host.shutdown();
+    real_host::stop(runtime, &mux);
 }
 
 /// A UDP port the system never hands out to a `:0` bind, free when probed:
@@ -882,7 +842,7 @@ fn fixed_port() -> u16 {
 #[test]
 fn a_restarted_machine_rejoins_and_delivers_writes_buffered_while_it_was_down() {
     let host_dir = TestDir::new("restart-host");
-    let (mux, subscribe_count, _) = fake_host();
+    let (runtime, mux) = running_host(&host_dir);
     let port = fixed_port();
     let host = start_host(mux.clone(), &host_dir, Some(port));
     let dir = TestDir::new("restart-phone");
@@ -931,7 +891,7 @@ fn a_restarted_machine_rejoins_and_delivers_writes_buffered_while_it_was_down() 
         )
         .unwrap();
     let restarted = TraverseHost::start(
-        mux,
+        mux.clone(),
         HostConfig {
             host_name: "Renamed".into(),
             data_dir: host_dir.0.clone(),
@@ -972,21 +932,16 @@ fn a_restarted_machine_rejoins_and_delivers_writes_buffered_while_it_was_down() 
     let deadline = Instant::now() + Duration::from_secs(10);
     let (mut resubscribed, mut acked) = (false, false);
     while !(resubscribed && acked) {
-        assert!(
-            Instant::now() < deadline,
-            "rejoin incomplete: resubscribed {resubscribed}, buffered write acked {acked}"
-        );
-        let Ok(line) = client.from_host.try_recv() else {
-            std::thread::sleep(Duration::from_millis(10));
-            continue;
-        };
+        let line = next(&client.from_host, deadline).unwrap_or_else(|| {
+            panic!("rejoin incomplete: resubscribed {resubscribed}, buffered write acked {acked}")
+        });
         let value: Value = serde_json::from_str(line.trim_end()).unwrap();
-        resubscribed |= value["type"] == "event";
+        resubscribed |= value["type"] == "event" && !value["content"]["request_id"].is_null();
         acked |= value["type"] == "ack" && value["content"]["id"] == 0;
     }
-    assert_eq!(subscribe_count.load(Ordering::Relaxed), 2);
     link.close();
     restarted.shutdown();
+    real_host::stop(runtime, &mux);
 }
 
 fn space_invite(host: &TraverseHost, id: &str) -> PairInvite {
@@ -1052,6 +1007,18 @@ fn scoped_ping(
     });
     let reply = recv_type(client, "query_result", Some(id));
     assert_eq!(reply["content"]["result"]["Ok"]["type"], "pong");
+}
+
+/// A member dropped by a change to its grant comes back with the new one.
+/// The device's return to the app wakes the link, as the shell sends it,
+/// rather than the backoff timer, whose length is not what these tests are
+/// about.
+fn rejoin(client: &Transport) {
+    wait_state(client, |state| {
+        matches!(state, ConnectionState::Reconnecting { .. })
+    });
+    client.to_host.wake(Wake::Reconnect);
+    wait_state(client, syncing_directly);
 }
 
 fn assert_stayed_connected(client: &Transport) {
@@ -1311,10 +1278,7 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
         project_ids: vec!["project-b".into()],
     }))
     .unwrap();
-    wait_state(&client, |state| {
-        matches!(state, ConnectionState::Reconnecting { .. })
-    });
-    wait_state(&client, syncing_directly);
+    rejoin(&client);
     if let Principal::Space {
         project_ids,
         policy_revision,
@@ -1327,10 +1291,7 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
         *project_ids = vec!["project-b".into()];
     }
     scoped_ping(&client, &host_rx, &host_tx, &principal, 7);
-    wait_state(&other_client, |state| {
-        matches!(state, ConnectionState::Reconnecting { .. })
-    });
-    wait_state(&other_client, syncing_directly);
+    rejoin(&other_client);
     if let Principal::Space {
         project_ids,
         policy_revision,
@@ -1344,10 +1305,7 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     }
     scoped_ping(&other_client, &host_rx, &host_tx, &other_principal, 11);
     host.rename_space(&id, "Renamed".into()).unwrap();
-    wait_state(&client, |state| {
-        matches!(state, ConnectionState::Reconnecting { .. })
-    });
-    wait_state(&client, syncing_directly);
+    rejoin(&client);
     if let Principal::Space {
         space_name,
         policy_revision,
@@ -1365,10 +1323,7 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     assert_eq!(pair(&moved_invite, &member), Err(PairError::AlreadyMember));
     host.move_member(&member.endpoint_id().to_string(), &moved_space)
         .unwrap();
-    wait_state(&client, |state| {
-        matches!(state, ConnectionState::Reconnecting { .. })
-    });
-    wait_state(&client, syncing_directly);
+    rejoin(&client);
     if let Principal::Space {
         space_id,
         space_name,
@@ -1494,6 +1449,11 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
     }
 }
 
+/// Several times QUIC's 1.25 MB per-stream receive window (noq-proto 1.4
+/// `TransportConfig::default`), so a transfer stays open on the machine
+/// until the device reads or cancels it.
+const ORIGINAL_BYTES: usize = 4 * 1024 * 1024;
+
 /// Contract: a large original and a recorded image leave control responsive;
 /// cancellation releases admission even when both device slots are occupied.
 #[test]
@@ -1502,7 +1462,7 @@ fn originals_preserve_control_progress_bytes_and_cancelled_admission() {
     use tcode_protocol::{OriginalTarget, Query, QueryResponse};
     let host_dir = TestDir::new("originals");
     let device_dir = TestDir::new("original-device");
-    let bytes: Vec<_> = (0..20 * 1024 * 1024)
+    let bytes: Vec<_> = (0..ORIGINAL_BYTES)
         .map(|index| ((index * 17 + index / 257) % 251) as u8)
         .collect();
     let path = host_dir.0.join("original.png");
@@ -1562,7 +1522,7 @@ fn originals_preserve_control_progress_bytes_and_cancelled_admission() {
         pump.await.unwrap();
     });
     host.shutdown();
-    original_fixture::stop(runtime, &mux);
+    real_host::stop(runtime, &mux);
 }
 
 /// A paired device's upload crosses the real connection in protocol-sized
@@ -1632,7 +1592,7 @@ fn a_device_uploads_a_file_to_the_hosts_scratch_directory() {
         pump.await.unwrap();
     });
     host.shutdown();
-    original_fixture::stop(runtime, &mux);
+    real_host::stop(runtime, &mux);
 }
 
 /// Opens `target` once the host admits it. A read gives its slot back when the
@@ -1663,7 +1623,7 @@ fn revoked_project_original_never_completes() {
     use tcode_protocol::{HostingAction, OriginalTarget, SpaceAction};
     let host_dir = TestDir::new("original-revoke");
     let device_dir = TestDir::new("original-member");
-    let bytes = vec![0x91; 64 * 1024 * 1024];
+    let bytes = vec![0x91; ORIGINAL_BYTES];
     let path = host_dir.0.join("original.png");
     std::fs::write(&path, &bytes).unwrap();
     let (runtime, mux, _, project_id) =
@@ -1723,5 +1683,5 @@ fn revoked_project_original_never_completes() {
         pump.await.unwrap();
     });
     host.shutdown();
-    original_fixture::stop(runtime, &mux);
+    real_host::stop(runtime, &mux);
 }
