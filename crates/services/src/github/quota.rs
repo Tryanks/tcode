@@ -6,7 +6,6 @@ use std::{
 
 #[derive(Clone)]
 struct Snapshot {
-    limit: u64,
     remaining: u64,
     reset: SystemTime,
 }
@@ -33,8 +32,7 @@ impl Ledger {
             self.quotas
                 .get(&(host.to_owned(), resource.to_owned(), scope.to_owned()))
             && snapshot.reset > now
-            && (snapshot.remaining == 0
-                || (!interactive && (snapshot.remaining as f64) < (snapshot.limit as f64) * 0.1))
+            && snapshot.remaining == 0
         {
             return Err(GitHubError::Paused {
                 retry_at: snapshot.reset,
@@ -51,16 +49,12 @@ impl Ledger {
         else {
             return;
         };
-        let (Some(limit), Some(remaining), Some(reset)) = (
-            number(headers, "x-ratelimit-limit"),
+        let (Some(remaining), Some(reset)) = (
             number(headers, "x-ratelimit-remaining"),
             reset_time(headers),
         ) else {
             return;
         };
-        if limit == 0 {
-            return;
-        }
         let key = (host.to_owned(), resource.to_owned(), scope.to_owned());
         if self
             .quotas
@@ -69,14 +63,7 @@ impl Ledger {
         {
             return;
         }
-        self.quotas.insert(
-            key,
-            Snapshot {
-                limit,
-                remaining,
-                reset,
-            },
-        );
+        self.quotas.insert(key, Snapshot { remaining, reset });
     }
 
     pub fn refused(
