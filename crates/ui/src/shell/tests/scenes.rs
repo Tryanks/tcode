@@ -94,6 +94,24 @@ fn arrive(shell: &Entity<AppShell>, cx: &mut VisualTestContext) {
     draw(cx);
 }
 
+/// Frames until the window asks for none, then a full frame to read: the
+/// scene at rest. Only the end of the motion is read, so each frame comes a
+/// whole glide after the one before, as a display that stalled would deliver
+/// it: what a switch sets moving lands by the next frame. A running turn's
+/// working indicator asks for frames for as long as the turn runs, so a
+/// window showing one is at rest once three glides have gone by.
+fn at_rest(cx: &mut VisualTestContext) {
+    draw(cx);
+    for _ in 0..3 {
+        cx.run_until_parked();
+        if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
+            break;
+        }
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+    }
+    draw(cx);
+}
+
 /// Shows the thread the sidebar lists `key`'s shortcut against, `id`, with
 /// what the host has answered by the frame that first draws it.
 fn switch(shell: &Entity<AppShell>, key: &str, id: &str, cx: &mut VisualTestContext) {
@@ -114,7 +132,7 @@ fn the_composer_of_a_thread_come_back_to_starts_at_rest(cx: &mut TestAppContext)
     await_restore_update(&shell, cx, |store, cx| {
         store.composer_state_for(Some("thread-1"), cx).turn_running
     });
-    settle_frames(cx);
+    at_rest(cx);
     let send = |cx: &mut VisualTestContext| cx.debug_bounds("send-message");
     assert_eq!(send(cx), None, "the running turn shows its stop button");
 
@@ -129,7 +147,7 @@ fn the_composer_of_a_thread_come_back_to_starts_at_rest(cx: &mut TestAppContext)
     serve_finished(&host, "thread-1");
     switch(&shell, "secondary-1", "thread-1", cx);
     let first = send(cx);
-    settle_frames(cx);
+    at_rest(cx);
     assert!(first.is_some(), "thread-1's send button");
     assert_eq!(first, send(cx), "at rest from its first frame");
 }
@@ -167,7 +185,7 @@ fn the_terminal_drawer_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppCo
     store_of(&shell, cx).update(cx, |store, cx| {
         store.toggle_terminal_panel_for("thread-1".into(), cx)
     });
-    settle_frames(cx);
+    at_rest(cx);
     let tabs = |cx: &mut VisualTestContext| {
         ["terminal-tab-1", "terminal-tab-2", "terminal-tab-3"].map(|tab| cx.debug_bounds(tab))
     };
@@ -180,7 +198,7 @@ fn the_terminal_drawer_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppCo
         serve_with_terminals(&host, id, terminals);
         switch(&shell, key, id, cx);
         let first = tabs(cx);
-        settle_frames(cx);
+        at_rest(cx);
         assert_eq!(
             first,
             tabs(cx),
@@ -204,7 +222,7 @@ fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContex
     store_of(&shell, cx).update(cx, |store, cx| {
         store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
     });
-    settle_frames(cx);
+    at_rest(cx);
     let panel = |cx: &mut VisualTestContext| {
         cx.debug_bounds("right-panel")
             .zip(cx.debug_bounds("pane-conversation"))
@@ -212,7 +230,7 @@ fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContex
 
     for width in [2000., 900.] {
         resize(cx, width);
-        settle_frames(cx);
+        at_rest(cx);
         let open = panel(cx);
         assert!(open.is_some(), "thread-1's panel at {width}px");
         for (key, id, shown) in [
@@ -226,14 +244,14 @@ fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContex
                 shown,
                 "{id}'s panel on its first frame at {width}px"
             );
-            settle_frames(cx);
+            at_rest(cx);
             assert_eq!(panel(cx), shown, "{id}'s panel at rest at {width}px");
         }
     }
 
     // Within one thread, the reader closing the panel still slides it out.
     resize(cx, 2000.);
-    settle_frames(cx);
+    at_rest(cx);
     let open = cx.debug_bounds("right-panel").expect("thread-1's panel");
     assert_eq!(
         cx.debug_bounds("pane-conversation")
@@ -254,7 +272,7 @@ fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContex
         closing.left() > open.left() && closing.left() < open.right(),
         "the panel slides out: {open:?} -> {closing:?}"
     );
-    settle_frames(cx);
+    at_rest(cx);
     assert_eq!(cx.debug_bounds("right-panel"), None, "the panel shut");
 }
 
@@ -273,13 +291,13 @@ fn the_right_panel_of_a_thread_switched_to_shows_its_tab_at_once(cx: &mut TestAp
     store.update(cx, |store, cx| {
         store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
     });
-    settle_frames(cx);
+    at_rest(cx);
     serve_finished(&host, "thread-2");
     switch(&shell, "secondary-2", "thread-2", cx);
     store.update(cx, |store, cx| {
         store.toggle_tab_panel_for("thread-2", tcode_core::ui::RightTab::PullRequests, cx)
     });
-    settle_frames(cx);
+    at_rest(cx);
     let diff = |cx: &mut VisualTestContext| cx.debug_bounds("diff-tab-body").is_some();
     assert!(!diff(cx), "thread-2 shows its pull requests");
 
@@ -294,7 +312,7 @@ fn the_right_panel_of_a_thread_switched_to_shows_its_tab_at_once(cx: &mut TestAp
             "{id}'s panel is open"
         );
         assert_eq!(diff(cx), on_diff, "{id}'s tab on its first frame");
-        settle_frames(cx);
+        at_rest(cx);
         assert_eq!(diff(cx), on_diff, "{id}'s tab at rest");
     }
 }
@@ -366,7 +384,7 @@ fn mount_finished(
     await_restore_update(&shell, cx, |store, cx| {
         store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx) == Some(1)
     });
-    settle_frames(cx);
+    at_rest(cx);
     let rest = bubble_fill("thread-1", cx).expect("thread-1's question");
     assert!(rest > 0., "the bubble has a fill");
     (shell, host, cx, rest)
@@ -709,117 +727,138 @@ fn differences(a: &[[i32; 4]], b: &[[i32; 4]]) -> (Vec<[i32; 4]>, Vec<[i32; 4]>)
     (only(a, b), only(b, a))
 }
 
-/// A pane switched to another thread, and back, draws each as a new scene:
-/// on the first frame that shows a thread, everything painted is where and
-/// as large as it rests, whatever the thread left was showing (its steers,
-/// its right panel, its terminal drawer, its agents, an agent's window, an
-/// answer streaming in, its side rail's cards) and whatever the thread
-/// shown had when it was last on screen, an answer it left still revealing
-/// included, which the thread finished while away, and whatever it gained
-/// while away (a goal, a plan, commands its turn ran). Only the thread's
-/// fade in, which moves nothing, plays.
-#[gpui::test]
-fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppContext) {
+/// A pane switched from thread-1, holding `holding`, to thread-2 and back
+/// draws each as a new scene: on the first frame that shows a thread,
+/// everything painted is where and as large as it rests, whatever the thread
+/// left was showing and whatever the thread shown had when it was last on
+/// screen, an answer it left still revealing included, which the thread
+/// finished while away, and whatever it gained while away (thread-2 gains a
+/// goal, a plan and a command). Only the thread's fade in, which moves
+/// nothing, plays.
+fn switched_to_at_rest(holding: Holding, cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_panes(cx);
     let store = store_of(&shell, cx);
-    let mut failures = Vec::new();
-    let mut went_on = 0;
-    for holding in [
-        Holding::Plain,
-        Holding::Steers,
-        Holding::RightPanel,
-        Holding::Drawer,
-        Holding::AgentsPanel,
-        Holding::Subagent,
-        Holding::Streaming,
-        Holding::StreamedOn,
-        Holding::Rail,
-    ] {
-        serve_holding(&host, "thread-1", holding);
-        switch(&shell, "secondary-1", "thread-1", cx);
-        settle_frames(cx);
-        let opened = store.update(cx, |store, cx| {
-            match holding {
-                Holding::RightPanel => {
-                    store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
-                }
-                Holding::AgentsPanel => {
-                    store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
-                }
-                Holding::Drawer => store.toggle_terminal_panel_for("thread-1".into(), cx),
-                _ => return false,
+    serve_other_after(&host, 0);
+    switch(&shell, "secondary-2", "thread-2", cx);
+    at_rest(cx);
+    serve_holding(&host, "thread-1", holding);
+    switch(&shell, "secondary-1", "thread-1", cx);
+    at_rest(cx);
+    let opened = store.update(cx, |store, cx| {
+        match holding {
+            Holding::RightPanel => {
+                store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
             }
-            true
-        });
-        if opened {
-            settle_frames(cx);
-        }
-        if holding == Holding::StreamedOn {
-            // More of the answer streams in, and the pane leaves on the
-            // frame after.
-            send_events(
-                &host,
-                vec![(
-                    Topic::SessionEvents {
-                        session_id: "thread-1".into(),
-                    },
-                    ServerEvent::SessionEvent(answer_delta("thread-1", streamed_on(1)).into()),
-                )],
-            );
-            arrive(&shell, cx);
-            display_frame(cx);
-        }
-        for (key, id) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
-            match (id, holding) {
-                // The pane draws what the thread held as it left until the
-                // host has sent what it did since.
-                ("thread-1", Holding::StreamedOn) => {
-                    switch(&shell, key, id, cx);
-                    serve_streamed_on(&host, id);
-                    arrive(&shell, cx);
-                }
-                ("thread-1", _) => {
-                    serve_holding(&host, id, holding);
-                    switch(&shell, key, id, cx);
-                }
-                // thread-2 went on while the pane was away.
-                _ => {
-                    serve_other_after(&host, went_on);
-                    went_on += 1;
-                    switch(&shell, key, id, cx);
-                }
-            }
-            // The first frame that shows the thread, however little.
-            for _ in 0..10 {
-                if bubble_fill(id, cx).is_some_and(|fill| fill > 0.) {
-                    break;
-                }
-                display_frame(cx);
-            }
-            let first = (painted(cx), cx.debug_bounds("right-panel"));
-            settle_frames(cx);
-            let rest = (painted(cx), cx.debug_bounds("right-panel"));
-            if first != rest {
-                let (moving, resting) = differences(&first.0, &rest.0);
-                failures.push(format!(
-                    "{holding:?}, switched to {id}: panel {:?} -> {:?}; \
-                     first frame only {moving:?}; at rest only {resting:?}",
-                    first.1, rest.1
-                ));
-            }
-        }
-        // thread-1 leaves its panel and drawer shut for the next case.
-        store.update(cx, |store, cx| match holding {
-            Holding::RightPanel | Holding::AgentsPanel => {
-                store.close_right_panel_for(Some("thread-1"), cx)
+            Holding::AgentsPanel => {
+                store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
             }
             Holding::Drawer => store.toggle_terminal_panel_for("thread-1".into(), cx),
-            _ => {}
-        });
-        settle_frames(cx);
+            _ => return false,
+        }
+        true
+    });
+    if opened {
+        at_rest(cx);
     }
-    assert!(failures.is_empty(), "{failures:#?}");
+    if holding == Holding::StreamedOn {
+        // More of the answer streams in, and the pane leaves on the frame
+        // after.
+        send_events(
+            &host,
+            vec![(
+                Topic::SessionEvents {
+                    session_id: "thread-1".into(),
+                },
+                ServerEvent::SessionEvent(answer_delta("thread-1", streamed_on(1)).into()),
+            )],
+        );
+        arrive(&shell, cx);
+        display_frame(cx);
+    }
+    for (key, id) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
+        match (id, holding) {
+            // The pane draws what the thread held as it left until the host
+            // has sent what it did since.
+            ("thread-1", Holding::StreamedOn) => {
+                switch(&shell, key, id, cx);
+                serve_streamed_on(&host, id);
+                arrive(&shell, cx);
+            }
+            ("thread-1", _) => {
+                serve_holding(&host, id, holding);
+                switch(&shell, key, id, cx);
+            }
+            // thread-2 went on while the pane was away.
+            _ => {
+                serve_other_after(&host, 1);
+                switch(&shell, key, id, cx);
+            }
+        }
+        // The first frame that shows the thread, however little.
+        for _ in 0..10 {
+            if bubble_fill(id, cx).is_some_and(|fill| fill > 0.) {
+                break;
+            }
+            display_frame(cx);
+        }
+        let first = (painted(cx), cx.debug_bounds("right-panel"));
+        at_rest(cx);
+        let rest = (painted(cx), cx.debug_bounds("right-panel"));
+        let (moving, resting) = differences(&first.0, &rest.0);
+        assert!(
+            first == rest,
+            "{holding:?}, switched to {id}: panel {:?} -> {:?}; \
+             first frame only {moving:?}; at rest only {resting:?}",
+            first.1,
+            rest.1
+        );
+    }
+}
+
+#[gpui::test]
+fn a_switch_from_a_finished_turn_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::Plain, cx);
+}
+
+#[gpui::test]
+fn a_switch_from_a_turns_steers_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::Steers, cx);
+}
+
+#[gpui::test]
+fn a_switch_from_an_open_right_panel_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::RightPanel, cx);
+}
+
+#[gpui::test]
+fn a_switch_from_an_open_terminal_drawer_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::Drawer, cx);
+}
+
+#[gpui::test]
+fn a_switch_from_an_open_agents_panel_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::AgentsPanel, cx);
+}
+
+#[gpui::test]
+fn a_switch_from_an_agents_window_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::Subagent, cx);
+}
+
+#[gpui::test]
+fn a_switch_from_a_streaming_answer_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::Streaming, cx);
+}
+
+#[gpui::test]
+fn a_switch_back_to_an_answer_that_streamed_on_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::StreamedOn, cx);
+}
+
+#[gpui::test]
+fn a_switch_from_the_rails_cards_starts_at_rest(cx: &mut TestAppContext) {
+    switched_to_at_rest(Holding::Rail, cx);
 }
 
 /// A lead switched back to with an agent open beside it draws the agent's
@@ -834,7 +873,7 @@ fn a_lead_switched_to_shows_the_agent_beside_it_at_rest(cx: &mut TestAppContext)
     let store = store_of(&shell, cx);
     serve_finished(&host, "thread-1");
     switch(&shell, "secondary-1", "thread-1", cx);
-    settle_frames(cx);
+    at_rest(cx);
     serve_finished(&host, "agent-1");
     cx.update(|window, cx| {
         crate::agents_panel::open_agent(
@@ -847,7 +886,7 @@ fn a_lead_switched_to_shows_the_agent_beside_it_at_rest(cx: &mut TestAppContext)
         )
     });
     arrive(&shell, cx);
-    settle_frames(cx);
+    at_rest(cx);
     assert!(
         cx.debug_bounds("chat-side-card").is_some(),
         "agent-1 beside thread-1"
@@ -855,7 +894,7 @@ fn a_lead_switched_to_shows_the_agent_beside_it_at_rest(cx: &mut TestAppContext)
 
     serve_other(&host);
     switch(&shell, "secondary-2", "thread-2", cx);
-    settle_frames(cx);
+    at_rest(cx);
     assert!(cx.debug_bounds("chat-side-card").is_none());
 
     serve_finished(&host, "thread-1");
@@ -869,7 +908,7 @@ fn a_lead_switched_to_shows_the_agent_beside_it_at_rest(cx: &mut TestAppContext)
         display_frame(cx);
     }
     let first = (painted(cx), cx.debug_bounds("chat-side-card"));
-    settle_frames(cx);
+    at_rest(cx);
     let rest = (painted(cx), cx.debug_bounds("chat-side-card"));
     assert!(rest.1.is_some(), "agent-1 beside thread-1 again");
     let (moving, resting) = differences(&first.0, &rest.0);
@@ -933,7 +972,7 @@ fn a_thread_opened_again_on_a_phone_reveals_nothing_it_gained_away(cx: &mut Test
     as_mobile(cx);
     cx.simulate_resize(gpui::size(px(393.), px(852.)));
     serve_holding(&host, "thread-1", Holding::StreamedOn);
-    settle_frames(cx);
+    at_rest(cx);
     let live = |event: agent::AgentEvent| {
         (
             Topic::SessionEvents {
@@ -946,7 +985,7 @@ fn a_thread_opened_again_on_a_phone_reveals_nothing_it_gained_away(cx: &mut Test
     arrive(&shell, cx);
     display_frame(cx);
     cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx)));
-    settle_frames(cx);
+    at_rest(cx);
 
     send_events(
         &host,
@@ -963,7 +1002,7 @@ fn a_thread_opened_again_on_a_phone_reveals_nothing_it_gained_away(cx: &mut Test
         ],
     );
     arrive(&shell, cx);
-    settle_frames(cx);
+    at_rest(cx);
     store_of(&shell, cx).update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
     arrive(&shell, cx);
     // The frame the page lands on: its question stays where it is.
@@ -977,7 +1016,7 @@ fn a_thread_opened_again_on_a_phone_reveals_nothing_it_gained_away(cx: &mut Test
         question = now;
     }
     let landed = rows_painted(cx);
-    settle_frames(cx);
+    at_rest(cx);
     let rest = rows_painted(cx);
     assert!(rest.len() > 1, "thread-1's rows: {rest:?}");
     assert_eq!(
@@ -1120,7 +1159,7 @@ fn a_page_landing_on_a_thread_switched_to_leaves_its_footers_at_rest(cx: &mut Te
         display_frame(cx);
         seen.push(trailers(cx));
     }
-    settle_frames(cx);
+    at_rest(cx);
     let rest = trailers(cx);
     let turns = store_of(&shell, cx).read_with(cx, |store, cx| {
         store.with_timeline_for(Some("thread-2"), |timeline| timeline.turns.len(), cx)

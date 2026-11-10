@@ -7506,7 +7506,7 @@ pub(crate) mod tests {
             !store.chat_loading_for(Some("thread-1"), cx)
         });
         b.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         (shell, hosts, cx)
     }
 
@@ -7585,7 +7585,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-1"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("thread-1".into())]
@@ -7648,7 +7648,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-1"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_hosts(&shell, cx), [key_a.clone(), key_b.clone()]);
         assert_eq!(returns_to(cx), Some(key_b.clone()), "the pane beside");
 
@@ -7662,7 +7662,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-2"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_hosts(&shell, cx), [key_b.clone(), key_b.clone()]);
         assert_eq!(returns_to(cx), Some(key_b), "the thread the pane shows");
     }
@@ -7685,7 +7685,7 @@ pub(crate) mod tests {
             "the drop would land"
         );
         cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("thread-2".into())]
@@ -7724,7 +7724,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-2"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let [pane_a, pane_b]: [Entity<ThreadPanel>; 2] = shell
             .read_with(cx, |shell, cx| shell.column.as_ref().unwrap().panes(cx))
             .try_into()
@@ -7774,7 +7774,7 @@ pub(crate) mod tests {
         );
 
         cx.update(|window, cx| shell.update(cx, |shell, cx| shell.leave_host(&key_b, window, cx)));
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         a_unchanged(cx);
         assert_eq!(
             shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().all_panes(cx)),
@@ -7860,7 +7860,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-2"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_hosts(&shell, cx), std::slice::from_ref(&key_b));
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         assert!(!a.read_with(cx, |store, _| store.is_thread_open("thread-2")));
@@ -7947,7 +7947,7 @@ pub(crate) mod tests {
                 ])),
             );
         }
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         for caption in ["Messages on host-a", "Messages on host-b"] {
             assert!(
                 cx.debug_bounds(format!("palette-caption-{caption}").leak())
@@ -7961,7 +7961,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-2"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_hosts(&shell, cx), [key_b]);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
     }
@@ -8088,7 +8088,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-1"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_hosts(&shell, cx), std::slice::from_ref(&key_b));
         heard(&hosts[&key_a], &a, cx);
         heard(&hosts[&key_b], &b, cx);
@@ -8594,7 +8594,6 @@ pub(crate) mod tests {
             if store.read_with(cx, |store, cx| ready(store, cx)) {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(1));
         }
         panic!("restore host update never arrived");
     }
@@ -9443,7 +9442,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-2"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(composer_has_keyboard(&shell, 0, cx));
     }
 
@@ -10354,8 +10353,7 @@ pub(crate) mod tests {
             !store.chat_loading_for(Some("thread-1"), cx)
         });
         // The window settles before a pointer reaches it.
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         (shell, host, cx)
     }
 
@@ -10727,6 +10725,7 @@ pub(crate) mod tests {
     fn a_subagent_window_opens_its_thread_beside_its_lead(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         // The lead is reopened below, so the host answers it with the log
         // that spawned the agent.
         cx.simulate_keystrokes("secondary-2");
@@ -10837,7 +10836,7 @@ pub(crate) mod tests {
             !store.chat_loading_for(Some("mirror"), cx)
                 && store.native_subagent_readonly_for(Some("mirror"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let store = store_of(&shell, cx);
         let lead_typing = |cx: &mut VisualTestContext| {
             cx.update(|window, cx| {
@@ -10876,7 +10875,7 @@ pub(crate) mod tests {
         );
 
         cx.simulate_keystrokes("escape");
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("chat-side-header").is_none());
         assert!(
             lead_typing(cx),
@@ -10889,7 +10888,7 @@ pub(crate) mod tests {
                 .debug_bounds("activity-row-spawn-1")
                 .expect("the subagent's window");
             cx.simulate_click(window.center(), gpui::Modifiers::default());
-            settle_panes(cx);
+            crate::test_frames::draw_settled(cx);
             assert_eq!(
                 pane_threads(&shell, cx),
                 [Some("thread-1".into())],
@@ -10987,17 +10986,6 @@ pub(crate) mod tests {
         (topic, ServerEvent::IndexSnapshot(index))
     }
 
-    /// Let the panes' and panels' motion land: the longest of it is an
-    /// agent's card growing out of what opened it beside its lead, or
-    /// shrinking back into it.
-    fn settle_panes(cx: &mut VisualTestContext) {
-        // A glide starts on the frame that draws its change, and a display
-        // draws one before any time has gone by.
-        draw(cx);
-        cx.executor().advance_clock(Duration::from_millis(800));
-        draw(cx);
-    }
-
     /// `id` finishes a turn that changed `file`.
     fn serve_changed_turn(host: &MountedShell, id: &str, file: &str) {
         let turn_id = format!("turn-{file}");
@@ -11056,7 +11044,7 @@ pub(crate) mod tests {
         await_restore_update(shell, cx, |store, cx| {
             !store.chat_loading_for(Some("agent-1"), cx) && store.timeline_settled_for("agent-1")
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
     }
 
     /// Press the control `selector` names, and let what it moves land.
@@ -11068,7 +11056,7 @@ pub(crate) mod tests {
         draw(cx);
         cx.simulate_click(control.center(), gpui::Modifiers::default());
         draw(cx);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
     }
 
     /// An agent opened from its lead's Agents panel shows beside the lead in
@@ -11086,8 +11074,9 @@ pub(crate) mod tests {
     fn an_agent_opens_beside_its_lead_in_the_leads_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_lead_with_agent(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let panes = pane_bounds(&shell, cx);
         assert_eq!(panes.len(), 1);
         let header = cx.debug_bounds("chat-title").expect("the lead's header");
@@ -11099,7 +11088,7 @@ pub(crate) mod tests {
             store.update(cx, |store, cx| {
                 store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
             });
-            settle_panes(cx);
+            crate::test_frames::draw_settled(cx);
             let panel = cx.debug_bounds("right-panel").expect("the panel");
             open_agent_from_panel(&shell, &host, cx);
             assert_eq!(
@@ -11164,7 +11153,7 @@ pub(crate) mod tests {
             store.update(cx, |store, cx| {
                 store.close_right_panel_for(Some("thread-1"), cx)
             });
-            settle_panes(cx);
+            crate::test_frames::draw_settled(cx);
             assert_eq!(
                 cx.debug_bounds("composer-card"),
                 Some(column),
@@ -11181,13 +11170,13 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         open_agent_from_panel(&shell, &host, cx);
         // Beside a docked panel the card is about as wide as it can be.
         store.update(cx, |store, cx| {
             store.close_right_panel_for(Some("thread-1"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
         let lead = lead_card(column, cx).expect("the lead's composer");
         let grip = cx
@@ -11262,17 +11251,18 @@ pub(crate) mod tests {
     fn an_agent_in_a_compact_window_takes_its_leads_place(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_lead_with_agent(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         as_mobile(cx);
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         open_agent_from_panel(&shell, &host, cx);
         assert!(cx.debug_bounds("chat-side-header").is_some());
 
         resize(cx, 600.);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(shell.read_with(cx, |shell, cx| shell.compact(cx)));
         assert!(cx.debug_bounds("chat-side-header").is_none());
         store.read_with(cx, |store, _| {
@@ -11280,14 +11270,14 @@ pub(crate) mod tests {
             assert!(!store.is_thread_open("agent-1"));
         });
         resize(cx, 2000.);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         assert!(cx.debug_bounds("chat-side-header").is_some());
         store.read_with(cx, |store, _| assert!(store.is_thread_open("agent-1")));
         press_control("side-close", cx);
 
         resize(cx, 600.);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         cx.update(|window, cx| {
             crate::agents_panel::open_agent(
                 &store,
@@ -11303,7 +11293,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("agent-1"), cx) && store.timeline_settled_for("agent-1")
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         store.read_with(cx, |store, _| {
             assert!(store.is_thread_open("agent-1"));
         });
@@ -11311,7 +11301,7 @@ pub(crate) mod tests {
 
         let back = cx.debug_bounds("compact-back").expect("the compact Back");
         cx.simulate_click(back.center(), gpui::Modifiers::default());
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         store.read_with(cx, |store, _| {
             assert!(store.is_thread_open("thread-1"));
             assert!(!store.is_thread_open("agent-1"));
@@ -11325,12 +11315,13 @@ pub(crate) mod tests {
     fn the_phone_agents_sheet_shows_the_leads_agents(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (_shell, _host, cx) = mount_lead_with_agent(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         as_mobile(cx);
         resize(cx, 393.);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let pill = cx.debug_bounds("agents-pill").expect("the Agents pill");
         cx.simulate_click(pill.center(), gpui::Modifiers::default());
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let content = cx
             .debug_bounds("touch-picker-content")
             .expect("the Agents sheet");
@@ -11881,7 +11872,7 @@ pub(crate) mod tests {
             cx.simulate_mouse_move(at, None, modifiers);
             draw(cx);
             cx.simulate_click(at, modifiers);
-            settle_panes(cx);
+            crate::test_frames::draw_settled(cx);
         };
         let row = |id: &'static str, cx: &mut VisualTestContext| {
             cx.debug_bounds(id).expect("the thread's row").center()
@@ -11892,14 +11883,14 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-2"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let alt = gpui::Modifiers {
             alt: true,
             ..Default::default()
         };
         click(row("sidebar-thread-thread-1", cx), alt, cx);
         cx.simulate_keystrokes("secondary-alt-left");
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-2".into()), Some("thread-1".into())]
@@ -11924,7 +11915,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, _| {
             store.timeline_settled_for("thread-1")
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         cx.simulate_input("typed as it caught up");
         draw(cx);
         let drafts: Vec<_> = shell.read_with(cx, |shell, cx| {
@@ -11958,9 +11949,9 @@ pub(crate) mod tests {
         cx.simulate_mouse_move(row.center(), None, alt);
         draw(cx);
         cx.simulate_click(row.center(), alt);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         cx.simulate_keystrokes("secondary-alt-left");
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         assert!(
             store.read_with(cx, |store, cx| store.chat_loading_for(Some("thread-2"), cx)),
@@ -11971,7 +11962,7 @@ pub(crate) mod tests {
         cx.simulate_mouse_move(right.center(), None, gpui::Modifiers::default());
         draw(cx);
         cx.simulate_click(right.center(), gpui::Modifiers::default());
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         assert_eq!(
             shell.read_with(cx, |shell, cx| shell
@@ -11984,7 +11975,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-2"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         cx.simulate_input("typed as it loaded");
         draw(cx);
         let drafts: Vec<_> = shell.read_with(cx, |shell, cx| {
@@ -12013,14 +12004,14 @@ pub(crate) mod tests {
         cx.simulate_mouse_move(row.center(), None, alt);
         draw(cx);
         cx.simulate_click(row.center(), alt);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         serve();
         await_restore_update(shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-2"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         cx.simulate_keystrokes("secondary-alt-left");
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(shell, cx),
             [Some("thread-1".into()), Some("thread-2".into())]
@@ -12035,7 +12026,7 @@ pub(crate) mod tests {
         cx.simulate_mouse_down(at, MouseButton::Left, gpui::Modifiers::default());
         draw(cx);
         cx.simulate_mouse_up(at, MouseButton::Left, gpui::Modifiers::default());
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
     }
 
     /// The panel `session_id`'s conversation has recorded, if it is open.
@@ -12063,6 +12054,7 @@ pub(crate) mod tests {
     fn a_header_toggle_acts_on_the_thread_of_its_own_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         side_by_side(
             &shell,
@@ -12099,7 +12091,7 @@ pub(crate) mod tests {
             MouseButton::Left,
             gpui::Modifiers::default(),
         );
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Agents));
         assert_eq!(panel_of(&store, "thread-1", cx), None);
         assert_eq!(keyboard_pane(&shell, cx), Some(0), "the panel leaves it");
@@ -12110,7 +12102,7 @@ pub(crate) mod tests {
 
         let close = bounds("diff-close", cx);
         cx.simulate_click(close.center(), gpui::Modifiers::default());
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         // The header takes its wide tiers again as the conversation widens
         // after the panel, over the frames a display goes on delivering.
         crate::test_frames::draw_settled(cx);
@@ -12143,6 +12135,7 @@ pub(crate) mod tests {
     fn a_changed_file_in_an_agents_card_opens_the_agents_diff(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_lead_with_agent(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         serve_changed_turn(&host, "thread-1", "lead.rs");
         await_restore_update(&shell, cx, |store, cx| {
@@ -12152,14 +12145,14 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", RightTab::Agents, cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         open_agent_from_panel(&shell, &host, cx);
         serve_changed_turn(&host, "agent-1", "agent.rs");
         serve_changed_turn(&host, "agent-1", "later.rs");
         await_restore_update(&shell, cx, |store, cx| {
             store.with_timeline_for(Some("agent-1"), |timeline| timeline.turns.len(), cx) == Some(2)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
 
         let shows_agents_file = |cx: &mut VisualTestContext| {
             press_control("changed-file-chip-file-agent.rs", cx);
@@ -12214,7 +12207,7 @@ pub(crate) mod tests {
         let store = store_of(&shell, cx);
         serve_changed_turn(&host, "thread-1", "lead.rs");
         resize(cx, 600.);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         cx.update(|window, cx| {
             crate::agents_panel::open_agent(&store, "agent-1".into(), None, None, window, cx)
         });
@@ -12224,7 +12217,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             store.with_timeline_for(Some("agent-1"), |timeline| timeline.turns.len(), cx) == Some(1)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
 
         press_control("changed-file-chip-file-agent.rs", cx);
         draw_until(&shell, cx, &host, "diff-line-new-agent.rs-1", None);
@@ -12272,7 +12265,7 @@ pub(crate) mod tests {
             },
             cx,
         );
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let panes = pane_bounds(&shell, cx);
         let inside = |pane: gpui::Bounds<Pixels>, bounds: gpui::Bounds<Pixels>| {
             pane.left() <= bounds.left()
@@ -12290,7 +12283,7 @@ pub(crate) mod tests {
         cx.simulate_mouse_move(left_diff, None, gpui::Modifiers::default());
         draw(cx);
         cx.simulate_click(left_diff, gpui::Modifiers::default());
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         draw_until(&shell, cx, &host, "diff-line-new-left.rs-1", None);
         let conversations = |cx: &mut VisualTestContext| {
             shell.read_with(cx, |shell, cx| {
@@ -12320,7 +12313,7 @@ pub(crate) mod tests {
         cx.simulate_mouse_move(plan.center(), None, gpui::Modifiers::default());
         draw(cx);
         cx.simulate_click(plan.center(), gpui::Modifiers::default());
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(panel_of(&store, "thread-1", cx), Some(RightTab::Diff));
         assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Plan));
         let diff = cx
@@ -12342,7 +12335,7 @@ pub(crate) mod tests {
 
         // The keyboard stayed in the left pane, which carries its thread over.
         cx.simulate_keystrokes("secondary-alt-shift-right");
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-2".into()), Some("thread-1".into())]
@@ -12367,12 +12360,12 @@ pub(crate) mod tests {
         let store = store_of(&shell, cx);
         side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
         resize(cx, 2600.);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let open = |thread: &str, cx: &mut VisualTestContext| {
             store.update(cx, |store, cx| {
                 store.toggle_tab_panel_for(thread, RightTab::Plan, cx)
             });
-            settle_panes(cx);
+            crate::test_frames::draw_settled(cx);
             cx.debug_bounds("right-panel").expect("the drawer")
         };
         let panes = pane_bounds(&shell, cx);
@@ -12392,7 +12385,7 @@ pub(crate) mod tests {
             draw(cx);
         }
         cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let chosen = cx
             .debug_bounds("right-panel")
             .expect("the drawer")
@@ -12403,7 +12396,7 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.close_right_panel_for(Some("thread-1"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let other = open("thread-2", cx);
         assert_eq!(other.right(), panes[1].right(), "the other pane's drawer");
         assert_eq!(other.size.width, chosen);
@@ -12419,7 +12412,7 @@ pub(crate) mod tests {
         let store = store_of(&shell, cx);
         side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
         resize(cx, 1440.);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", RightTab::Plan, cx)
         });
@@ -12500,7 +12493,7 @@ pub(crate) mod tests {
             },
             cx,
         );
-        settle_frames(cx);
+        crate::test_frames::draw_settled(cx);
         let row = cx
             .debug_bounds("changed-file-row-file-src/lib.rs")
             .expect("the file's row in the rail");
@@ -12531,7 +12524,7 @@ pub(crate) mod tests {
         });
         assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Diff));
         assert_eq!(panel_of(&store, "thread-1", cx), None);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             keyboard_pane(&shell, cx),
             Some(0),
@@ -12561,16 +12554,16 @@ pub(crate) mod tests {
         side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
 
         cx.simulate_keystrokes("secondary-alt-right");
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         store.update(cx, |store, cx| store.show_thread("agent-1".into(), cx));
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         serve_thread(&host, "agent-1");
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("agent-1"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         cx.simulate_keystrokes("secondary-alt-left");
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("agent-1".into())]
@@ -13022,7 +13015,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("agent-1"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("agent-1".into())]
@@ -13033,7 +13026,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, _| !store.is_thread_open("agent-1"));
         draw(cx);
         assert_ne!(keyboard_pane(&shell, cx), Some(0));
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
 
         send_events(&host, vec![archive_agent(false)]);
@@ -13263,6 +13256,7 @@ pub(crate) mod tests {
     fn a_press_anywhere_in_a_pane_makes_it_current(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_lead_with_agent(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let (topic, ServerEvent::IndexSnapshot(mut index)) = lead_with_agent_index("thread-1")
         else {
             unreachable!("an index")
@@ -13313,7 +13307,7 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", RightTab::Diff, cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         current(false, "a drawer opening elsewhere", cx);
         let drawer = cx.debug_bounds("right-panel").expect("the drawer");
         press_only(drawer.center(), cx);
@@ -13321,7 +13315,7 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", RightTab::Diff, cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
 
         // The card of an agent beside its lead.
         let chat = shell.read_with(cx, |shell, cx| {
@@ -13340,7 +13334,7 @@ pub(crate) mod tests {
         draw(cx);
         serve_thread(&host, "agent-1");
         await_restore_update(&shell, cx, |store, _| store.timeline_settled_for("agent-1"));
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         press_only(panes[1].center(), cx);
         current(false, "the right timeline", cx);
         let card = cx
@@ -13377,7 +13371,7 @@ pub(crate) mod tests {
         // A zoomed pane is current: here the one holding the keyboard, zoomed
         // from it with the other pane current.
         cx.simulate_click(panes[0].center(), gpui::Modifiers::default());
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         let toggle = cx
             .debug_bounds("toggle-sidebar")
@@ -13388,7 +13382,7 @@ pub(crate) mod tests {
         });
         assert_eq!(shown.as_deref(), Some("thread-3"));
         cx.simulate_keystrokes("secondary-shift-enter");
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         current(true, "the pane zoomed", cx);
     }
 
@@ -13456,11 +13450,12 @@ pub(crate) mod tests {
     fn a_lone_panes_row_stays_lit_wherever_the_keyboard_goes(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_lead_with_agent(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         let row = "sidebar-thread-thread-1";
         let lit = cx.update(|_, cx| cx.theme().list_active.a);
         let settled = |cx: &mut VisualTestContext| {
-            settle_panes(cx);
+            crate::test_frames::draw_settled(cx);
             row_fill(row, cx)
         };
         assert_eq!(settled(cx), lit, "the composer");
@@ -13479,12 +13474,12 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", RightTab::Diff, cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
 
         store.update(cx, |store, cx| {
             store.toggle_terminal_panel_for("thread-1".to_owned(), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(
             !composer_has_keyboard(&shell, 0, cx),
             "the terminal took the keyboard"
@@ -13493,7 +13488,7 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.toggle_terminal_panel_for("thread-1".to_owned(), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
 
         let chat = shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().chat(cx));
         cx.update(|window, cx| {
@@ -13516,7 +13511,7 @@ pub(crate) mod tests {
         draw(cx);
         assert_eq!(settled(cx), lit, "under the palette");
         state.update(cx, |state, cx| state.close_palette(cx));
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
 
         state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
         draw(cx);
@@ -13586,7 +13581,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, _| {
             store.timeline_settled_for("thread-2")
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let active = cx.update(|_, cx| cx.theme().list_active);
         let (full, weak) = (active.a, active.a * 0.5);
         let fills = |cx: &mut VisualTestContext| {
@@ -13687,7 +13682,7 @@ pub(crate) mod tests {
         let shown = pane_bounds(&shell, cx);
 
         click("sidebar-thread-thread-1", cx);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("thread-2".into())]
@@ -13709,7 +13704,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-3"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("thread-3".into())]
@@ -13771,7 +13766,7 @@ pub(crate) mod tests {
         assert_eq!(glyph_cells("thread-1", cx), [], "a lone pane has no map");
 
         open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let filled_at = |row: &str, pane: usize, cx: &mut VisualTestContext| {
             let panes = pane_bounds(&shell, cx);
             let cells = glyph_cells(row, cx);
@@ -13791,22 +13786,22 @@ pub(crate) mod tests {
 
         // The threads trade panes, and the glyphs follow.
         cx.simulate_keystrokes("secondary-alt-shift-left");
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         filled_at("thread-1", 1, cx);
         filled_at("thread-2", 0, cx);
 
         // A split under the right pane cuts its cell in two.
         cx.simulate_keystrokes("secondary-shift-d");
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         answer_draft(&shell, &host, "draft-1", cx);
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_bounds(&shell, cx).len(), 3);
         filled_at("thread-1", 1, cx);
         filled_at("thread-2", 0, cx);
 
         // A zoomed pane is the column alone.
         cx.update(|window, cx| window.dispatch_action(Box::new(crate::panes::ZoomPane), cx));
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(glyph_cells("thread-1", cx), []);
     }
 
@@ -13875,7 +13870,7 @@ pub(crate) mod tests {
         // The palette's input holds it.
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         state.update(cx, |state, cx| state.open_palette(cx));
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let query = shell.read_with(cx, |shell, cx| {
             let palette = shell.palette.read(cx);
             palette.query_focus_handle(cx)
@@ -13886,17 +13881,17 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-1"), cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         cx.update(|window, _| assert!(query.is_focused(window), "it keeps the keyboard"));
         state.update(cx, |state, cx| state.close_palette(cx));
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
 
         // Beside another pane it stays nowhere.
         open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
         cx.update(|window, cx| window.blur(cx));
         store.update(cx, |store, cx| store.put_back_thread("thread-2".into(), cx));
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(keyboard_pane(&shell, cx), None);
     }
 
@@ -13909,7 +13904,7 @@ pub(crate) mod tests {
         let (shell, _host, cx) = mount_panes(cx);
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         state.update(cx, |state, cx| state.open_palette(cx));
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(!composer_has_keyboard(&shell, 0, cx));
         state.update(cx, |state, cx| state.close_palette(cx));
         draw(cx);
@@ -14159,6 +14154,7 @@ pub(crate) mod tests {
     fn choosing_an_agent_shown_beside_its_lead_selects_its_card(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount_lead_with_agent(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         let chat = shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().chat(cx));
         cx.update(|window, cx| {
@@ -14171,7 +14167,7 @@ pub(crate) mod tests {
                 cx,
             );
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         cx.update(|window, cx| chat.update(cx, |chat, cx| chat.focus_composer(window, cx)));
         draw(cx);
 
@@ -18226,12 +18222,6 @@ pub(crate) mod tests {
         draw(cx);
     }
 
-    fn settle_frames(cx: &mut VisualTestContext) {
-        for _ in 0..30 {
-            display_frame(cx);
-        }
-    }
-
     /// From the command's header to the turn's working status: the
     /// command's window, as tall as its motion draws it.
     fn command_to_status(cx: &mut VisualTestContext) -> Pixels {
@@ -18350,7 +18340,7 @@ pub(crate) mod tests {
             store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx)
                 == Some(1)
         });
-        settle_frames(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("turn-time-row").is_some());
         // From the plan button to the diff button: the Agents toggle
         // between them is there only with an agent.
@@ -18388,7 +18378,7 @@ pub(crate) mod tests {
                 .map(|selector| cx.debug_bounds(selector))
             };
             let first = (drawn(cx), plan(cx));
-            settle_frames(cx);
+            crate::test_frames::draw_settled(cx);
             assert_eq!(
                 first,
                 (drawn(cx), plan(cx)),
@@ -18428,30 +18418,32 @@ pub(crate) mod tests {
         );
     }
 
-    /// A control the keyboard is on keeps it, and with it its fading ring,
-    /// which is kept by its focus handle, when its view is drawn under a new
-    /// parent: a command's header in the left of two panes, as the pane is
-    /// zoomed over the column, back, and as the tablet window turns compact.
+    /// A control the keyboard is on keeps it when its view is drawn under a
+    /// new parent: a command's header in the left of two panes, as the pane
+    /// is zoomed over the column, back, and as the tablet window turns
+    /// compact. The turn runs, so its working indicator would keep the
+    /// window drawing; with motion reduced it rests.
     #[gpui::test]
     fn a_focused_control_keeps_the_keyboard_through_a_zoom_and_a_compact_flip(
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         show_timeline(&store, reparented_timeline(2, false), cx);
-        settle_frames(cx);
+        crate::test_frames::draw_settled(cx);
         // Shut, the command's header is the timeline's last control.
         click_command(cx);
         cx.simulate_keystrokes("secondary-d");
-        settle_frames(cx);
+        crate::test_frames::draw_settled(cx);
         cx.simulate_keystrokes("secondary-alt-left");
-        settle_frames(cx);
+        crate::test_frames::draw_settled(cx);
         let _ = sent(&host);
         // Back from the composer to the header, as Shift-Tab takes it.
         cx.update(|window, cx| window.focus_prev(cx));
         cx.simulate_keystrokes("shift");
-        settle_frames(cx);
+        crate::test_frames::draw_settled(cx);
         let focused = cx
             .update(|window, cx| window.focused(cx))
             .expect("the header holds the keyboard");
@@ -18469,7 +18461,7 @@ pub(crate) mod tests {
             cx.simulate_event(gpui::KeyUpEvent {
                 keystroke: gpui::Keystroke::parse("enter").expect("a keystroke"),
             });
-            settle_frames(cx);
+            crate::test_frames::draw_settled(cx);
             let after = command_to_status(cx);
             assert!(
                 (after - before).abs() > px(10.),
@@ -18482,10 +18474,10 @@ pub(crate) mod tests {
         draw(cx);
         assert!(cx.debug_bounds("zoomed-pane").is_some());
         still("zooming", cx);
-        settle_frames(cx);
+        crate::test_frames::draw_settled(cx);
         still("zoomed", cx);
         cx.simulate_keystrokes("secondary-shift-enter");
-        settle_frames(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("zoomed-pane").is_none());
         still("back in its slot", cx);
 
@@ -18495,7 +18487,7 @@ pub(crate) mod tests {
         draw(cx);
         shell.read_with(cx, |shell, cx| assert!(shell.compact(cx)));
         still("turning compact", cx);
-        settle_frames(cx);
+        crate::test_frames::draw_settled(cx);
         still("compact", cx);
     }
 }
