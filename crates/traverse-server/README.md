@@ -31,7 +31,9 @@ advertises `"quic_port": 0` so devices skip address discovery through this
 relay. `tls.mode = "off"` also turns address discovery off.
 
 `tcode-traverse --dev` serves plain HTTP on `127.0.0.1:8080` with the store in
-`./tcode-traverse-dev`: no TLS, no QUIC address discovery, no metrics.
+`./tcode-traverse-dev`: no TLS, no QUIC address discovery, no metrics. Its
+manifest names `http` URLs, which Tcode machines and devices refuse, so it
+serves testing this server and cannot carry a Tcode connection.
 `RUST_LOG` controls logging (`info` by default).
 
 ## TLS
@@ -143,8 +145,7 @@ off to publish to your instance alone. Headless:
 instances at once. Devices take the URL from the machine's invitation, so
 nothing is configured on a phone.
 The base URL may be `http` for development; the relay and pkarr URLs in the
-manifest must be `https`. A `--dev` instance is for the tests in this crate,
-not for a machine.
+manifest must be `https`.
 
 ## Docker
 
