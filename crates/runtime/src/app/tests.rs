@@ -8149,6 +8149,7 @@ fn a_report_the_lead_took_is_saved_as_taken_with_the_record_of_it() {
             (*test_store).clone(),
             SettingsStore::new(test_store.root().clone()),
             failures,
+            cx.clock.host_clock(),
         );
         let (saved, queue) = smol::channel::unbounded();
         for write in held.into_iter().take(record + 1) {
@@ -11885,10 +11886,12 @@ fn history_windows_are_byte_budgeted() {
 fn store_writer_commits_a_waiting_delta_on_its_own_and_at_shutdown() {
     let store = TestStore::new("tcode-delta-window");
     let (failures, _failures) = smol::channel::unbounded();
+    let clock = test_clock();
     let writer = StoreWriter::new(
         (*store).clone(),
         SettingsStore::new(store.root().clone()),
         failures,
+        clock.host_clock(),
     );
     let (writes, queue) = smol::channel::unbounded();
     let writer = std::thread::spawn(move || writer.run(queue));
@@ -11918,16 +11921,13 @@ fn store_writer_commits_a_waiting_delta_on_its_own_and_at_shutdown() {
     };
 
     writes.send_blocking(delta("first")).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while texts().is_empty() {
-        assert!(
-            Instant::now() < deadline,
-            "a lone delta was never committed"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-
+    smol::block_on(clock.advance_to_next_timer());
+    // The writer opens a window for the next delta only once the last one is
+    // committed, so the window it opens is the moment to read the store.
     writes.send_blocking(delta(" second")).unwrap();
+    smol::block_on(clock.next_timer());
+    assert_eq!(texts(), ["first"]);
+
     drop(writes);
     writer.join().unwrap();
     assert_eq!(texts(), ["first", " second"]);

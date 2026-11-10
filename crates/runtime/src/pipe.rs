@@ -39,6 +39,8 @@ pub struct HostServices {
     /// Why the MCP servers could not start; the host tells the user when the first thread
     /// starts without them.
     pub mcp_unavailable: Option<String>,
+    /// The host's time; the system's unless a test turns it.
+    pub clock: crate::clock::HostClock,
 }
 
 impl HostServices {
@@ -277,7 +279,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.attach_control_mcp(server);
             }
             state.mcp_unavailable(services.mcp_unavailable.take());
-            let mut cx = HostCx::new(mailbox_tx, event_tx);
+            let mut cx = HostCx::new(mailbox_tx, event_tx, services.clock.clone());
             state.pump_pull_request_requests(services.pull_requests.take(), &mut cx);
             state.start_pull_request_workers(&mut cx);
             state.pump_control_requests(&mut cx);

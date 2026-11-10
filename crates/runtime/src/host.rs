@@ -51,16 +51,19 @@ pub struct HostCx {
     pub(crate) origin: Option<tcode_core::session::MessageOrigin>,
     pub(crate) delivery_key: Option<String>,
     pub(crate) completed: std::sync::Arc<std::sync::Mutex<CompletedCommands>>,
+    clock: crate::clock::HostClock,
 }
 
 impl HostCx {
     pub(crate) fn new(
         mailbox: smol::channel::Sender<HostFn>,
         events: smol::channel::Sender<String>,
+        clock: crate::clock::HostClock,
     ) -> Self {
         Self {
             mailbox,
             events,
+            clock,
             completed: Default::default(),
             delivery_key: None,
             principal: Principal::Full,
@@ -68,6 +71,11 @@ impl HostCx {
             space: None,
             origin: None,
         }
+    }
+
+    /// The host's time, which everything it does by time reads.
+    pub fn clock(&self) -> &crate::clock::HostClock {
+        &self.clock
     }
 
     pub fn emit(&mut self, event: HostEvent) {

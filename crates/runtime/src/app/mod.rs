@@ -715,6 +715,7 @@ impl AppState {
                 self.store.clone(),
                 self.settings_store.clone(),
                 self.store_write_failures.clone(),
+                cx.clock().clone(),
             );
             // Its own thread: every commit blocks on the database's fsync.
             match std::thread::Builder::new()

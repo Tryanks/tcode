@@ -13,6 +13,13 @@ enum Arrival<T> {
     Other(T),
 }
 
+/// A host clock for a test, whose wall starts at a fixed moment.
+pub(super) fn test_clock() -> std::sync::Arc<crate::clock::ManualClock> {
+    crate::clock::ManualClock::starting_at(
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_780_000_000),
+    )
+}
+
 pub(super) struct TestStore(SessionStore);
 
 impl TestStore {
@@ -49,6 +56,8 @@ pub(super) struct TestAppContext {
     outgoing: Vec<String>,
     domain_diff: Option<DomainDiff>,
     state: Option<Weak<RefCell<TestClientState>>>,
+    /// The host's time, which moves only when the test advances it.
+    pub(super) clock: std::sync::Arc<crate::clock::ManualClock>,
 }
 
 impl Default for TestAppContext {
@@ -63,6 +72,7 @@ impl Default for TestAppContext {
             outgoing: Vec::new(),
             domain_diff: None,
             state: None,
+            clock: test_clock(),
         }
     }
 }
@@ -83,7 +93,11 @@ impl TestAppContext {
     }
 
     pub(super) fn host_cx(&self) -> HostCx {
-        HostCx::new(self.mailbox_tx.clone(), self.outgoing_tx.clone())
+        HostCx::new(
+            self.mailbox_tx.clone(),
+            self.outgoing_tx.clone(),
+            self.clock.host_clock(),
+        )
     }
 
     /// Run what is already queued for the host, and what that queues in turn,

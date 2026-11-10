@@ -258,12 +258,18 @@ impl StoreWrite {
 fn recv_until(
     writes: &smol::channel::Receiver<StoreWrite>,
     deadline: Instant,
+    clock: &crate::clock::HostClock,
 ) -> Result<Option<StoreWrite>, smol::channel::RecvError> {
     use smol::future::FutureExt as _;
-    smol::block_on(async { writes.recv().await.map(Some) }.or(async {
-        smol::Timer::at(deadline).await;
-        Ok(None)
-    }))
+    let timer = clock.timer_at(deadline);
+    // A window that has run out commits before the write that arrived with it.
+    smol::block_on(
+        async {
+            timer.await;
+            Ok(None)
+        }
+        .or(async { writes.recv().await.map(Some) }),
+    )
 }
 
 pub(super) fn atomic_write(path: PathBuf, bytes: Vec<u8>) -> std::io::Result<()> {
@@ -278,6 +284,8 @@ pub(super) struct StoreWriter {
     pub(super) failures: smol::channel::Sender<StoreWriteFailure>,
     /// The first failed database write, until the writer stops.
     unresolved: Option<String>,
+    /// The host's time, which a waiting delta's window runs on.
+    clock: crate::clock::HostClock,
 }
 
 impl StoreWriter {
@@ -285,12 +293,14 @@ impl StoreWriter {
         store: SessionStore,
         settings_store: SettingsStore,
         failures: smol::channel::Sender<StoreWriteFailure>,
+        clock: crate::clock::HostClock,
     ) -> Self {
         Self {
             store,
             settings_store,
             failures,
             unresolved: None,
+            clock,
         }
     }
 
@@ -305,7 +315,7 @@ impl StoreWriter {
         loop {
             let received = match deadline {
                 None => writes.recv_blocking().map(Some),
-                Some(deadline) => recv_until(&writes, deadline),
+                Some(deadline) => recv_until(&writes, deadline, &self.clock),
             };
             let Ok(received) = received else { break };
             let Some(first) = received else {
@@ -328,7 +338,7 @@ impl StoreWriter {
                 self.process(std::mem::take(&mut queue));
                 deadline = None;
             } else {
-                deadline.get_or_insert_with(|| Instant::now() + DELTA_WINDOW);
+                deadline.get_or_insert_with(|| self.clock.now() + DELTA_WINDOW);
             }
         }
         self.process(queue);
