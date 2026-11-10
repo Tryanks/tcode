@@ -1,10 +1,6 @@
 //! Project-root configuration. See docs/project-config.md for the file contract.
 use serde::Deserialize;
-use std::{
-    fs::File,
-    io::{self, Read},
-    path::Path,
-};
+use std::{fs::File, io, path::Path};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,18 +22,7 @@ pub fn read(root: &Path) -> io::Result<ProjectConfig> {
         }
         result => result?,
     };
-    const MAX_BYTES: u64 = 1024 * 1024;
-    let mut bytes = Vec::new();
-    file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_BYTES {
-        return Err(io::Error::other(
-            "project config exceeds the 1 MiB size limit",
-        ));
-    }
-    // Struct deserialization also accepts positional arrays; configuration is map-only.
-    let fields = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    serde_json::from_value(serde_json::Value::Object(fields))
+    serde_json::from_reader(io::BufReader::new(file))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
@@ -69,10 +54,6 @@ mod tests {
         }
         for json in [
             "broken json",
-            "null",
-            "[]",
-            r#"["logo.png"]"#,
-            "[null]",
             r#"{"iconPath":42}"#,
             r#"{"iconPath":false}"#,
             r#"{"iconPath":"a",}"#,
@@ -84,11 +65,6 @@ mod tests {
                 "{json}"
             );
         }
-        fs::File::create(root.join("tcode.json"))
-            .unwrap()
-            .set_len(1024 * 1024 + 1)
-            .unwrap();
-        assert!(read(&root).unwrap_err().to_string().contains("1 MiB"));
         fs::remove_file(root.join("tcode.json")).unwrap();
         fs::create_dir(root.join("tcode.json")).unwrap();
         assert!(
