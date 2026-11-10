@@ -329,8 +329,8 @@ impl Db {
     }
 
     /// Copy every committed frame into the main file and truncate the WAL,
-    /// failing unless both are confirmed: after this the main file alone is
-    /// the database.
+    /// failing when Turso reports the checkpoint incomplete: after this the
+    /// main file alone is the database.
     pub(super) fn checkpoint(&self) -> io::Result<()> {
         let writer = self.writer()?;
         let mut busy = None;
@@ -347,17 +347,7 @@ impl Db {
                 ),
             ));
         }
-        let wal = wal_path(&self.path);
-        match std::fs::metadata(&wal) {
-            Ok(metadata) if metadata.len() > 0 => Err(io::Error::other(format!(
-                "{} still holds {} bytes after a truncating checkpoint",
-                wal.display(),
-                metadata.len()
-            ))),
-            Ok(_) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        }
+        Ok(())
     }
 }
 
@@ -411,17 +401,6 @@ pub(super) fn text(row: &Row, index: usize) -> io::Result<String> {
 
 fn open_error(path: &Path, error: turso::Error) -> io::Error {
     let message = error.to_string();
-    // Turso holds an exclusive lock on the file for as long as a process has
-    // it open; the message is the only signal its error carries.
-    if message.contains("locked by another process") {
-        return io::Error::new(
-            io::ErrorKind::ResourceBusy,
-            format!(
-                "{} is in use by another Tcode process: {message}",
-                path.display()
-            ),
-        );
-    }
     match error {
         turso::Error::IoError(kind, operation) => io::Error::new(
             kind,
