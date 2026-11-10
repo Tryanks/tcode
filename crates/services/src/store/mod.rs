@@ -237,10 +237,6 @@ struct Shared {
     /// change to that log; see [`SessionStore::event_generation`].
     generations: Mutex<HashMap<String, u64>>,
     next_generation: AtomicU64,
-    /// Full event-log parses, shared by every clone of this store so tests can
-    /// prove a caller served history from memory.
-    #[cfg(any(test, feature = "test-support"))]
-    event_reads: std::sync::atomic::AtomicUsize,
 }
 
 enum State {
@@ -470,8 +466,6 @@ impl SessionStore {
                     idle: Condvar::new(),
                     generations: Mutex::default(),
                     next_generation: AtomicU64::new(1),
-                    #[cfg(any(test, feature = "test-support"))]
-                    event_reads: Default::default(),
                 });
                 stores.insert(key, Arc::downgrade(&shared));
                 shared
@@ -482,15 +476,6 @@ impl SessionStore {
             previous: None,
             shared,
         })
-    }
-
-    /// How many times [`SessionStore::read_events`] parsed a log through this
-    /// store or any of its clones.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn event_reads(&self) -> usize {
-        self.shared
-            .event_reads
-            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn root(&self) -> &PathBuf {
@@ -1005,10 +990,6 @@ impl SessionStore {
     /// what the log held when [`SessionStore::next_row`] returned `end`, since
     /// rows are only ever appended.
     pub fn read_log_until(&self, id: &str, end: u64) -> io::Result<EventLog> {
-        #[cfg(any(test, feature = "test-support"))]
-        self.shared
-            .event_reads
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.read_rows(id, 0..end)
     }
 

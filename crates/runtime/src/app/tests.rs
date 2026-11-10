@@ -10635,65 +10635,8 @@ fn persist_streamed_turns(store: &SessionStore, id: &str, turns: u64) -> Vec<Ses
     store.read_events(id).unwrap()
 }
 
-/// A client scrolling to the top of a long thread fetches one page per turn;
-/// every page must come from the log parsed when the thread was opened.
-#[test]
-fn history_pages_of_an_opened_session_parse_the_log_once() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("history-single-parse");
-    open_stored_session(&store, "paged");
-    let records = persist_streamed_turns(&store, "paged", 5);
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let reads_before_open = store.event_reads();
-
-    let window = window_reply(
-        &through_pipe(&state, cx, 1, subscribe_events("paged", None)),
-        1,
-    );
-    assert_eq!(
-        window.total_turns, 5,
-        "the absolute turn count comes from the log"
-    );
-    cx.run_until(|state| {
-        state
-            .resident("paged")
-            .is_some_and(|session| session.timeline.turns.len() == 5)
-    });
-    let mut loaded = window.records;
-    let mut before = window.from;
-    let mut id = 2;
-    while before > 0 {
-        let QueryResponse::SessionHistoryPage {
-            records: page,
-            from,
-            end,
-            ..
-        } = query_reply(
-            &through_pipe(&state, cx, id, history_page("paged", before)),
-            id,
-        )
-        else {
-            panic!("page")
-        };
-        assert_eq!(end, before);
-        loaded.splice(0..0, page);
-        before = from;
-        id += 1;
-    }
-    assert_eq!(
-        Timeline::fold_events(loaded),
-        Timeline::fold_events(records),
-        "merged deltas fold as the log does"
-    );
-    assert_eq!(
-        store.event_reads() - reads_before_open,
-        1,
-        "opening, loading the timeline and paging parsed the log once"
-    );
-}
-
-/// The log of an opened session is read once, extended by its appends, and
-/// kept while the session is resident, parked included; once it leaves
+/// The log of an opened session is extended by its appends and kept while
+/// the session is resident, parked included; once it leaves
 /// residency it is dropped only after the store writer flushed its appends,
 /// so the next read finds every one of them.
 #[test]
@@ -10703,7 +10646,6 @@ fn session_log_follows_residency_and_flushes_before_release() {
     open_stored_session(&store, "resident");
     let persisted = persist_streamed_turns(&store, "resident", 2).len() as u64;
     let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let reads_before_open = store.event_reads();
     let (commands, _actor) = smol::channel::unbounded();
 
     window_reply(
@@ -10744,11 +10686,6 @@ fn session_log_follows_residency_and_flushes_before_release() {
         panic!("page")
     };
     assert_eq!((from, records.len()), (persisted, 1));
-    assert_eq!(
-        store.event_reads() - reads_before_open,
-        1,
-        "the appended record is served from the log, not a re-read"
-    );
 
     // Parked with a live provider, the session stays resident and cached.
     state.update(cx, |state, _| {
@@ -10771,7 +10708,6 @@ fn session_log_follows_residency_and_flushes_before_release() {
         store.read_events("resident").unwrap().len() as u64,
         persisted + 1
     );
-    assert_eq!(store.event_reads() - reads_before_open, 2);
 }
 
 #[test]

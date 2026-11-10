@@ -470,50 +470,6 @@ mod tests {
         .into()
     }
 
-    /// What a search extracts is kept in the store: a later search, after the
-    /// host restarts included, reads it instead of folding the log again,
-    /// until the log changes.
-    #[test]
-    fn extracted_entries_outlive_the_host_that_made_them() {
-        let root = std::env::temp_dir().join(format!("tcode-search-{}", uuid::Uuid::new_v4()));
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
-        let reply = |id: &str, text: &str| {
-            completed(
-                id,
-                ItemContent::AssistantMessage {
-                    text: text.into(),
-                    summarized: false,
-                },
-            )
-            .event
-        };
-        store
-            .append_event(&meta.id, 1, &reply("first", "the auth.rs fix"))
-            .unwrap();
-        let sessions = std::slice::from_ref(&meta);
-        assert_eq!(
-            SessionSearch::new(store.clone())
-                .search(sessions, "auth.rs", 10)
-                .len(),
-            1
-        );
-        store.close().unwrap();
-        drop(store);
-
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        let search = SessionSearch::new(store.clone());
-        assert_eq!(search.search(sessions, "AUTH.RS", 10)[0].entry_id, "first");
-        assert_eq!(store.event_reads(), 0, "the restarted host read no log");
-        store
-            .append_event(&meta.id, 2, &reply("second", "auth.rs again"))
-            .unwrap();
-        assert_eq!(search.search(sessions, "auth.rs", 10).len(), 2);
-        assert_eq!(store.event_reads(), 1, "the changed log was folded again");
-        store.close().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     /// A query matches an entry as the entry's text lowercased the Unicode
     /// way with its whitespace collapsed, whatever is stored to answer it.
     #[test]

@@ -3,9 +3,6 @@ name = "tcode-services"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-test-support = []
-
 [dependencies]
 agent = { path = "../agent" }
 tcode-core = { path = "../core" }

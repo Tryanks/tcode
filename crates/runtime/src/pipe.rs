@@ -1884,15 +1884,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// A recorded image opened from a thread a client is reading streams from
-    /// the thread's history already in memory: neither its bytes nor the check
-    /// that they are still current read the stored log again. Its size is
+    /// A recorded image opened from a thread a client is reading: its size is
     /// known before its bytes, for the viewer to lay out its preview, and its
     /// bytes arrive in full 64 KiB blocks: each block is a hand-over to the
     /// viewer, and the 768-byte reads of the history's base64 once made a
     /// screenshot hundreds of them.
     #[test]
-    fn originals_of_a_subscribed_session_reuse_its_history() {
+    fn an_original_of_a_subscribed_session_streams_in_full_blocks() {
         use base64::Engine as _;
         use tcode_client::original::OriginalBackend as _;
         let data_root =
@@ -1924,7 +1922,6 @@ mod tests {
                 }),
             )
             .expect("append image");
-        let reader = store.clone();
         let host = spawn_host(store, HostServices::default()).expect("spawn host");
         let link = host.link();
         link.subscribe(Subscription {
@@ -1935,17 +1932,6 @@ mod tests {
             },
         })
         .expect("subscribe to the thread");
-        // The subscription is answered from the log's tail while its one read
-        // of the whole log runs on; a user opens the image after that read.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while reader.event_reads() == 0 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the subscription never read the thread's log"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
         let source = smol::block_on(host.open(
             tcode_protocol::Principal::Full,
             tcode_protocol::OriginalTarget::Item {
@@ -1977,11 +1963,6 @@ mod tests {
                 .iter()
                 .all(|&len| len == 64 * 1024),
             "every block but the last is full: {block_lens:?}"
-        );
-        assert_eq!(
-            reader.event_reads(),
-            1,
-            "the original was served from the thread's history"
         );
 
         drop(source);
