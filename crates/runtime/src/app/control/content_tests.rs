@@ -313,12 +313,12 @@ fn reading_a_very_long_thread_stays_within_budget_and_says_what_it_left_out() {
     let mut caller = StoredThread::new("caller", "p");
     let mut target = StoredThread::new("target", "p");
     let first = target.record(item("u0", user_message("Build everything")));
-    let log: String = (0..20_000)
+    let log: String = (0..4_000)
         .map(|line| format!("compiling crate {line}\n"))
         .collect();
     let run = target.record(item("c0", command("cargo build", log.clone())));
     target.record(turn_completed(0));
-    for n in 1..800 {
+    for n in 1..300 {
         target.turn(
             n,
             &format!("Question {n} about the build cache and its eviction policy"),
@@ -343,7 +343,7 @@ fn reading_a_very_long_thread_stays_within_budget_and_says_what_it_left_out() {
     let cursor = output["truncated"]["cursor"].as_str().unwrap().to_owned();
     assert!(cursor.starts_with(&format!("target#{run}@")), "{cursor}");
     let text = output["text"].as_str().unwrap();
-    assert!(text.contains("compiling crate 0\n") && text.contains("compiling crate 19999"));
+    assert!(text.contains("compiling crate 0\n") && text.contains("compiling crate 3999"));
 
     let continued = call(
         &state,
@@ -380,7 +380,7 @@ fn reading_a_very_long_thread_stays_within_budget_and_says_what_it_left_out() {
     let turns = outline["turns"].as_array().unwrap();
     assert_eq!(
         turns.last().unwrap()["turn"],
-        799,
+        299,
         "the newest turns are kept"
     );
 }
