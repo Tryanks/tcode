@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use agent::{PlanStep, PlanStepStatus};
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Context, IntoElement as _, ParentElement as _, SharedString, Styled as _,
     Window,
@@ -17,16 +18,18 @@ fn plan<'a>(rail: &RailView, cx: &'a App) -> Option<&'a SessionPlan> {
     rail.workspace_store
         .read(cx)
         .session_plan_for(rail.session_id.as_deref(), cx)
-        .filter(|plan| !plan.steps.is_empty())
+        .filter(|plan| crate::plan_panel::shown(plan))
 }
 
 fn steps<'a>(rail: &RailView, cx: &'a App) -> Option<&'a [PlanStep]> {
-    plan(rail, cx).map(|plan| plan.steps.as_slice())
+    plan(rail, cx)
+        .map(|plan| plan.steps.as_slice())
+        .filter(|steps| !steps.is_empty())
 }
 
 /// Whether the card has something to show for `rail`'s thread now.
 pub(super) fn present(rail: &RailView, cx: &App) -> bool {
-    steps(rail, cx).is_some()
+    plan(rail, cx).is_some()
 }
 
 /// The line the card's header shows beside its title: how far
@@ -66,7 +69,7 @@ pub(super) fn body(
         last.replace((crate::plan_panel::explanation(plan), plan.steps.clone()));
     }
     let (explanation, steps) = last.borrow().clone();
-    if steps.is_empty() {
+    if steps.is_empty() && explanation.is_none() {
         return None;
     }
     Some(
@@ -80,14 +83,16 @@ pub(super) fn body(
                 window,
                 cx,
             ))
-            .child(crate::plan_panel::render_steps(
-                "rail-plan-steps",
-                &steps,
-                false,
-                crate::plan_panel::StepLayout::Dense,
-                window,
-                cx,
-            ))
+            .when(!steps.is_empty(), |body| {
+                body.child(crate::plan_panel::render_steps(
+                    "rail-plan-steps",
+                    &steps,
+                    false,
+                    crate::plan_panel::StepLayout::Dense,
+                    window,
+                    cx,
+                ))
+            })
             .into_any_element(),
     )
 }
