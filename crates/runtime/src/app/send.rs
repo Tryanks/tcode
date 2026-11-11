@@ -1074,6 +1074,7 @@ impl AppState {
             return Ok(());
         }
         active.shutdown_to_idle();
+        self.revoke_computer_use_registration(&session_id);
         self.requeue_unconfirmed_steers(&session_id, cx);
         self.clear_approvals(&session_id);
         self.close_abandoned_turn(&session_id, cx);
