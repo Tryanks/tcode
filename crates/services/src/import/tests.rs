@@ -215,6 +215,89 @@ fn a_rollout_codex_compressed_is_listed_and_imports_as_it_was_written() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// A thread found in a profile's config directory is listed as that
+/// profile's, so it imports under the account it ran with; one found in the
+/// built-in directory names no profile.
+#[test]
+fn a_scanned_thread_belongs_to_the_profile_whose_directory_holds_it() {
+    let home = std::env::temp_dir().join(format!("tcode-profiles-{}", uuid::Uuid::new_v4()));
+    let cwd = home.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let in_json = serde_json::to_string(cwd.to_str().unwrap()).unwrap();
+    let at_cwd = |text: &str| {
+        let first = text.lines().next().unwrap();
+        first.replace("/work/example", in_json.trim_matches('"'))
+    };
+    let claude_projects = home.join("claude-work").join("projects");
+    std::fs::create_dir_all(claude_projects.join("-project")).unwrap();
+    std::fs::write(
+        claude_projects
+            .join("-project")
+            .join("00000000-0000-4000-8000-000000000010.jsonl"),
+        at_cwd(CLAUDE_TRANSCRIPT),
+    )
+    .unwrap();
+    let codex_day = |root: &str| home.join(root).join("sessions/2026/01/02");
+    let rollout = "rollout-2026-01-02T03-04-05-00000000-0000-4000-8000-000000000001.jsonl";
+    std::fs::create_dir_all(codex_day("codex-personal")).unwrap();
+    std::fs::write(
+        codex_day("codex-personal").join(rollout),
+        at_cwd(CODEX_ROLLOUT),
+    )
+    .unwrap();
+    let builtin = at_cwd(CODEX_ROLLOUT).replace(
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+    );
+    std::fs::create_dir_all(codex_day("codex")).unwrap();
+    std::fs::write(
+        codex_day("codex").join(rollout.replace("0001.jsonl", "0002.jsonl")),
+        builtin,
+    )
+    .unwrap();
+
+    let history = super::scan_recent_dirs(
+        &super::ExternalRoots {
+            claude_projects: vec![(Some("work".into()), claude_projects)],
+            claude_desktop_meta: None,
+            codex_session_roots: vec![
+                (
+                    Some("personal".into()),
+                    home.join("codex-personal/sessions"),
+                ),
+                (None, home.join("codex/sessions")),
+            ],
+        },
+        &[],
+    );
+    let _ = std::fs::remove_dir_all(&home);
+    assert!(history.unreadable.is_empty(), "{:?}", history.unreadable);
+    let mut profiles = history
+        .dirs
+        .into_iter()
+        .flat_map(|dir| dir.threads)
+        .map(|thread| (thread.external_id, thread.profile_id))
+        .collect::<Vec<_>>();
+    profiles.sort();
+    assert_eq!(
+        profiles,
+        [
+            (
+                "claude:00000000-0000-4000-8000-000000000010".to_owned(),
+                Some("work".to_owned())
+            ),
+            (
+                "codex:00000000-0000-4000-8000-000000000001".to_owned(),
+                Some("personal".to_owned())
+            ),
+            (
+                "codex:00000000-0000-4000-8000-000000000002".to_owned(),
+                None
+            ),
+        ]
+    );
+}
+
 /// A thread `thread/revert` rewound is listed once, by the rollout Codex now
 /// reads for it, and shows the history Codex assembles for it: what it kept
 /// of the rollout it continues, then what followed the revert. Shapes from
