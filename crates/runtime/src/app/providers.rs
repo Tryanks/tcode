@@ -21,6 +21,8 @@ struct UpdateRun {
 struct ModelRefresh {
     generation: u64,
     loading: bool,
+    /// Why the latest listing that ended failed.
+    failure: Option<String>,
     /// The harness processes the latest listing started, which the next one
     /// stops.
     processes: agent::SessionProcesses,
@@ -115,13 +117,20 @@ impl ProviderCatalog {
         *refresh = ModelRefresh {
             generation: refresh.generation + 1,
             loading: true,
+            failure: None,
             processes: agent::SessionProcesses::default(),
         };
         (refresh.generation, refresh.processes.clone())
     }
 
-    /// Ends the listing of `generation`; `false` when a later one replaced it.
-    fn finish_model_refresh(&mut self, provider: ProviderKind, generation: u64) -> bool {
+    /// Ends the listing of `generation` with why it failed, if it did;
+    /// `false` when a later one replaced it.
+    fn finish_model_refresh(
+        &mut self,
+        provider: ProviderKind,
+        generation: u64,
+        failure: Option<String>,
+    ) -> bool {
         let Some(refresh) = self
             .model_refreshes
             .get_mut(&provider)
@@ -130,6 +139,7 @@ impl ProviderCatalog {
             return false;
         };
         refresh.loading = false;
+        refresh.failure = failure;
         true
     }
 
@@ -254,6 +264,11 @@ impl ProviderCatalog {
                 .iter()
                 .map(|(provider, refresh)| (*provider, refresh.loading))
                 .collect(),
+            model_errors: self
+                .model_refreshes
+                .iter()
+                .filter_map(|(provider, refresh)| Some((*provider, refresh.failure.clone()?)))
+                .collect(),
             provider_versions: self
                 .provider_versions
                 .iter()
@@ -351,7 +366,11 @@ impl AppState {
                     Err(error) => Err(error),
                 };
                 host_cx.enqueue(move |state, _cx| {
-                    if !state.providers.finish_model_refresh(provider, generation) {
+                    let failure = result.as_ref().err().cloned();
+                    if !state
+                        .providers
+                        .finish_model_refresh(provider, generation, failure)
+                    {
                         return;
                     }
                     if state.settings.provider(provider) != configuration

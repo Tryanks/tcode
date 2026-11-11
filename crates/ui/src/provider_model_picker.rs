@@ -220,8 +220,13 @@ impl Render for ProviderModelPicker {
                     .map(|(tab, profile)| {
                         let options: Rc<[ModelOption]> =
                             picker.read(cx).profile_options(&profile.id, cx).into();
-                        let list =
-                            option_list(tab, options, &selected, &picker, &store, &popover, cx);
+                        let unlisted = Settings::is_builtin_profile_id(&profile.id)
+                            .then(|| store.read(cx).models_error(profile.kind))
+                            .flatten()
+                            .map(str::to_owned);
+                        let list = option_list(
+                            tab, options, unlisted, &selected, &picker, &store, &popover, cx,
+                        );
                         (tab, list)
                     })
                     .collect();
@@ -282,9 +287,12 @@ impl Render for ProviderModelPicker {
 
 /// One profile's options: an option the catalog adds or drops folds into or
 /// out of the list as the others glide.
+#[allow(clippy::too_many_arguments)]
 fn option_list(
     tab: usize,
     options: Rc<[ModelOption]>,
+    // Why the profile's catalog could not be listed.
+    unlisted: Option<String>,
     selected: &Option<(ProviderKind, String, Option<String>)>,
     picker: &Entity<ProviderModelPicker>,
     store: &Entity<WorkspaceStore>,
@@ -297,7 +305,10 @@ fn option_list(
             .size_full()
             .p_1()
             .child(crate::material::empty_row(
-                crate::tr!("model_picker.no_models"),
+                match &unlisted {
+                    Some(error) => crate::tr!("model_picker.models_unlisted", error = error),
+                    None => crate::tr!("model_picker.no_models"),
+                },
                 cx,
             ))
             .into_any_element();

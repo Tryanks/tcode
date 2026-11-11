@@ -367,6 +367,10 @@ pub struct ImportFailure {
 pub struct ProvidersStatus {
     pub model_catalogs: HashMap<ProviderKind, Vec<agent::ModelSpec>>,
     pub models_loading: HashMap<ProviderKind, bool>,
+    /// Why the latest listing of a provider's models failed, as the harness
+    /// or the process said; its catalog is the one listed before, if any.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_errors: HashMap<ProviderKind, String>,
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
     pub update_run: Option<ProviderUpdateRun>,
     pub tcode_update: TcodeUpdateStatus,

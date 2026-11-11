@@ -300,6 +300,8 @@ struct ProviderRow {
     version: Option<ProtocolProviderVersionStatus>,
     models: Vec<ModelRow>,
     models_loading: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    models_error: Option<String>,
     profiles: Vec<ProfileRow>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     acp_agents: Vec<AcpAgentRow>,
@@ -1221,6 +1223,7 @@ impl AppState {
                         })
                         .collect(),
                     models_loading: status.models_loading.get(&kind).copied().unwrap_or(false),
+                    models_error: status.model_errors.get(&kind).cloned(),
                     profiles: self
                         .settings
                         .profiles_for_kind(kind)

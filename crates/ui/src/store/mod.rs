@@ -2898,6 +2898,14 @@ impl WorkspaceStore {
             .unwrap_or_default()
     }
 
+    /// Why the latest listing of `provider`'s models failed.
+    pub(crate) fn models_error(&self, provider: agent::ProviderKind) -> Option<&str> {
+        self.providers_replica
+            .model_errors
+            .get(&provider)
+            .map(String::as_str)
+    }
+
     pub(crate) fn models_loading(&self, provider: agent::ProviderKind) -> bool {
         self.providers_replica.models_loading.get(&provider) == Some(&true)
             && self

@@ -606,6 +606,7 @@ settings:
     description: "用于生成和重新生成线程标题，始终使用 low 推理强度。"
 model_picker:
   no_models: "暂无可用模型。"
+  models_unlisted: "没能取到模型列表：%{error}"
 computer_use:
   section: "电脑操作"
   enable:
@@ -1082,6 +1083,7 @@ composer:
   worktree_base_named: "基础分支 %{branch}"
   preparing_worktree: "正在准备 worktree…"
   no_models: "未找到模型"
+  models_unlisted: "没能取到模型列表：%{error}"
   add_favorite: "添加到收藏"
   remove_favorite: "从收藏中移除"
   restart_note: "将在会话下次重启时生效"

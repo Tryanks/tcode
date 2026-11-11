@@ -200,10 +200,14 @@ impl Composer {
             .collect();
         // Only the built-in profiles have a probed catalog that can still be
         // loading; a third-party profile shows its own slugs immediately.
-        let loading = store.models_loading(provider)
-            && matches!(&rail, PickerRail::Profile(id) if tcode_core::settings::Settings::is_builtin_profile_id(id))
-            && rows.is_empty()
-            && query.is_empty();
+        let builtin_rail = matches!(&rail, PickerRail::Profile(id) if tcode_core::settings::Settings::is_builtin_profile_id(id));
+        let loading =
+            store.models_loading(provider) && builtin_rail && rows.is_empty() && query.is_empty();
+        // A catalog that could not be listed says why rather than that it is empty.
+        let unlisted = (builtin_rail && all_rows.is_empty())
+            .then(|| store.models_error(provider))
+            .flatten()
+            .map(str::to_owned);
 
         let composer = cx.entity();
         let store_entity = self.workspace_store.clone();
@@ -333,6 +337,7 @@ impl Composer {
                         &acp_rail_agents,
                         pending_restart,
                         loading,
+                        unlisted.clone(),
                         &store_entity,
                         &model_search,
                         &composer,
@@ -740,6 +745,8 @@ fn render_model_pane(
     acp_agents: &[(String, String)],
     pending_restart: bool,
     loading: bool,
+    // Why the rail's catalog could not be listed, when it has none.
+    unlisted: Option<String>,
     store_entity: &Entity<WorkspaceStore>,
     model_search: &Entity<InputState>,
     composer: &Entity<Composer>,
@@ -918,8 +925,14 @@ fn render_model_pane(
                 let content = match layer {
                     0 => crate::material::empty_row(crate::tr!("composer.loading_models"), cx)
                         .into_any_element(),
-                    1 => crate::material::empty_row(crate::tr!("composer.no_models"), cx)
-                        .into_any_element(),
+                    1 => crate::material::empty_row(
+                        match &unlisted {
+                            Some(error) => crate::tr!("composer.models_unlisted", error = error),
+                            None => crate::tr!("composer.no_models"),
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
                     _ if state == 2 => build_list(shown_rows.clone(), current),
                     _ => build_list(last.clone(), None),
                 };

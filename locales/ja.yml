@@ -606,6 +606,7 @@ settings:
     description: "スレッドタイトルの生成と再生成に使用します。推論レベルは常に「低」です。"
 model_picker:
   no_models: "利用できるモデルがありません。"
+  models_unlisted: "モデルの一覧を取得できませんでした: %{error}"
 computer_use:
   section: "コンピューター操作"
   enable:
@@ -1089,6 +1090,7 @@ composer:
   worktree_base_named: "ベースブランチ %{branch}"
   preparing_worktree: "ワークツリーを準備中…"
   no_models: "モデルが見つかりません"
+  models_unlisted: "モデルの一覧を取得できませんでした: %{error}"
   add_favorite: "お気に入りに追加"
   remove_favorite: "お気に入りから削除"
   restart_note: "次にセッションを再起動したときに適用されます"

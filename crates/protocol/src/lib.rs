@@ -344,6 +344,8 @@ pub use wire::{
 // Command gains stop_stack_rebase; StackRebaseFailure gains stopped.
 // Command gains cancel_provider_update, RuntimeToast provider_update_cancelled.
 // ProvidersStatus gains secrets_unreadable.
+// ProvidersStatus gains model_errors, why a provider's latest model listing
+// failed.
 // The agent event stream gains unreadable_record {line}: a row of a thread's
 // log the host cannot read is sent as it is stored instead of left out, and so
 // is a subagent's item (with parent_item_id) a build before v0.1.42 wrote

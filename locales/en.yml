@@ -606,6 +606,7 @@ settings:
     description: "Generates and regenerates thread titles, always at low reasoning effort."
 model_picker:
   no_models: "No models available."
+  models_unlisted: "Couldn't list the models: %{error}"
 computer_use:
   section: "COMPUTER USE"
   enable:
@@ -1089,6 +1090,7 @@ composer:
   worktree_base_named: "Base branch %{branch}"
   preparing_worktree: "Preparing worktree…"
   no_models: "No models found"
+  models_unlisted: "Couldn't list the models: %{error}"
   add_favorite: "Add to favorites"
   remove_favorite: "Remove from favorites"
   restart_note: "applies when the session next restarts"
