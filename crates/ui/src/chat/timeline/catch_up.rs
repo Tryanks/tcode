@@ -28,8 +28,8 @@ fn turn(turn: usize, answer: &str) -> Vec<agent::AgentEvent> {
     ]
 }
 
-/// A turn of `count` records, alternating a short answer and a command whose
-/// output is about four kilobytes, so 300 of them are more than a window.
+/// A turn of `count` commands, each holding the four kilobytes of output a
+/// record keeps, so 140 of them (560 KB) are more than a 512 KB window.
 fn long_run(turn: usize, count: usize) -> Vec<agent::AgentEvent> {
     let mut events = vec![
         agent::AgentEvent::TurnStarted {
@@ -38,20 +38,16 @@ fn long_run(turn: usize, count: usize) -> Vec<agent::AgentEvent> {
         user_event(&format!("user-{turn}"), "Work through the whole list."),
     ];
     for index in 0..count {
-        events.push(if index % 2 == 0 {
-            answer_event(&format!("step-{index}"), &format!("Step {index} is done."))
-        } else {
-            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
-                id: format!("command-{index}"),
-                parent_item_id: None,
-                content: agent::ItemContent::CommandExecution {
-                    command: format!("check {index}"),
-                    output: format!("{index} checked\n").repeat(350),
-                    exit_code: Some(0),
-                    status: agent::ItemStatus::Completed,
-                },
-            })
-        });
+        events.push(agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+            id: format!("command-{index}"),
+            parent_item_id: None,
+            content: agent::ItemContent::CommandExecution {
+                command: format!("check {index}"),
+                output: format!("{index} checked\n").repeat(350),
+                exit_code: Some(0),
+                status: agent::ItemStatus::Completed,
+            },
+        }));
     }
     events.push(answer_event("finished", "Every step is done."));
     events.push(agent::AgentEvent::TurnCompleted {
@@ -201,13 +197,15 @@ fn painted(
 /// A thread that ran on while another was shown, come back to, shows its
 /// latest entry, brought there by one subscription. So for a run that fits one
 /// window (ten records, which the window continues) and for one longer than
-/// a window (300, about 600 KB of command output, answered with the
-/// thread's tail).
+/// a window (140, answered with the thread's tail).
 #[gpui::test]
 fn a_thread_come_back_to_shows_its_latest_entry_brought_by_one_subscription(
     cx: &mut TestAppContext,
 ) {
-    for (count, continued) in [(10, true), (300, false)] {
+    // The history a tail window leaves above it loads behind a spinner,
+    // which rests only with motion reduced.
+    cx.update(|cx| cx.set_reduce_motion(true));
+    for (count, continued) in [(10, true), (140, false)] {
         let mut workspace = Workspace::new(cx);
         let window_state = cx.new(|_| WindowState::default());
         let store = workspace.store.clone();

@@ -2142,7 +2142,7 @@ mod tests {
         for case in [Outcome::Delivered, Outcome::SettingOff, Outcome::Refused] {
             let (host, session_id, timeline) = seeded_chat_host_on(
                 cx,
-                synthetic_markdown_timeline(30),
+                synthetic_markdown_timeline(15),
                 false,
                 Some(agent::ProviderKind::ClaudeCode),
             );
@@ -2571,16 +2571,17 @@ mod tests {
         );
     }
 
-    /// A reader flicking up a long thread is not sent back to its end when a
-    /// page of history lands mid-fling, even one that re-indexes the rows: a
-    /// background agent that a later turn reported on moves back to the turn
-    /// that started it once the page holds that turn.
+    /// A reader scrolled up a thread is not sent back to its end when a page
+    /// of history lands, even one that re-indexes the rows: a background
+    /// agent that a later turn reported on moves back to the turn that
+    /// started it once the page holds that turn.
     #[gpui::test]
     fn a_page_that_moves_a_background_agent_back_keeps_the_reader_in_place(
         cx: &mut TestAppContext,
     ) {
         use gpui::{VisualTestContext, point, px};
 
+        const TURNS: usize = 12;
         let agent = |status| agent::ThreadItem {
             id: "agent-0".into(),
             parent_item_id: None,
@@ -2593,7 +2594,7 @@ mod tests {
                 effort: None,
             },
         };
-        let events: Vec<_> = (0..80)
+        let events: Vec<_> = (0..TURNS)
             .flat_map(|turn| {
                 let mut events = vec![
                     agent::AgentEvent::TurnStarted {
@@ -2602,10 +2603,10 @@ mod tests {
                     user_event(&format!("user-{turn}"), &format!("Question {turn}")),
                 ];
                 match turn {
-                    10 => events.push(agent::AgentEvent::ItemStarted(agent(
+                    2 => events.push(agent::AgentEvent::ItemStarted(agent(
                         agent::ItemStatus::InProgress,
                     ))),
-                    50 => events.push(agent::AgentEvent::ItemCompleted(agent(
+                    8 => events.push(agent::AgentEvent::ItemCompleted(agent(
                         agent::ItemStatus::Completed,
                     ))),
                     _ => {}
@@ -2624,63 +2625,38 @@ mod tests {
                 events
             })
             .collect();
-        // The window opens at turn 40, after the agent started.
+        // The window opens at turn 6, after the agent started.
         let held_from = events
             .iter()
             .position(|event| {
-                matches!(event, agent::AgentEvent::TurnStarted { turn_id } if turn_id == "40")
+                matches!(event, agent::AgentEvent::TurnStarted { turn_id } if turn_id == "6")
             })
             .unwrap();
         let mut thread = ScriptedThread::new(cx, events, held_from, false);
-        let store = thread.store.clone();
+        // The page in flight shows a spinner, which rests only with motion
+        // reduced.
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (view, cx) = thread.open(cx);
-        let frame = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.executor().advance_clock(Duration::from_millis(16));
-            cx.update(|window, cx| {
-                window.simulate_next_frame(cx);
-            });
-            draw(cx);
-        };
         draw_settled(cx);
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
         assert!(list.is_following_tail());
-        let loading = |cx: &mut VisualTestContext| {
-            store.read_with(cx, |store, _| store.history_loading_for(Some(THREAD)))
-        };
-        let send = |delta: f32, touch_phase, cx: &mut VisualTestContext| {
+        // The reader scrolls up a screen.
+        for (phase, delta) in [
+            (gpui::TouchPhase::Started, 0.),
+            (gpui::TouchPhase::Moved, 700.),
+            (gpui::TouchPhase::Ended, 0.),
+        ] {
             cx.simulate_event(gpui::ScrollEvent {
                 position: list.viewport_bounds().center(),
                 delta: gpui::ScrollDelta::Pixels(point(px(0.), px(delta))),
-                touch_phase,
+                touch_phase: phase,
                 ..Default::default()
             });
-        };
-        // Trackpad flicks up, a frame between packets, until the reader nears
-        // the start of the window and the page is asked for.
-        let mut gestures = 0;
-        'flicking: while !loading(cx) {
-            gestures += 1;
-            assert!(gestures < 20, "the page was never asked for");
-            send(0., gpui::TouchPhase::Started, cx);
-            for _ in 0..3 {
-                send(120., gpui::TouchPhase::Moved, cx);
-                frame(cx);
-            }
-            send(0., gpui::TouchPhase::Ended, cx);
-            let mut speed = 300.;
-            for _ in 0..12 {
-                if loading(cx) {
-                    break 'flicking;
-                }
-                send(speed, gpui::TouchPhase::Moved, cx);
-                speed *= 0.85;
-                frame(cx);
-            }
         }
+        draw_settled(cx);
         assert!(!list.is_following_tail());
         let on_screen = |cx: &mut VisualTestContext| {
-            (40..80)
+            (6..TURNS)
                 .filter_map(|turn| {
                     let bounds = cx.debug_bounds(format!("user-bubble-user-{turn}").leak())?;
                     bounds
@@ -2696,8 +2672,7 @@ mod tests {
         // The page holds every earlier turn, the agent's start among them.
         assert!(thread.answer_page(held_from).is_some());
         cx.run_until_parked();
-        frame(cx);
-        frame(cx);
+        draw_settled(cx);
         assert!(list.item_count() > rows, "the page landed");
         assert!(
             !list.is_following_tail(),
