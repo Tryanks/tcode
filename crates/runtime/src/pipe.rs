@@ -1696,6 +1696,10 @@ mod tests {
             .parse()
             .unwrap();
 
+        // The host is held busy past the quit's budget. Nothing a client or a
+        // provider sends can do that: the host thread never blocks (blocking
+        // work goes through `HostCx::unblock`, which Clippy enforces), so only
+        // the test mailbox can occupy it.
         let (entered, busy) = async_channel::bounded(1);
         let (release, released) = async_channel::bounded::<()>(1);
         let working = std::thread::spawn({

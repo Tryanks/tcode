@@ -1134,8 +1134,26 @@ pub(super) fn controlled_host(
     state.update(cx, |state, cx| {
         state.pump_control_requests(cx);
         state.resume_undelivered_reports(cx);
+        state.start_activity(cx);
     });
     (state, providers)
+}
+
+/// The user sends thread `id`, shown on the client, its first message, and
+/// the provider the host starts `n`th takes it and starts a turn.
+pub(super) fn first_turn(
+    state: &TestEntity,
+    cx: &mut TestAppContext,
+    providers: &Providers,
+    id: &str,
+    n: usize,
+) -> Played {
+    state.open(cx, id);
+    state.send(cx, id, "Go");
+    let provider = providers.started(cx, n);
+    provider.start_turn(cx, "turn");
+    cx.run_until_seen(|view| view.status(id).running_turn.is_some());
+    provider
 }
 
 /// A host over `store` whose providers the test plays.
@@ -1148,7 +1166,10 @@ pub(super) fn played_host(
     state.set_provider_launcher(providers.launcher());
     let state = cx.new_entity(state);
     // What a host does as it starts over a store an earlier one left.
-    state.update(cx, |state, cx| state.resume_undelivered_reports(cx));
+    state.update(cx, |state, cx| {
+        state.resume_undelivered_reports(cx);
+        state.start_activity(cx);
+    });
     (state, providers)
 }
 
@@ -1237,18 +1258,6 @@ fn answer_usage_read(reply: smol::channel::Sender<Result<serde_json::Value, Stri
 }
 
 impl AppState {
-    /// Record an event in a thread's log as the host records what reaches
-    /// it.
-    pub(crate) fn record_event_for_replica_test(
-        &mut self,
-        session_id: &str,
-        ts: u64,
-        event: &AgentEvent,
-        cx: &mut HostCx,
-    ) {
-        self.record_event_at(session_id, ts, event, Vec::new(), cx);
-    }
-
     /// Deliver an event as a session's provider would.
     pub(crate) fn provider_event_for_test(
         &mut self,
