@@ -9723,6 +9723,26 @@ pub(crate) mod tests {
         status.requested_model = meta.model.clone();
         status.activity.turn_running = subagent;
         status.conversation_read_only = subagent;
+        status
+            .provider_option_descriptors
+            .push(agent::OptionDescriptor::Select {
+                id: "reasoningEffort".into(),
+                label: "Reasoning effort".into(),
+                options: vec![agent::SelectOption {
+                    value: "high".into(),
+                    label: "High".into(),
+                    description: None,
+                    unavailable: None,
+                    speed: None,
+                    summary: None,
+                    approval: None,
+                }],
+                default_value: None,
+                role: agent::OptionRole::Effort,
+                apply: Default::default(),
+                recommended: None,
+                permissive: None,
+            });
         status.provider_option_selections = vec![agent::OptionSelection {
             id: "reasoningEffort".into(),
             value: serde_json::json!("high"),

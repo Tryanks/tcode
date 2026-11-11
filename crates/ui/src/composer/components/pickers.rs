@@ -372,8 +372,7 @@ impl Composer {
                 }) => resolved_select_value(id, default_value, &composer.active_option_selections)
                     .map(|value| select_value_label(options, &value)),
                 _ => None,
-            }
-            .unwrap_or_else(|| crate::tr!("composer.context_unknown").into_owned());
+            }?;
             let label = gpui::SharedString::from(label);
             return Some((
                 label.clone(),
