@@ -2952,16 +2952,26 @@ mod tests {
 
     /// An agent that never answers `initialize` (cline 3.0.39) holds its
     /// session's start until the session is stopped. The agent here is a
-    /// process that reads its stdin and says nothing.
+    /// process that reads its stdin and says nothing; it tells the test when
+    /// `initialize` has reached it, so the stop lands on a start that is
+    /// waiting for the answer.
     #[test]
     fn a_start_its_agent_never_answers_ends_when_the_session_stops() {
+        use std::io::BufRead as _;
+
         const ROLE: &str = "TCODE_TEST_SILENT_AGENT";
         const NAME: &str =
             "acp_session::tests::a_start_its_agent_never_answers_ends_when_the_session_stops";
-        if std::env::var_os(ROLE).is_some() {
-            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+        if let Ok(port) = std::env::var(ROLE) {
+            let mut stdin = std::io::stdin().lock();
+            let mut initialize = String::new();
+            stdin.read_line(&mut initialize).unwrap();
+            std::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).unwrap();
+            let _ = std::io::copy(&mut stdin, &mut std::io::sink());
             return;
         }
+        let asked = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = asked.local_addr().unwrap().port().to_string();
         let processes = crate::SessionProcesses::default();
         let opts = SessionOptions {
             cwd: std::env::temp_dir(),
@@ -2979,13 +2989,14 @@ mod tests {
                 launch: crate::AcpLaunch::Binary {
                     command: std::env::current_exe().unwrap(),
                     args: vec!["--exact".into(), NAME.into(), "--quiet".into()],
-                    env: vec![(ROLE.into(), "1".into())],
+                    env: vec![(ROLE.into(), port)],
                 },
             }),
             instructions: None,
             processes: processes.clone(),
         };
         let start = smol::spawn(crate::start_session(ProviderKind::Acp, opts));
+        asked.accept().unwrap();
         processes.stop();
         assert!(smol::block_on(start).is_err());
     }

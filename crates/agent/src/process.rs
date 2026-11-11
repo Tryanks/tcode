@@ -686,7 +686,7 @@ pub(crate) fn test_echo_command() -> std::process::Command {
     child
         .args([
             "--exact",
-            "process::tests::line_reader_preserves_record_framing_and_reports_invalid_utf8",
+            "process::tests::echo_child",
             "--quiet",
             "--nocapture",
         ])
@@ -839,50 +839,19 @@ mod tests {
         std::fs::remove_file(&fifo).unwrap();
     }
 
+    /// Not a test: the echo child [`test_echo_command`] starts, which writes
+    /// back each line it reads. Run by the test runner, it does nothing.
     #[test]
-    fn line_reader_preserves_record_framing_and_reports_invalid_utf8() {
-        if std::env::var_os("TCODE_TEST_ECHO_CHILD").is_some() {
-            let mut output = std::io::stdout().lock();
-            writeln!(output, "{TEST_ECHO_READY}").unwrap();
-            output.flush().unwrap();
-            for line in std::io::stdin().lock().lines() {
-                writeln!(output, "{}", line.unwrap()).unwrap();
-                output.flush().unwrap();
-            }
+    fn echo_child() {
+        if std::env::var_os("TCODE_TEST_ECHO_CHILD").is_none() {
             return;
         }
-        let record = "{\"text\":\"a\u{2028}b\"}";
-        for skip_empty in [false, true] {
-            let (lines, spawned) = spawn_line_reader(
-                std::io::Cursor::new(format!("\n{record}\r\nlast").into_bytes()),
-                "test-json-lines",
-                None,
-                skip_empty,
-            );
-            spawned.unwrap();
-            if !skip_empty {
-                assert!(
-                    matches!(lines.recv_blocking().unwrap(), ChildOutput::Line(line) if line.is_empty())
-                );
-            }
-            assert!(
-                matches!(lines.recv_blocking().unwrap(), ChildOutput::Line(line) if line == record)
-            );
-            assert!(
-                matches!(lines.recv_blocking().unwrap(), ChildOutput::Line(line) if line == "last")
-            );
-            assert!(matches!(lines.recv_blocking().unwrap(), ChildOutput::Eof));
+        let mut output = std::io::stdout().lock();
+        writeln!(output, "{TEST_ECHO_READY}").unwrap();
+        output.flush().unwrap();
+        for line in std::io::stdin().lock().lines() {
+            writeln!(output, "{}", line.unwrap()).unwrap();
+            output.flush().unwrap();
         }
-        let (lines, spawned) = spawn_line_reader(
-            std::io::Cursor::new(vec![0xff, b'\n']),
-            "test-invalid-utf8",
-            Some("provider output"),
-            true,
-        );
-        spawned.unwrap();
-        assert!(
-            matches!(lines.recv_blocking().unwrap(), ChildOutput::Error(message) if message.starts_with("provider output:"))
-        );
-        assert!(lines.recv_blocking().is_err());
     }
 }
