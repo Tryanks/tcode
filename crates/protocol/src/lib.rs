@@ -309,126 +309,42 @@ pub use wire::{
 // the Space principal and scope and set by SpaceAction set_policy; and the
 // {"type":"ssh"} stream carrying an SSH connection to the machine.
 //
-// Unreleased: a field may be missing only where the sender leaves it out at
-// its empty value; a message missing any other field no longer decodes, and
-// nothing stands in for it (a principal, scope or space without a policy was
-// read as unrestricted). HostingAction no longer reads new_code. HostProblem
-// gains credentials_unreadable. RuntimeNotice::WorktreeSeeded has no
-// limit_reached. RewindStatus has no running_turn (a running turn is always
-// interrupted first) and its blocked no "turn_running". SourceTool gains
-// claude_agent_sdk.
-// QueryResponse::ExternalHistory carries an ExternalHistory {dirs,
-// unreadable}, and SessionContentHits a SessionContentHits {hits, unreadable}.
-// tcode/group/1 no longer has the full rejection. RuntimeError gains
-// file_unreadable. GitStatusStatus carries git's error. HostProblem gains
-// cli_failed. PullRequestStack has no url (GitHub gives no page for one).
-// GitDiffScope and SourceTool have no unknown value. ExternalImportState's
-// finished carries failed, the ImportFailure {file, error} of each thread an
-// import could not bring in, which skipped no longer counts.
-// PullRequestSnapshot's updated_at may be absent (Azure DevOps keeps none).
-// RuntimeError gains mcp_unavailable.
-// The user_message item has no context_len.
-// PullRequestFiles' changed_files may be absent (the host gave no count).
-// PullRequestFile gains url, the file's page on the host.
-// ThreadWakes' pull_requests are PullRequestKeys, not numbers.
-// GitDiffResult's default_base is base, the one a branch diff was read against.
-// SessionActivity gains settle_blocked.
-// WriteRelaunchMarker's session_id is absent rather than empty for no thread.
-// SetFollowUp carries on and note instead of a FollowUp: the host stamps since.
-// SessionStatus gains preparing_turn.
-// ServerEvent gains preview_request_cancelled.
-// Command gains cancel_plugin_operation, RuntimeToast plugin_operation_cancelled.
-// Command gains cancel_acp_install; RuntimeToast acp_install_started carries
-// id, and RuntimeToast gains acp_install_cancelled.
-// Command gains cancel_title_generation.
-// Command gains stop_stack_rebase; StackRebaseFailure gains stopped.
-// Command gains cancel_provider_update, RuntimeToast provider_update_cancelled.
-// ProvidersStatus gains secrets_unreadable.
-// ProvidersStatus gains model_errors, why a provider's latest model listing
-// failed.
-// ProviderVersionStatus gains latest_error and TcodeUpdateStatus check_error,
-// why the latest version could not be looked up.
-// ProvidersStatus gains login_shell_unread, why the host could not read the
-// login shell's environment at start.
-// ProvidersStatus gains model_problems, what of a provider's model catalog
-// could not be read and was left out.
-// The agent event stream's command_execution gains input, the lines written to
-// the command's stdin in order; rows without it read as none.
-// The agent event stream gains unreadable_record {line}: a row of a thread's
-// log the host cannot read is sent as it is stored instead of left out, and so
-// is a subagent's item (with parent_item_id) a build before v0.1.42 wrote
-// into its parent's log.
-// The agent event stream loses plan_resolved, proposed_plan_delta,
-// proposed_plan, model_fallback_detected and turn_blocked, and
-// approval_resolved's decision no longer reads approve, approve_for_session
-// or deny: rows of them are unreadable_record.
-// The agent event stream gains record_withheld {bytes}: a history window or
-// page sends it for a record longer than the client's line, where the whole
-// reply was the history_record_too_large error, and a live session_event
-// carries it for such a record, where the connection closed.
-// OptionRole gains effort, context_window, speed and thinking. SelectOption
-// gains speed and summary (a PermissionSummary of profile, sandbox, approval
-// and reviewer); Codex's current permissions carry a summary, not a
-// description.
-// SessionStatus gains goal_control and manual_compaction.
-// ProviderSnapshot gains supported_from, the oldest release Tcode supports,
-// present when the probed CLI is older.
-// ExternalThread gains profile_id, the profile whose CLI keeps the thread.
-// The tool_call item gains family, what its adapter read the call to be:
-// read {path, first_line, note}, whose output is the lines read; search
-// {scope, pattern, path, glob, hits}, each hit {path, line, text}; question
-// {questions}, each {question, options, answers}; fetch {url, prompt};
-// web_search {query, links}, each link {title, url}; load_tools {query,
-// tools}; skill {name}; wait {duration_ms}; image_generation {prompt};
-// review {action, risk}.
-// The served_model event gains from, the model the harness named before it.
-// RuntimeError gains title_attachment_unreadable {path, error}.
-// PullRequestFile's additions and deletions may be absent: a binary or
-// oversized file whose host gave no count.
-// SelectOption gains approval, the ApprovalClass of a permission value.
-// A select OptionDescriptor gains minimum, the smallest value of its own the
-// harness takes (Claude's context window); a context window has no other
-// lower bound.
-// SessionStatus gains background_control {stop, move_running} and
-// harness_option_labels.
-// HarnessDescription's plugins is a PluginsDescription {actions, marketplaces,
-// scopes, source_install, unmanaged} instead of a bool; it gains home_path.
-// The file_change item gains output, what the harness gave back for the
-// change: its tool's result, or why it failed.
-// QueryResponse::PullRequest carries fresh_for, the seconds the answer stays
-// current, instead of expires_at, a time by the host's clock.
-// QueryResponse::ActiveWorkspace carries a WorkspaceListing {entries,
-// truncated, unreadable}; ListActiveWorkspace lists a thread that is not
-// running too, and answers unknown_session or git's or the file system's error
-// where it was an empty list.
-// ProvidersStatus gains acp_registry_loaded and loses acp_registry_loading.
-// Command gains stop_plugin_listing; PluginStaleReason gains stopped.
-// ScheduleTurn carries due, a TurnDue (after_secs from when the host takes it
-// in, or at_unix_secs), instead of fire_at_unix_secs computed by the client's
-// clock.
-// ScopeSnapshot is {scope, host_unix_ms}: the host's wall clock when it sent
-// the scope, by which a client tells how long ago a host's time was.
-// RuntimeError gains orphan_sweep_skipped {error} and orphans_left {left}, each
-// a LeftOrphan {path, error}.
-// TokenCheck gains unreadable {status, error}: a host took the token but its
-// answer could not be read.
-// CommandResponse gains unsent, the UnsentMessage {text, attachments} list an
-// Interrupt answers with when the next turn had not reached the provider.
-// Settings gains shorten_long_commands with the ShortenLongCommands patch.
-// Settings gains background_commands_on_steer with the
-// BackgroundCommandsOnSteer patch.
-// SessionContentHits gains truncated: more messages matched than the limit
-// asked for. SearchSessionContent's limit is no longer capped at 50.
-// record_withheld gains row, the withheld record's log cursor, which a
-// history window names and a live session_event leaves out; OriginalTarget
-// gains record {session_id, row}, that record as JSON, read whole on the
-// original stream by whoever may read the thread's history.
-// SessionStatus's provider_option_selections are, while a harness runs, the
-// values it reported (only the permission's were); it gains
-// provider_option_unconfirmed, the options it does not report, running_model
-// and model_unconfirmed. The agent event stream gains session_model {model},
-// and a provider_options selection may be null: the harness reports no value.
-pub const PROTOCOL_VERSION: u32 = 27;
+// Version 28 (v0.4.1): a field may be missing only where the sender leaves
+// it out at its empty value, and nothing stands in for any other (a
+// principal, scope or space without a policy no longer reads as
+// unrestricted); unreadable rows, records too large for a line
+// (record_withheld with row, OriginalTarget's record) and what a host could
+// not read (HostProblem's credentials_unreadable and cli_failed,
+// RuntimeError's file_unreadable, mcp_unavailable,
+// title_attachment_unreadable, orphan_sweep_skipped and orphans_left,
+// ProvidersStatus' secrets_unreadable, model_errors, model_problems and
+// login_shell_unread, the version lookups' errors, TokenCheck's unreadable,
+// GitStatusStatus' error, the unreadable lists of ExternalHistory,
+// SessionContentHits and WorkspaceListing, ImportFailure) are sent rather
+// than dropped; the agent event stream gains unreadable_record,
+// session_model and command_execution's input, and loses plan_resolved,
+// proposed_plan_delta, proposed_plan, model_fallback_detected, turn_blocked
+// and approval_resolved's approve, approve_for_session and deny; the
+// tool_call item's family, the file_change item's output, and no
+// user_message context_len; OptionRole's effort, context_window, speed and
+// thinking, SelectOption's speed, summary and approval, OptionDescriptor's
+// minimum, and harness-reported option selections (provider_option_unconfirmed,
+// running_model, model_unconfirmed); SessionStatus' preparing_turn,
+// goal_control, manual_compaction, background_control and
+// harness_option_labels; cancel and stop commands for plugin operations and
+// listings, ACP installs, title generation, stack rebases and provider
+// updates; Interrupt's unsent; host-clock times (ScheduleTurn's TurnDue,
+// ScopeSnapshot's host_unix_ms, PullRequest's fresh_for, SetFollowUp's on
+// and note); pull request files' url and optional counts, PullRequestKeys
+// in ThreadWakes, PullRequestStack without url, optional updated_at; and
+// SourceTool's claude_agent_sdk, GitDiffResult's base, SessionActivity's
+// settle_blocked, ProviderSnapshot's supported_from, ExternalThread's
+// profile_id, HarnessDescription's PluginsDescription and home_path,
+// preview_request_cancelled, the shorten_long_commands and
+// background_commands_on_steer settings, and no unknown GitDiffScope or
+// SourceTool, HostingAction new_code, WorktreeSeeded limit_reached,
+// RewindStatus running_turn or full group rejection.
+pub const PROTOCOL_VERSION: u32 = 28;
 
 #[cfg(test)]
 mod tests;
