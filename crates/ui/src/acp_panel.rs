@@ -21,7 +21,7 @@ use std::rc::Rc;
 use tcode_protocol::AcpMarketplaceItem;
 
 use crate::material;
-use crate::store::{StoreChange, TopicKind, WorkspaceStore, observe_store_topics};
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
@@ -57,8 +57,6 @@ pub struct AcpPanel {
     /// what they were as they fold.
     market_rows: crate::motion::list_rows::ListRows<(), AcpMarketplaceItem>,
     market_flip: crate::motion::ListFlip,
-    /// Whether the host had said this client may manage it, as last seen.
-    manages_host: bool,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -71,10 +69,9 @@ impl AcpPanel {
         let search = cx.new(|cx| InputState::new(window, cx));
         let subscriptions = vec![
             observe_store_topics(&store, &[TopicKind::Providers], cx),
-            cx.subscribe(&store, |this, _, _: &StoreChange, cx| this.follow_scope(cx)),
             cx.observe(&search, |_, _, cx| cx.notify()),
         ];
-        let mut panel = Self {
+        Self {
             store,
             view: PanelView::Home,
             search,
@@ -86,29 +83,15 @@ impl AcpPanel {
             market_rows: crate::motion::list_rows::ListRows::over(crate::motion::KEYSTROKE),
             market_flip: Default::default(),
             market_ids: Vec::new(),
-            manages_host: false,
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
-        };
-        panel.follow_scope(cx);
-        panel
-    }
-
-    /// The registry is the host owner's. A link learns that it may manage
-    /// its host only once the host's scope arrives, after this panel is
-    /// built with the settings page, and learns it again after a reconnect:
-    /// each time, the registry is asked for.
-    fn follow_scope(&mut self, cx: &mut Context<Self>) {
-        let manages_host = self.store.read(cx).can_manage_host();
-        if manages_host && !self.manages_host {
-            self.store
-                .update(cx, |store, _| store.refresh_acp_registry());
         }
-        self.manages_host = manages_host;
     }
 
-    /// The host answers from its cache while that is fresh, so asking on
-    /// every opening costs no fetch.
+    /// The registry is asked for on every opening, not when the panel is
+    /// built with the settings page, before a link knows its scope. The host
+    /// answers from its cache while that is fresh, so an opening costs no
+    /// fetch.
     pub fn prepare_to_open(&mut self, cx: &mut Context<Self>) {
         self.view = PanelView::Home;
         self.store
@@ -607,9 +590,9 @@ mod tests {
     }
 
     /// The dialog is built with the settings page, before a link knows it may
-    /// manage its host; the host is asked for the registry once it says so.
+    /// manage its host; opening it asks the host for the registry.
     #[gpui::test]
-    fn the_registry_is_asked_for_once_the_scope_arrives(cx: &mut TestAppContext) {
+    fn opening_the_dialog_asks_for_the_registry(cx: &mut TestAppContext) {
         use tcode_protocol::{ClientMessage, ClientPayload, Command};
 
         cx.update(crate::test_client::init);
@@ -629,8 +612,9 @@ mod tests {
                 cx,
             )
         });
-        let (_panel, _) = cx.add_window_view(|window, cx| AcpPanel::new(store.clone(), window, cx));
+        let (panel, _) = cx.add_window_view(|window, cx| AcpPanel::new(store.clone(), window, cx));
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
+        panel.update(cx, |panel, cx| panel.prepare_to_open(cx));
         cx.run_until_parked();
         let asked = std::iter::from_fn(|| requests.try_recv().ok()).any(|line| {
             serde_json::from_str::<ClientMessage>(&line).is_ok_and(|message| {
