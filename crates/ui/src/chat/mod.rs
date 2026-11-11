@@ -1342,50 +1342,42 @@ pub(crate) mod tests {
             context_window: Some(200_000),
             ..Default::default()
         });
-        // Seed a catalog-backed model: the generic chat fixture has no model
-        // options and therefore cannot detect a missing effort control.
-        cx.update(crate::test_client::init);
-        let data_root = crate::store::tests::scratch_root("effort-layout");
-        let host = tcode_runtime::pipe::spawn_host(
-            tcode_services::store::SessionStore::open_at(data_root).unwrap(),
-            tcode_runtime::pipe::HostServices::default(),
+        // A catalog-backed model, as the host caches it: the generic chat
+        // fixture has no model options and therefore cannot detect a missing
+        // effort control.
+        let disk = chat_store(cx);
+        disk.save_models(
+            agent::ProviderKind::Codex,
+            &[agent::ModelSpec {
+                id: "effort-layout".into(),
+                display_name: "A model with a long display name".into(),
+                is_default: true,
+                options: vec![agent::OptionDescriptor::Select {
+                    id: "reasoningEffort".into(),
+                    label: "Reasoning effort".into(),
+                    options: vec![agent::SelectOption {
+                        value: "xhigh".into(),
+                        label: "Extra High".into(),
+                        description: None,
+                        unavailable: None,
+                        speed: None,
+                        summary: None,
+                    }],
+                    default_value: Some("xhigh".into()),
+                    role: agent::OptionRole::Effort,
+                    apply: Default::default(),
+                    recommended: None,
+                    permissive: None,
+                }],
+            }],
         )
         .unwrap();
-        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
-            state.providers.model_catalogs.insert(
-                agent::ProviderKind::Codex,
-                vec![agent::ModelSpec {
-                    id: "effort-layout".into(),
-                    display_name: "A model with a long display name".into(),
-                    is_default: true,
-                    options: vec![agent::OptionDescriptor::Select {
-                        id: "reasoningEffort".into(),
-                        label: "Reasoning effort".into(),
-                        options: vec![agent::SelectOption {
-                            value: "xhigh".into(),
-                            label: "Extra High".into(),
-                            description: None,
-                            unavailable: None,
-                            speed: None,
-                            summary: None,
-                            approval: None,
-                        }],
-                        default_value: Some("xhigh".into()),
-                        role: agent::OptionRole::Effort,
-                        apply: Default::default(),
-                        recommended: None,
-                        permissive: None,
-                    }],
-                }],
-            );
-            let id = state.start_draft("effort-layout".into(), std::env::temp_dir(), cx);
-            let active = state.residents.live.get_mut(&id).unwrap();
-            active.meta.provider = agent::ProviderKind::Codex;
-            active.meta.model = Some("effort-layout".into());
-            active.timeline = timeline;
-            (id, active.timeline.clone())
-        }))
-        .unwrap();
+        let mut meta = thread_meta(None);
+        meta.provider = agent::ProviderKind::Codex;
+        meta.model = Some("effort-layout".into());
+        record_thread(&disk, &meta, log_of(&timeline));
+        let session_id = meta.id;
+        let host = spawn_chat_host(disk);
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -1411,9 +1403,6 @@ pub(crate) mod tests {
                 store.baseline_ready()
                     && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
-        });
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let window_state = cx.new(|_| WindowState::default().with_compact(true));
         let (_view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
@@ -1583,60 +1572,215 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
         timeline: Timeline,
         paged: bool,
-    ) -> (tcode_runtime::pipe::SpawnedHost, String, Timeline) {
-        seeded_chat_host_on(cx, timeline, paged, None)
+    ) -> (tcode_runtime::pipe::SpawnedHost, String) {
+        seeded_chat_host_on(cx, log_of(&timeline), paged, None)
     }
 
-    /// A host holding one thread with `timeline`, on `provider` when given.
-    pub(in crate::chat) fn seeded_chat_host_on(
-        cx: &mut TestAppContext,
-        timeline: Timeline,
-        paged: bool,
-        provider: Option<agent::ProviderKind>,
-    ) -> (tcode_runtime::pipe::SpawnedHost, String, Timeline) {
-        use tcode_runtime::pipe::{HostServices, spawn_host};
-        use tcode_services::store::SessionStore;
+    /// The log a host holds for `timeline`: each turn started, its entries
+    /// as the events that record them, and the turn completed unless it
+    /// still runs.
+    pub(in crate::chat) fn log_of(timeline: &Timeline) -> Vec<agent::AgentEvent> {
+        use agent::AgentEvent;
+        let turns = timeline
+            .entries
+            .iter()
+            .map(|entry| entry.turn + 1)
+            .max()
+            .unwrap_or(0)
+            .max(timeline.turns.len());
+        let mut log = Vec::new();
+        for turn in 0..turns {
+            let turn_id = format!("turn-{turn}");
+            log.push(AgentEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+            });
+            if let Some(checkpoint_id) = timeline
+                .turns
+                .get(turn)
+                .and_then(|meta| meta.provider_checkpoint_id.clone())
+            {
+                log.push(AgentEvent::TurnCheckpoint {
+                    turn_id: turn_id.clone(),
+                    checkpoint_id,
+                });
+            }
+            for entry in timeline.entries.iter().filter(|entry| entry.turn == turn) {
+                match &entry.content {
+                    EntryContent::Item(content) => {
+                        let running = serde_json::to_value(content)
+                            .ok()
+                            .and_then(|content| content.get("status").cloned())
+                            .is_some_and(|status| status == "in_progress");
+                        let item = agent::ThreadItem {
+                            id: entry.id.clone(),
+                            parent_item_id: None,
+                            content: content.clone(),
+                        };
+                        log.push(if running {
+                            AgentEvent::ItemStarted(item)
+                        } else {
+                            AgentEvent::ItemCompleted(item)
+                        });
+                    }
+                    EntryContent::Steer {
+                        text,
+                        status,
+                        attachments,
+                    } => {
+                        log.push(AgentEvent::SteerRequested {
+                            request_id: entry.id.clone(),
+                            text: text.clone(),
+                            attachments: attachments.clone(),
+                        });
+                        if *status == tcode_core::session::SteeringStatus::Accepted {
+                            log.push(AgentEvent::SteerAccepted {
+                                request_id: entry.id.clone(),
+                            });
+                        }
+                    }
+                    other => panic!("no event in this fixture records {other:?}"),
+                }
+            }
+            if !timeline.turns.get(turn).is_some_and(|meta| meta.running) {
+                log.push(AgentEvent::TurnCompleted {
+                    turn_id,
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                });
+            }
+        }
+        if timeline.goal.is_some() {
+            log.push(AgentEvent::GoalUpdated {
+                goal: timeline.goal.clone(),
+            });
+        }
+        if !timeline.plan_steps.is_empty() {
+            log.push(AgentEvent::PlanUpdated {
+                turn_id: None,
+                explanation: timeline.plan_explanation.clone(),
+                steps: timeline.plan_steps.clone(),
+            });
+        }
+        if let Some(usage) = timeline.usage {
+            log.push(AgentEvent::TokenUsage(usage));
+        }
+        log
+    }
 
+    /// A thread on `provider`, with a native session to resume when one is
+    /// given.
+    pub(in crate::chat) fn thread_meta(
+        provider: Option<agent::ProviderKind>,
+    ) -> tcode_core::project::SessionMeta {
+        let mut meta = tcode_core::project::SessionMeta::new(
+            provider.unwrap_or(agent::ProviderKind::ClaudeCode),
+            std::env::temp_dir(),
+            None,
+        );
+        if provider.is_some() {
+            meta.resume_cursor = Some(agent::ResumeCursor(
+                serde_json::json!({"session_id": "seeded"}),
+            ));
+        }
+        meta
+    }
+
+    /// `meta`'s thread, recorded in `store` with `log`, as a host finds a
+    /// thread an earlier run recorded.
+    pub(in crate::chat) fn record_thread(
+        store: &tcode_services::store::SessionStore,
+        meta: &tcode_core::project::SessionMeta,
+        log: impl IntoIterator<Item = agent::AgentEvent>,
+    ) {
+        store.upsert_meta(meta).expect("record the thread");
+        for (ts, event) in log.into_iter().enumerate() {
+            store
+                .append_event(&meta.id, ts as u64, &event)
+                .expect("record the thread's log");
+        }
+    }
+
+    /// A host started over a store holding one thread with `log`.
+    pub(in crate::chat) fn seeded_log_host(
+        cx: &mut TestAppContext,
+        log: Vec<agent::AgentEvent>,
+    ) -> (tcode_runtime::pipe::SpawnedHost, String) {
+        let store = chat_store(cx);
+        let meta = thread_meta(None);
+        record_thread(&store, &meta, log);
+        (spawn_chat_host(store), meta.id)
+    }
+
+    /// The user sends `thread` a turn that a scripted `provider` plays: what
+    /// the test sends on the returned channel reaches the host as the
+    /// provider's events, and the commands it gets back are the provider's.
+    pub(in crate::chat) fn scripted_turn(
+        host: &tcode_runtime::pipe::SpawnedHost,
+        driver: &mut crate::store::tests::LocalHostDriver,
+        thread: &str,
+        provider: agent::ProviderKind,
+        cx: &mut TestAppContext,
+    ) -> ScriptedHandles {
+        let scripted = tcode_runtime::app::scripted_provider(provider);
+        let handles = (scripted.commands.clone(), scripted.events.clone());
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.set_provider_launcher_for_test(scripted.launcher)
+        }))
+        .expect("script the provider");
+        driver.command(
+            cx,
+            tcode_protocol::Command::SendTurn {
+                session_id: thread.to_string(),
+                text: "Go on.".into(),
+                attachment_paths: Vec::new(),
+            },
+        );
+        loop {
+            if let agent::SessionCommand::SendTurn { .. } = driver.recv(cx, &handles.0) {
+                return handles;
+            }
+        }
+    }
+
+    /// A store for one test's host, with markdown and the client set up.
+    pub(in crate::chat) fn chat_store(
+        cx: &mut TestAppContext,
+    ) -> tcode_services::store::SessionStore {
         cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
-        let data_root = crate::store::tests::scratch_root("chat-residency-test");
-        let store = SessionStore::open_at(data_root).expect("test session store");
-        let host = spawn_host(store, HostServices::default()).expect("spawn test host");
-        let (session_id, timeline) =
-            smol::block_on(host.update_state_for_test(move |state, cx| {
-                let id =
-                    state.start_draft("markdown-residency-test".into(), std::env::temp_dir(), cx);
-                if paged {
-                    for ts in 0..2000 {
-                        state.record_event_for_replica_test(
-                            &id,
-                            ts,
-                            &agent::AgentEvent::Warning {
-                                message: "short".into(),
-                            },
-                            cx,
-                        );
-                    }
-                }
-                let active = state.residents.live.get_mut(&id).expect("selected draft");
-                active.timeline = timeline;
-                active.draft = false;
-                if let Some(provider) = provider {
-                    active.meta.provider = provider;
-                    active.meta.resume_cursor = Some(agent::ResumeCursor(
-                        serde_json::json!({"session_id": "seeded"}),
-                    ));
-                }
-                let result = (active.meta.id.clone(), active.timeline.clone());
-                let meta = active.meta.clone();
-                state.sessions.push(meta);
-                result
-            }))
-            .expect("seed markdown host");
-        (host, session_id, timeline)
+        tcode_services::store::SessionStore::open_at(crate::store::tests::scratch_root(
+            "chat-residency-test",
+        ))
+        .expect("test session store")
     }
 
-    /// Two threads on one host, the first selected and holding `first`.
+    pub(in crate::chat) fn spawn_chat_host(
+        store: tcode_services::store::SessionStore,
+    ) -> tcode_runtime::pipe::SpawnedHost {
+        tcode_runtime::pipe::spawn_host(store, tcode_runtime::pipe::HostServices::default())
+            .expect("spawn test host")
+    }
+
+    /// A host started over a store holding one thread with `log`, on
+    /// `provider` when given. When `paged`, two thousand warnings come
+    /// first, so the thread opens on a window of its log.
+    pub(in crate::chat) fn seeded_chat_host_on(
+        cx: &mut TestAppContext,
+        log: Vec<agent::AgentEvent>,
+        paged: bool,
+        provider: Option<agent::ProviderKind>,
+    ) -> (tcode_runtime::pipe::SpawnedHost, String) {
+        let store = chat_store(cx);
+        let meta = thread_meta(provider);
+        let warnings = (0..if paged { 2000 } else { 0 }).map(|_| agent::AgentEvent::Warning {
+            message: "short".into(),
+        });
+        record_thread(&store, &meta, warnings.chain(log));
+        (spawn_chat_host(store), meta.id)
+    }
+
+    /// Two threads on one host, the first selected and holding `first`, the
+    /// second holding `second`.
     pub(in crate::chat) struct TwoThreads {
         pub(in crate::chat) store: Entity<WorkspaceStore>,
         pub(in crate::chat) driver: crate::store::tests::LocalHostDriver,
@@ -1648,17 +1792,13 @@ pub(crate) mod tests {
     pub(in crate::chat) fn seed_two_threads(
         cx: &mut TestAppContext,
         first: Timeline,
+        second: Timeline,
     ) -> TwoThreads {
-        let (host, first_id, timeline) = seeded_chat_host(cx, first, false);
-        let second = smol::block_on(host.update_state_for_test(|state, cx| {
-            let id = state.start_draft("second".into(), std::env::temp_dir(), cx);
-            let active = state.residents.live.get_mut(&id).expect("second draft");
-            active.draft = false;
-            let meta = active.meta.clone();
-            state.sessions.push(meta);
-            id
-        }))
-        .expect("seed the second thread");
+        let store = chat_store(cx);
+        let (first_meta, second_meta) = (thread_meta(None), thread_meta(None));
+        record_thread(&store, &first_meta, log_of(&first));
+        record_thread(&store, &second_meta, log_of(&second));
+        let host = spawn_chat_host(store);
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -1672,32 +1812,28 @@ pub(crate) mod tests {
         driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        store.update(cx, |store, cx| store.show_alone(first_id.clone(), cx));
+        store.update(cx, |store, cx| store.show_alone(first_meta.id.clone(), cx));
         driver.wait_until(cx, "chat baseline", |cx| {
             store.read_with(cx, |store, cx| {
                 !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(first_id.clone(), timeline, cx);
-        });
         TwoThreads {
             store,
             driver,
             host,
-            first: first_id,
-            second,
+            first: first_meta.id,
+            second: second_meta.id,
         }
     }
 
     impl TwoThreads {
-        /// Binds `chat`'s pane to `thread`, as the shell does, and gives the
-        /// thread `timeline` once its history has arrived.
+        /// Binds `chat`'s pane to `thread`, as the shell does, once the
+        /// thread's history has arrived.
         pub(in crate::chat) fn bind(
             &mut self,
             chat: &Entity<ChatView>,
             thread: &str,
-            timeline: Timeline,
             cx: &mut gpui::VisualTestContext,
         ) {
             let store = self.store.clone();
@@ -1708,15 +1844,9 @@ pub(crate) mod tests {
             self.driver
                 .wait_until(cx, "the bound thread's history", |cx| {
                     store.read_with(cx, |store, cx| {
-                        store
-                            .with_timeline_for(store.sole_thread().as_deref(), |_| (), cx)
-                            .is_some()
+                        !store.chat_loading_for(store.sole_thread().as_deref(), cx)
                     })
                 });
-            store.update(cx, |store, cx| {
-                store.set_session_replica_for_test(thread.to_string(), timeline, cx);
-                cx.notify();
-            });
         }
 
         pub(in crate::chat) fn shutdown(mut self, cx: &mut gpui::VisualTestContext) {
@@ -1749,7 +1879,23 @@ pub(crate) mod tests {
         crate::store::tests::LocalHostDriver,
     ) {
         let (store, window_state, session_id, driver, _) =
-            seed_chat_scripted(cx, timeline, paged, provider, false);
+            seed_chat_scripted(cx, log_of(&timeline), paged, provider, false);
+        (store, window_state, session_id, driver)
+    }
+
+    /// [`seed_chat_with_history_on`] for a thread recorded as `log`.
+    pub(in crate::chat) fn seed_chat_log_on(
+        cx: &mut TestAppContext,
+        log: Vec<agent::AgentEvent>,
+        provider: Option<agent::ProviderKind>,
+    ) -> (
+        Entity<WorkspaceStore>,
+        Entity<WindowState>,
+        String,
+        crate::store::tests::LocalHostDriver,
+    ) {
+        let (store, window_state, session_id, driver, _) =
+            seed_chat_scripted(cx, log, false, provider, false);
         (store, window_state, session_id, driver)
     }
 
@@ -1764,7 +1910,7 @@ pub(crate) mod tests {
     /// rewind preview, say) is never the real CLI.
     pub(in crate::chat) fn seed_chat_scripted(
         cx: &mut TestAppContext,
-        timeline: Timeline,
+        log: Vec<agent::AgentEvent>,
         paged: bool,
         provider: Option<agent::ProviderKind>,
         script: bool,
@@ -1775,7 +1921,7 @@ pub(crate) mod tests {
         crate::store::tests::LocalHostDriver,
         Option<ScriptedHandles>,
     ) {
-        let (host, session_id, timeline) = seeded_chat_host_on(cx, timeline, paged, provider);
+        let (host, session_id) = seeded_chat_host_on(cx, log, paged, provider);
         let scripted = provider.filter(|_| script).map(|provider| {
             let scripted = tcode_runtime::app::scripted_provider(provider);
             let handles = (scripted.commands.clone(), scripted.events.clone());
@@ -1817,9 +1963,6 @@ pub(crate) mod tests {
                 store.baseline_ready()
                     && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
-        });
-        workspace_store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         driver.wait_until(cx, "Git status", |cx| {
             workspace_store.read_with(cx, |store, cx| {
@@ -2034,6 +2177,16 @@ pub(crate) mod tests {
                     truncated: false,
                 },
             );
+        }
+
+        /// The host sends `events` live, one record at a time, as it records
+        /// them.
+        pub(in crate::chat) fn stream(&mut self, events: Vec<agent::AgentEvent>) {
+            for event in events {
+                let record = StoredEvent::from(event);
+                self.records.push(record.clone());
+                self.event(events_topic(), ServerEvent::SessionEvent(record));
+            }
         }
 
         /// Answer the history page the client asked for with at most `records`

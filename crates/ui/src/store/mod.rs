@@ -7072,7 +7072,7 @@ pub(crate) mod tests {
             }
         }
 
-        fn command(&mut self, cx: &mut TestAppContext, command: Command) {
+        pub(crate) fn command(&mut self, cx: &mut TestAppContext, command: Command) {
             let link = self.link.clone();
             self.await_with_events(cx, link.command(command))
                 .expect("typed host command");

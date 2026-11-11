@@ -1458,7 +1458,7 @@ mod tests {
 
     #[gpui::test]
     fn a_paused_reader_on_the_live_window_stays_put_as_it_folds(cx: &mut TestAppContext) {
-        use gpui::{ListOffset, Modifiers, VisualTestContext, px, size};
+        use gpui::{ListOffset, Modifiers, VisualTestContext, px};
         use tcode_core::session::SteeringStatus;
 
         let tool = |id: &str| {
@@ -1495,19 +1495,11 @@ mod tests {
             ));
         }
 
-        let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+        let mut thread = ScriptedThread::new(cx, log_of(&timeline), 0, true);
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-            ChatView::new(
-                store.clone(),
-                window_state,
-                Some(session_id.clone()),
-                window,
-                cx,
-            )
-        });
+        let (view, cx) = thread.open(cx);
         let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(700.)));
+        thread.deliver(cx);
         draw_settled(cx);
         view.update(cx, |chat, cx| {
             chat.list_state.scroll_to(ListOffset::default());
@@ -1543,25 +1535,41 @@ mod tests {
                 .map(|bounds| bounds.top())
         };
 
-        let update = |timeline: &Timeline, cx: &mut VisualTestContext| {
-            store.update(cx, |store, cx| {
-                store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
-                cx.notify();
-            });
+        let update = |thread: &mut ScriptedThread, events, cx: &mut VisualTestContext| {
+            thread.send_window(events);
+            thread.deliver(cx);
             draw_settled(cx);
             draw_settled(cx);
         };
-        timeline.entries.push(tool("tool-20"));
-        timeline.entries.push(tool("tool-21"));
-        update(&timeline, cx);
+        let completed = |id: &str| match &tool(id).content {
+            EntryContent::Item(content) => agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: id.into(),
+                parent_item_id: None,
+                content: content.clone(),
+            }),
+            _ => unreachable!("a tool is an item"),
+        };
+        update(
+            &mut thread,
+            vec![completed("tool-20"), completed("tool-21")],
+            cx,
+        );
         assert_eq!(
             top(cx),
             Some(reading),
             "new activities folding the live window moved the reader"
         );
 
-        timeline.turns[0].running = false;
-        update(&timeline, cx);
+        thread.set_running(false);
+        update(
+            &mut thread,
+            vec![agent::AgentEvent::TurnCompleted {
+                turn_id: "turn-0".into(),
+                status: agent::TurnStatus::Completed,
+                usage: None,
+            }],
+            cx,
+        );
         // Settled, the activity takes the folded rows' indent but keeps its
         // line.
         assert_eq!(
@@ -1581,12 +1589,9 @@ mod tests {
 
         const TURNS: u64 = 12;
         const DELTAS: u64 = 40;
-        let (host, session_id, _) = seeded_chat_host(cx, Timeline::default(), false);
-        cx.update(|cx| cx.set_reduce_motion(true));
-        let seeded_id = session_id.clone();
         // Turn `t` takes the rows from `t * (DELTAS + 5)`; its user message is
         // the second, and the position a `tcode_control` anchor names it by.
-        let rows = smol::block_on(host.update_state_for_test(move |state, cx| {
+        let events = {
             let mut events = Vec::new();
             for turn in 0..TURNS {
                 let answer = format!("answer-{turn}");
@@ -1628,12 +1633,11 @@ mod tests {
                     usage: None,
                 });
             }
-            for (ts, event) in events.iter().enumerate() {
-                state.record_event_for_replica_test(&seeded_id, ts as u64, event, cx);
-            }
-            events.len() as u64
-        }))
-        .expect("record the streamed turns");
+            events
+        };
+        let rows = events.len() as u64;
+        let (host, session_id) = seeded_log_host(cx, events);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -1738,27 +1742,8 @@ mod tests {
     /// below the reader, until they are back at the end.
     #[gpui::test]
     fn a_streaming_reply_is_followed_until_the_reader_scrolls_up(cx: &mut TestAppContext) {
-        use gpui::{VisualTestContext, px, size};
+        use gpui::{VisualTestContext, px};
 
-        let (host, session_id, _) = seeded_chat_host(cx, Timeline::default(), false);
-        // The streaming turn's working indicator rests.
-        cx.update(|cx| cx.set_reduce_motion(true));
-        let ts = std::cell::Cell::new(0);
-        let record = |events: Vec<agent::AgentEvent>| {
-            let session_id = session_id.clone();
-            let from = ts.replace(ts.get() + events.len() as u64);
-            smol::block_on(host.update_state_for_test(move |state, cx| {
-                for (offset, event) in events.iter().enumerate() {
-                    state.record_event_for_replica_test(
-                        &session_id,
-                        from + offset as u64,
-                        event,
-                        cx,
-                    );
-                }
-            }))
-            .expect("record on the host");
-        };
         let user = |turn: usize| {
             agent::AgentEvent::ItemCompleted(agent::ThreadItem {
                 id: format!("user-{turn}"),
@@ -1769,11 +1754,6 @@ mod tests {
                 },
             })
         };
-        let seeded_id = session_id.clone();
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.residents.live.get_mut(&seeded_id).unwrap().timeline = Timeline::default();
-        }))
-        .expect("clear the seeded timeline");
         // Earlier turns fill more than a screen above the streaming one.
         let mut events = Vec::new();
         for turn in 0..4 {
@@ -1811,55 +1791,12 @@ mod tests {
                 },
             }),
         ]);
-        record(events);
-
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        driver.wait_until(cx, "workspace baseline", |cx| {
-            store.read_with(cx, |store, _| store.baseline_ready())
-        });
-        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        // A host still reading the thread's log answers with the window it
-        // read and sends the records it accepted meanwhile live after it, so
-        // the thread is all there only once its last record is.
-        driver.wait_until(cx, "the seeded turns", |cx| {
-            store.read_with(cx, |store, cx| {
-                let thread = store.sole_thread();
-                !store.chat_loading_for(thread.as_deref(), cx)
-                    && store
-                        .with_timeline_for(
-                            thread.as_deref(),
-                            |timeline| {
-                                timeline
-                                    .entries
-                                    .last()
-                                    .is_some_and(|entry| entry.id == "streaming")
-                            },
-                            cx,
-                        )
-                        .unwrap_or(false)
-            })
-        });
-        let window_state = cx.new(|_| WindowState::default());
-        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-            ChatView::new(
-                store.clone(),
-                window_state,
-                Some(session_id.clone()),
-                window,
-                cx,
-            )
-        });
+        let mut thread = ScriptedThread::new(cx, events, 0, true);
+        // The streaming turn's working indicator rests.
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (view, cx) = thread.open(cx);
         let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(700.)));
+        thread.deliver(cx);
         draw_settled(cx);
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
         assert!(list.is_following_tail());
@@ -1868,6 +1805,7 @@ mod tests {
             "the thread scrolls"
         );
 
+        let store = thread.store.clone();
         let streamed = |cx: &TestAppContext| {
             store.read_with(cx, |store, cx| {
                 store
@@ -1893,12 +1831,13 @@ mod tests {
         };
         let mut stream = |delta: usize, cx: &mut VisualTestContext| {
             let before = streamed(cx);
-            record(vec![agent::AgentEvent::Delta {
+            thread.stream(vec![agent::AgentEvent::Delta {
                 item_id: "streaming".into(),
                 kind: agent::DeltaKind::AssistantText,
                 text: format!("Paragraph {delta} of the streamed answer.\n\n"),
             }]);
-            driver.wait_until(cx, "the delta", |cx| streamed(cx) != before);
+            thread.deliver(cx);
+            assert_ne!(streamed(cx), before, "the delta arrived");
             draw_settled(cx);
         };
         for delta in 0..12 {
@@ -1943,7 +1882,6 @@ mod tests {
         scroll(-100_000., gpui::TouchPhase::Moved, cx);
         stream(24, cx);
         assert!(list.is_following_tail());
-        driver.shutdown(cx, &host);
     }
 
     #[gpui::test]
@@ -1964,44 +1902,8 @@ mod tests {
             path.display(),
             "Text after the screenshot.\n\n".repeat(80)
         ));
-        let (host, session_id, timeline) = seeded_chat_host(cx, timeline, false);
+        let (host, session_id) = seeded_chat_host(cx, timeline, false);
         cx.update(|cx| cx.set_reduce_motion(true));
-        let seeded_id = session_id.clone();
-        smol::block_on(host.update_state_for_test(move |state, cx| {
-            state.residents.live.get_mut(&seeded_id).unwrap().timeline = Timeline::default();
-            let mut ts = 0;
-            for turn in 0..timeline.turns.len() {
-                let mut events = vec![agent::AgentEvent::TurnStarted {
-                    turn_id: turn.to_string(),
-                }];
-                events.extend(
-                    timeline
-                        .entries
-                        .iter()
-                        .filter(|entry| entry.turn == turn)
-                        .map(|entry| {
-                            let EntryContent::Item(content) = &entry.content else {
-                                panic!("image fixture contains provider items");
-                            };
-                            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
-                                id: entry.id.clone(),
-                                parent_item_id: None,
-                                content: content.clone(),
-                            })
-                        }),
-                );
-                events.push(agent::AgentEvent::TurnCompleted {
-                    turn_id: turn.to_string(),
-                    status: agent::TurnStatus::Completed,
-                    usage: None,
-                });
-                for event in events {
-                    state.record_event_for_replica_test(&seeded_id, ts, &event, cx);
-                    ts += 1;
-                }
-            }
-        }))
-        .expect("record inline image conversation");
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -2140,9 +2042,9 @@ mod tests {
             Refused,
         }
         for case in [Outcome::Delivered, Outcome::SettingOff, Outcome::Refused] {
-            let (host, session_id, timeline) = seeded_chat_host_on(
+            let (host, session_id) = seeded_chat_host_on(
                 cx,
-                synthetic_markdown_timeline(15),
+                log_of(&synthetic_markdown_timeline(15)),
                 false,
                 Some(agent::ProviderKind::ClaudeCode),
             );
@@ -2198,9 +2100,6 @@ mod tests {
                 store.read_with(cx, |store, cx| {
                     !store.chat_loading_for(store.sole_thread().as_deref(), cx)
                 })
-            });
-            store.update(cx, |store, cx| {
-                store.set_session_replica_for_test(session_id.clone(), timeline, cx)
             });
             let window_state = cx.new(|_| WindowState::default());
             let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
@@ -2280,26 +2179,21 @@ mod tests {
                 self.0.read(cx).frame()
             }
         }
-        let full = synthetic_markdown_timeline(120);
-        let mut tail = full.clone();
-        tail.turns.drain(..20);
-        tail.entries.retain(|entry| entry.turn >= 20);
-        for entry in &mut tail.entries {
-            Arc::make_mut(entry).turn -= 20;
-        }
-        let (store, window_state, session_id) = seed_chat(cx, tail);
+        // Five records a turn: its start, three items and its end. The
+        // thread opens on its last thirty turns.
+        const RECORDS: usize = 5;
+        let log = |turns: usize| log_of(&synthetic_markdown_timeline(turns));
+        let mut thread = ScriptedThread::new(cx, log(120), 90 * RECORDS, false);
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (root, cx) = cx.add_window_view(|window, cx| {
-            TouchChat(cx.new(|cx| {
-                ChatView::new(
-                    store.clone(),
-                    window_state,
-                    Some(session_id.clone()),
-                    window,
-                    cx,
-                )
-            }))
-        });
+        let store = thread.store.clone();
+        let window_state = cx.new(|_| WindowState::default());
+        let (root, cx) =
+            cx.add_window_view(|window, cx| {
+                TouchChat(cx.new(|cx| {
+                    ChatView::new(store, window_state, Some(THREAD.to_owned()), window, cx)
+                }))
+            });
+        thread.deliver(cx);
         let view = root.read_with(cx, |root, _| root.0.clone());
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
         draw_settled(cx);
@@ -2338,10 +2232,12 @@ mod tests {
         let before = list.logical_scroll_top();
         assert!(before.item_ix > 0);
         assert_eq!(before.offset_in_item, px(7.));
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id.clone(), full, cx);
-            cx.notify();
-        });
+        // A page of twenty earlier turns.
+        assert!(
+            thread.answer_page(20 * RECORDS).is_some(),
+            "a page was asked for"
+        );
+        thread.deliver(cx);
         draw_settled(cx);
         assert!(
             cx.debug_bounds("scroll-to-end").is_some(),
@@ -2358,14 +2254,8 @@ mod tests {
         draw_settled(cx);
         assert!(cx.debug_bounds("scroll-to-end").is_none());
         assert!(list.is_following_tail());
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(
-                session_id.clone(),
-                synthetic_markdown_timeline(121),
-                cx,
-            );
-            cx.notify();
-        });
+        thread.stream(log(121).split_off(120 * RECORDS));
+        thread.deliver(cx);
         draw_settled(cx);
         assert!(cx.debug_bounds("scroll-to-end").is_none());
         assert!(list.is_following_tail());
@@ -2379,14 +2269,8 @@ mod tests {
         );
         assert!(!list.is_following_tail());
         let before = list.logical_scroll_top();
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(
-                session_id.clone(),
-                synthetic_markdown_timeline(122),
-                cx,
-            );
-            cx.notify();
-        });
+        thread.stream(log(122).split_off(121 * RECORDS));
+        thread.deliver(cx);
         draw_settled(cx);
         assert!(cx.debug_bounds("scroll-to-end").is_some());
         assert_eq!(
@@ -2516,21 +2400,12 @@ mod tests {
         full.entries.pop();
         full.entries
             .push(at_turn(entry("assistant-1", assistant(&long_answer)), 1));
-        let mut tail = Timeline::default();
-        tail.turns = vec![TurnMeta::default()];
-        tail.entries = vec![entry("assistant-1", assistant(&long_answer))];
-        let (store, window_state, session_id, _driver) = seed_chat_with_history(cx, tail, true);
+        // The window holds the long answer and its turn's end: records 8
+        // and 9 of the turns' starts, items and ends.
+        let mut thread = ScriptedThread::new(cx, log_of(&full), 8, false);
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-            ChatView::new(
-                store.clone(),
-                window_state,
-                Some(session_id.clone()),
-                window,
-                cx,
-            )
-        });
-        cx.simulate_resize(gpui::size(px(1024.), px(700.)));
+        let (view, cx) = thread.open(cx);
+        thread.deliver(cx);
         for _ in 0..2 {
             view.update(cx, |_, cx| cx.notify());
             draw_settled(cx);
@@ -2552,10 +2427,11 @@ mod tests {
         });
         view.update(cx, |_, cx| cx.notify());
         draw_settled(cx);
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, full, cx);
-            cx.notify();
-        });
+        assert!(
+            thread.answer_page(8).is_some(),
+            "the first page was asked for"
+        );
+        thread.deliver(cx);
         draw_settled(cx);
         let anchor = list.logical_scroll_top();
         // The page adds the earlier turn's three rows and the user bubble

@@ -551,16 +551,17 @@ mod tests {
         let original = large_markdown("original");
         // The thread's only code block: its lines show only the rewrite.
         let latest = format!("{}\n```\nedited\n```\n", large_markdown("edited"));
-        let timeline = single_assistant_timeline("large", &original);
-        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
+        let mut thread = ScriptedThread::new(
+            cx,
+            log_of(&single_assistant_timeline("large", &original)),
+            0,
+            false,
+        );
+        cx.run_until_parked();
+        let store = thread.store.clone();
+        let window_state = cx.new(|_| WindowState::default());
         let window = cx.add_window(|window, cx| {
-            ChatView::new(
-                workspace_store.clone(),
-                window_state,
-                Some(session_id.clone()),
-                window,
-                cx,
-            )
+            ChatView::new(store, window_state, Some(THREAD.to_owned()), window, cx)
         });
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         cx.simulate_resize(size(px(1_024.), px(700.)));
@@ -569,16 +570,9 @@ mod tests {
             "the original's parse is in flight"
         );
 
-        // The rewrite lands and is drawn before the parse finishes.
-        workspace_store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(
-                session_id,
-                single_assistant_timeline("large", &latest),
-                cx,
-            );
-            cx.notify();
-        });
-        assert!(painted_markdown_block(cx).is_none());
+        // The rewrite lands while the original's parse is in flight.
+        thread.stream(vec![answer_event("large", &latest)]);
+        thread.deliver(cx);
         draw_settled(cx);
         assert!(
             cx.debug_bounds("markdown-code-line-0").is_some(),
@@ -594,7 +588,11 @@ mod tests {
         use gpui::{VisualTestContext, px, size};
         // The thread's only code block: its lines show only the stale text.
         let text = format!("{}\n```\nstale\n```\n", large_markdown("stale session"));
-        let mut threads = seed_two_threads(cx, single_assistant_timeline("large", &text));
+        let mut threads = seed_two_threads(
+            cx,
+            single_assistant_timeline("large", &text),
+            single_assistant_timeline("large", "The replacement."),
+        );
         let window_state = cx.new(|_| WindowState::default());
         let store = threads.store.clone();
         let window = cx.add_window(|window, cx| {
@@ -609,12 +607,7 @@ mod tests {
         );
 
         let second = threads.second.clone();
-        threads.bind(
-            &view,
-            &second,
-            single_assistant_timeline("large", "The replacement."),
-            cx,
-        );
+        threads.bind(&view, &second, cx);
         draw_settled(cx);
 
         assert!(

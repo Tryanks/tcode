@@ -537,7 +537,7 @@ mod tests {
     }
 
     fn open(cx: &mut TestAppContext) -> (TwoThreads, Entity<Panes>, &mut VisualTestContext) {
-        let threads = seed_two_threads(cx, turns());
+        let threads = seed_two_threads(cx, turns(), single_assistant_timeline("other", "Other"));
         cx.update(|cx| cx.set_reduce_motion(true));
         let store = threads.store.clone();
         let window_state = cx.new(|_| WindowState::default());
@@ -756,12 +756,7 @@ mod tests {
         jump(&threads, 3, cx);
         assert_eq!(marked(&panes, cx), Some(3));
         let second = threads.second.clone();
-        threads.bind(
-            &chat,
-            &second,
-            single_assistant_timeline("other", "Other"),
-            cx,
-        );
+        threads.bind(&chat, &second, cx);
         draw_settled(cx);
         assert_eq!(marked(&panes, cx), None, "another thread kept the mark");
         threads.shutdown(cx);

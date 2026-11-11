@@ -897,7 +897,7 @@ mod tests {
         cx: &mut TestAppContext,
         timeline: impl Fn() -> Timeline,
     ) -> (TwoThreads, &mut VisualTestContext) {
-        let mut threads = seed_two_threads(cx, timeline());
+        let mut threads = seed_two_threads(cx, timeline(), Timeline::default());
         let store = threads.store.clone();
         let window_state = cx.new(|_| WindowState::default());
         let (chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
@@ -905,7 +905,7 @@ mod tests {
         });
         cx.simulate_resize(size(px(1_400.), px(560.)));
         let first = threads.first.clone();
-        threads.bind(&chat, &first, timeline(), cx);
+        threads.bind(&chat, &first, cx);
         draw_settled(cx);
         (threads, cx)
     }
