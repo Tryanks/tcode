@@ -1,0 +1,15 @@
+#!/bin/sh
+# rc.exe as a dependency's build script calls it for the MSVC target
+# (`rc /nologo /fo<out> <in>`), answered by llvm-rc. A Unix path starts with
+# a slash, which rc reads as an option, so the files are named relatively.
+out=; in=
+for arg in "$@"; do
+  case "$arg" in
+    /nologo) ;;
+    /fo*) out="${arg#/fo}" ;;
+    *) in="$arg" ;;
+  esac
+done
+cd "$(dirname "$in")" || exit 1
+"${LLVM_RC:-llvm-rc}" -FO "$(basename "$out")" "$(basename "$in")" || exit 1
+[ "$(dirname "$out")" = "$(pwd)" ] || mv "$(basename "$out")" "$out"
