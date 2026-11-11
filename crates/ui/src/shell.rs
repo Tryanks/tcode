@@ -8267,6 +8267,89 @@ pub(crate) mod tests {
         );
     }
 
+    /// Stopping a plugin change from its toast ends the command the change
+    /// started, whatever that command was doing. The profile's harness is
+    /// set to a program that runs no harness: `/bin/sh`, which pi's install
+    /// arguments (`install <source>`) have run the script `install` in the
+    /// profile's home. The script opens the source, a FIFO this test reads,
+    /// and sleeps holding it, so the read ends only when that process ends.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn stopping_a_plugin_change_from_its_toast_ends_the_command_it_started(
+        cx: &mut TestAppContext,
+    ) {
+        use std::io::Read as _;
+        use tcode_core::settings::ProfileSettingsPatch;
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+        // The change's toast spins while it runs, which rests only with
+        // motion reduced.
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let root = crate::store::tests::scratch_root("plugin-change-stop");
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("install"), "exec 3>\"$1\"\nexec sleep 86400\n").unwrap();
+        let source = root.join("source");
+        assert!(
+            tcode_services::process::command("mkfifo")
+                .arg(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let disk = tcode_services::store::SessionStore::open_at(root.join("data")).unwrap();
+        let (_shell, store, host, mut driver, cx) = mount_on_host(cx, disk, None);
+        for patch in [
+            ProfileSettingsPatch::SetBinaryPath(Some("/bin/sh".into())),
+            ProfileSettingsPatch::SetHomePath(Some(home.clone())),
+        ] {
+            driver.command(
+                cx,
+                Command::UpdateProfileSettings {
+                    profile_id: "pi".into(),
+                    patch,
+                },
+            );
+        }
+        // A change is made to a listing; this one fails (`sh list`), as a
+        // listing may.
+        driver.command(
+            cx,
+            Command::RefreshProviderPlugins {
+                profile_id: "pi".into(),
+                cwd: None,
+            },
+        );
+        driver.wait_until(cx, "pi's listing", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .provider_plugin_catalog("pi", None)
+                    .is_some_and(|catalog| !catalog.loading)
+            })
+        });
+        driver.command(
+            cx,
+            Command::InstallProviderPlugin {
+                profile_id: "pi".into(),
+                entry_id: source.to_string_lossy().into_owned(),
+                scope: agent::PluginScope::User,
+                cwd: None,
+            },
+        );
+        // Opening the FIFO returns once the command has opened it too.
+        let mut held = std::fs::File::open(&source).unwrap();
+        driver.settle_until(cx, "the change's toast", |cx| {
+            cx.debug_bounds("toast-action").is_some()
+        });
+        click("toast-action", cx);
+        let mut rest = Vec::new();
+        held.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty());
+
+        driver.shutdown(cx, &host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// A failed git action's toast carries git's own words, which Copy
     /// error gives back as they came, and its Retry sends the host the
     /// action that failed, as it was asked.
