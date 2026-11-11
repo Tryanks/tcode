@@ -408,11 +408,6 @@ impl Agents {
         self.needs_settle.len() + self.running.len() + self.native.len() + self.done.len()
     }
 
-    /// Dispatched agents still running and finished ones awaiting settle.
-    pub(crate) fn outstanding(&self) -> usize {
-        self.running.len() + self.needs_settle.len()
-    }
-
     /// The cue on the panel toggle and the phone pill: running work first,
     /// then results awaiting settle.
     pub(crate) fn cue(&self, cx: &App) -> Option<Hsla> {
@@ -1716,7 +1711,7 @@ mod tests {
             };
             assert_eq!(keys(&agents.settled), ["settled"]);
             assert_eq!(keys(&agents.running), ["unsettled"]);
-            assert_eq!(agents.outstanding(), 1);
+            assert_eq!(agents.count(), 1);
         });
         link.close();
     }
