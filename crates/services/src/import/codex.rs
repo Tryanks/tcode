@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::io::{BufRead, BufReader, Read as _};
+use std::path::{Path, PathBuf};
 
 use agent::{ItemContent, ItemStatus, ThreadItem, ToolOutput};
 use serde_json::Value;
@@ -56,6 +56,97 @@ pub(super) fn is_read_rollout(path: &Path) -> bool {
     }
 }
 
+/// The records a rollout continues from, oldest first, as Codex assembles a
+/// thread's history (`resolve_rollout_lineage`, thread-store
+/// `local/rollout_lineage.rs` at `rust-v0.167.0`). A rollout that
+/// `thread/revert` or a fork wrote names in its `session_meta.history_base`
+/// (`HistoryPosition`, `protocol/src/protocol.rs`) the rollout it continues
+/// and the byte offset just past the last record it takes from it; that
+/// rollout may continue another in turn.
+fn inherited(path: &Path, meta: &Value, seen: &mut HashSet<String>) -> Result<Vec<String>, String> {
+    let Some(base) = meta.pointer("/payload/history_base") else {
+        return Ok(Vec::new());
+    };
+    let malformed = || format!("{} has an unreadable history_base", path.display());
+    let rollout = base
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .ok_or_else(malformed)?;
+    let end = base
+        .get("end_byte_offset")
+        .and_then(Value::as_u64)
+        .ok_or_else(malformed)?;
+    if !seen.insert(rollout.to_owned()) {
+        return Err(format!(
+            "the history of {} returns to rollout {rollout}",
+            path.display()
+        ));
+    }
+    let base_path = find_rollout(path, rollout)?;
+    let read = |err: std::io::Error| format!("failed to read {}: {err}", base_path.display());
+    let mut bytes = Vec::new();
+    open_rollout(&base_path)
+        .map_err(read)?
+        .take(end)
+        .read_to_end(&mut bytes)
+        .map_err(read)?;
+    if u64::try_from(bytes.len()).ok() != Some(end) {
+        return Err(format!(
+            "{} ends before the history {} continues from",
+            base_path.display(),
+            path.display()
+        ));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|err| format!("failed to read {}: {err}", base_path.display()))?;
+    let own: Vec<String> = text.lines().map(str::to_owned).collect();
+    let base_meta = own
+        .first()
+        .and_then(|line| serde_json::from_str::<Value>(line).ok())
+        .unwrap_or(Value::Null);
+    let mut lines = inherited(&base_path, &base_meta, seen)?;
+    lines.extend(own);
+    Ok(lines)
+}
+
+/// The rollout whose file name carries `rollout` as its rollout id, in the
+/// sessions and then the archived sessions of the Codex home `path` is in
+/// (`find_rollout_path_by_rollout_id`, `rollout/src/list.rs`).
+fn find_rollout(path: &Path, rollout: &str) -> Result<PathBuf, String> {
+    let home = path
+        .ancestors()
+        .find(|dir| {
+            dir.file_name()
+                .is_some_and(|name| name == "sessions" || name == "archived_sessions")
+        })
+        .and_then(Path::parent)
+        .ok_or_else(|| format!("{} is not in a Codex home", path.display()))?;
+    let mut unreadable = Vec::new();
+    for sessions in ["sessions", "archived_sessions"] {
+        let found = super::collect_files(
+            &home.join(sessions),
+            &|candidate| {
+                is_read_rollout(candidate)
+                    && rollout_name(candidate).is_some_and(|(_, _, id)| id == rollout)
+            },
+            &mut unreadable,
+        );
+        if let Some(found) = found.into_iter().next() {
+            return Ok(found);
+        }
+    }
+    let mut error = format!(
+        "rollout {rollout}, whose history {} continues, is not in {}",
+        path.display(),
+        home.display()
+    );
+    for path in unreadable {
+        error.push_str("; ");
+        error.push_str(&path);
+    }
+    Err(error)
+}
+
 pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread, String> {
     let fallback_ts = file_modified_ms(path);
     let read = |err: std::io::Error| format!("failed to read {}: {err}", path.display());
@@ -77,7 +168,11 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
         ));
     }
 
-    let first_meta_ts = meta
+    let inherited = inherited(path, &meta, &mut HashSet::new())?;
+    let first_meta_ts = inherited
+        .first()
+        .and_then(|line| serde_json::from_str::<Value>(line).ok())
+        .unwrap_or(meta)
         .get("timestamp")
         .and_then(timestamp_ms)
         .unwrap_or(fallback_ts);
@@ -87,8 +182,12 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
     let mut pending = HashMap::<String, usize>::new();
     let mut next_id = 0_u64;
 
-    for line in lines {
-        let line = line.map_err(read)?;
+    for line in inherited
+        .into_iter()
+        .map(Ok)
+        .chain(lines.map(|line| line.map_err(read)))
+    {
+        let line = line?;
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };

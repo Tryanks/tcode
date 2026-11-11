@@ -110,6 +110,10 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Ext
         ));
     }
 
+    // `thread/revert` gives a thread a new rollout under the same thread id,
+    // and Codex reads the one whose name is newest
+    // (`find_thread_path_by_id_from_filenames`, `rollout/src/list.rs`).
+    let mut codex = HashMap::<String, ((String, String), PathBuf, ExternalThread)>::new();
     for root in &roots.codex_session_roots {
         let files = collect_files(root, &super::codex::is_read_rollout, &mut unreadable);
         for path in files {
@@ -140,23 +144,33 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Ext
             if originator == Some("tcode") {
                 continue;
             }
-            found.push((
-                PathBuf::from(cwd),
-                ExternalThread {
-                    source: if originator == Some("Codex Desktop") {
-                        SourceTool::CodexDesktop
-                    } else {
-                        SourceTool::CodexCli
-                    },
-                    file: path.clone(),
-                    external_id: format!("codex:{id}"),
-                    title_hint: None,
-                    last_active_ms: file_modified_ms(&path)
-                        .max(value.get("timestamp").and_then(timestamp_ms).unwrap_or(0)),
+            let newest = super::codex::rollout_name(&path)
+                .map(|(timestamp, _, rollout)| (timestamp.to_owned(), rollout.to_owned()))
+                .unwrap_or_default();
+            let thread = ExternalThread {
+                source: if originator == Some("Codex Desktop") {
+                    SourceTool::CodexDesktop
+                } else {
+                    SourceTool::CodexCli
                 },
-            ));
+                file: path.clone(),
+                external_id: format!("codex:{id}"),
+                title_hint: None,
+                last_active_ms: file_modified_ms(&path)
+                    .max(value.get("timestamp").and_then(timestamp_ms).unwrap_or(0)),
+            };
+            if codex
+                .get(&thread.external_id)
+                .is_none_or(|(kept, ..)| *kept < newest)
+            {
+                codex.insert(
+                    thread.external_id.clone(),
+                    (newest, PathBuf::from(cwd), thread),
+                );
+            }
         }
     }
+    found.extend(codex.into_values().map(|(_, cwd, thread)| (cwd, thread)));
 
     let mut groups = HashMap::<PathBuf, Vec<ExternalThread>>::new();
     for (cwd, thread) in found {

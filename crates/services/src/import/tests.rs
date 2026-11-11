@@ -176,6 +176,145 @@ fn a_rollout_codex_compressed_is_listed_and_imports_as_it_was_written() {
     std::fs::remove_dir_all(&home).unwrap();
 }
 
+/// A thread `thread/revert` rewound is listed once, by the rollout Codex now
+/// reads for it, and shows the history Codex assembles for it: what it kept
+/// of the rollout it continues, then what followed the revert. Shapes from
+/// `rust-v0.167.0`: a reverted rollout is named `rollout-<time>-<thread
+/// id>_<rollout id>.jsonl` (`rollout_file_name.rs`) and its `session_meta`
+/// carries `history_base` {`thread_id`: the rollout id of the rollout it
+/// continues, `end_ordinal_exclusive`, `end_byte_offset`}
+/// (`HistoryPosition`, `protocol/src/protocol.rs`); a paginated rollout's
+/// records carry their `ordinal` (`decode_rollout_line`, `rollout/src/lib.rs`).
+/// The continued rollout is archived and compressed here, which Codex looks
+/// through too (`find_rollout_path_by_rollout_id`). Content invented.
+#[test]
+fn a_reverted_codex_thread_shows_the_history_it_kept_and_what_followed() {
+    let home = std::env::temp_dir().join(format!("tcode-codex-{}", uuid::Uuid::new_v4()));
+    let cwd = home.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let thread = "00000000-0000-7000-8000-000000000031";
+    let meta = |ordinal: u64, time: &str, base: &str| {
+        format!(
+            r#"{{"timestamp":"{time}","ordinal":{ordinal},"type":"session_meta","payload":{{"id":"{thread}","timestamp":"{time}","cwd":"{}","originator":"codex_cli_rs","cli_version":"0.167.0","history_mode":"paginated"{base}}}}}"#,
+            cwd.display()
+        )
+    };
+    let message = |ordinal: u64, time: &str, role: &str, kind: &str, text: &str| {
+        format!(
+            r#"{{"timestamp":"{time}","ordinal":{ordinal},"type":"response_item","payload":{{"type":"message","role":"{role}","content":[{{"type":"{kind}","text":"{text}"}}]}}}}"#
+        )
+    };
+    let kept = [
+        meta(0, "2026-01-02T03:04:05.000Z", ""),
+        message(
+            1,
+            "2026-01-02T03:04:06.000Z",
+            "user",
+            "input_text",
+            "Write the plan",
+        ),
+        message(
+            2,
+            "2026-01-02T03:04:07.000Z",
+            "assistant",
+            "output_text",
+            "Planned.",
+        ),
+    ]
+    .map(|line| line + "\n")
+    .concat();
+    let original = kept.clone()
+        + &[
+            message(
+                3,
+                "2026-01-02T03:04:08.000Z",
+                "user",
+                "input_text",
+                "Now build it",
+            ),
+            message(
+                4,
+                "2026-01-02T03:04:09.000Z",
+                "assistant",
+                "output_text",
+                "Built.",
+            ),
+        ]
+        .map(|line| line + "\n")
+        .concat();
+    let archived = home.join("archived_sessions");
+    std::fs::create_dir_all(&archived).unwrap();
+    std::fs::write(
+        archived.join(format!("rollout-2026-01-02T03-04-05-{thread}.jsonl.zst")),
+        zstd::stream::encode_all(original.as_bytes(), 3).unwrap(),
+    )
+    .unwrap();
+    let base = format!(
+        r#","history_base":{{"thread_id":"{thread}","end_ordinal_exclusive":3,"end_byte_offset":{}}}"#,
+        kept.len()
+    );
+    let day = home.join("sessions/2026/01/03");
+    std::fs::create_dir_all(&day).unwrap();
+    let reverted = day.join(format!(
+        "rollout-2026-01-03T04-05-06-{thread}_00000000-0000-7000-8000-000000000032.jsonl"
+    ));
+    std::fs::write(
+        &reverted,
+        [
+            meta(3, "2026-01-03T04:05:06.000Z", &base),
+            message(
+                4,
+                "2026-01-03T04:05:07.000Z",
+                "user",
+                "input_text",
+                "Build it smaller",
+            ),
+            message(
+                5,
+                "2026-01-03T04:05:08.000Z",
+                "assistant",
+                "output_text",
+                "Built smaller.",
+            ),
+        ]
+        .map(|line| line + "\n")
+        .concat(),
+    )
+    .unwrap();
+
+    let history = super::scan_recent_dirs(
+        &super::ExternalRoots {
+            claude_projects: None,
+            claude_desktop_meta: None,
+            codex_session_roots: vec![home.join("sessions"), archived],
+        },
+        &[],
+    );
+    let listed: Vec<_> = history
+        .dirs
+        .into_iter()
+        .flat_map(|dir| dir.threads)
+        .map(|thread| thread.file)
+        .collect();
+    assert_eq!(listed, std::slice::from_ref(&reverted));
+    let assistant = |text: &str| {
+        Some(ItemContent::AssistantMessage {
+            text: text.into(),
+            summarized: false,
+        })
+    };
+    assert_eq!(
+        shown(codex::convert(&reverted, "codex:example").unwrap()),
+        [
+            user("Write the plan"),
+            assistant("Planned."),
+            user("Build it smaller"),
+            assistant("Built smaller."),
+        ]
+    );
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
 fn command(
     command: &str,
     output: &str,
