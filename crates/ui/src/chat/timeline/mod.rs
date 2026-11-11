@@ -1473,6 +1473,7 @@ mod tests {
                     input: serde_json::json!({ "path": id }),
                     output: None,
                     status: ItemStatus::Completed,
+                    family: None,
                 }),
             )
         };

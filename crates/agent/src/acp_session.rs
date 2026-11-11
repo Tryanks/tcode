@@ -37,8 +37,8 @@ use crate::{
     ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus,
     McpRegistration, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderCommand,
     ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
-    SessionOptions, ThreadItem, TokenUsage, ToolName, ToolOutput, TurnStatus, UserInputDelivery,
-    UserInputQuestion,
+    SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolName, ToolOutput, TurnStatus,
+    UserInputDelivery, UserInputQuestion,
 };
 
 /// Option-descriptor ids. The composer renders an ACP agent's own
@@ -2287,6 +2287,21 @@ fn tool_call_content(tool: &ToolState, status: ItemStatus, output: String) -> It
         input: tool.raw_input.clone().unwrap_or(Value::Null),
         output: (!output.is_empty()).then_some(output),
         status,
+        family: tool_family(tool).map(Box::new),
+    }
+}
+
+/// What a call is, as its ACP `kind` and `locations` say: a read of the
+/// file it locates, from the line it locates.
+fn tool_family(tool: &ToolState) -> Option<ToolFamily> {
+    let location = tool.locations.first();
+    match tool.kind {
+        acp::ToolKind::Read => location.map(|location| ToolFamily::Read {
+            path: location.path.to_string_lossy().into_owned(),
+            first_line: location.line.map(u64::from),
+            note: None,
+        }),
+        _ => None,
     }
 }
 
@@ -3269,7 +3284,8 @@ mod tests {
         assert!(
             matches!(events.as_slice(), [AgentEvent::ItemStarted(ThreadItem {
             content:ItemContent::ToolCall {
-            image_reads: _, name, input, output:Some(output), status:ItemStatus::Completed }, ..
+            image_reads: _, name, input, output:Some(output), status:ItemStatus::Completed,
+            .. }, ..
         })] if name == "Opaque edit" && input == &json!({"path":"file.rs"}) && output == "done")
         );
     }
@@ -3315,6 +3331,7 @@ mod tests {
             output: Some("body".into()),
             status: ItemStatus::Completed,
             image_reads: Vec::new(),
+            family: None,
         };
         for (kind, expected) in [
             ("read", card.clone()),
@@ -3343,6 +3360,36 @@ mod tests {
                 other => panic!("{kind}: expected ItemStarted, got {other:?}"),
             }
         }
+    }
+
+    /// A `read` call is a read of the file its location names, from the
+    /// line it names (`ToolKind::Read`, `ToolCallLocation {path, line}` of
+    /// agent-client-protocol-schema 1.5.0).
+    #[test]
+    fn a_read_is_the_file_and_line_it_locates() {
+        let events = state().apply_update(update(json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "t1",
+            "title": "Read file",
+            "kind": "read",
+            "status": "completed",
+            "locations": [{ "path": "/repo/x.rs", "line": 12 }],
+            "content": [{ "type": "content", "content": { "type": "text", "text": "body" } }]
+        })));
+        let [AgentEvent::ItemStarted(item)] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        let ItemContent::ToolCall { family, .. } = &item.content else {
+            panic!("{item:?}");
+        };
+        assert_eq!(
+            family.as_deref(),
+            Some(&ToolFamily::Read {
+                path: "/repo/x.rs".into(),
+                first_line: Some(12),
+                note: None,
+            })
+        );
     }
 
     #[test]

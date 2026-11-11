@@ -3042,6 +3042,11 @@ pub enum ItemContent {
         input: serde_json::Value,
         output: Option<String>,
         status: ItemStatus,
+        /// What the call is, when its adapter knows the harness's tool for
+        /// one of the families every harness has: the UI draws it from these
+        /// fields, never from the tool's name or input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        family: Option<Box<ToolFamily>>,
     },
     Subagent {
         agent_type: String,
@@ -3069,6 +3074,25 @@ pub enum ItemContent {
     Other {
         provider_kind: String,
         summary: String,
+    },
+}
+
+/// A tool call as its adapter read it from the harness's own tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolFamily {
+    /// A read of a file. The call's `output` is what was read, without the
+    /// numbers a harness put before its lines.
+    Read {
+        path: String,
+        /// The number of the output's first line, when the harness said
+        /// which line the read began at.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_line: Option<u64>,
+        /// The harness's own words after the lines it read: that the file
+        /// goes on, and where to continue.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
 }
 
@@ -3638,6 +3662,20 @@ mod turn_diff_tests {
 #[cfg(test)]
 mod thread_item_serde_tests {
     use super::*;
+
+    /// A call recorded before calls said what they are (v0.4.0-rc.3's
+    /// `ToolCall`, which had no `family`) reads as a call of no family.
+    #[test]
+    fn a_call_recorded_without_a_family_reads_as_one_of_none() {
+        let item: ThreadItem = serde_json::from_str(
+            r#"{"id":"t1","content":{"kind":"tool_call","name":"Read","input":{"file_path":"a.rs"},"output":"1\tfn a() {}","status":"completed"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            item.content,
+            ItemContent::ToolCall { family: None, ref name, .. } if name == "Read"
+        ));
+    }
 
     #[test]
     fn cursor_and_grok_use_their_wire_names() {

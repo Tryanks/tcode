@@ -32,7 +32,7 @@ pub(in crate::chat) mod window;
 
 use std::{any::Any, collections::HashMap, ops::Deref, path::Path, rc::Rc, sync::Arc};
 
-use agent::{Attachment, ItemContent, ItemStatus, ToolName};
+use agent::{Attachment, ItemContent, ItemStatus, ToolFamily, ToolName};
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
@@ -59,6 +59,7 @@ pub(in crate::chat) struct Call<'a> {
     pub(in crate::chat) output: Option<&'a str>,
     pub(in crate::chat) images: &'a [Attachment],
     pub(in crate::chat) status: ItemStatus,
+    pub(in crate::chat) family: Option<&'a ToolFamily>,
 }
 
 impl<'a> Call<'a> {
@@ -69,6 +70,7 @@ impl<'a> Call<'a> {
             input,
             output,
             status,
+            family,
         }) = &entry.content
         else {
             return None;
@@ -80,6 +82,7 @@ impl<'a> Call<'a> {
             output: output.as_deref(),
             images: image_reads,
             status: *status,
+            family: family.as_deref(),
         })
     }
 

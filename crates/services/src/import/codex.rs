@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read as _};
 use std::path::{Path, PathBuf};
 
-use agent::{ItemContent, ItemStatus, ThreadItem, ToolOutput};
+use agent::{ItemContent, ItemStatus, ThreadItem, ToolFamily, ToolOutput};
 use serde_json::Value;
 
 use super::{ConvertedEntry, ConvertedThread, file_modified_ms, timestamp_ms};
@@ -281,6 +281,16 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             }
                             _ => ItemContent::ToolCall {
                                 image_reads: Vec::new(),
+                                family: (name == VIEW_IMAGE)
+                                    .then(|| input.get("path").and_then(Value::as_str))
+                                    .flatten()
+                                    .map(|path| {
+                                        Box::new(ToolFamily::Read {
+                                            path: path.to_owned(),
+                                            first_line: None,
+                                            note: None,
+                                        })
+                                    }),
                                 name,
                                 input,
                                 output: None,
@@ -326,6 +336,21 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                     };
                                     *output = printed.to_owned();
                                 }
+                            }
+                            // An image Codex was shown is the `imageView`
+                            // item it reports live (`view_image.rs`); one it
+                            // could not show stays the call, with its error.
+                            ItemContent::ToolCall { name, input, .. }
+                                if name == VIEW_IMAGE && !failed && !result.images.is_empty() =>
+                            {
+                                item.content = ItemContent::ImageRead {
+                                    path: input
+                                        .get("path")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                    image: result.images.into_iter().next(),
+                                };
                             }
                             ItemContent::ToolCall {
                                 image_reads,
@@ -402,6 +427,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                 input: payload.get("arguments").cloned().unwrap_or(Value::Null),
                                 output: None,
                                 status: ItemStatus::InProgress,
+                                family: None,
                             },
                             Some(&call_id),
                         );
@@ -527,13 +553,8 @@ fn roll_back(entries: &mut Vec<ConvertedEntry>, pending: &mut HashMap<String, us
         .filter(|(_, entry)| {
             matches!(
                 entry,
-                ConvertedEntry::Item {
-                    item: ThreadItem {
-                        content: ItemContent::UserMessage { .. },
-                        ..
-                    },
-                    ..
-                }
+                ConvertedEntry::Item { item, .. }
+                    if matches!(item.content, ItemContent::UserMessage { .. })
             )
         })
         .map(|(index, _)| index)
@@ -582,14 +603,14 @@ fn push_item(
     *next_id += 1;
     entries.push(ConvertedEntry::Item {
         ts,
-        item: ThreadItem {
+        item: Box::new(ThreadItem {
             id: id
                 .filter(|id| !id.is_empty())
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("imported-codex-{next_id}")),
             parent_item_id: None,
             content,
-        },
+        }),
     });
 }
 
@@ -633,6 +654,8 @@ fn aborted(output: &str) -> bool {
 /// Codex 0.167's tool that runs a command line (`create_exec_command_tool`,
 /// `core/src/tools/handlers/shell_spec.rs`), whose `cmd` is the command.
 const EXEC_COMMAND: &str = "exec_command";
+/// The tool that shows Codex an image (`view_image_spec.rs`).
+const VIEW_IMAGE: &str = "view_image";
 
 /// A command's result as Codex words it for the model: a header of
 /// `Key: value` lines, the code it exited with among them, then `Output:`

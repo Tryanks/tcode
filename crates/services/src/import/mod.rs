@@ -102,7 +102,7 @@ struct ConvertedThread {
 
 #[derive(Debug)]
 enum ConvertedEntry {
-    Item { ts: u64, item: ThreadItem },
+    Item { ts: u64, item: Box<ThreadItem> },
     Compacted { ts: u64 },
 }
 
@@ -158,14 +158,10 @@ pub fn import_thread(
 
     let user_messages = || {
         converted.entries.iter().filter_map(|entry| match entry {
-            ConvertedEntry::Item {
-                item:
-                    ThreadItem {
-                        content: agent::ItemContent::UserMessage { text, .. },
-                        ..
-                    },
-                ..
-            } => Some(text.as_str()),
+            ConvertedEntry::Item { item, .. } => match &item.content {
+                agent::ItemContent::UserMessage { text, .. } => Some(text.as_str()),
+                _ => None,
+            },
             _ => None,
         })
     };
@@ -218,7 +214,7 @@ pub fn import_thread(
                     }
                     turn_number += 1;
                     let turn_id = format!("imported-turn-{turn_number}");
-                    events.push((ts, AgentEvent::ItemCompleted(item)));
+                    events.push((ts, AgentEvent::ItemCompleted(*item)));
                     events.push((
                         ts,
                         AgentEvent::TurnStarted {
@@ -227,7 +223,7 @@ pub fn import_thread(
                     ));
                     open_turn = Some(turn_id);
                 } else {
-                    events.push((ts, AgentEvent::ItemCompleted(item)));
+                    events.push((ts, AgentEvent::ItemCompleted(*item)));
                 }
             }
             ConvertedEntry::Compacted { ts } => {

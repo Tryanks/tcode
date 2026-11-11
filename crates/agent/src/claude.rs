@@ -44,9 +44,9 @@ use crate::{
     ApprovalRequest, Attachment, CatalogRefresh, DeltaKind, FileChange, FileChangeKind, GoalStatus,
     ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
     PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode,
-    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, ToolOutput, TurnStatus,
-    UserInputDelivery, UserInputOption, UserInputQuestion, WorktreeAnswer, WorktreeRequest,
-    selection_bool, selection_str,
+    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput,
+    TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion, WorktreeAnswer,
+    WorktreeRequest, selection_bool, selection_str,
 };
 
 /// The hook callbacks `initialize` registers. With `onFailure: "block"` an error
@@ -1840,6 +1840,7 @@ impl ToolItem {
                 },
             )
         } else {
+            let family = tool_family(&name, &input, None).0;
             (
                 ToolItem::Tool {
                     name: name.clone(),
@@ -1851,6 +1852,7 @@ impl ToolItem {
                     input,
                     output: None,
                     status: ItemStatus::InProgress,
+                    family: family.map(Box::new),
                 },
             )
         }
@@ -1904,13 +1906,17 @@ impl ToolItem {
                 }
                 ItemContent::FileChange { changes, status }
             }
-            ToolItem::Tool { name, input } => ItemContent::ToolCall {
-                image_reads: images,
-                name,
-                input,
-                output: Some(text),
-                status,
-            },
+            ToolItem::Tool { name, input } => {
+                let (family, output) = tool_family(&name, &input, Some((text, tool_use_result)));
+                ItemContent::ToolCall {
+                    image_reads: images,
+                    name,
+                    input,
+                    output,
+                    status,
+                    family: family.map(Box::new),
+                }
+            }
             ToolItem::Plan { markdown } => ItemContent::Plan { markdown },
             ToolItem::Subagent {
                 agent_type,
@@ -4413,6 +4419,86 @@ fn api_retry_notice(msg: &Value) -> AgentEvent {
     }
 }
 
+/// What Claude Code's own tool `name` is, from its input and, once it has
+/// finished, its result text and `tool_use_result` (the tool's output
+/// object; a string when the call failed). Returns the family, and the
+/// output the call shows: the result text, or the part of it the family
+/// leaves once its fields are read out. Shapes are 2.1.322's
+/// (`sdk-tools.d.ts` of `@anthropic-ai/claude-agent-sdk` 0.3.322).
+fn tool_family(
+    name: &str,
+    input: &Value,
+    result: Option<(String, Option<&Value>)>,
+) -> (Option<ToolFamily>, Option<String>) {
+    let text = |key: &str| input.get(key).and_then(Value::as_str);
+    let (output, structured) = match result {
+        Some((text, structured)) => (Some(text), structured.filter(|value| value.is_object())),
+        None => (None, None),
+    };
+    let family = match name {
+        // `FileReadOutput`: a text read is `{type: "text", file: {filePath,
+        // content, startLine, ..}}`, the content without the `N\t` numbers
+        // the tool result puts before each line.
+        "Read" => {
+            let Some(path) = text("file_path") else {
+                return (None, output);
+            };
+            let file = structured
+                .filter(|result| result.get("type").and_then(Value::as_str) == Some("text"))
+                .and_then(|result| result.get("file"));
+            if let Some(file) = file
+                && let Some(content) = file.get("content").and_then(Value::as_str)
+            {
+                // An empty read's result is only Claude Code's warning that
+                // the file is empty or shorter than the offset.
+                return (
+                    Some(ToolFamily::Read {
+                        path: path.to_owned(),
+                        first_line: file.get("startLine").and_then(Value::as_u64),
+                        note: output.filter(|text| content.is_empty() && !text.trim().is_empty()),
+                    }),
+                    Some(content.to_owned()),
+                );
+            }
+            // A subagent's transcript can leave the output object out; its
+            // tool result numbers the lines it read.
+            if structured.is_none()
+                && let Some((first_line, content)) = output.as_deref().and_then(numbered_read)
+            {
+                return (
+                    Some(ToolFamily::Read {
+                        path: path.to_owned(),
+                        first_line: Some(first_line),
+                        note: None,
+                    }),
+                    Some(content),
+                );
+            }
+            ToolFamily::Read {
+                path: path.to_owned(),
+                first_line: None,
+                note: None,
+            }
+        }
+        _ => return (None, output),
+    };
+    (Some(family), output)
+}
+
+/// A Read tool result's numbered lines (`N\t` before each, 2.1.322's
+/// format) as the first line's number and the lines without their numbers.
+fn numbered_read(text: &str) -> Option<(u64, String)> {
+    let mut first = None;
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let (number, rest) = line.split_once('\t')?;
+        let number: u64 = number.trim_start().parse().ok()?;
+        first.get_or_insert(number);
+        lines.push(rest);
+    }
+    Some((first?, lines.join("\n")))
+}
+
 fn is_file_tool(name: &str) -> bool {
     matches!(name, "Write" | "Edit" | "NotebookEdit")
 }
@@ -6396,6 +6482,11 @@ mod tests {
                 input: json!({"file_path": "blue.png"}),
                 output: Some(String::new()),
                 status: ItemStatus::Completed,
+                family: Some(Box::new(ToolFamily::Read {
+                    path: "blue.png".into(),
+                    first_line: None,
+                    note: None,
+                })),
             }
         );
         let child = |id: &str| {
@@ -6426,10 +6517,12 @@ mod tests {
                 status: ItemStatus::Completed,
             }
         );
+        // A subagent's tool result comes without the output object, so its
+        // read is told by the lines the result numbers.
         assert!(matches!(
             child("toolu_010000000000000000000017"),
-            ItemContent::ToolCall { name, output: Some(output), .. }
-                if name == "Read" && output == "1\thello\n2\tworld\n3\t"
+            ItemContent::ToolCall { name, output: Some(output), family: Some(family), .. }
+                if name == "Read" && output == "hello\nworld\n" && matches!(&**family, ToolFamily::Read { path, first_line: Some(1), .. } if path == "/home/user/project/a.txt")
         ));
     }
 
@@ -6469,6 +6562,47 @@ mod tests {
                 exit_code: Some(2),
                 status: ItemStatus::Failed,
             }
+        );
+    }
+
+    /// A Read is a read of the file it names: its lines as the output object
+    /// gives them, without the `N\t` numbers of the tool result, from the
+    /// line the read began at (`FileReadOutput` of `sdk-tools.d.ts` in
+    /// `@anthropic-ai/claude-agent-sdk` 0.3.322, for Claude Code 2.1.322;
+    /// content invented).
+    #[test]
+    fn a_read_is_the_lines_it_read_from_where_it_began() {
+        let mut mapper = Mapper::new();
+        let started = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg_read","content":[{"type":"tool_use","id":"toolu_read","name":"Read","input":{"file_path":"/work/src/lib.rs","offset":40,"limit":2}}]}}"#,
+        );
+        assert!(
+            matches!(
+                started.as_slice(),
+                [AgentEvent::ItemStarted(ThreadItem { content: ItemContent::ToolCall { family: Some(family), .. }, .. })]
+                    if matches!(&**family, ToolFamily::Read { path, first_line: None, .. } if path == "/work/src/lib.rs")
+            ),
+            "{started:?}"
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_read","content":"40\tfn main() {\n41\t}"}]},"tool_use_result":{"type":"text","file":{"filePath":"/work/src/lib.rs","content":"fn main() {\n}","numLines":2,"startLine":40,"totalLines":90}}}"#,
+        );
+        let [AgentEvent::ItemCompleted(item)] = completed.as_slice() else {
+            panic!("{completed:?}");
+        };
+        let ItemContent::ToolCall { output, family, .. } = &item.content else {
+            panic!("{item:?}");
+        };
+        assert_eq!(output.as_deref(), Some("fn main() {\n}"));
+        assert_eq!(
+            family.as_deref(),
+            Some(&ToolFamily::Read {
+                path: "/work/src/lib.rs".into(),
+                first_line: Some(40),
+                note: None,
+            })
         );
     }
 

@@ -909,6 +909,7 @@ mod tests {
                     input: serde_json::json!({ "root": "@r1" }),
                     output: Some("state_id: S1\nroot: @r1 app=\"Notes\" title=\"Groceries\"".into()),
                     status: ItemStatus::Completed,
+                    family: None,
                 }),
             ),
             1,

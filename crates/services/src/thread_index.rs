@@ -1726,6 +1726,7 @@ mod tests {
             } else {
                 ItemStatus::InProgress
             },
+            family: None,
         }
     }
 

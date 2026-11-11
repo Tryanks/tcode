@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use agent::{
     AgentEvent, ApprovalRequest, ChangeCompleteness, DeltaKind, FileChange, ItemContent,
-    ItemStatus, PlanStep, ResumeCursor, ThreadItem, TokenUsage, TurnStatus, UserInputDelivery,
-    UserInputQuestion,
+    ItemStatus, PlanStep, ResumeCursor, ThreadItem, TokenUsage, ToolFamily, TurnStatus,
+    UserInputDelivery, UserInputQuestion,
 };
 use serde::{Deserialize, Serialize};
 
@@ -708,9 +708,17 @@ impl LatestActivity {
             },
             ItemContent::ImageRead { path, .. } => Self::Read { path: clip(path) },
             ItemContent::WebSearch { query } => Self::WebSearch { query: clip(query) },
-            ItemContent::ToolCall { name, input, .. } => Self::Tool {
-                name: clip(name),
-                target: identifying_argument(input).map(|target| clip(&target)),
+            ItemContent::ToolCall {
+                name,
+                input,
+                family,
+                ..
+            } => match family.as_deref() {
+                Some(ToolFamily::Read { path, .. }) => Self::Read { path: clip(path) },
+                None => Self::Tool {
+                    name: clip(name),
+                    target: identifying_argument(input).map(|target| clip(&target)),
+                },
             },
             ItemContent::Subagent { description, .. } => Self::Subagent {
                 description: clip(description),
@@ -2354,6 +2362,7 @@ mod tests {
                         input: json!({ "path": "src/lib.rs", "limit": 10 }),
                         output: None,
                         status: ItemStatus::InProgress,
+                        family: None,
                     },
                 )),
                 Some(tool.clone()),
@@ -2416,6 +2425,7 @@ mod tests {
                     input,
                     output: None,
                     status: ItemStatus::InProgress,
+                    family: None,
                 },
             })
         };
@@ -2460,6 +2470,7 @@ mod tests {
                 input: json!({ "file_path": "src/lib.rs" }),
                 output: (status == ItemStatus::Completed).then(|| "1\tfn main() {}".into()),
                 status,
+                family: None,
             },
         };
         let timeline = Timeline::fold_events([

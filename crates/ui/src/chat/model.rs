@@ -1166,6 +1166,7 @@ pub(in crate::chat) mod tests {
                         data_base64: String::new(),
                         source_path: None,
                     }],
+                    family: None,
                 }),
             ),
             command("cmd"),

@@ -1897,6 +1897,7 @@ impl Actor {
                 input,
                 output: (!rationale.is_empty()).then(|| rationale.to_owned()),
                 status: item_status,
+                family: None,
             },
         };
         self.events
@@ -4007,6 +4008,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             input: json!({ "questions": item.get("questions").cloned().unwrap_or_default() }),
             output: None,
             status: ItemStatus::Completed,
+            family: None,
         },
         "plan" | "proposed_plan" => ItemContent::Plan {
             markdown: string_field(item, "text"),
@@ -4067,6 +4069,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
                     .map(str::to_owned)
                     .or(result.map(|_| text)),
                 status: map_status(item.get("status").and_then(Value::as_str)),
+                family: None,
             }
         }
         "collabAgentToolCall" => ItemContent::ToolCall {
@@ -4079,6 +4082,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
                 .filter(|states| !states.is_empty())
                 .map(|_| item["agentsStates"].to_string()),
             status: map_status(item.get("status").and_then(Value::as_str)),
+            family: None,
         },
         "imageView" => ItemContent::ImageRead {
             path: string_field(item, "path"),
@@ -4095,6 +4099,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             input: json!({ "duration_ms": item.get("durationMs").cloned().unwrap_or(Value::Null) }),
             output: None,
             status: map_status(item.get("status").and_then(Value::as_str)),
+            family: None,
         },
         "imageGeneration" => image_generation(item),
         _ => ItemContent::Other {
@@ -4166,6 +4171,7 @@ pub fn image_generation(item: &Value) -> ItemContent {
         input: Value::Object(input),
         output: failure.map(Value::to_string),
         status,
+        family: None,
     }
 }
 
@@ -6942,6 +6948,7 @@ mod tests {
             input: json!({"duration_ms": 20000}),
             output: None,
             status,
+            family: None,
         };
         assert_eq!(
             lifecycle_item("item/started", &sleep).unwrap().content,
@@ -6968,6 +6975,7 @@ mod tests {
             }),
             output: None,
             status: ItemStatus::Completed,
+            family: None,
         };
         assert_eq!(
             lifecycle_item("item/completed", &generation)

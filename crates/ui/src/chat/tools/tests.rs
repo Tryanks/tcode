@@ -463,11 +463,10 @@ fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
     thread.shutdown(cx);
 }
 
-/// A read reads as the file and the lines read: numbered as its harness
-/// numbered them, or counted from the offset it asked for when the harness
-/// returned bare lines; a failure by the harness's own words; an image read
-/// as viewed, its image a tile above the row, whether it came live or from an
-/// imported Codex rollout.
+/// A read reads as the file and the lines read, numbered from the line its
+/// harness said the read began at; a failure by the harness's own words; an
+/// image read as viewed, its image a tile above the row, whether it came as a
+/// read call or as the image Codex was shown.
 #[gpui::test]
 fn a_read_reads_as_its_file_and_lines(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
@@ -522,15 +521,6 @@ fn a_read_reads_as_its_file_and_lines(cx: &mut TestAppContext) {
                     None,
                 ),
                 Some("L346–380"),
-            ),
-        ),
-        (
-            rollout,
-            super::tests::read(
-                "Viewed",
-                None,
-                Some("/tmp/example-debug/diff_threshold.png"),
-                None,
             ),
         ),
     ] {

@@ -18,8 +18,8 @@ use crate::{
     ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ForkPoint, ItemContent,
     ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand,
     ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
-    SessionOptions, ThreadItem, TokenUsage, ToolOutput, UserInputDelivery, UserInputOption,
-    UserInputQuestion,
+    SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput, UserInputDelivery,
+    UserInputOption, UserInputQuestion,
 };
 
 /// The directory pi launched with `launch_env` keeps its settings, sign-in
@@ -1655,18 +1655,81 @@ fn tool_item(id: &str, tool: &PiTool, status: ItemStatus) -> ThreadItem {
                 .unwrap_or_default(),
             status,
         },
-        _ => ItemContent::ToolCall {
-            image_reads: output.images.clone(),
-            name: name.clone(),
-            input: input.clone(),
-            output: (!output.text.is_empty()).then(|| output.text.clone()),
-            status,
-        },
+        _ => {
+            let text = (!output.text.is_empty()).then(|| output.text.clone());
+            let (family, text) = tool_family(name, input, text, result, status);
+            ItemContent::ToolCall {
+                image_reads: output.images.clone(),
+                name: name.clone(),
+                input: input.clone(),
+                output: text,
+                status,
+                family: family.map(Box::new),
+            }
+        }
     };
     ThreadItem {
         id: id.into(),
         parent_item_id: None,
         content,
+    }
+}
+
+/// What pi's own tool `name` is, from its input and, once it succeeded, its
+/// text and `result` (`{content, details?}`). Returns the family and the
+/// output the call shows: the text, or what is left of it once the family's
+/// fields are read out. Formats are 1.5.2's (`dist/core/tools/`).
+fn tool_family(
+    name: &str,
+    input: &Value,
+    text: Option<String>,
+    result: Option<&Value>,
+    status: ItemStatus,
+) -> (Option<ToolFamily>, Option<String>) {
+    let field = |key: &str| input.get(key).and_then(Value::as_str).map(str::to_owned);
+    match name {
+        // `read.js`: the lines read as they are, from `offset` (1-based);
+        // when the file goes on, a blank line and a `[…]` notice after them.
+        "read" => {
+            let Some(path) = field("path") else {
+                return (None, text);
+            };
+            let first_line = Some(
+                input
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1)
+                    .max(1),
+            );
+            let noticed = result
+                .is_some_and(|result| result.pointer("/details/truncation").is_some())
+                || input.get("limit").is_some();
+            let (lines, note) = match text {
+                Some(text) if status == ItemStatus::Completed && noticed => {
+                    match text.rsplit_once("\n\n[") {
+                        Some((lines, note)) if note.ends_with(']') && !note.contains('\n') => {
+                            (Some(lines.to_owned()), Some(format!("[{note}")))
+                        }
+                        _ => (Some(text), None),
+                    }
+                }
+                text => (text, None),
+            };
+            // An image's result is the `Read image file [type]` line beside
+            // the image, not lines of the file.
+            let image = lines
+                .as_deref()
+                .is_some_and(|text| text.starts_with("Read image file ["));
+            (
+                Some(ToolFamily::Read {
+                    path,
+                    first_line: first_line.filter(|_| status == ItemStatus::Completed && !image),
+                    note,
+                }),
+                lines,
+            )
+        }
+        _ => (None, text),
     }
 }
 
@@ -2402,8 +2465,39 @@ mod tests {
                     input: json!({"path": "blue.png"}),
                     output: Some("Read image file [image/png]".into()),
                     status: ItemStatus::Completed,
+                    family: Some(Box::new(ToolFamily::Read {
+                        path: "blue.png".into(),
+                        first_line: None,
+                        note: None,
+                    })),
                 },
             ]
+        );
+    }
+
+    /// `read` returns the lines as they are, from its `offset`, and when
+    /// its `limit` stopped short of the file's end, a blank line and a notice
+    /// of what is left (1.5.2's `dist/core/tools/read.js`; content invented).
+    #[test]
+    fn a_read_is_the_lines_it_read_from_its_offset() {
+        assert_eq!(
+            tool_family(
+                "read",
+                &json!({"path": "src/lib.rs", "offset": 40, "limit": 2}),
+                Some(
+                    "fn main() {\n}\n\n[48 more lines in file. Use offset=42 to continue.]".into()
+                ),
+                None,
+                ItemStatus::Completed,
+            ),
+            (
+                Some(ToolFamily::Read {
+                    path: "src/lib.rs".into(),
+                    first_line: Some(40),
+                    note: Some("[48 more lines in file. Use offset=42 to continue.]".into()),
+                }),
+                Some("fn main() {\n}".into()),
+            )
         );
     }
 

@@ -23,7 +23,8 @@ use crate::{
     FileChangeKind, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
     OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
     ResumeCursor, RewindMode, SelectOption, SessionCommand, SessionHandle, SessionOptions,
-    ThreadItem, TokenUsage, ToolOutput, UserInputDelivery, UserInputOption, UserInputQuestion,
+    ThreadItem, TokenUsage, ToolFamily, ToolOutput, UserInputDelivery, UserInputOption,
+    UserInputQuestion,
 };
 
 /// The directory OpenCode launched with `launch_env` keeps its sessions,
@@ -2174,17 +2175,25 @@ impl Mapper {
                     .or_else(|| tool.child_model.clone()),
                 effort: None,
             },
-            name => ItemContent::ToolCall {
-                image_reads: images,
-                name: name.to_owned(),
-                input: input.clone(),
-                output: if status == ItemStatus::Completed {
+            name => {
+                let output = if status == ItemStatus::Completed {
                     text
                 } else {
                     error.or(text)
-                },
-                status,
-            },
+                };
+                let (family, output) = match status {
+                    ItemStatus::Completed => tool_family(name, input, output),
+                    _ => (tool_family(name, input, None).0, output),
+                };
+                ItemContent::ToolCall {
+                    image_reads: images,
+                    name: name.to_owned(),
+                    input: input.clone(),
+                    output,
+                    status,
+                    family: family.map(Box::new),
+                }
+            }
         };
         Some(ThreadItem {
             id: item_id.to_owned(),
@@ -2343,6 +2352,88 @@ fn file_diffs(files: &Value) -> Vec<FileChange> {
             })
         })
         .collect()
+}
+
+/// What OpenCode's own tool `name` is, from its input and, once it
+/// succeeded, the text it gave the model. Returns the family and the output
+/// the call shows: the text, or what is left of it once the family's fields
+/// are read out. Formats are v2.2.7's (`packages/core/src/tool/plugin/`).
+fn tool_family(
+    name: &str,
+    input: &Value,
+    output: Option<String>,
+) -> (Option<ToolFamily>, Option<String>) {
+    let field = |key: &str| input.get(key).and_then(Value::as_str).map(str::to_owned);
+    match name {
+        "read" => {
+            let Some(path) = field("path") else {
+                return (None, output);
+            };
+            match output.as_deref().map(read_page) {
+                Some(Some(Page::File {
+                    first_line,
+                    lines,
+                    note,
+                })) => (
+                    Some(ToolFamily::Read {
+                        path,
+                        first_line,
+                        note,
+                    }),
+                    Some(lines),
+                ),
+                // A directory's entries are a listing, not a file's lines.
+                Some(Some(Page::Directory)) => (None, output),
+                _ => (
+                    Some(ToolFamily::Read {
+                        path,
+                        first_line: None,
+                        note: None,
+                    }),
+                    output,
+                ),
+            }
+        }
+        _ => (None, output),
+    }
+}
+
+/// A page `read` returned (`toModelContent` in `read.ts`): a file's
+/// `Read file <path>, lines S-E` header, then each line as `N: text`, then
+/// `[Output truncated. …]` when the file goes on; or a directory's entries.
+enum Page {
+    File {
+        first_line: Option<u64>,
+        lines: String,
+        note: Option<String>,
+    },
+    Directory,
+}
+
+fn read_page(text: &str) -> Option<Page> {
+    let mut rows = text.lines();
+    let header = rows.next()?;
+    if header.starts_with("Read directory ") {
+        return Some(Page::Directory);
+    }
+    header.strip_prefix("Read file ")?;
+    let mut first_line = None;
+    let mut lines = Vec::new();
+    let mut note = None;
+    for row in rows {
+        match row.split_once(": ") {
+            Some((number, line)) if number.bytes().all(|byte| byte.is_ascii_digit()) => {
+                first_line.get_or_insert_with(|| number.parse().ok());
+                lines.push(line);
+            }
+            _ => note = Some(row.to_owned()),
+        }
+    }
+    Some(Page::File {
+        first_line: first_line.flatten(),
+        lines: lines.join("\n"),
+        note,
+    })
 }
 
 fn file_changes(
@@ -2944,6 +3035,35 @@ mod tests {
         );
     }
 
+    /// `read` gives a page of `N: text` lines under its `Read file` header,
+    /// and says where to continue when the file goes on (v2.2.7's
+    /// `toModelContent`, `packages/core/src/tool/plugin/read.ts`; content
+    /// invented). A directory's page is its entries, not a file's lines.
+    #[test]
+    fn a_read_is_the_lines_it_read_from_where_it_began() {
+        let page = "Read file src/lib.rs, lines 40-41\n40: fn main() {\n41: }\n[Output truncated. Continue reading with offset: 42]";
+        assert_eq!(
+            tool_family(
+                "read",
+                &json!({"path": "src/lib.rs", "offset": 40}),
+                Some(page.into())
+            ),
+            (
+                Some(ToolFamily::Read {
+                    path: "src/lib.rs".into(),
+                    first_line: Some(40),
+                    note: Some("[Output truncated. Continue reading with offset: 42]".into()),
+                }),
+                Some("fn main() {\n}".into()),
+            )
+        );
+        let listing = "Read directory src, entries 1-2\nlib.rs\nbin/";
+        assert_eq!(
+            tool_family("read", &json!({"path": "src"}), Some(listing.into())),
+            (None, Some(listing.into()))
+        );
+    }
+
     /// The call's output is polled from the shell its progress names, until
     /// the call ends with its output and exit code.
     #[test]
@@ -3048,8 +3168,8 @@ mod tests {
             items_only(replay("image_turn.jsonl", &[]))[..3],
             [
                 json!({"type": "item_started", "id": read, "content": {"kind": "tool_call", "name": "read", "input": {}, "output": null, "status": "in_progress"}}),
-                json!({"type": "item_updated", "id": read, "content": {"kind": "tool_call", "name": "read", "input": {"path": "blue.png"}, "output": null, "status": "in_progress"}}),
-                json!({"type": "item_completed", "id": read, "content": {"kind": "tool_call", "image_reads": [{"media_type": "image/png", "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg=="}], "name": "read", "input": {"path": "blue.png"}, "output": "Image read successfully", "status": "completed"}}),
+                json!({"type": "item_updated", "id": read, "content": {"kind": "tool_call", "name": "read", "input": {"path": "blue.png"}, "output": null, "status": "in_progress", "family": {"type": "read", "path": "blue.png"}}}),
+                json!({"type": "item_completed", "id": read, "content": {"kind": "tool_call", "image_reads": [{"media_type": "image/png", "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg=="}], "name": "read", "input": {"path": "blue.png"}, "output": "Image read successfully", "status": "completed", "family": {"type": "read", "path": "blue.png"}}}),
             ]
         );
     }

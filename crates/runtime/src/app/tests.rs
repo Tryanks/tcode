@@ -3897,6 +3897,7 @@ fn report_result_event(id: &str, text: &str) -> AgentEvent {
             input: serde_json::json!({ "text": text }),
             output: Some("{\"ok\":true}".into()),
             status: ItemStatus::Completed,
+            family: None,
         },
     })
 }
@@ -11261,6 +11262,7 @@ fn tool_call(id: &str, output: String) -> StoredEvent {
                 input: serde_json::json!({}),
                 output: Some(output),
                 status: ItemStatus::Completed,
+                family: None,
             },
         }),
         elided: None,

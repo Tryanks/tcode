@@ -6342,6 +6342,7 @@ pub(crate) mod tests {
                 input: serde_json::json!({}),
                 output: Some("preview".into()),
                 status: agent::ItemStatus::Completed,
+                family: None,
             },
         });
         workspace.update(cx, |store, cx| {

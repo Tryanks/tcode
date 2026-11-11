@@ -355,6 +355,8 @@ pub use wire::{
 // ProviderSnapshot gains supported_from, the oldest release Tcode supports,
 // present when the probed CLI is older.
 // ExternalThread gains profile_id, the profile whose CLI keeps the thread.
+// The tool_call item gains family, what its adapter read the call to be:
+// read {path, first_line, note}, whose output is the lines read.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

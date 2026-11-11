@@ -3,12 +3,12 @@
 
 use std::sync::Arc;
 
+use agent::ToolFamily;
 use gpui::{
     AnyElement, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledText, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
-use serde::Deserialize;
 
 use super::window::{Argument, Header, Verb};
 use super::{Bound, Call, ToolCtx, ToolView, copy, output_section, thumbnails};
@@ -16,135 +16,63 @@ use crate::icon::IconName;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 
-const READ: &[&str] = &["read", "read_file", "readfile", "view"];
-const VIEW_IMAGE: &[&str] = &["view_image", "read_image", "image_view"];
 const MAX_OPEN_LINES: usize = 1_000;
 
-#[derive(Deserialize)]
-struct Input<'a> {
-    #[serde(
-        borrow,
-        alias = "path",
-        alias = "filePath",
-        alias = "target_file",
-        alias = "absolute_path"
-    )]
-    file_path: &'a str,
-    #[serde(default)]
-    offset: Option<u64>,
-    #[serde(default)]
-    limit: Option<u64>,
-}
-
 pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView + 'a>> {
-    let image = call.named(VIEW_IMAGE);
-    if !image && !call.named(READ) {
+    let Some(ToolFamily::Read {
+        path,
+        first_line,
+        note,
+    }) = call.family
+    else {
         return None;
-    }
-    let input = call.input::<Input<'a>>()?;
-    Some(Box::new(Read { input, image }))
+    };
+    Some(Box::new(Read {
+        path,
+        first_line: *first_line,
+        note: note.as_deref(),
+    }))
 }
 
 struct Read<'a> {
-    input: Input<'a>,
-    image: bool,
-}
-
-/// What a read returned: its lines with their numbers, from the harness
-/// when it numbered them (`N\t…`, `N→…`), else counted from the offset read
-/// at; and a note after them.
-struct Content<'o> {
-    lines: Vec<(Option<u64>, &'o str)>,
-    /// A note after the lines: how much more the file holds.
-    note: Option<&'o str>,
-}
-
-fn numbered(line: &str) -> Option<(u64, &str)> {
-    let trimmed = line.trim_start();
-    let digits = trimmed.len()
-        - trimmed
-            .trim_start_matches(|c: char| c.is_ascii_digit())
-            .len();
-    let number = trimmed[..digits].parse().ok()?;
-    let rest = &trimmed[digits..];
-    let text = rest.strip_prefix('\t').or_else(|| rest.strip_prefix('→'))?;
-    Some((number, text))
+    path: &'a str,
+    first_line: Option<u64>,
+    note: Option<&'a str>,
 }
 
 impl Read<'_> {
-    fn content<'o>(&self, output: &'o str) -> Content<'o> {
-        let mut all: Vec<&str> = output.lines().collect();
-        // A note the harness appends after the lines, set off by a blank
-        // line: `[898 more lines in file. Use offset=381 to continue.]`.
-        let note = match all.as_slice() {
-            [.., blank, last]
-                if blank.trim().is_empty() && last.starts_with('[') && last.ends_with(']') =>
-            {
-                let note = *last;
-                all.truncate(all.len() - 2);
-                Some(note)
-            }
-            _ => None,
-        };
-        if all.first().is_some_and(|line| numbered(line).is_some()) {
-            // A line without a number is the harness's, not the file's.
-            return Content {
-                lines: all
-                    .into_iter()
-                    .map(|line| match numbered(line) {
-                        Some((number, text)) => (Some(number), text),
-                        None => (None, line),
-                    })
-                    .collect(),
-                note,
-            };
-        }
-        let first = self.input.offset.filter(|offset| *offset > 0).unwrap_or(1);
-        Content {
-            lines: all
-                .into_iter()
-                .enumerate()
-                .map(|(index, line)| (Some(first + index as u64), line))
-                .collect(),
-            note,
-        }
+    /// The lines read, numbered from the line the harness said the read
+    /// began at.
+    fn lines<'o>(&self, output: &'o str) -> Vec<(Option<u64>, &'o str)> {
+        output
+            .lines()
+            .enumerate()
+            .map(|(index, line)| (self.first_line.map(|first| first + index as u64), line))
+            .collect()
     }
 
-    /// The lines read: as the harness numbered what it returned, else as
-    /// the call asked for them.
+    /// The lines read, when the harness said where the read began.
     fn range(&self, call: &Call<'_>) -> Option<String> {
-        let range = |first: u64, last: u64| {
-            crate::tr!("tools.line_range", first = first, last = last).into_owned()
-        };
-        // Read from its ends, not its whole: the header is drawn with the
-        // window shut too.
-        if let Some(output) = call
+        let first = self.first_line?;
+        let output = call
             .output
-            .filter(|_| call.status != agent::ItemStatus::Failed)
-            && let Some((first, _)) = output.lines().next().and_then(numbered)
-        {
-            let last = output.lines().rev().find_map(numbered);
-            return Some(range(first, last.map_or(first, |(last, _)| last)));
-        }
-        let first = self.input.offset?.max(1);
-        Some(range(first, first + self.input.limit?.saturating_sub(1)))
+            .filter(|_| call.status == agent::ItemStatus::Completed)?;
+        let count = output.lines().count() as u64;
+        (count > 0).then(|| {
+            crate::tr!("tools.line_range", first = first, last = first + count - 1).into_owned()
+        })
     }
 }
 
 impl ToolView for Read<'_> {
     fn header(&self, call: &Call<'_>, cwd: &std::path::Path) -> Header {
-        let verb = if self.image || !call.images.is_empty() {
-            Verb("view")
+        let (icon, verb) = if call.images.is_empty() {
+            (IconName::FileText, Verb("read"))
         } else {
-            Verb("read")
-        };
-        let icon = if self.image || !call.images.is_empty() {
-            IconName::Image
-        } else {
-            IconName::FileText
+            (IconName::Image, Verb("view"))
         };
         Header::new(icon, verb).argument(
-            Argument::mono(super::display_path(self.input.file_path, cwd))
+            Argument::mono(super::display_path(self.path, cwd))
                 .map(|argument| argument.detail(self.range(call))),
         )
     }
@@ -165,22 +93,15 @@ impl ToolView for Read<'_> {
 
     fn copy_items(&self, call: &Call<'_>) -> Vec<(String, String)> {
         let mut items = Vec::new();
-        copy(&mut items, "chat.copy_path", self.input.file_path);
+        copy(&mut items, "chat.copy_path", self.path);
         if let Some(output) = call.output {
-            let content = self.content(output);
-            let text = content
-                .lines
-                .iter()
-                .map(|(_, line)| *line)
-                .collect::<Vec<_>>()
-                .join("\n");
-            copy(&mut items, "tools.copy_content", &text);
+            copy(&mut items, "tools.copy_content", output);
         }
         items
     }
 
     fn path(&self) -> Option<&str> {
-        Some(self.input.file_path)
+        Some(self.path)
     }
 }
 
@@ -194,27 +115,26 @@ struct ShownLines {
     hidden: usize,
     /// Opened, the lines past the most it shows.
     beyond: Option<usize>,
-    note: Option<SharedString>,
 }
 
 impl ShownLines {
     fn of(
-        content: &Content<'_>,
+        lines: &[(Option<u64>, &str)],
         path: &str,
         open: bool,
         theme: &crate::highlight::HighlightTheme,
     ) -> Self {
-        let total = content.lines.len();
+        let total = lines.len();
         let limit = Bound::HEAD.head;
         // Hiding two lines behind a control saves nothing.
         let folds = total > limit + 2;
         let shown = if !folds {
-            &content.lines[..]
+            lines
         } else if open {
             // Opened, a read lays out at most this many lines every frame.
-            &content.lines[..total.min(MAX_OPEN_LINES)]
+            &lines[..total.min(MAX_OPEN_LINES)]
         } else {
-            &content.lines[..limit]
+            &lines[..limit]
         };
         let source = shown
             .iter()
@@ -238,21 +158,21 @@ impl ShownLines {
             beyond: open
                 .then(|| total.saturating_sub(MAX_OPEN_LINES))
                 .filter(|n| *n > 0),
-            note: content.note.map(|note| SharedString::from(note.to_owned())),
         }
     }
 }
 
 /// Lines of a file beside their numbers, highlighted as the file's language:
-/// the first lines, then all of them in a capped scroll once asked for.
+/// the first lines, then all of them in a capped scroll once asked for; and
+/// the harness's note after them.
 fn code(call: &Call<'_>, read: &Read<'_>, output: &str, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
     let key = format!("tool-text-{}-content", call.id());
     let open = ctx.is_open(&key);
     let theme = ctx.highlight_theme();
     let lines = ctx.derived(
-        format!("{key}-{open}-{:?}", read.input.offset),
+        format!("{key}-{open}-{:?}", read.first_line),
         output,
-        |output| ShownLines::of(&read.content(output), read.input.file_path, open, &theme),
+        |output| ShownLines::of(&read.lines(output), read.path, open, &theme),
     );
     let ShownLines {
         highlighted,
@@ -260,7 +180,6 @@ fn code(call: &Call<'_>, read: &Read<'_>, output: &str, ctx: &mut ToolCtx<'_, '_
         folds,
         hidden,
         beyond,
-        note,
     } = &*lines;
     let (folds, hidden, beyond) = (*folds, *hidden, *beyond);
     let cx = ctx.app();
@@ -275,14 +194,16 @@ fn code(call: &Call<'_>, read: &Read<'_>, output: &str, ctx: &mut ToolCtx<'_, '_
         .font_family(mono)
         .text_token(&theme.tokens.typography.xs)
         .when(open, |block| block.max_h(px(360.)).overflow_y_scroll())
-        .child(
-            div()
-                .flex_none()
-                .text_right()
-                .text_color(theme.muted_foreground)
-                .whitespace_nowrap()
-                .child(numbers.clone()),
-        )
+        .when(read.first_line.is_some(), |block| {
+            block.child(
+                div()
+                    .flex_none()
+                    .text_right()
+                    .text_color(theme.muted_foreground)
+                    .whitespace_nowrap()
+                    .child(numbers.clone()),
+            )
+        })
         .child(
             div()
                 .flex_1()
@@ -301,10 +222,11 @@ fn code(call: &Call<'_>, read: &Read<'_>, output: &str, ctx: &mut ToolCtx<'_, '_
             .child(crate::tr!("tools.lines_not_shown", count = count).into_owned())
             .into_any_element()
     });
-    let note = note.clone().map(|note| {
+    let note = read.note.map(|note| {
         div()
             .text_secondary(false, cx)
-            .child(note)
+            .whitespace_normal()
+            .child(note.to_owned())
             .into_any_element()
     });
     let control = folds.then(|| {

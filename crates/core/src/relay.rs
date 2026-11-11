@@ -515,6 +515,7 @@ mod tests {
                     input: serde_json::json!({"path": "src/main.rs"}),
                     output: Some("line one\nline two".into()),
                     status: ItemStatus::Completed,
+                    family: None,
                 },
             ),
             item(
@@ -525,6 +526,7 @@ mod tests {
                     input: serde_json::json!({"target": "workspace"}),
                     output: Some("compiler error\nmore detail".into()),
                     status: ItemStatus::Failed,
+                    family: None,
                 },
             ),
             completed("t1"),

@@ -112,6 +112,7 @@ fn tool(
         input,
         output: output.map(str::to_owned),
         status,
+        family: None,
     })
 }
 
@@ -138,6 +139,8 @@ const CODEX_ROLLOUT: &str = r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"s
 {"timestamp":"2026-01-02T03:04:09.000Z","type":"response_item","payload":{"type":"local_shell_call","call_id":"call_local","status":"completed","action":{"type":"exec","command":["ls","-la"],"timeout_ms":null,"working_directory":null,"env":null,"user":null}}}
 {"timestamp":"2026-01-02T03:04:10.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cat README.md\",\"workdir\":\"/work/example\"}","call_id":"call_read"}}
 {"timestamp":"2026-01-02T03:04:11.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_read","output":"Chunk ID: 0a1b2c\nWall time: 0.0123 seconds\nProcess exited with code 0\nOriginal token count: 4\nOutput:\nExample readme\n"}}
+{"timestamp":"2026-01-02T03:04:11.200Z","type":"response_item","payload":{"type":"function_call","name":"view_image","arguments":"{\"path\":\"/work/example/shot.png\"}","call_id":"call_view"}}
+{"timestamp":"2026-01-02T03:04:11.300Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_view","output":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==","detail":"high"}]}}
 {"timestamp":"2026-01-02T03:04:11.500Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"make lint\"}","call_id":"call_lint"}}
 {"timestamp":"2026-01-02T03:04:11.600Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_lint","output":"Wall time: 1.2000 seconds\nProcess exited with code 2\nOutput:\nmake: *** No rule to make target 'lint'.  Stop.\n"}}
 {"timestamp":"2026-01-02T03:04:11.700Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"sleep 60\"}","call_id":"call_stopped"}}
@@ -374,7 +377,8 @@ fn readme_revised(status: ItemStatus) -> Option<ItemContent> {
 
 /// A rollout shows what Codex recorded: a local shell call shows the
 /// command in its `action`, a command shows what it printed and the code
-/// it exited with, failing when that is not 0 as Codex judges it, a patch
+/// it exited with, failing when that is not 0 as Codex judges it, an image
+/// Codex was shown is that image as Codex reports it live, a patch
 /// shows the changes Codex applied, a call Codex dropped, stopped or never
 /// answered is interrupted, and a turn the user rolled back is gone.
 #[test]
@@ -395,6 +399,14 @@ fn a_codex_rollout_imports_as_codex_recorded_it() {
                 Some(0),
                 ItemStatus::Completed
             ),
+            Some(ItemContent::ImageRead {
+                path: "/work/example/shot.png".into(),
+                image: Some(agent::Attachment {
+                    media_type: "image/png".into(),
+                    data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==".into(),
+                    source_path: None,
+                }),
+            }),
             command(
                 "make lint",
                 "make: *** No rule to make target 'lint'.  Stop.\n",
@@ -481,7 +493,7 @@ fn a_paginated_codex_rollout_shows_the_items_codex_recorded() {
 const CLAUDE_TRANSCRIPT: &str = r#"{"type":"user","message":{"role":"user","content":"Context the CLI adds for itself."},"isMeta":true,"uuid":"00000000-0000-4000-8000-000000000011","parentUuid":null,"isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:05.000Z"}
 {"type":"user","message":{"role":"user","content":"Read the readme"},"uuid":"00000000-0000-4000-8000-000000000012","parentUuid":"00000000-0000-4000-8000-000000000011","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:06.000Z"}
 {"type":"assistant","message":{"id":"msg_example_1","type":"message","role":"assistant","model":"claude-example","content":[{"type":"thinking","thinking":"Reading it.","signature":"c2lnbmF0dXJl"},{"type":"tool_use","id":"toolu_read","name":"Read","input":{"file_path":"/work/example/README.md"}}]},"uuid":"00000000-0000-4000-8000-000000000013","parentUuid":"00000000-0000-4000-8000-000000000012","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:07.000Z"}
-{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_read","content":"Example readme"}]},"uuid":"00000000-0000-4000-8000-000000000014","parentUuid":"00000000-0000-4000-8000-000000000013","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:08.000Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_read","content":"1\tExample readme"}]},"toolUseResult":{"type":"text","file":{"filePath":"/work/example/README.md","content":"Example readme","numLines":1,"startLine":1,"totalLines":1}},"uuid":"00000000-0000-4000-8000-000000000014","parentUuid":"00000000-0000-4000-8000-000000000013","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:08.000Z"}
 {"type":"assistant","message":{"id":"msg_example_2","type":"message","role":"assistant","model":"claude-example","content":[{"type":"tool_use","id":"toolu_make","name":"Bash","input":{"command":"make"}}]},"uuid":"00000000-0000-4000-8000-000000000015","parentUuid":"00000000-0000-4000-8000-000000000014","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:09.000Z"}
 {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_make","content":"Exit code 2\nmake: *** No targets.  Stop.","is_error":true}]},"uuid":"00000000-0000-4000-8000-000000000016","parentUuid":"00000000-0000-4000-8000-000000000015","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:10.000Z"}
 {"type":"assistant","message":{"id":"msg_example_5","type":"message","role":"assistant","model":"claude-example","content":[{"type":"tool_use","id":"toolu_edit","name":"Edit","input":{"file_path":"/work/example/README.md","old_string":"Example readme","new_string":"Example readme, revised","replace_all":false}}]},"uuid":"00000000-0000-4000-8000-000000000025","parentUuid":"00000000-0000-4000-8000-000000000016","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:10.500Z"}
@@ -520,12 +532,18 @@ fn a_claude_transcript_imports_as_claude_recorded_it() {
             Some(ItemContent::Reasoning {
                 text: "Reading it.".into(),
             }),
-            tool(
-                "Read",
-                json!({"file_path": "/work/example/README.md"}),
-                Some("Example readme"),
-                ItemStatus::Completed,
-            ),
+            Some(ItemContent::ToolCall {
+                image_reads: Vec::new(),
+                name: "Read".into(),
+                input: json!({"file_path": "/work/example/README.md"}),
+                output: Some("Example readme".into()),
+                status: ItemStatus::Completed,
+                family: Some(Box::new(agent::ToolFamily::Read {
+                    path: "/work/example/README.md".into(),
+                    first_line: Some(1),
+                    note: None,
+                })),
+            }),
             Some(ItemContent::CommandExecution {
                 command: "make".into(),
                 output: "make: *** No targets.  Stop.".into(),

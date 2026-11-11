@@ -139,6 +139,7 @@ fn wire_event(event: &AgentEvent) -> Option<(AgentEvent, Option<u64>)> {
             input,
             output,
             status,
+            family,
         } => {
             let full = output.as_ref().map(|output| output.len() as u64);
             let mut preview = output.as_deref().map(Cow::Borrowed);
@@ -180,6 +181,7 @@ fn wire_event(event: &AgentEvent) -> Option<(AgentEvent, Option<u64>)> {
                     input: input.clone(),
                     output,
                     status: *status,
+                    family: family.clone(),
                 },
                 elided,
             )

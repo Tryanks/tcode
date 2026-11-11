@@ -265,6 +265,7 @@ mod tests {
                     input: serde_json::json!({"path": "src/main.rs"}),
                     output: Some("read 12 lines".into()),
                     status: ItemStatus::Completed,
+                    family: None,
                 },
             ),
             AgentEvent::PlanUpdated {
@@ -459,6 +460,7 @@ mod tests {
                     input: serde_json::json!({"path": format!("file-{index}.rs")}),
                     output: Some(format!("result-{index}")),
                     status: ItemStatus::Completed,
+                    family: None,
                 },
             ));
         }

@@ -483,6 +483,7 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             output,
             status,
             image_reads,
+            ..
         }) => {
             image_reads.len().hash(hash);
             name.len().hash(hash);

@@ -570,6 +570,7 @@ mod tests {
                     input: json!({"path":"auth.rs"}),
                     output: Some("DO_NOT_INDEX output".into()),
                     status: ItemStatus::Completed,
+                    family: None,
                 },
             )
             .event,
@@ -792,6 +793,7 @@ mod tests {
                     input: json!({"path": "auth.rs"}),
                     output: Some("auth.rs output".into()),
                     status: ItemStatus::Completed,
+                    family: None,
                 },
             )
             .event,
