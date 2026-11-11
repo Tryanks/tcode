@@ -26,23 +26,6 @@ fn published_activity(
         .collect()
 }
 
-/// The user sends thread `id`, shown on the client, its first message, and
-/// the provider the host starts `n`th takes it and starts a turn.
-fn first_turn(
-    state: &TestEntity,
-    cx: &mut TestAppContext,
-    providers: &Providers,
-    id: &str,
-    n: usize,
-) -> Played {
-    state.open(cx, id);
-    state.send(cx, id, "Go");
-    let provider = providers.started(cx, n);
-    provider.start_turn(cx, "turn");
-    cx.run_until_seen(|view| view.status(id).running_turn.is_some());
-    provider
-}
-
 /// Whether the client holds a record of `id`'s log that `matches`.
 fn has_record(view: &ClientView, id: &str, matches: impl Fn(&AgentEvent) -> bool) -> bool {
     view.records(id).iter().any(|record| matches(&record.event))
@@ -5318,6 +5301,21 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
     std::fs::create_dir_all(demo.join("app")).unwrap();
     let quick_project = Project::from_root(quick.clone());
     test_store.upsert_project(&quick_project).unwrap();
+    // A thread of the same project that works in a worktree of its own.
+    stored_thread(
+        &test_store,
+        "worktree-thread",
+        ProviderKind::ClaudeCode,
+        &quick,
+        |worktree| {
+            worktree.project_id = Some(quick_project.id.clone());
+            worktree.worktree = Some(WorktreeInfo {
+                root_project_path: quick.clone(),
+                base: "main".into(),
+                branch: "tcode/worktree-thread".into(),
+            });
+        },
+    );
     let (launcher, launches) = recording_launcher();
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
@@ -5336,6 +5334,8 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
     ) else {
         panic!("draft not started");
     };
+    state.subscribe(cx, Topic::Index);
+    state.open(cx, &session_id);
     acked(
         &state,
         cx,
@@ -5369,11 +5369,7 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
     ] {
         events.try_send(event).unwrap();
     }
-    cx.run_until(|state| {
-        state
-            .resident(&session_id)
-            .is_some_and(|session| session.turn_in_flight)
-    });
+    cx.run_until_seen(|view| view.status(&session_id).running_turn.is_some());
 
     let Ok(CommandResponse::ProjectId(Some(demo_id))) =
         acked(&state, cx, 3, Command::CreateProject { root: demo.clone() })
@@ -5396,23 +5392,7 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
             usage: None,
         })
         .unwrap();
-    cx.run_until(|state| {
-        state
-            .resident(&session_id)
-            .is_some_and(|session| !session.turn_in_flight)
-    });
-
-    state.update(cx, |state, cx| {
-        let mut worktree = SessionMeta::new(ProviderKind::ClaudeCode, quick.clone(), None);
-        worktree.id = "worktree-thread".into();
-        worktree.project_id = Some(quick_project.id.clone());
-        worktree.worktree = Some(WorktreeInfo {
-            root_project_path: quick.clone(),
-            base: "main".into(),
-            branch: "tcode/worktree-thread".into(),
-        });
-        state.persist_meta(&worktree, cx);
-    });
+    cx.run_until_seen(|view| view.status(&session_id).running_turn.is_none());
     let refusal = acked(
         &state,
         cx,
@@ -5427,12 +5407,10 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
     assert_eq!(refusal.code, "worktree_session");
 
     acked(&state, cx, 6, move_to_demo()).unwrap();
-    state.read(|state| {
-        let meta = state.find_meta(&session_id).unwrap();
-        assert_eq!(meta.project_id.as_deref(), Some(demo_id.as_str()));
-        assert_eq!(meta.cwd, demo.join("app"));
-        assert_eq!(meta.resume_cursor, None);
-    });
+    let meta = cx.seen().session(&session_id).unwrap();
+    assert_eq!(meta.project_id.as_deref(), Some(demo_id.as_str()));
+    assert_eq!(meta.cwd, demo.join("app"));
+    assert_eq!(meta.resume_cursor, None);
     cx.run_until_parked();
     drop(state);
 
@@ -5444,17 +5422,11 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
         state.set_provider_launcher(launcher);
         state
     });
-    state.read(|state| {
-        let meta = state.find_meta(&session_id).unwrap();
-        assert_eq!(meta.project_id.as_deref(), Some(demo_id.as_str()));
-        assert_eq!(meta.cwd, demo.join("app"));
-    });
-    state.update(cx, |state, cx| state.select_session(&session_id, cx));
-    cx.run_until(|state| {
-        state
-            .selected_session()
-            .is_some_and(|session| session.timeline.turns.len() == 1)
-    });
+    state.subscribe(cx, Topic::Index);
+    let meta = cx.seen().session(&session_id).unwrap();
+    assert_eq!(meta.project_id.as_deref(), Some(demo_id.as_str()));
+    assert_eq!(meta.cwd, demo.join("app"));
+    state.open(cx, &session_id);
     acked(
         &state,
         cx,
@@ -5490,22 +5462,20 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
         text.ends_with("what did we decide?\n</new-user-message>"),
         "{text}"
     );
-    state.read(|state| {
-        let session = state.selected_session().unwrap();
-        let relay = session
-            .timeline
-            .entries
-            .iter()
-            .find_map(|entry| match &entry.content {
-                EntryContent::ProviderRelay {
-                    prompt, moved_from, ..
-                } => Some((prompt.clone(), moved_from.clone())),
-                _ => None,
-            })
-            .expect("the handoff is shown in the thread");
-        assert_eq!(relay, (Some(text.clone()), Some(quick.clone())));
-        assert!(session.meta.moved_from.is_none());
-    });
+    cx.run_until_seen(|view| view.session(&session_id).unwrap().moved_from.is_none());
+    let relay = cx
+        .seen()
+        .timeline(&session_id)
+        .entries
+        .iter()
+        .find_map(|entry| match &entry.content {
+            EntryContent::ProviderRelay {
+                prompt, moved_from, ..
+            } => Some((prompt.clone(), moved_from.clone())),
+            _ => None,
+        })
+        .expect("the handoff is shown in the thread");
+    assert_eq!(relay, (Some(text.clone()), Some(quick.clone())));
 }
 
 /// A moved thread's first message hands the provider the conversation in the host's
@@ -5658,14 +5628,13 @@ fn a_moved_thread_keeps_a_native_session_that_can_move() {
         attachment_paths: Vec::new(),
     };
 
+    state.subscribe(cx, Topic::Index);
     acked(&state, cx, 1, move_to(&demo_project)).unwrap();
-    state.read(|state| {
-        assert_eq!(
-            state.find_meta("thread").unwrap().resume_cursor,
-            Some(native.clone())
-        );
-    });
-    state.update(cx, |state, cx| state.select_session("thread", cx));
+    assert_eq!(
+        cx.seen().session("thread").unwrap().resume_cursor,
+        Some(native.clone())
+    );
+    state.open(cx, "thread");
     acked(&state, cx, 2, send("what did we decide?")).unwrap();
     let (delivery_id, text, events) = next_turn(cx, &launches, 0);
     {
@@ -5692,10 +5661,11 @@ fn a_moved_thread_keeps_a_native_session_that_can_move() {
     ] {
         events.try_send(event).unwrap();
     }
-    cx.run_until(|state| {
-        state
-            .resident("thread")
-            .is_some_and(|session| session.timeline.turns.len() == 2 && !session.has_work())
+    cx.run_until_seen(|view| {
+        let status = view.status("thread");
+        view.timeline("thread").turns.len() == 2
+            && status.running_turn.is_none()
+            && status.delivery_in_flight.is_none()
     });
 
     acked(&state, cx, 3, move_to(&quick_project)).unwrap();
@@ -5735,10 +5705,11 @@ fn a_moved_thread_keeps_a_native_session_that_can_move() {
     ] {
         events.try_send(event).unwrap();
     }
-    cx.run_until(|state| {
-        state
-            .resident("thread")
-            .is_some_and(|session| session.timeline.turns.len() == 3 && !session.has_work())
+    cx.run_until_seen(|view| {
+        let status = view.status("thread");
+        view.timeline("thread").turns.len() == 3
+            && status.running_turn.is_none()
+            && status.delivery_in_flight.is_none()
     });
     acked(&state, cx, 5, send("go on")).unwrap();
     let (_, text, _) = next_turn(cx, &launches, 0);
@@ -5748,12 +5719,13 @@ fn a_moved_thread_keeps_a_native_session_that_can_move() {
         1,
         "the same provider process"
     );
-    state.read(|state| {
-        let session = state.resident("thread").unwrap();
-        assert_eq!(state.find_meta("thread").unwrap().cwd, elsewhere);
-        assert_eq!(session.meta.moved_from, None);
-        let moves: Vec<_> = session
-            .timeline
+    {
+        let meta = cx.seen().session("thread").unwrap();
+        assert_eq!(meta.cwd, elsewhere);
+        assert_eq!(meta.moved_from, None);
+        let moves: Vec<_> = cx
+            .seen()
+            .timeline("thread")
             .entries
             .iter()
             .filter_map(|entry| match &entry.content {
@@ -5770,7 +5742,7 @@ fn a_moved_thread_keeps_a_native_session_that_can_move() {
                 (quick.clone(), elsewhere.clone())
             ]
         );
-    });
+    }
 }
 
 /// The next command the provider of `launch` is sent that is not a turn.
@@ -5812,7 +5784,8 @@ fn a_subagents_claude_worktree_belongs_to_the_thread_and_goes_with_it() {
         state.set_provider_launcher(launcher);
         state
     });
-    state.update(cx, |state, cx| state.select_session("thread", cx));
+    state.subscribe(cx, Topic::Index);
+    state.open(cx, "thread");
     acked(
         &state,
         cx,
@@ -5863,17 +5836,13 @@ fn a_subagents_claude_worktree_belongs_to_the_thread_and_goes_with_it() {
             parent_item_id: Some("toolu_agent".into()),
         })
         .unwrap();
-    cx.run_until(|state| {
-        state
-            .sessions
-            .iter()
+    cx.run_until_seen(|view| {
+        view.sessions()
             .any(|meta| meta.native_subagent.is_some() && meta.cwd == worktree)
     });
-    state.read(|state| {
-        let thread = state.find_meta("thread").unwrap();
-        assert_eq!(thread.cwd, repo, "the session stays where it was");
-        assert_eq!(thread.other_worktrees.len(), 1);
-    });
+    let thread = cx.seen().session("thread").unwrap();
+    assert_eq!(thread.cwd, repo, "the session stays where it was");
+    assert_eq!(thread.other_worktrees.len(), 1);
 
     state.dispatch_command(
         cx,
@@ -6279,32 +6248,6 @@ fn an_account_switch_relays_when_the_copy_does_not_resume() {
     assert!(text.contains("ship it"), "{text}");
     assert!(text.ends_with("try again\n</new-user-message>"), "{text}");
     assert_eq!(switch.relays(), [Some(text)]);
-}
-
-/// Park `id` with a live provider running its turn, as a thread is whose log
-/// the host let go of while it worked.
-fn park_running(state: &TestEntity, cx: &mut TestAppContext, id: &str) {
-    state.update(cx, |state, _| {
-        let mut running = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
-        running.meta = state.find_meta(id).unwrap();
-        running.turn_in_flight = true;
-        state.residents.parked.insert(id.into(), running);
-    });
-}
-
-/// A live session with `provider`, nothing queued, no turn in flight.
-fn live_session(
-    provider: ProviderKind,
-    commands: smol::channel::Sender<SessionCommand>,
-) -> ActiveSession {
-    ActiveSession {
-        runtime: Runtime::Live(commands),
-        ..ActiveSession::new(
-            SessionMeta::new(provider, PathBuf::from("/tmp/project"), None),
-            false,
-            Vec::new(),
-        )
-    }
 }
 
 /// A harness that describes its own controls takes back the ones it no
@@ -6938,7 +6881,6 @@ fn a_new_threads_permission_is_its_projects_then_its_harness_then_the_recommende
 fn a_running_harness_options_are_what_it_reported_or_what_was_sent() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-confirmed-options");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
     let chosen = |id: &str, value: serde_json::Value| OptionSelection {
         id: id.into(),
         value,
@@ -6950,18 +6892,21 @@ fn a_running_harness_options_are_what_it_reported_or_what_was_sent() {
             .find(|selection| selection.id == id)
             .map(|selection| selection.value.clone())
     };
-    state.update(cx, |state, cx| {
-        let mut session = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
-        session.meta.id = "confirmed".into();
-        session.meta.option_selections = vec![
-            chosen(agent::EFFORT_OPTION_ID, serde_json::json!("high")),
-            chosen("thinking", serde_json::json!(true)),
-        ];
-        session
-            .live_option_selections
-            .clone_from(&session.meta.option_selections);
-        state.sessions.push(session.meta.clone());
-        state.install_selected(session);
+    stored_thread(
+        &store,
+        "confirmed",
+        ProviderKind::ClaudeCode,
+        &store.root().join("thread"),
+        |meta| {
+            meta.option_selections = vec![
+                chosen(agent::EFFORT_OPTION_ID, serde_json::json!("high")),
+                chosen("thinking", serde_json::json!(true)),
+            ];
+        },
+    );
+    let (state, providers) = played_host(cx, &store);
+    let provider = first_turn(&state, cx, &providers, "confirmed", 0);
+    {
         let level = |value: &str| agent::SelectOption {
             value: value.into(),
             label: value.into(),
@@ -6971,57 +6916,49 @@ fn a_running_harness_options_are_what_it_reported_or_what_was_sent() {
             summary: None,
             approval: None,
         };
-        state.on_event(
-            "confirmed",
-            AgentEvent::ProviderOptions {
-                descriptors: vec![
-                    OptionDescriptor::Select {
-                        id: agent::EFFORT_OPTION_ID.into(),
-                        label: "Effort".into(),
-                        options: vec![level("medium"), level("high")],
-                        default_value: Some("medium".into()),
-                        role: agent::OptionRole::Effort,
-                        apply: Default::default(),
-                        recommended: None,
-                        permissive: None,
-                        minimum: None,
-                    },
-                    OptionDescriptor::Boolean {
-                        id: "thinking".into(),
-                        label: "Thinking".into(),
-                        default_value: false,
-                        role: agent::OptionRole::Thinking,
-                        apply: Default::default(),
-                        recommended: None,
-                        permissive: None,
-                    },
-                ],
-                selections: Vec::new(),
-            },
-            cx,
-        );
-        let before = state.session_status_snapshot("confirmed").unwrap();
+        provider.play([AgentEvent::ProviderOptions {
+            descriptors: vec![
+                OptionDescriptor::Select {
+                    id: agent::EFFORT_OPTION_ID.into(),
+                    label: "Effort".into(),
+                    options: vec![level("medium"), level("high")],
+                    default_value: Some("medium".into()),
+                    role: agent::OptionRole::Effort,
+                    apply: Default::default(),
+                    recommended: None,
+                    permissive: None,
+                    minimum: None,
+                },
+                OptionDescriptor::Boolean {
+                    id: "thinking".into(),
+                    label: "Thinking".into(),
+                    default_value: false,
+                    role: agent::OptionRole::Thinking,
+                    apply: Default::default(),
+                    recommended: None,
+                    permissive: None,
+                },
+            ],
+            selections: Vec::new(),
+        }]);
+        provider.fence(cx, "confirmed");
+        let before = cx.seen().status("confirmed").clone();
         assert_eq!(value(&before, agent::EFFORT_OPTION_ID), None);
         assert_eq!(value(&before, "thinking"), Some(serde_json::json!(true)));
         assert_eq!(before.provider_option_unconfirmed, ["thinking"]);
         assert_eq!(before.running_model, None);
 
-        state.on_event(
-            "confirmed",
+        provider.play([
             AgentEvent::ProviderOptions {
                 descriptors: Vec::new(),
                 selections: vec![chosen(agent::EFFORT_OPTION_ID, serde_json::json!("medium"))],
             },
-            cx,
-        );
-        state.on_event(
-            "confirmed",
             AgentEvent::SessionModel {
                 model: "claude-test".into(),
             },
-            cx,
-        );
-        let after = state.session_status_snapshot("confirmed").unwrap();
+        ]);
+        provider.fence(cx, "confirmed");
+        let after = cx.seen().status("confirmed").clone();
         assert_eq!(
             value(&after, agent::EFFORT_OPTION_ID),
             Some(serde_json::json!("medium"))
@@ -7031,7 +6968,7 @@ fn a_running_harness_options_are_what_it_reported_or_what_was_sent() {
             chosen(agent::EFFORT_OPTION_ID, serde_json::json!("high"))
         );
         assert_eq!(after.running_model.as_deref(), Some("claude-test"));
-    });
+    }
 }
 
 /// A `$skill` the provider also exposes as a slash command (Claude) goes out
@@ -10641,11 +10578,12 @@ fn stored_snapshot(ts: u64, turn: &str, diff: &str) -> String {
     )
 }
 
-/// A snapshot appended to an open thread drops the diffs of the one it
-/// supersedes in the same commit, at that one's stored row even where blank or
-/// undecodable rows put rows and records out of step, and the log windows are
-/// served from holds it the same way. A log with a row that does not decode keeps its stored
-/// rows: its fold may not name the snapshots another build's would.
+/// A snapshot of a turn's changes appended to a thread a client holds drops
+/// the diffs of the ones it supersedes from the store, at their own rows even
+/// where a blank row puts rows and records out of step, and what the client
+/// is sent folds as the store does. A log with a row that does not decode
+/// keeps its stored rows: its fold may not name the snapshots another
+/// build's would.
 #[test]
 fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
     for (label, gap, rewritten) in [
@@ -10654,30 +10592,25 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
     ] {
         let cx = &mut TestAppContext::default();
         let store = TestStore::new("append-supersedes");
-        let seeded = format!(
-            "{{\"ts\":1,\"event\":{{\"type\":\"turn_started\",\"turn_id\":\"t\"}}}}\n\n{}{gap}",
-            stored_snapshot(2, "t", "-a\n+b\n")
+        stored_thread(
+            &store,
+            "thread",
+            ProviderKind::Codex,
+            &store.root().join("thread"),
+            |_| {},
         );
         store
             .apply(&[tcode_services::store::Mutation::replace_event_log(
                 "thread",
-                seeded.clone().into_bytes(),
+                gap.as_bytes().to_vec(),
             )])
             .unwrap();
-        open_stored_session(&store, "thread");
-        let mut conversation = store.read_events("thread").unwrap();
-        let state = cx.new_entity(TestClientState::new((*store).clone()));
-        state.update(cx, |state, cx| state.start_activity(cx));
-        cx.run_until(|state| state.store.turn_index("thread").unwrap().is_some());
-        park_running(&state, cx, "thread");
-        window_reply(
-            &through_pipe(&state, cx, 1, subscribe_events("thread", None)),
-            1,
-        );
-        // The window can be served before the whole log is read and kept.
-        cx.run_until(|state| state.event_records.contains_key("thread"));
+        let (state, providers) = played_host(cx, &store);
+        // The host indexes the stored log's turns as it starts.
+        cx.run_until(|_| store.turn_index("thread").unwrap().is_some());
+        let provider = first_turn(&state, cx, &providers, "thread", 0);
         let snapshot = |diff: &str| AgentEvent::TurnChangesUpdated {
-            turn_id: "t".into(),
+            turn_id: "turn".into(),
             changes: vec![agent::FileChange {
                 path: "f".into(),
                 kind: agent::FileChangeKind::Modify,
@@ -10685,67 +10618,37 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
             }],
             completeness: agent::ChangeCompleteness::Exact,
         };
-        let window = state.update(cx, |state, cx| {
-            for (ts, diff) in [(3, "-a\n+c\n"), (4, "-a\n+d\n")] {
-                state.record_event_for_replica_test("thread", ts, &snapshot(diff), cx);
-                conversation.push(StoredEvent {
-                    origin: None,
-                    author: None,
-                    ts: Some(ts),
-                    event: snapshot(diff),
-                    elided: None,
-                });
-            }
-            let ServerEvent::SessionSnapshot { records, .. } = events_reply(
-                state,
-                &tcode_protocol::Subscription {
-                    known_index: None,
-                    topic: Topic::SessionEvents {
-                        session_id: "thread".into(),
-                    },
-                    after: None,
-                },
-            )
-            .event
-            else {
-                panic!("snapshot")
-            };
-            records
-        });
-        let diffs: Vec<_> = window
+        provider.play(["-a\n+b\n", "-a\n+c\n", "-a\n+d\n"].map(snapshot));
+        provider.fence(cx, "thread");
+        cx.run_until_parked();
+
+        let diffs: Vec<bool> = store
+            .read_events("thread")
+            .unwrap()
             .iter()
             .filter_map(|record| match &record.event {
                 AgentEvent::TurnChangesUpdated { changes, .. } => Some(changes[0].diff.is_some()),
                 _ => None,
             })
             .collect();
-        assert_eq!(diffs, [false, false, true], "{label}: the served log");
         assert_eq!(
-            Timeline::fold_stored(&window),
-            Timeline::fold_stored(&conversation),
-            "{label}"
+            diffs,
+            if rewritten {
+                [false, false, true]
+            } else {
+                [true, true, true]
+            },
+            "{label}: the stored snapshots"
         );
-        cx.run_until_parked();
-
-        let stored = String::from_utf8(store.read_event_log("thread").unwrap()).unwrap();
-        let expected = if rewritten {
-            format!(
-                "{{\"ts\":1,\"event\":{{\"type\":\"turn_started\",\"turn_id\":\"t\"}}}}\n\n{}{gap}{}{}",
-                stored_snapshot(2, "t", ""),
-                stored_snapshot(3, "t", ""),
-                stored_snapshot(4, "t", "-a\n+d\n"),
-            )
-        } else {
-            format!(
-                "{seeded}{}{}",
-                stored_snapshot(3, "t", "-a\n+c\n"),
-                stored_snapshot(4, "t", "-a\n+d\n"),
-            )
-        };
-        assert_eq!(stored, expected, "{label}: the stored rows");
+        assert!(
+            String::from_utf8(store.read_event_log("thread").unwrap())
+                .unwrap()
+                .starts_with(gap),
+            "{label}: the rows before stay"
+        );
         assert_eq!(
+            cx.seen().timeline("thread"),
             Timeline::fold_events(store.read_events("thread").unwrap()),
-            Timeline::fold_stored(&conversation),
             "{label}"
         );
     }
@@ -10900,34 +10803,24 @@ fn clients_hear_of_the_move_of_an_older_builds_threads_only_while_it_runs() {
     assert_eq!(reply, (Some(3), None));
 }
 
-/// A completion appended to an open thread drops the deltas it repeats in
-/// the same commit: the one that created the entry stays with its text
-/// emptied, a stream the completion only abbreviates stays whole, and every
-/// later append still takes the row after the last. A thread nobody holds
-/// keeps its deltas until the background pass, which leaves the same rows.
-/// A client that holds the log up to a dropped delta and reads on from the
-/// store folds the same thread.
+/// A completion appended to a thread a client holds drops from the store the
+/// deltas it repeats: the one that created the entry stays with its text
+/// emptied, and a stream the completion only abbreviates stays whole. A log
+/// an earlier host wrote whole keeps its deltas until the startup pass,
+/// which leaves the same records. Each folds to the same thread.
 #[test]
 fn a_completion_drops_the_deltas_it_repeats_in_the_same_commit() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("completion-supersedes");
-    let seeded = "{\"ts\":1,\"event\":{\"type\":\"turn_started\",\"turn_id\":\"t\"}}\n";
     for id in ["held", "cold"] {
-        store
-            .apply(&[tcode_services::store::Mutation::replace_event_log(
-                id,
-                seeded.as_bytes().to_vec(),
-            )])
-            .unwrap();
-        open_stored_session(&store, id);
+        stored_thread(
+            &store,
+            id,
+            ProviderKind::Codex,
+            &store.root().join(id),
+            |_| {},
+        );
     }
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    park_running(&state, cx, "held");
-    window_reply(
-        &through_pipe(&state, cx, 1, subscribe_events("held", None)),
-        1,
-    );
-    cx.run_until(|state| state.event_records.contains_key("held"));
     let delta = |id: &str, kind, text: &str| AgentEvent::Delta {
         item_id: id.into(),
         kind,
@@ -10939,13 +10832,6 @@ fn a_completion_drops_the_deltas_it_repeats_in_the_same_commit() {
             parent_item_id: None,
             content,
         })
-    };
-    let command = |output: &str| ItemContent::CommandExecution {
-        command: "ls".into(),
-        input: Vec::new(),
-        output: output.into(),
-        exit_code: Some(0),
-        status: agent::ItemStatus::Completed,
     };
     let events = [
         delta("a", agent::DeltaKind::AssistantText, "Hel"),
@@ -10962,81 +10848,82 @@ fn a_completion_drops_the_deltas_it_repeats_in_the_same_commit() {
             agent::DeltaKind::CommandOutput,
             "x".repeat(40).as_str(),
         ),
-        completed("c", command("xxxx… 36 bytes omitted")),
-        AgentEvent::TurnCompleted {
-            turn_id: "t".into(),
-            status: TurnStatus::Completed,
-            usage: None,
-        },
+        completed(
+            "c",
+            ItemContent::CommandExecution {
+                command: "ls".into(),
+                input: Vec::new(),
+                output: "xxxx… 36 bytes omitted".into(),
+                exit_code: Some(0),
+                status: agent::ItemStatus::Completed,
+            },
+        ),
+        completed_turn("t"),
     ];
-    state.update(cx, |state, cx| {
-        for id in ["held", "cold"] {
-            for (ts, event) in events.iter().enumerate() {
-                state.record_event_for_replica_test(id, ts as u64 + 2, event, cx);
-            }
-        }
-    });
-    cx.run_until_parked();
-    let all: Vec<String> = std::iter::once(seeded.trim_end().to_owned())
-        .chain(events.iter().enumerate().map(|(ts, event)| {
-            let mut row = serde_json::json!({"ts": ts + 2, "event": event});
-            if matches!(event, AgentEvent::ItemCompleted(_)) {
-                row["item_version"] = 1.into();
-            }
-            serde_json::to_string(&row).unwrap()
-        }))
-        .collect();
-    let held = String::from_utf8(store.read_event_log("held").unwrap()).unwrap();
-    let expected: String = [
-        all[0].clone(),
-        all[1].replace("\"text\":\"Hel\"", "\"text\":\"\""),
-        all[3].clone(),
-        all[4].clone(),
-        all[5].clone(),
-        all[6].clone(),
-    ]
-    .iter()
-    .map(|line| format!("{line}\n"))
-    .collect();
-    assert_eq!(held, expected);
-    let log = store.read_log("held").unwrap();
-    assert_eq!(log.rows, [0, 1, 3, 4, 5, 6]);
-    let full = store.read_log("cold").unwrap();
-    assert_eq!(
-        full.rows,
-        [0, 1, 2, 3, 4, 5, 6],
-        "a thread nobody holds keeps its deltas"
-    );
-    assert_eq!(
-        Timeline::fold_stored(&log.records),
-        Timeline::fold_stored(&full.records)
-    );
-    // A client holding rows 0..=2 (the second delta among them) reads on.
-    let mut resumed = full.records[..3].to_vec();
-    resumed.extend(store.read_rows("held", 3..u64::MAX).unwrap().records);
-    assert_eq!(
-        Timeline::fold_stored(&resumed),
-        Timeline::fold_stored(&full.records)
-    );
-    state.update(cx, |state, cx| {
-        state.record_event_for_replica_test("held", 20, &events[5], cx)
-    });
-    cx.run_until_parked();
-    assert_eq!(store.read_log("held").unwrap().rows.last(), Some(&7));
-
+    // An earlier host wrote the cold thread's turn whole.
+    let started = AgentEvent::TurnStarted {
+        turn_id: "t".into(),
+    };
+    for (ts, event) in std::iter::once(&started).chain(&events).enumerate() {
+        store.append_event("cold", ts as u64, event).unwrap();
+    }
     assert!(
         store
             .threads_to_compact()
             .unwrap()
             .contains(&"cold".to_owned())
     );
-    state.update(cx, |state, cx| state.start_storage_pass(cx));
-    cx.run_until(|state| state.storage_pass.is_none());
+
+    let (state, providers) = played_host(cx, &store);
+    let provider = first_turn(&state, cx, &providers, "held", 0);
+    provider.play(events.clone());
+    cx.run_until_seen(|view| has_record(view, "held", is_turn_end));
+    cx.run_until_parked();
+    let deltas = |id: &str| {
+        store
+            .read_events(id)
+            .unwrap()
+            .into_iter()
+            .filter_map(|record| match record.event {
+                AgentEvent::Delta { item_id, text, .. } => Some((item_id, text)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let kept = vec![
+        ("a".to_string(), String::new()),
+        ("c".to_string(), "x".repeat(40)),
+    ];
+    assert_eq!(deltas("held"), kept);
     assert_eq!(
-        String::from_utf8(store.read_event_log("cold").unwrap()).unwrap(),
-        expected
+        deltas("cold").len(),
+        3,
+        "a log nobody wrote this way keeps its deltas"
     );
-    assert!(store.threads_to_compact().unwrap().is_empty());
+    assert_eq!(
+        cx.seen().timeline("held"),
+        Timeline::fold_events(store.read_events("held").unwrap())
+    );
+
+    // The pass a host makes as it starts.
+    state.update(cx, |state, cx| state.start_storage_pass(cx));
+    cx.run_until(|_| store.threads_to_compact().unwrap().is_empty());
+    assert_eq!(deltas("cold"), kept);
+    let fold = |id: &str| {
+        Timeline::fold_events(store.read_events(id).unwrap())
+            .entries
+            .into_iter()
+            .map(|entry| entry.content.clone())
+            .filter(|content| {
+                matches!(
+                    content,
+                    EntryContent::Item(ItemContent::AssistantMessage { .. })
+                        | EntryContent::Item(ItemContent::CommandExecution { .. })
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(fold("cold"), fold("held"));
 }
 
 /// A thread opens with about half a megabyte of history however long its
@@ -12230,86 +12117,84 @@ fn a_relaunch_marker_the_host_cannot_write_is_refused_with_the_reason() {
     )));
 }
 
+/// A thread settles only by itself and only when nothing of it waits on the
+/// user: a message the user queued, an approval or a blocking question keeps
+/// it out, a question its harness does not wait on does not. Settling stops
+/// its harness and sends nothing of what was queued for it automatically, a
+/// lead's waking report included, and leaves its children running. Reading
+/// it, archiving and unarchiving it and reopening it keep it settled;
+/// un-settling it holds it active until a message it accepts makes it
+/// ordinarily unsettled again, which a host started again reads.
 #[test]
 fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_admission() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("manual-settlement");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let (commands, received) = smol::channel::unbounded();
-    let original_commands = commands.clone();
-    state.update(cx, |state, _| {
-        let mut parent = live_session(ProviderKind::Codex, commands);
-        parent.meta.id = "parent".into();
-        parent.meta.unsettled_at = Some(1);
-        parent.push_or_merge_orchestrate_callback("queued completion".into());
-        let wake = parent.push_queued("automatic wake".into(), vec![]);
-        parent
-            .queue
-            .iter_mut()
-            .find(|message| message.id == wake)
-            .unwrap()
-            .origin = MessageOrigin::Server;
-        let mut child = ActiveSession::new(
-            SessionMeta::new(ProviderKind::Codex, store.root().clone(), None),
-            false,
-            vec![],
-        );
-        child.meta.id = "child".into();
-        child.meta.parent_session_id = Some("parent".into());
-        child.turn_in_flight = true;
-        state
-            .sessions
-            .extend([parent.meta.clone(), child.meta.clone()]);
-        state.residents.parked.insert("child".into(), child);
-        state.install_selected(parent);
-    });
-    through_pipe(
-        &state,
-        cx,
-        1,
-        tcode_protocol::ClientPayload::Command(Command::ScheduleTurn {
-            session_id: "parent".into(),
-            text: "human later".into(),
-            attachment_paths: vec![],
-            due: tcode_protocol::TurnDue::AfterSecs(3600),
-        }),
+    stored_thread(
+        &store,
+        "parent",
+        ProviderKind::Codex,
+        &store.root().join("parent"),
+        |meta| {
+            meta.unsettled_at = Some(1);
+        },
     );
-    let denied = through_pipe(
-        &state,
-        cx,
-        2,
-        tcode_protocol::ClientPayload::Command(Command::SettleSession {
-            session_id: "parent".into(),
-        }),
+    stored_thread(
+        &store,
+        "child",
+        ProviderKind::Codex,
+        &store.root().join("child"),
+        |meta| {
+            meta.parent_session_id = Some("parent".into());
+            meta.expectation = Some(ChildExpectation::opened(1));
+        },
     );
-    assert!(denied.iter().any(|message| matches!(
-        message,
-        HostMessage::Ack { id: 2, result: Err(error) } if error.code == "thread_busy"
-    )));
-    let human = state.read(|state| {
-        state
-            .resident("parent")
-            .unwrap()
-            .queue
-            .iter()
-            .find(|message| message.origin == MessageOrigin::Human)
-            .unwrap()
-            .id
-    });
-    through_pipe(
-        &state,
-        cx,
-        3,
-        tcode_protocol::ClientPayload::Command(Command::DropQueued {
-            session_id: "parent".into(),
-            id: human,
-        }),
-    );
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    let settle = |cx: &mut TestAppContext| {
+        state.command(
+            cx,
+            Command::SettleSession {
+                session_id: "parent".into(),
+            },
+        )
+    };
+    let busy = |result: Result<CommandResponse, ProtocolError>| matches!(result, Err(error) if error.code == "thread_busy");
+    // The child's turn runs on.
+    first_turn(&state, cx, &providers, "child", 0);
+    state.leave(cx, "child");
+    let parent = first_turn(&state, cx, &providers, "parent", 1);
+    parent.play([completed_turn("turn")]);
+    parent.fence(cx, "parent");
+
+    // A message the user queues for later keeps the thread out.
+    state
+        .command(
+            cx,
+            Command::ScheduleTurn {
+                session_id: "parent".into(),
+                text: "human later".into(),
+                attachment_paths: vec![],
+                due: tcode_protocol::TurnDue::AfterSecs(3600),
+            },
+        )
+        .unwrap();
+    assert!(busy(settle(cx)));
+    let human = cx.seen().status("parent").queued_messages[0].id;
+    state
+        .command(
+            cx,
+            Command::DropQueued {
+                session_id: "parent".into(),
+                id: human,
+            },
+        )
+        .unwrap();
+    // So does what the harness waits on the user for.
     for (request, resolved) in [
         (
             AgentEvent::ApprovalRequested(agent::ApprovalRequest {
                 id: "approval".into(),
-                parent_item_id: None,
+                parent_item_id: Some("toolu_agent".into()),
                 turn_id: None,
                 kind: agent::ApprovalKind::ToolUse {
                     name: "shell".into(),
@@ -12337,77 +12222,49 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
             },
         ),
     ] {
-        state.update(cx, |state, cx| state.on_event("parent", request, cx));
-        let denied = through_pipe(
-            &state,
-            cx,
-            20,
-            tcode_protocol::ClientPayload::Command(Command::SettleSession {
-                session_id: "parent".into(),
-            }),
-        );
-        assert!(denied.iter().any(|message| matches!(
-            message,
-            HostMessage::Ack { id: 20, result: Err(error) } if error.code == "thread_busy"
-        )));
-        state.update(cx, |state, cx| state.on_event("parent", resolved, cx));
+        parent.play([request]);
+        parent.fence(cx, "parent");
+        assert!(busy(settle(cx)));
+        parent.play([resolved]);
+        parent.fence(cx, "parent");
     }
-    state.update(cx, |state, cx| {
-        state.on_event(
-            "parent",
-            AgentEvent::UserInputRequested {
-                request_id: "asynchronous".into(),
-                questions: vec![],
-                delivery: agent::UserInputDelivery::Async,
-            },
-            cx,
-        )
-    });
-    let accepted = through_pipe(
-        &state,
+    // The harness hit its usage limit: the host queues the resume for when
+    // it resets, on its own.
+    parent.play([AgentEvent::UsageLimitReached {
+        resets_at: cx.now_secs() + 3_600,
+    }]);
+    parent.fence(cx, "parent");
+    assert_eq!(
+        cx.seen().status("parent").queued_messages[0].text,
+        tcode_core::session::RESUME_PROMPT
+    );
+    parent.play([AgentEvent::UserInputRequested {
+        request_id: "asynchronous".into(),
+        questions: vec![],
+        delivery: agent::UserInputDelivery::Async,
+    }]);
+    parent.fence(cx, "parent");
+    settle(cx).unwrap();
+    assert!(matches!(parent.next_command(cx), SessionCommand::Shutdown));
+    let settled = |cx: &TestAppContext, id: &str| cx.seen().session(id).unwrap().is_settled();
+    assert!(settled(cx, "parent"));
+    assert!(cx.seen().session("parent").unwrap().unsettled_at.is_none());
+    assert!(
+        cx.seen().status("parent").queued_messages.is_empty(),
+        "the automatic queue goes with the settle"
+    );
+    assert!(cx.seen().activity("child").unwrap().turn_running);
+    assert!(!settled(cx, "child"));
+
+    // Reading, archiving and coming back keep it settled.
+    state.leave(cx, "parent");
+    state.subscribe(
         cx,
-        4,
-        tcode_protocol::ClientPayload::Command(Command::SettleSession {
+        Topic::SessionEvents {
             session_id: "parent".into(),
-        }),
+        },
     );
-    assert!(accepted.iter().any(|message| matches!(
-        message,
-        HostMessage::Ack {
-            id: 4,
-            result: Ok(_)
-        }
-    )));
-    state.read(|state| {
-        let parent = state.resident("parent").unwrap();
-        assert!(parent.meta.is_settled());
-        assert!(parent.meta.unsettled_at.is_none());
-        assert!(parent.queue.is_empty());
-        assert!(state.resident("child").unwrap().turn_in_flight);
-        assert!(!state.find_meta("child").unwrap().is_settled());
-    });
-    assert!(matches!(
-        received.try_recv().unwrap(),
-        SessionCommand::Shutdown
-    ));
-    through_pipe(
-        &state,
-        cx,
-        21,
-        tcode_protocol::ClientPayload::Subscribe(Subscription {
-            known_index: None,
-            topic: Topic::SessionEvents {
-                session_id: "parent".into(),
-            },
-            after: None,
-        }),
-    );
-    state.read(|state| {
-        assert!(
-            state.find_meta("parent").unwrap().is_settled(),
-            "reading leaves settlement intact"
-        )
-    });
+    assert!(settled(cx, "parent"), "reading leaves settlement intact");
     for command in [
         Command::ArchiveSession {
             session_id: "parent".into(),
@@ -12416,183 +12273,146 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
             session_id: "parent".into(),
         },
     ] {
-        through_pipe(
-            &state,
-            cx,
-            22,
-            tcode_protocol::ClientPayload::Command(command),
-        );
-        state.read(|state| assert!(state.find_meta("parent").unwrap().is_settled()));
+        state.command(cx, command).unwrap();
     }
-    through_pipe(
-        &state,
-        cx,
-        24,
-        tcode_protocol::ClientPayload::Subscribe(Subscription {
-            known_index: None,
-            topic: Topic::SessionStatus {
+    cx.run_until_seen(|view| view.session("parent").is_some());
+    assert!(settled(cx, "parent"));
+    state.open(cx, "parent");
+    assert!(
+        settled(cx, "parent"),
+        "reopening status preserves settlement"
+    );
+
+    state
+        .command(
+            cx,
+            Command::UnsettleSession {
                 session_id: "parent".into(),
             },
-            after: None,
-        }),
-    );
-    cx.run_until(|state| state.resident("parent").is_some());
-    state.read(|state| {
-        assert!(
-            state.find_meta("parent").unwrap().is_settled(),
-            "reopening status preserves settlement"
         )
-    });
-    through_pipe(
-        &state,
-        cx,
-        23,
-        tcode_protocol::ClientPayload::Command(Command::UnsettleSession {
-            session_id: "parent".into(),
-        }),
+        .unwrap();
+    assert_eq!(
+        cx.seen().session("parent").unwrap().settled_override,
+        Some(tcode_core::project::SettledOverride::Active)
     );
-    state.read(|state| {
-        assert_eq!(
-            state.find_meta("parent").unwrap().settled_override,
-            Some(tcode_core::project::SettledOverride::Active)
-        )
-    });
-    let fresh = smol::channel::unbounded();
-    state.update(cx, |state, _| {
-        state.resident_mut("parent").unwrap().runtime = Runtime::Live(fresh.0)
-    });
-    through_pipe(
-        &state,
-        cx,
-        5,
-        tcode_protocol::ClientPayload::Command(Command::SendTurn {
-            session_id: "parent".into(),
-            text: "new work".into(),
-            attachment_paths: vec![],
-        }),
-    );
+    state.send(cx, "parent", "new work");
+    let next = providers.started(cx, 2);
+    let (delivery_id, text) = next.next_turn(cx);
+    assert_eq!(text, "new work");
+    next.play([AgentEvent::TurnAccepted { delivery_id }]);
+    cx.run_until_seen(|view| view.session("parent").unwrap().settled_override.is_none());
+    let meta = cx.seen().session("parent").unwrap();
+    assert!(!meta.is_settled());
     assert!(
-        matches!(fresh.1.try_recv().unwrap(), SessionCommand::SendTurn { text, .. } if text == "new work")
+        meta.unsettled_at.is_some(),
+        "an accepted message clears explicit Active"
     );
-    state.update(cx, |state, cx| {
-        state.on_event_stream_ended("parent", &original_commands, cx)
-    });
-    state.read(|state| {
-        let meta = state.find_meta("parent").unwrap();
-        assert!(!meta.is_settled());
-        assert_eq!(
-            meta.settled_override, None,
-            "an accepted message clears explicit Active"
-        );
-        assert!(meta.unsettled_at.is_some());
-    });
-    through_pipe(
-        &state,
-        cx,
-        6,
-        tcode_protocol::ClientPayload::Command(Command::ShutdownAllAndFlush),
-    );
+    state.command(cx, Command::ShutdownAllAndFlush).unwrap();
     let restarted = AppState::new((*store).clone()).unwrap();
     assert!(!restarted.find_meta("parent").unwrap().is_settled());
 }
 
+/// A report wakes its settled lead, renamed or not, and no thread above it;
+/// a lead archived or deleted before the report, or a child archived before
+/// it ran, is woken by nothing.
 #[test]
 fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("completion-admission");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    for case in [
+    let cases = [
         "valid",
         "renamed",
         "archived_child",
         "archived_parent",
         "deleted_parent",
-    ] {
-        let ancestor_id = format!("{case}-ancestor");
-        let parent_id = format!("{case}-parent");
-        let child_id = format!("{case}-child");
-        let (parent_commands, parent_received) = smol::channel::unbounded();
-        let (child_commands, _child_received) = smol::channel::unbounded();
-        state.update(cx, |state, _| {
-            let mut ancestor = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
-            ancestor.id = ancestor_id.clone();
-            ancestor.settled_at = Some(1);
-            let mut parent = live_session(ProviderKind::Codex, parent_commands);
-            parent.meta.id = parent_id.clone();
-            parent.meta.parent_session_id = Some(ancestor_id.clone());
-            parent.meta.settled_at = Some(1);
-            let mut child = live_session(ProviderKind::Codex, child_commands);
-            child.meta.id = child_id.clone();
-            child.meta.parent_session_id = Some(parent_id.clone());
-            child.meta.expectation = Some(ChildExpectation::opened(1));
-            state
-                .sessions
-                .extend([ancestor, parent.meta.clone(), child.meta.clone()]);
-            state.residents.parked.insert(parent_id.clone(), parent);
-            state.install_selected(child);
-        });
+    ];
+    for case in cases {
+        let ancestor = format!("{case}-ancestor");
+        let parent = format!("{case}-parent");
+        let child = format!("{case}-child");
+        stored_thread(
+            &store,
+            &ancestor,
+            ProviderKind::Codex,
+            &store.root().join(&ancestor),
+            |meta| {
+                meta.settled_at = Some(1);
+            },
+        );
+        stored_thread(
+            &store,
+            &parent,
+            ProviderKind::Codex,
+            &store.root().join(&parent),
+            |meta| {
+                meta.parent_session_id = Some(ancestor.clone());
+                meta.settled_at = Some(1);
+            },
+        );
+        stored_thread(
+            &store,
+            &child,
+            ProviderKind::Codex,
+            &store.root().join(&child),
+            |meta| {
+                meta.parent_session_id = Some(parent.clone());
+                meta.expectation = Some(ChildExpectation::opened(1));
+            },
+        );
+    }
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    let mut launches = 0;
+    for case in cases {
+        let (ancestor, parent, child) = (
+            format!("{case}-ancestor"),
+            format!("{case}-parent"),
+            format!("{case}-child"),
+        );
         // Each command lands before the child runs and reports.
         let command = match case {
             "renamed" => Some(Command::RenameSession {
-                session_id: child_id.clone(),
+                session_id: child.clone(),
                 title: "Renamed".into(),
             }),
             "archived_child" => Some(Command::ArchiveSession {
-                session_id: child_id.clone(),
+                session_id: child.clone(),
             }),
             "archived_parent" => Some(Command::ArchiveSession {
-                session_id: parent_id.clone(),
+                session_id: parent.clone(),
             }),
             "deleted_parent" => Some(Command::DeleteSession {
-                session_id: parent_id.clone(),
+                session_id: parent.clone(),
                 remove_worktree: false,
             }),
             _ => None,
         };
         if let Some(command) = command {
-            state.dispatch_command(cx, 1, command);
+            state.command(cx, command).unwrap();
         }
-        cx.run_until_parked();
-        state.update(cx, |state, cx| {
-            if state.resident(&child_id).is_none() {
-                return;
-            }
-            for event in [
-                AgentEvent::TurnStarted {
-                    turn_id: "finished-run".into(),
-                },
+        if cx.seen().session(&child).is_some() {
+            let played = first_turn(&state, cx, &providers, &child, launches);
+            launches += 1;
+            played.play([
                 report_result_event("rep", "completion evidence"),
-                completed_turn("finished-run"),
-            ] {
-                state.on_event(&child_id, event, cx);
-            }
-        });
+                completed_turn("turn"),
+            ]);
+            played.fence(cx, &child);
+        }
         if case == "valid" || case == "renamed" {
-            assert!(
-                matches!(cx.run_until_recv(&parent_received), SessionCommand::SendTurn { text, .. } if text.contains("completion evidence"))
-            );
-            state.read(|state| assert!(!state.find_meta(&parent_id).unwrap().is_settled()));
+            let woken = providers.started(cx, launches);
+            launches += 1;
+            assert_eq!(woken.options.cwd, store.root().join(&parent));
+            assert!(woken.next_turn(cx).1.contains("completion evidence"));
+            assert!(!cx.seen().session(&parent).unwrap().is_settled());
         } else {
             cx.run_until_parked();
-            state.read(|state| {
-                if let Some(parent) = state.find_meta(&parent_id) {
-                    assert!(parent.is_settled(), "{case}");
-                }
-            });
-            assert!(
-                !std::iter::from_fn(|| parent_received.try_recv().ok()).any(|command| matches!(
-                    command,
-                    SessionCommand::SendTurn { .. } | SessionCommand::Steer { .. }
-                )),
-                "{case}"
-            );
+            if let Some(parent) = cx.seen().session(&parent) {
+                assert!(parent.is_settled(), "{case}");
+            }
+            assert_eq!(providers.count(), launches, "{case}: nothing is woken");
         }
-        state.read(|state| {
-            assert!(
-                state.find_meta(&ancestor_id).unwrap().is_settled(),
-                "{case}"
-            )
-        });
+        assert!(cx.seen().session(&ancestor).unwrap().is_settled(), "{case}");
     }
 }
 
@@ -12871,16 +12691,24 @@ fn an_agent_archived_before_settle_stays_not_delivered_when_restored() {
     );
 }
 
+/// Settling a dispatched child stops its own harness and the subagent that
+/// harness ran, leaves the work of its own children running, and lets its
+/// lead settle once nothing under the lead is unsettled.
 #[test]
 fn settling_detaches_only_its_own_provider_and_releases_its_parent() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("settlement-own-provider");
     let stamp = cx.now_millis();
     cx.clock.advance(Duration::from_secs(10 * 86_400));
-    let mut lead = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
-    lead.id = "lead".into();
-    lead.created_at = stamp / 1000;
-    store.upsert_meta(&lead).unwrap();
+    stored_thread(
+        &store,
+        "lead",
+        ProviderKind::Codex,
+        &store.root().join("lead"),
+        |lead| {
+            lead.created_at = stamp / 1000;
+        },
+    );
     store
         .append_event(
             "lead",
@@ -12895,113 +12723,94 @@ fn settling_detaches_only_its_own_provider_and_releases_its_parent() {
             }),
         )
         .unwrap();
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let (worker_commands, worker_received) = smol::channel::unbounded();
-    state.update(cx, |state, cx| {
-        state.settings.auto_settle_after_days = None;
-        let mut worker = live_session(ProviderKind::Codex, worker_commands);
-        worker.meta.id = "worker".into();
-        worker.meta.parent_session_id = Some("lead".into());
-        let mut independent = ActiveSession::new(
-            SessionMeta::new(ProviderKind::Codex, store.root().clone(), None),
-            false,
-            vec![],
+    for (id, parent) in [("worker", "lead"), ("independent", "worker")] {
+        stored_thread(
+            &store,
+            id,
+            ProviderKind::Codex,
+            &store.root().join(id),
+            |meta| {
+                meta.parent_session_id = Some(parent.into());
+            },
         );
-        independent.meta.id = "independent".into();
-        independent.meta.parent_session_id = Some("worker".into());
-        independent.turn_in_flight = true;
-        state.persist_meta(&worker.meta, cx);
-        state.persist_meta(&independent.meta, cx);
-        state
-            .residents
-            .parked
-            .insert("independent".into(), independent);
-        state.install_selected(worker);
-        for owner in ["worker", "independent"] {
-            state.on_event(
-                owner,
-                AgentEvent::ItemStarted(ThreadItem {
-                    id: format!("spawn-{owner}"),
-                    parent_item_id: None,
-                    content: ItemContent::Subagent {
-                        agent_type: "explorer".into(),
-                        description: "Inspect sample".into(),
-                        status: ItemStatus::InProgress,
-                        summary: None,
-                        model: None,
-                        effort: None,
-                    },
-                }),
-                cx,
-            );
-        }
-    });
+    }
+    let settings = Settings {
+        auto_settle_after_days: None,
+        ..Default::default()
+    };
+    SettingsStore::new(store.root().clone())
+        .save(&settings)
+        .unwrap();
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    let spawn = |owner: &str| {
+        AgentEvent::ItemStarted(ThreadItem {
+            id: format!("spawn-{owner}"),
+            parent_item_id: None,
+            content: ItemContent::Subagent {
+                agent_type: "explorer".into(),
+                description: "Inspect sample".into(),
+                status: ItemStatus::InProgress,
+                summary: None,
+                model: None,
+                effort: None,
+            },
+        })
+    };
+    // The independent child's turn runs on; the worker's has ended, its
+    // subagent going on in the background.
+    let independent = first_turn(&state, cx, &providers, "independent", 0);
+    independent.play([spawn("independent")]);
+    independent.fence(cx, "independent");
+    state.leave(cx, "independent");
+    let worker = first_turn(&state, cx, &providers, "worker", 1);
+    worker.play([spawn("worker"), completed_turn("turn")]);
+    worker.fence(cx, "worker");
+
     // An unsettled dispatched child holds its lead out of settlement.
-    state.dispatch_command(
-        cx,
-        1,
-        Command::PatchSettings {
-            patch: SettingsPatch::AutoSettleAfterDays(Some(3.0)),
-        },
+    state
+        .command(
+            cx,
+            Command::PatchSettings {
+                patch: SettingsPatch::AutoSettleAfterDays(Some(3.0)),
+            },
+        )
+        .unwrap();
+    assert!(!cx.seen().session("lead").unwrap().is_settled());
+    state
+        .command(
+            cx,
+            Command::SettleSession {
+                session_id: "worker".into(),
+            },
+        )
+        .unwrap();
+    assert!(matches!(worker.next_command(cx), SessionCommand::Shutdown));
+    let mirror = |spawn: &str| cx.seen().mirror(spawn).unwrap().id.clone();
+    let (worker_mirror, independent_mirror) = (mirror("spawn-worker"), mirror("spawn-independent"));
+    state.open(cx, &worker_mirror);
+    assert_eq!(
+        cx.seen().timeline(&worker_mirror).last_turn_status,
+        Some(TurnStatus::Interrupted)
     );
-    cx.run_until(|state| state.thread_activity.contains_key("lead"));
-    state.read(|state| assert!(!state.find_meta("lead").unwrap().is_settled()));
-    let accepted = through_pipe(
-        &state,
-        cx,
-        2,
-        tcode_protocol::ClientPayload::Command(Command::SettleSession {
-            session_id: "worker".into(),
-        }),
+    assert!(
+        cx.seen()
+            .activity(&independent_mirror)
+            .unwrap()
+            .turn_running
     );
-    assert!(accepted.iter().any(|message| matches!(
-        message,
-        HostMessage::Ack {
-            id: 2,
-            result: Ok(_)
-        }
-    )));
-    assert!(matches!(
-        worker_received.try_recv().unwrap(),
-        SessionCommand::Shutdown
-    ));
-    state.read(|state| {
-        let mirror = |spawn| {
-            state
-                .sessions
-                .iter()
-                .find(|meta| meta.native_subagent.as_deref() == Some(spawn))
-                .unwrap()
-        };
-        assert_eq!(
-            state
-                .resident(&mirror("spawn-worker").id)
-                .unwrap()
-                .timeline
-                .last_turn_status,
-            Some(TurnStatus::Interrupted)
-        );
-        assert!(
-            state
-                .resident(&mirror("spawn-independent").id)
-                .unwrap()
-                .timeline
-                .turn_running
-        );
-        assert!(state.resident("independent").unwrap().turn_in_flight);
-    });
-    state.dispatch_command(
-        cx,
-        3,
-        Command::PatchSettings {
-            patch: SettingsPatch::AutoSettleAfterDays(Some(2.0)),
-        },
-    );
-    cx.run_until(|state| {
-        state
-            .find_meta("lead")
-            .is_some_and(|meta| meta.settled_at == Some(stamp / 1000))
-    });
+    assert!(cx.seen().activity("independent").unwrap().turn_running);
+    assert!(next_command(&independent.commands).is_err());
+
+    state
+        .command(
+            cx,
+            Command::PatchSettings {
+                patch: SettingsPatch::AutoSettleAfterDays(Some(2.0)),
+            },
+        )
+        .unwrap();
+    cx.run_until_seen(|view| view.session("lead").unwrap().settled_at == Some(stamp / 1000));
 }
 
 /// A pin promotes a settled thread without reopening it, holds an idle
@@ -13621,76 +13430,71 @@ fn deleting_the_last_child_releases_its_leads_automatic_settlement() {
     host.stopped.recv_blocking().unwrap();
 }
 
+/// Settling a lead's children settles each of its own dispatched children
+/// that finished, skips one still running, and touches no thread of another
+/// lead, no native subagent and not the lead.
 #[test]
 fn settle_all_children_delivers_finished_results_and_skips_running_children() {
     use tcode_core::settlement::AgentDelivery;
     use tcode_protocol::{ChildSettlement, CommandResponse, SettleChildrenResult};
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("settle-all-children");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    state.update(cx, |state, _| {
-        for (id, parent, running, native) in [
-            ("lead", None, false, false),
-            ("first", Some("lead"), false, false),
-            ("second", Some("lead"), false, false),
-            ("running", Some("lead"), true, false),
-            ("other", Some("another-lead"), false, false),
-            ("native", Some("lead"), false, true),
-        ] {
-            let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
-            meta.id = id.into();
-            meta.parent_session_id = parent.map(str::to_owned);
-            meta.native_subagent = native.then(|| "native-item".into());
-            let mut session = ActiveSession::new(meta.clone(), false, vec![]);
-            session.turn_in_flight = running;
-            state.sessions.push(meta);
-            state.residents.parked.insert(id.into(), session);
-        }
-    });
-    let messages = through_pipe(
-        &state,
+    for (id, parent, native) in [
+        ("lead", None, false),
+        ("first", Some("lead"), false),
+        ("second", Some("lead"), false),
+        ("running", Some("lead"), false),
+        ("other", Some("another-lead"), false),
+        ("native", Some("lead"), true),
+    ] {
+        stored_thread(
+            &store,
+            id,
+            ProviderKind::Codex,
+            &store.root().join(id),
+            |meta| {
+                meta.parent_session_id = parent.map(str::to_owned);
+                meta.native_subagent = native.then(|| "native-item".into());
+            },
+        );
+    }
+    let (state, providers) = played_host(cx, &store);
+    state.subscribe(cx, Topic::Index);
+    first_turn(&state, cx, &providers, "running", 0);
+    state.leave(cx, "running");
+    let Ok(CommandResponse::ChildrenSettled(mut result)) = state.command(
         cx,
-        1,
-        tcode_protocol::ClientPayload::Command(Command::SettleChildren {
+        Command::SettleChildren {
             session_id: "lead".into(),
-        }),
-    );
+        },
+    ) else {
+        panic!("the children are settled")
+    };
     let entry = |id: &str, delivery| ChildSettlement {
         thread_id: id.into(),
         delivery,
     };
-    let expected = SettleChildrenResult {
-        settled: vec![
-            entry("first", AgentDelivery::Settled),
-            entry("second", AgentDelivery::Settled),
-        ],
-        skipped: vec![entry("running", AgentDelivery::Running)],
-    };
-    let mut result = messages
-        .iter()
-        .find_map(|message| match message {
-            HostMessage::Ack {
-                id: 1,
-                result: Ok(CommandResponse::ChildrenSettled(result)),
-            } => Some(result.clone()),
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("settle-all response: {messages:?}"));
     result.settled.sort_by(|a, b| a.thread_id.cmp(&b.thread_id));
-    assert_eq!(result, expected);
-    state.read(|state| {
-        for id in ["first", "second"] {
-            let meta = state.find_meta(id).unwrap();
-            assert!(meta.is_settled());
-            assert_eq!(
-                state.agent_status(&meta).unwrap().delivery,
-                AgentDelivery::Settled
-            );
+    assert_eq!(
+        result,
+        SettleChildrenResult {
+            settled: vec![
+                entry("first", AgentDelivery::Settled),
+                entry("second", AgentDelivery::Settled),
+            ],
+            skipped: vec![entry("running", AgentDelivery::Running)],
         }
-        for id in ["lead", "running", "other", "native"] {
-            assert!(!state.find_meta(id).unwrap().is_settled(), "{id}");
-        }
-    });
+    );
+    for id in ["first", "second"] {
+        assert!(cx.seen().session(id).unwrap().is_settled());
+        assert_eq!(
+            cx.seen().activity(id).unwrap().agent.unwrap().delivery,
+            AgentDelivery::Settled
+        );
+    }
+    for id in ["lead", "running", "other", "native"] {
+        assert!(!cx.seen().session(id).unwrap().is_settled(), "{id}");
+    }
 }
 
 #[test]

@@ -243,6 +243,10 @@ fn terminal_session() -> Session {
         unreachable!()
     };
     let terminal_id = status.terminals[0].id;
+    // The host emulator's own grid is what every replica is held to. A client
+    // sees only projections of it, which are what is under test, and
+    // `read_terminal` gives its text redacted, without cells, styles or modes,
+    // so the grid is taken from the host itself.
     let terminal = smol::block_on(
         host.update_state_for_test(move |state, _| state.terminal_handle(terminal_id)),
     )

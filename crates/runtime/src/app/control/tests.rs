@@ -3,8 +3,8 @@ use crate::app::active_session::Runtime;
 use crate::app::test_support::*;
 use control_mcp::{
     CancelNotifyParams, DeleteThreadsParams, GetThreadParams, GitOp, GitParams, NotifyWhenParams,
-    OutlineParams, PatchSettingsParams, RequestGrantParams, RespondInputParams, TerminalOp,
-    TerminalParams, ThreadChange, ThreadOp, UpdateThreadsParams,
+    OutlineParams, PatchSettingsParams, RequestGrantParams, TerminalOp, TerminalParams,
+    ThreadChange, ThreadOp, UpdateThreadsParams,
 };
 use tcode_core::control::{ControlCategory, ControlTier, WatchEvent};
 use tcode_protocol::{Command, CommandResponse, HostMessage};
@@ -867,53 +867,76 @@ fn watches_survive_a_restart_fire_once_and_cancel() {
 fn respond_input_answers_only_the_pending_question_with_the_category() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-control-respond-input");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    state.update(cx, |state, cx| {
-        state.sessions.push(thread("caller", "p"));
-        state.sessions.push(thread("asker", "p"));
-        let commands = install_live(state, thread("asker", "p"));
-        state.provider_event_for_test("asker", question("q1"), cx);
-        let answer = |question_id: Option<&str>| {
-            ControlOp::RespondInput(RespondInputParams {
-                thread_id: "asker".into(),
-                question_id: question_id.map(str::to_owned),
-                answers: [("which".to_owned(), serde_json::json!("main"))]
-                    .into_iter()
-                    .collect(),
-            })
-        };
-
-        assert_eq!(
-            call(state, "caller", answer(None), cx),
-            Err("refused: `respond_input` needs category answer_input; your grant: observe, organize, operate (project)".into())
+    let root = store.root().clone();
+    for id in ["caller", "asker"] {
+        stored_thread(
+            &store,
+            id,
+            ProviderKind::ClaudeCode,
+            &root.join(id),
+            |meta| {
+                meta.project_id = Some("p".into());
+                meta.title = format!("Thread {id}");
+            },
         );
-        let meta = granted(state.find_meta("caller").unwrap(), &[ControlCategory::AnswerInput]);
-        state.store_meta(meta, cx);
-        assert_eq!(
-            call(state, "caller", answer(Some("q0")), cx),
-            Err("refused: request q0 is not pending in thread asker".into())
-        );
-        assert!(commands.try_recv().is_err());
+    }
+    let (state, providers) = controlled_host(cx, &store);
+    let asker = first_turn(&state, cx, &providers, "asker", 0);
+    asker.play([question("q1")]);
+    asker.fence(cx, "asker");
+    let caller = first_turn(&state, cx, &providers, "caller", 1);
+    let answer = |cx: &mut TestAppContext, question_id: Option<&str>| {
+        caller.control(
+            cx,
+            "respond_input",
+            serde_json::json!({
+                "thread_id": "asker",
+                "question_id": question_id,
+                "answers": {"which": "main"},
+            }),
+        )
+    };
+    assert_eq!(
+        answer(cx, None),
+        Err("refused: `respond_input` needs category answer_input; your grant: observe, organize, operate (project)".into())
+    );
+    state
+        .command(
+            cx,
+            Command::SetControlGrant {
+                session_id: "caller".into(),
+                grant: Some(ControlGrant {
+                    categories: [ControlCategory::AnswerInput].into_iter().collect(),
+                    ..ControlGrant::default_grant()
+                }),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        answer(cx, Some("q0")),
+        Err("refused: request q0 is not pending in thread asker".into())
+    );
+    assert!(crate::app::next_command(&asker.commands).is_err());
 
-        call(state, "caller", answer(Some("q1")), cx).unwrap();
-        match commands.try_recv().unwrap() {
-            agent::SessionCommand::RespondUserInput {
-                request_id,
-                answers,
-            } => {
-                assert_eq!(request_id, "q1");
-                assert_eq!(answers["which"], "main");
-            }
-            other => panic!("unexpected command: {other:?}"),
+    answer(cx, Some("q1")).unwrap();
+    match asker.next_command(cx) {
+        agent::SessionCommand::RespondUserInput {
+            request_id,
+            answers,
+        } => {
+            assert_eq!(request_id, "q1");
+            assert_eq!(answers["which"], "main");
         }
-        let audited = state.resident("asker").unwrap().timeline.entries.iter().any(|entry| {
+        other => panic!("unexpected command: {other:?}"),
+    }
+    cx.run_until_seen(|view| {
+        view.timeline("asker").entries.iter().any(|entry| {
             matches!(
                 &entry.content,
                 EntryContent::ControlAction(action)
                     if action.actor_thread_id == "caller" && action.action == "respond_input"
             )
-        });
-        assert!(audited, "the answer is recorded in the answered thread");
+        })
     });
 }
 
