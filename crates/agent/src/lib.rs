@@ -2315,25 +2315,6 @@ pub async fn start_session(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanResolution {
-    /// Accepted in this thread.
-    Implemented,
-    /// Accepted in a fresh thread.
-    HandedOff { session_id: String },
-    /// Explicitly dismissed by the user.
-    Dismissed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClassifierCategory {
-    Cyber,
-    Bio,
-    Other(String),
-}
-
 /// A failed native turn can be continued without adding user input.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnRetry {
@@ -2365,11 +2346,6 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         moved_from: Option<PathBuf>,
     },
-    /// History-only: retained to decode stored plan decisions; never emitted.
-    PlanResolved {
-        item_id: String,
-        resolution: PlanResolution,
-    },
     /// The agent's self-described options (ACP `modes` / `models` /
     /// `configOptions`), pushed at session start and on every change. Reuses
     /// [`OptionDescriptor`] so the composer's existing picker renders them
@@ -2390,20 +2366,6 @@ pub enum AgentEvent {
     ServedModel {
         model: String,
         reason: Option<String>,
-    },
-    /// History-only: retained to decode stored rows; never emitted.
-    ModelFallbackDetected {
-        expected: String,
-        actual: String,
-        category: Option<ClassifierCategory>,
-        checkpoint_id: Option<String>,
-        parent_tool_use_id: Option<String>,
-    },
-    /// History-only: retained to decode stored rows; never emitted.
-    TurnBlocked {
-        category: Option<ClassifierCategory>,
-        model: Option<String>,
-        detail: String,
     },
     TurnStarted {
         turn_id: String,
@@ -2667,16 +2629,6 @@ pub enum AgentEvent {
     /// Replaces the session's goal wholesale; `None` means there is none.
     GoalUpdated {
         goal: Option<Goal>,
-    },
-    /// History-only: retained to decode stored proposed-plan deltas; never emitted.
-    ProposedPlanDelta {
-        item_id: String,
-        text: String,
-    },
-    /// History-only: retained to decode stored proposed plans; never emitted.
-    ProposedPlan {
-        item_id: String,
-        markdown: String,
     },
     Warning {
         message: String,
@@ -3245,7 +3197,7 @@ pub enum WorktreeAnswer {
     Refused { error: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
     /// Codex aborts (`cancel`); Claude denies with "User cancelled tool execution";
@@ -3257,30 +3209,6 @@ pub enum ApprovalDecision {
     /// Claude denies with them as the message, Grok and Cursor return them as
     /// plan feedback. A provider with no channel for words declines once.
     Feedback(String),
-}
-
-impl<'de> Deserialize<'de> for ApprovalDecision {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "snake_case")]
-        enum StoredDecision {
-            Cancel,
-            Option(String),
-            Feedback(String),
-            Approve,
-            ApproveForSession,
-            Deny,
-        }
-        Ok(match StoredDecision::deserialize(deserializer)? {
-            StoredDecision::Cancel => Self::Cancel,
-            StoredDecision::Option(id) => Self::Option(id),
-            StoredDecision::Feedback(text) => Self::Feedback(text),
-            // These ids are history-only and never occur in live request options.
-            StoredDecision::Approve => Self::Option("legacy:approve".into()),
-            StoredDecision::ApproveForSession => Self::Option("legacy:approve_for_session".into()),
-            StoredDecision::Deny => Self::Option("legacy:deny".into()),
-        })
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

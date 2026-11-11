@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_plan_and_approval_log_loads_and_exports() {
+    fn rows_of_types_no_build_writes_any_more_read_as_stored_and_export() {
         let root = temp_root("legacy-plan");
         fs::create_dir_all(&root).unwrap();
         let mut meta =
@@ -339,23 +339,19 @@ mod tests {
                 .get("interaction_mode")
                 .is_none()
         );
+        // The rows of the plan and approval types v0.2.0 wrote and no
+        // later build has are each read as they are stored, in place.
         let events = store.read_events(&meta.id).unwrap();
-        assert_eq!(events.len(), 8);
-        let decisions = events
+        let unreadable: Vec<&str> = events
             .iter()
             .filter_map(|stored| match &stored.event {
-                AgentEvent::ApprovalResolved { decision, .. } => Some(decision.clone()),
+                AgentEvent::UnreadableRecord { line } => Some(line.as_str()),
                 _ => None,
             })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            decisions,
-            [
-                agent::ApprovalDecision::Option("legacy:approve".into()),
-                agent::ApprovalDecision::Option("legacy:approve_for_session".into()),
-                agent::ApprovalDecision::Option("legacy:deny".into()),
-            ]
-        );
+            .collect();
+        let lines: Vec<&str> = std::str::from_utf8(log).unwrap().lines().collect();
+        assert_eq!(events.len(), 8);
+        assert_eq!(unreadable, lines[1..7]);
         assert!(
             serde_json::to_value(&meta)
                 .unwrap()
@@ -363,20 +359,17 @@ mod tests {
                 .is_none()
         );
         let timeline = Timeline::fold_events(events);
-        let text: Vec<_> = timeline
+        let shown: Vec<&str> = timeline
             .entries
             .iter()
             .filter_map(|entry| match &entry.content {
-                EntryContent::Item(ItemContent::Plan { markdown }) => Some(markdown.as_str()),
+                EntryContent::Unreadable { line } => Some(line.as_str()),
                 _ => None,
             })
             .collect();
-        assert_eq!(text, ["# Stored plan\n\nKeep this content."]);
-        let markdown =
-            String::from_utf8(render_thread(&store, &meta, ThreadExportFormat::Markdown).unwrap())
-                .unwrap();
-        assert!(markdown.contains("# Stored plan\n\nKeep this content."));
-        assert!(!markdown.contains("# Draft"));
+        assert_eq!(shown, lines[1..7]);
+        assert_eq!(timeline.turns.len(), 1);
+        render_thread(&store, &meta, ThreadExportFormat::Markdown).unwrap();
         let export = render_thread(&store, &meta, ThreadExportFormat::Jsonl).unwrap();
         let (_, exported_log) =
             export.split_at(export.iter().position(|byte| *byte == b'\n').unwrap() + 1);

@@ -26,7 +26,7 @@ pub use streams::{ItemStreams, SupersededStream};
 pub use superseded::{TurnSnapshots, drop_turn_diffs};
 
 /// Bump when the persisted turn-boundary policy changes.
-pub const TURN_INDEX_FOLD_VERSION: u32 = 8;
+pub const TURN_INDEX_FOLD_VERSION: u32 = 9;
 
 fn synthetic_entry_id(
     prefix: &str,
@@ -1238,9 +1238,7 @@ impl Timeline {
             | AgentEvent::McpServersNotAttached
             | AgentEvent::BackgroundTasksChanged { .. }
             | AgentEvent::SettingsApplied { .. }
-            | AgentEvent::BackgroundTaskList { .. }
-            | AgentEvent::ModelFallbackDetected { .. }
-            | AgentEvent::TurnBlocked { .. } => {}
+            | AgentEvent::BackgroundTaskList { .. } => {}
             AgentEvent::TurnChangesUpdated {
                 turn_id,
                 changes,
@@ -1520,7 +1518,7 @@ impl Timeline {
             }
             // Logged once where the live provider event arrives; a fold also
             // replays stored records, which would log every old warning again.
-            AgentEvent::Warning { .. } | AgentEvent::PlanResolved { .. } => {}
+            AgentEvent::Warning { .. } => {}
             AgentEvent::ProviderStartFailed { error } => {
                 let turn = self.ensure_turn();
                 let id = self.synthetic_id("error", ts);
@@ -1610,21 +1608,6 @@ impl Timeline {
                 self.plan_explanation = explanation.clone();
             }
             AgentEvent::GoalUpdated { goal } => self.goal = goal.clone(),
-            AgentEvent::ProposedPlanDelta { item_id, text } => {
-                self.apply_delta(ts, item_id, DeltaKind::AssistantText, text);
-            }
-            AgentEvent::ProposedPlan { item_id, markdown } => {
-                self.upsert_item(
-                    ts,
-                    &ThreadItem {
-                        id: item_id.clone(),
-                        parent_item_id: None,
-                        content: ItemContent::Plan {
-                            markdown: markdown.clone(),
-                        },
-                    },
-                );
-            }
             AgentEvent::ControlAction(action) => {
                 let turn = self.ensure_turn();
                 let id = self.synthetic_id("control", ts);

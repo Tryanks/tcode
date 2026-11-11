@@ -1280,10 +1280,10 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
     let expected = TurnIndex {
         turns: 2,
         // The turns the fold holds: the divider's of the rewind at row 60
-        // (to before the first turn) and of the one at row 70; a rewind's
+        // (to before the first turn) and of the one at row 68; a rewind's
         // row opens the turn its divider stands in, and the turns it took
         // out leave their starts behind.
-        starts: vec![60, 70],
+        starts: vec![60, 68],
     };
     assert_eq!(store.turn_index("thread").unwrap(), Some(expected.clone()));
     store
@@ -1307,7 +1307,7 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
         ])
         .unwrap();
     let source = rows(&store, "thread");
-    for (id, end, starts) in [("before", 70, vec![60, 66]), ("through", 71, vec![60, 70])] {
+    for (id, end, starts) in [("before", 68, vec![60, 64]), ("through", 69, vec![60, 68])] {
         assert_eq!(rows(&store, id), source[..end], "{id}");
         assert_eq!(
             store.turn_index(id).unwrap(),

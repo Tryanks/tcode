@@ -340,6 +340,10 @@ pub use wire::{
 // ProvidersStatus gains secrets_unreadable.
 // The agent event stream gains unreadable_record {line}: a row of a thread's
 // log the host cannot read is sent as it is stored instead of left out.
+// The agent event stream loses plan_resolved, proposed_plan_delta,
+// proposed_plan, model_fallback_detected and turn_blocked, and
+// approval_resolved's decision no longer reads approve, approve_for_session
+// or deny: rows of them are unreadable_record.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

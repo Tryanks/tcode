@@ -456,9 +456,6 @@ impl AppState {
                 );
             }
             AgentEvent::ProviderRelay { .. }
-            | AgentEvent::PlanResolved { .. }
-            | AgentEvent::ModelFallbackDetected { .. }
-            | AgentEvent::TurnBlocked { .. }
             | AgentEvent::ServedModel { .. }
             | AgentEvent::TurnChangesUpdated { .. }
             | AgentEvent::TurnCheckpoint { .. }
@@ -484,8 +481,6 @@ impl AppState {
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::GoalUpdated { .. }
             | AgentEvent::ControlAction(_)
-            | AgentEvent::ProposedPlanDelta { .. }
-            | AgentEvent::ProposedPlan { .. }
             | AgentEvent::UnreadableRecord { .. }
             | AgentEvent::ProviderStartFailed { .. } => {}
         }

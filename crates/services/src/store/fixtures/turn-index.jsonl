@@ -59,8 +59,6 @@
 {"type":"item_completed","id":"stream","content":{"kind":"assistant_message","text":"final"}}
 {"type":"turn_checkpoint","turn_id":"delta","checkpoint_id":"clear-delta"}
 {"type":"rewind_completed","checkpoint_id":"clear-delta","mode":"conversation","prefill":null}
-{"type":"proposed_plan_delta","item_id":"plan","text":"draft"}
-{"type":"proposed_plan","item_id":"plan","markdown":"final plan"}
 {"type":"turn_started","turn_id":"plan-turn"}
 {"type":"turn_completed","turn_id":"plan-turn","status":"completed","usage":null}
 {"type":"steer_requested","request_id":"relocated","text":"between turns","attachments":[]}
