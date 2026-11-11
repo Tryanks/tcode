@@ -359,7 +359,8 @@ pub use wire::{
 // read {path, first_line, note}, whose output is the lines read; search
 // {scope, pattern, path, glob, hits}, each hit {path, line, text}; question
 // {questions}, each {question, options, answers}; fetch {url, prompt};
-// web_search {query, links}, each link {title, url}.
+// web_search {query, links}, each link {title, url}; load_tools {query,
+// tools}; skill {name}.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

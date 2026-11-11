@@ -2465,6 +2465,17 @@ fn tool_family(
                 .collect();
             (Some(ToolFamily::Question { questions }), output)
         }
+        // `skill.ts`: the skill's `id`, and once loaded its `name` in the
+        // metadata.
+        "skill" => match metadata
+            .and_then(|metadata| metadata.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| field("id"))
+        {
+            Some(name) => (Some(ToolFamily::Skill { name }), output),
+            None => (None, output),
+        },
         "webfetch" => match field("url") {
             Some(url) => (Some(ToolFamily::Fetch { url, prompt: None }), output),
             None => (None, output),
@@ -3335,6 +3346,24 @@ mod tests {
                         url: "https://example.org/preflight".into(),
                     },
                 ]),
+            })
+        );
+    }
+
+    /// skill is asked for by `id` and names the skill it loaded in its
+    /// metadata (v2.2.7's `skill.ts`; content invented).
+    #[test]
+    fn a_skill_is_the_skill_it_loaded() {
+        let (family, _) = tool_family(
+            "skill",
+            &json!({"id": "release"}),
+            Some("<skill_content name=\"release\"># Skill: release</skill_content>".into()),
+            Some(&json!({"name": "release", "directory": "/work/.opencode/skills/release"})),
+        );
+        assert_eq!(
+            family,
+            Some(ToolFamily::Skill {
+                name: "release".into()
             })
         );
     }

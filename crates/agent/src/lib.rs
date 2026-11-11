@@ -3127,6 +3127,16 @@ pub enum ToolFamily {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         links: Option<Vec<WebLink>>,
     },
+    /// A search of the harness's own deferred tools, which loads those it
+    /// finds for the model.
+    LoadTools {
+        query: String,
+        /// The tools it loaded, once it finished.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools: Option<Vec<String>>,
+    },
+    /// A skill the harness launched or loaded.
+    Skill { name: String },
 }
 
 /// A page a web search found.

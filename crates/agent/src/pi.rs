@@ -1729,6 +1729,27 @@ fn tool_family(
                 lines,
             )
         }
+        // The tool_search extension (`extensions/tool-search/tool.js`):
+        // `{query}`, and `details.loaded`, the tools it loaded.
+        "tool_search" => match field("query") {
+            Some(query) => (
+                Some(ToolFamily::LoadTools {
+                    query,
+                    tools: result
+                        .and_then(|result| result.pointer("/details/loaded"))
+                        .and_then(Value::as_array)
+                        .map(|loaded| {
+                            loaded
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect()
+                        }),
+                }),
+                text,
+            ),
+            None => (None, text),
+        },
         // `grep.js`, `find.js`, `ls.js`: one line each, relative to the
         // directory searched, before any `[…]` notice after a blank line.
         "grep" | "find" | "ls" => {
@@ -2613,6 +2634,27 @@ mod tests {
             family,
             Some(ToolFamily::Search { scope: SearchScope::Entries, hits: Some(hits), .. }) if hits.is_empty()
         ));
+    }
+
+    /// The tool_search extension names the tools it loaded in
+    /// `details.loaded` (1.5.2's `dist/extensions/tool-search/tool.js`;
+    /// content invented).
+    #[test]
+    fn a_tool_search_is_the_tools_it_loaded() {
+        let (family, _) = tool_family(
+            "tool_search",
+            &json!({"query": "browser"}),
+            Some("Loaded 1 tool. They are available from your next call:\n- browser_open: Open a page".into()),
+            Some(&json!({"content": [], "details": {"loaded": ["browser_open"]}})),
+            ItemStatus::Completed,
+        );
+        assert_eq!(
+            family,
+            Some(ToolFamily::LoadTools {
+                query: "browser".into(),
+                tools: Some(vec!["browser_open".into()]),
+            })
+        );
     }
 
     #[test]

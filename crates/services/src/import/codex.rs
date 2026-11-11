@@ -449,10 +449,18 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             ItemContent::ToolCall {
                                 image_reads: Vec::new(),
                                 name: "tool_search".into(),
+                                family: payload
+                                    .pointer("/arguments/query")
+                                    .and_then(Value::as_str)
+                                    .map(|query| {
+                                        Box::new(ToolFamily::LoadTools {
+                                            query: query.to_owned(),
+                                            tools: None,
+                                        })
+                                    }),
                                 input: payload.get("arguments").cloned().unwrap_or(Value::Null),
                                 output: None,
                                 status: ItemStatus::InProgress,
-                                family: None,
                             },
                             Some(&call_id),
                         );
@@ -469,9 +477,19 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                             continue;
                         };
                         if let Some(ConvertedEntry::Item { item, .. }) = entries.get_mut(index)
-                            && let ItemContent::ToolCall { output, status, .. } = &mut item.content
+                            && let ItemContent::ToolCall {
+                                output,
+                                status,
+                                family,
+                                ..
+                            } = &mut item.content
                         {
-                            *output = Some(found_tools(payload.get("tools")));
+                            let found = found_tools(payload.get("tools"));
+                            *output = Some(found.join("\n"));
+                            if let Some(ToolFamily::LoadTools { tools, .. }) = family.as_deref_mut()
+                            {
+                                *tools = Some(found);
+                            }
                             *status = ItemStatus::Completed;
                         }
                     }
@@ -777,8 +795,8 @@ fn web_search_query(action: &Value) -> String {
     }
 }
 
-/// The tools a search loaded, one per line, named as calls name them.
-fn found_tools(tools: Option<&Value>) -> String {
+/// The tools a search loaded, named as calls name them.
+fn found_tools(tools: Option<&Value>) -> Vec<String> {
     let mut names = Vec::new();
     for tool in tools.and_then(Value::as_array).into_iter().flatten() {
         let name = tool.get("name").and_then(Value::as_str).unwrap_or_default();
@@ -792,7 +810,7 @@ fn found_tools(tools: Option<&Value>) -> String {
             None => names.push(name.to_owned()),
         }
     }
-    names.join("\n")
+    names
 }
 
 fn readable_output(value: &Value) -> String {

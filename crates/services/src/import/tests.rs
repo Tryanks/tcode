@@ -161,6 +161,8 @@ const CODEX_ROLLOUT: &str = r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"s
 {"timestamp":"2026-01-02T03:04:11.300Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_view","output":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==","detail":"high"}]}}
 {"timestamp":"2026-01-02T03:04:11.320Z","type":"response_item","payload":{"type":"function_call","name":"js","namespace":"mcp__cua_repl","arguments":"{\"code\":\"await app.click(3);\",\"title\":\"Press OK\"}","call_id":"call_script"}}
 {"timestamp":"2026-01-02T03:04:11.330Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_script","output":[{"type":"input_text","text":"Wall time: 0.4200 seconds\nOutput:"},{"type":"input_text","text":"clicked OK"}]}}
+{"timestamp":"2026-01-02T03:04:11.340Z","type":"response_item","payload":{"type":"tool_search_call","call_id":"call_tools","status":"completed","execution":"client","arguments":{"query":"calendar"}}}
+{"timestamp":"2026-01-02T03:04:11.350Z","type":"response_item","payload":{"type":"tool_search_output","call_id":"call_tools","status":"completed","execution":"client","tools":[{"name":"mcp__calendar","tools":[{"name":"list_events"}]}]}}
 {"timestamp":"2026-01-02T03:04:11.400Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","arguments":"{\"explanation\":\"Lint next\",\"plan\":[{\"step\":\"Read the readme\",\"status\":\"completed\"},{\"step\":\"Lint\",\"status\":\"in_progress\"}]}","call_id":"call_plan"}}
 {"timestamp":"2026-01-02T03:04:11.450Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_plan","output":"Plan updated"}}
 {"timestamp":"2026-01-02T03:04:11.500Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"make lint\"}","call_id":"call_lint"}}
@@ -447,6 +449,17 @@ fn a_codex_rollout_imports_as_codex_recorded_it() {
                 Some("clicked OK"),
                 ItemStatus::Completed,
             ),
+            Some(ItemContent::ToolCall {
+                image_reads: Vec::new(),
+                name: "tool_search".into(),
+                input: json!({"query": "calendar"}),
+                output: Some("calendar/list_events".into()),
+                status: ItemStatus::Completed,
+                family: Some(Box::new(agent::ToolFamily::LoadTools {
+                    query: "calendar".into(),
+                    tools: Some(vec!["calendar/list_events".into()]),
+                })),
+            }),
             command(
                 "make lint",
                 "make: *** No rule to make target 'lint'.  Stop.\n",

@@ -4551,6 +4551,33 @@ fn tool_family(
                     }),
             }
         }
+        // Not in `sdk-tools.d.ts`; 2.1.322's own schema: `{query}`, and
+        // `{matches, query, total_deferred_tools}` once it loaded them.
+        "ToolSearch" => {
+            let Some(query) = text("query") else {
+                return (None, output);
+            };
+            ToolFamily::LoadTools {
+                query: query.to_owned(),
+                tools: structured
+                    .and_then(|result| result.get("matches"))
+                    .and_then(Value::as_array)
+                    .map(|matches| {
+                        matches
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    }),
+            }
+        }
+        // 2.1.322's own schema: `{skill, args?}`.
+        "Skill" => match text("skill") {
+            Some(name) => ToolFamily::Skill {
+                name: name.to_owned(),
+            },
+            None => return (None, output),
+        },
         // `AskUserQuestionInput`'s questions, and `AskUserQuestionOutput`'s
         // `answers`, keyed by question text: one string, a multi-select's
         // labels joined with ", " (a record written before 2.1.3xx joined
@@ -6947,6 +6974,42 @@ mod tests {
                     url: "https://example.com/cors".into(),
                 }]),
             })
+        );
+    }
+
+    /// A ToolSearch is the tools its output object says it loaded
+    /// (`matches`), a Skill the skill it names (2.1.322's own schemas, not
+    /// in `sdk-tools.d.ts`; content invented).
+    #[test]
+    fn a_tool_search_is_the_tools_it_loaded_and_a_skill_its_name() {
+        let mut mapper = Mapper::new();
+        feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg_tools","content":[{"type":"tool_use","id":"toolu_tools","name":"ToolSearch","input":{"query":"select:Monitor","max_results":1}},{"type":"tool_use","id":"toolu_skill","name":"Skill","input":{"skill":"pr"}}]}}"#,
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_tools","content":[{"type":"tool_reference","tool_name":"Monitor"}]},{"type":"tool_result","tool_use_id":"toolu_skill","content":"Launching skill: pr"}]},"tool_use_result":{"matches":["Monitor"],"query":"select:Monitor","total_deferred_tools":12}}"#,
+        );
+        let families: Vec<_> = completed
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::ToolCall { family, .. },
+                    ..
+                }) => family.as_deref().cloned(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            families,
+            [
+                ToolFamily::LoadTools {
+                    query: "select:Monitor".into(),
+                    tools: Some(vec!["Monitor".into()]),
+                },
+                ToolFamily::Skill { name: "pr".into() },
+            ]
         );
     }
 

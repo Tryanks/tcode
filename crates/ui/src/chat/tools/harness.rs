@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use agent::ItemStatus;
+use agent::{ItemStatus, ToolFamily};
 use gpui::{
     AnyElement, InteractiveElement as _, IntoElement as _, ParentElement as _, Styled as _, div,
 };
@@ -18,18 +18,6 @@ use crate::icon::IconName;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 
-#[derive(Deserialize)]
-struct ToolSearch<'a> {
-    #[serde(borrow)]
-    query: &'a str,
-}
-
-#[derive(Deserialize)]
-struct Skill<'a> {
-    #[serde(borrow, alias = "name", alias = "id")]
-    skill: &'a str,
-}
-
 /// A reviewer's verdict on an action: the action, and the risk it rated
 /// when it rated one. Its rationale is the call's output.
 #[derive(Deserialize)]
@@ -41,20 +29,20 @@ struct Review<'a> {
 }
 
 enum Kind<'a> {
-    LoadTools(&'a str),
+    LoadTools { query: &'a str, tools: &'a [String] },
     Skill(&'a str),
     Review(Review<'a>),
 }
 
 pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView + 'a>> {
-    let kind = if call.named(&["toolsearch", "tool_search"]) {
-        Kind::LoadTools(call.input::<ToolSearch<'a>>()?.query)
-    } else if call.named(&["skill"]) {
-        Kind::Skill(call.input::<Skill<'a>>()?.skill)
-    } else if call.named(&["auto-reviewer"]) {
-        Kind::Review(call.input::<Review<'a>>()?)
-    } else {
-        return None;
+    let kind = match call.family {
+        Some(ToolFamily::LoadTools { query, tools }) => Kind::LoadTools {
+            query,
+            tools: tools.as_deref().unwrap_or_default(),
+        },
+        Some(ToolFamily::Skill { name }) => Kind::Skill(name),
+        _ if call.named(&["auto-reviewer"]) => Kind::Review(call.input::<Review<'a>>()?),
+        _ => return None,
     };
     Some(Box::new(Harness { kind }))
 }
@@ -63,33 +51,16 @@ struct Harness<'a> {
     kind: Kind<'a>,
 }
 
-/// The tools a search loaded: one `{"type":"tool_reference","tool_name":…}`
-/// line each.
-fn loaded_tools(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-            (value.get("type")?.as_str()? == "tool_reference")
-                .then(|| value.get("tool_name")?.as_str().map(str::to_owned))
-                .flatten()
-        })
-        .collect()
-}
-
 impl ToolView for Harness<'_> {
     fn header(&self, call: &Call<'_>, _cwd: &Path) -> Header {
         let output = call.output.unwrap_or_default();
         match self.kind {
-            Kind::LoadTools(query) => {
-                let tools = loaded_tools(output);
-                Header::new(IconName::Search, Verb("load_tools"))
-                    .argument(Argument::mono(query))
-                    .chip(
-                        (!tools.is_empty())
-                            .then(|| Chip::Count(super::counted("tools.tools", tools.len()))),
-                    )
-            }
+            Kind::LoadTools { query, tools } => Header::new(IconName::Search, Verb("load_tools"))
+                .argument(Argument::mono(query))
+                .chip(
+                    (!tools.is_empty())
+                        .then(|| Chip::Count(super::counted("tools.tools", tools.len()))),
+                ),
             Kind::Skill(skill) => {
                 Header::with_icon("icons/puzzle.svg", Verb("skill")).argument(Argument::mono(skill))
             }
@@ -118,20 +89,19 @@ impl ToolView for Harness<'_> {
     fn body(&self, call: &Call<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
         let output = call.output.unwrap_or_default();
         match self.kind {
-            Kind::LoadTools(_) => {
-                let tools = loaded_tools(output);
+            Kind::LoadTools { tools, .. } => {
                 if tools.is_empty() {
                     return super::body(output_section(call, Bound::OUTPUT, ctx));
                 }
                 let cx = ctx.app();
                 let theme = cx.theme();
-                let names = tools.into_iter().enumerate().map(|(index, tool)| {
+                let names = tools.iter().enumerate().map(|(index, tool)| {
                     let selector = format!("tool-loaded-{}-{index}", call.id());
                     div()
                         .debug_selector(move || selector.clone())
                         .font_family(theme.mono_font_family.clone())
                         .text_color(theme.foreground.opacity(0.85))
-                        .child(tool)
+                        .child(tool.clone())
                         .into_any_element()
                 });
                 let list = h_flex()
@@ -158,11 +128,9 @@ impl ToolView for Harness<'_> {
     fn copy_items(&self, call: &Call<'_>) -> Vec<(String, String)> {
         let mut items = Vec::new();
         match self.kind {
-            Kind::LoadTools(_) => copy(
-                &mut items,
-                "chat.copy_output",
-                &loaded_tools(call.output.unwrap_or_default()).join("\n"),
-            ),
+            Kind::LoadTools { tools, .. } => {
+                copy(&mut items, "chat.copy_output", &tools.join("\n"))
+            }
             Kind::Skill(_) | Kind::Review(_) => copy(
                 &mut items,
                 "chat.copy_output",
