@@ -78,7 +78,6 @@ use crate::git::{git_action_label_key, git_hint_key};
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::WorkspaceStore;
 use crate::terminal_drawer::TerminalDrawer;
-use crate::time::now_secs;
 use crate::window_caption;
 use crate::window_drag_area;
 use crate::window_state::{NavigationPanel, OpenPanel, WindowState};

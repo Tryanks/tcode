@@ -373,7 +373,7 @@ pub(in crate::chat) fn controls(
         let first_seen = !task.started_reported;
         let clock = crate::widgets::clock::Clock::since(
             SharedString::from(format!("{key}-elapsed")),
-            task.started_at,
+            place.store.read(cx).host_moment_here(task.started_at),
             if first_seen {
                 |elapsed| {
                     format!("≥ {}", crate::chat::model::format_elapsed_seconds(elapsed)).into()

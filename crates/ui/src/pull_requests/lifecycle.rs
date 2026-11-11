@@ -1879,7 +1879,14 @@ pub(super) fn primary_element(
                 .read(cx)
                 .pull_requests(&target.session)
                 .to_vec();
-            super::stack::operation_chip(Some(target.clone()), operation, &links, compact, cx)
+            super::stack::operation_chip(
+                Some(target.clone()),
+                operation,
+                &links,
+                target.store.read(cx).host_now_secs(cx),
+                compact,
+                cx,
+            )
         }
         // A host that only rebases offers its rebase, which asks first.
         // `primary` offers an update only from a read action state.

@@ -64,11 +64,11 @@ impl Shot {
         }
     }
 
-    /// How long ago it was taken.
-    fn ago(&self, cx: &App) -> Option<String> {
-        self.taken_ms.map(|ms| {
-            crate::time::humanize_ago(crate::time::now_secs(cx).saturating_sub(ms / 1000))
-        })
+    /// How long ago it was taken, at `host_now` (unix seconds) by the clock
+    /// of the host that stamped it.
+    fn ago(&self, host_now: u64) -> Option<String> {
+        self.taken_ms
+            .map(|ms| crate::time::humanize_ago(host_now.saturating_sub(ms / 1000)))
     }
 }
 
@@ -234,6 +234,7 @@ pub(super) fn body(
                 .into_any_element()
         },
     );
+    let store = rail.workspace_store.clone();
     let caption = rail.motion.cross_fade_part(
         "rail-screen-caption",
         current.clone(),
@@ -241,7 +242,7 @@ pub(super) fn body(
         window,
         cx,
         |shot, _, cx| {
-            let ago = shot.ago(cx);
+            let ago = shot.ago(store.read(cx).host_now_secs(cx));
             h_flex()
                 .w_full()
                 .gap(cx.theme().tokens.spacing.sm)

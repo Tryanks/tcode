@@ -1215,7 +1215,9 @@ impl AppState {
             );
             return;
         }
-        if let Some(mut snapshot) = self.subscription_snapshot(&subscription, &cx.principal) {
+        let now_ms = cx.clock().unix_millis();
+        if let Some(mut snapshot) = self.subscription_snapshot(&subscription, &cx.principal, now_ms)
+        {
             snapshot.request_id = request_id;
             cx.emit(HostEvent::Domain(snapshot));
         }

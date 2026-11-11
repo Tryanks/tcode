@@ -205,7 +205,14 @@ pub enum ServerEvent {
     },
     SessionHistoryError(crate::ProtocolError),
     IndexSnapshot(IndexSnapshot),
-    ScopeSnapshot(Scope),
+    /// What the subscriber may see, and the host's wall clock when it said
+    /// so: a client shows how long ago or how soon a time the host gave is by
+    /// the host's clock, not its own.
+    ScopeSnapshot {
+        scope: Scope,
+        /// Unix milliseconds.
+        host_unix_ms: u64,
+    },
     SettingsSnapshot(Settings),
     /// The current (or latest) external-import run for one project. `None`
     /// means no run has ever started, or the project is gone. Only the latest

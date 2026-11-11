@@ -305,11 +305,14 @@ fn space_index_and_scope_project_only_the_members_projects() {
 
     host.subscribe(member.clone(), Topic::Scope);
     let scope = host.event(|event| event.topic == Topic::Scope && event.request_id.is_some());
-    let ServerEvent::ScopeSnapshot(Scope::Space {
-        projects,
-        providers,
+    let ServerEvent::ScopeSnapshot {
+        scope: Scope::Space {
+            projects,
+            providers,
+            ..
+        },
         ..
-    }) = &scope.event
+    } = &scope.event
     else {
         panic!("space scope")
     };

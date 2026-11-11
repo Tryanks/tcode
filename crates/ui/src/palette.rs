@@ -36,7 +36,7 @@ use tcode_protocol::{SessionContentHits, ThreadExportFormat};
 use crate::provider_card::profile_glyph;
 use crate::settings::ThemeMode;
 use crate::store::{HostKey, StoreChange, ThreadKey, TopicKind, WorkspaceStore};
-use crate::time::{humanize_ago, now_secs};
+use crate::time::humanize_ago;
 use crate::window_state::{PickerFrom, WindowState};
 
 /// How long a surface drawn here takes to appear, and to leave.
@@ -1154,7 +1154,7 @@ impl CommandPalette {
                                 .items_center()
                                 .text_secondary(compact, cx)
                                 .when_some(item.updated_at, |this, at| {
-                                    let ago = now_secs(cx).saturating_sub(at);
+                                    let ago = store.read(cx).host_now_secs(cx).saturating_sub(at);
                                     this.child(div().child(humanize_ago(ago)))
                                 })
                                 .child(profile_glyph(
@@ -1233,8 +1233,8 @@ impl CommandPalette {
                 .top(drop_of(&host))
                 .child(crate::widgets::fade_text(host))
         });
-        let ago = item.updated_at.map(|at| {
-            let ago = humanize_ago(now_secs(cx).saturating_sub(at));
+        let ago = item.updated_at.zip(store.clone()).map(|(at, store)| {
+            let ago = humanize_ago(store.read(cx).host_now_secs(cx).saturating_sub(at));
             div()
                 .flex_none()
                 .text_secondary(compact, cx)

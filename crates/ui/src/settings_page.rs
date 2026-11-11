@@ -31,7 +31,7 @@ use crate::settings::{
 };
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::theme::{self, ActiveTheme as _, ThemeMode as UiThemeMode};
-use crate::time::{humanize_ago, now_secs};
+use crate::time::humanize_ago;
 use crate::typography::TextRole as _;
 use crate::window_caption;
 use crate::window_drag_area;
@@ -2119,7 +2119,12 @@ impl SettingsPage {
                     .child(crate::tr!("settings.providers_section")),
             );
         let checked = checked_at.map(|checked_at| {
-            let ago = humanize_ago(now_secs(cx).saturating_sub(checked_at));
+            let ago = humanize_ago(
+                self.store
+                    .read(cx)
+                    .host_now_secs(cx)
+                    .saturating_sub(checked_at),
+            );
             crate::tr!("providers.checked", when = ago).into_owned()
         });
         if let Some(checked) = crate::motion::shown("providers-checked", checked, SHOW, window, cx)
@@ -2329,7 +2334,12 @@ impl SettingsPage {
                 .child(crate::tr!("usage.section")),
         );
         let updated = updated_at.map(|updated_at| {
-            let ago = humanize_ago(now_secs(cx).saturating_sub(updated_at));
+            let ago = humanize_ago(
+                self.store
+                    .read(cx)
+                    .host_now_secs(cx)
+                    .saturating_sub(updated_at),
+            );
             crate::tr!("usage.updated", when = ago).into_owned()
         });
         if let Some(updated) = crate::motion::shown("usage-updated", updated, SHOW, window, cx) {
@@ -2460,7 +2470,7 @@ impl SettingsPage {
                         }
                         None => div().into_any_element(),
                     };
-                    let now = now_secs(cx);
+                    let now = self.store.read(cx).host_now_secs(cx);
                     let windows = reported
                         .into_iter()
                         .flat_map(|usage| usage.windows.iter())
@@ -2684,7 +2694,7 @@ impl SettingsPage {
         let (page, start, end) = page_bounds(total, self.archived_page, ARCHIVED_PER_PAGE);
         self.archived_page = page;
 
-        let now = now_secs(cx);
+        let now = self.store.read(cx).host_now_secs(cx);
         // Each part below the controls carries the gap above it, so a project
         // whose last archived thread goes takes its gap with it.
         let gap = crate::material::section_gap(cx);

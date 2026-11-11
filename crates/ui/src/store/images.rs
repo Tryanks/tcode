@@ -1330,7 +1330,10 @@ mod tests {
                             EventEnvelope {
                                 request_id: store.host.subscription_request_id(&Topic::Scope),
                                 topic: Topic::Scope,
-                                event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                                event: ServerEvent::ScopeSnapshot {
+                                    scope: tcode_protocol::Scope::Full,
+                                    host_unix_ms: crate::time::now_millis(cx),
+                                },
                             },
                             cx,
                         );

@@ -149,9 +149,16 @@ impl ChatView {
                         .child(crate::widgets::fade_text(project.name.clone())),
                 )
                 .when_some(*last_activity, |row, last_activity| {
-                    row.child(div().flex_none().text_secondary(false, cx).child(
-                        crate::time::humanize_ago(now_secs(cx).saturating_sub(last_activity)),
-                    ))
+                    row.child(
+                        div().flex_none().text_secondary(false, cx).child(
+                            crate::time::humanize_ago(
+                                self.workspace_store
+                                    .read(cx)
+                                    .host_now_secs(cx)
+                                    .saturating_sub(last_activity),
+                            ),
+                        ),
+                    )
                 })
                 .into_any_element()
             },
@@ -409,7 +416,7 @@ impl ChatView {
         if threads.is_empty() {
             return None;
         }
-        let now = now_secs(cx);
+        let now = self.workspace_store.read(cx).host_now_secs(cx);
         let rows =
             threads.into_iter().map(|meta| {
                 let id = meta.id.clone();

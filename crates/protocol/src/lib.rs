@@ -398,6 +398,8 @@ pub use wire::{
 // ScheduleTurn carries due, a TurnDue (after_secs from when the host takes it
 // in, or at_unix_secs), instead of fire_at_unix_secs computed by the client's
 // clock.
+// ScopeSnapshot is {scope, host_unix_ms}: the host's wall clock when it sent
+// the scope, by which a client tells how long ago a host's time was.
 // RuntimeError gains orphan_sweep_skipped {error} and orphans_left {left}, each
 // a LeftOrphan {path, error}.
 // TokenCheck gains unreadable {status, error}: a host took the token but its

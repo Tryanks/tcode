@@ -259,6 +259,9 @@ pub struct WorkspaceStore {
     disk_usage: DiskUsageState,
     disk_usage_holds: usize,
     connection_state: ConnectionState,
+    /// How far the host's wall clock is ahead of this client's, in
+    /// milliseconds, as its last scope snapshot said; until one lands, none.
+    host_clock_offset_ms: i64,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     /// Each thread's place in `index_replica.0`, rebuilt by
     /// [`Self::reindex_sessions`] whenever that list changes.
@@ -482,6 +485,7 @@ impl WorkspaceStore {
             } else {
                 ConnectionState::Connected { path: None }
             },
+            host_clock_offset_ms: 0,
             index_replica: (Vec::new(), Vec::new()),
             index_positions: HashMap::new(),
             index_summary: IndexSummary::default(),
@@ -651,6 +655,31 @@ impl WorkspaceStore {
             .as_ref()
             .filter(|live| Some(live.snapshot().host_id.as_str()) == self.remote_host_id())
             .and_then(|live| Some((live.snapshot(), live.tunnels()?)))
+    }
+
+    /// Now by the host's clock, in unix milliseconds. How long ago or how
+    /// soon a time the host gave is, whether it stamped it or passed it on
+    /// from a harness or a forge, is told against this, not against this
+    /// client's clock.
+    pub(crate) fn host_now_millis(&self, cx: &App) -> u64 {
+        crate::time::now_millis(cx).saturating_add_signed(self.host_clock_offset_ms)
+    }
+
+    /// [`Self::host_now_millis`] in unix seconds.
+    pub(crate) fn host_now_secs(&self, cx: &App) -> u64 {
+        self.host_now_millis(cx) / 1000
+    }
+
+    /// The moment the host's clock reads `host_ms` (unix milliseconds) on
+    /// this client's clock, for a [`crate::widgets::clock::Clock`], which
+    /// ticks on this client's.
+    pub(crate) fn host_moment_here(&self, host_ms: u64) -> u64 {
+        host_ms.saturating_add_signed(-self.host_clock_offset_ms)
+    }
+
+    /// [`Self::host_moment_here`] in unix seconds.
+    pub(crate) fn host_moment_here_secs(&self, host_secs: u64) -> u64 {
+        self.host_moment_here(host_secs.saturating_mul(1000)) / 1000
     }
 
     pub(crate) fn can_manage_host(&self) -> bool {
@@ -1303,7 +1332,11 @@ impl WorkspaceStore {
             self.thread_list_revision += 1;
         }
         if envelope.topic == Topic::Scope {
-            if let ServerEvent::ScopeSnapshot(scope) = &envelope.event
+            if let ServerEvent::ScopeSnapshot { host_unix_ms, .. } = &envelope.event {
+                self.host_clock_offset_ms =
+                    *host_unix_ms as i64 - crate::time::now_millis(cx) as i64;
+            }
+            if let ServerEvent::ScopeSnapshot { scope, .. } = &envelope.event
                 && envelope.request_id.is_some()
                 && envelope.request_id != self.applied_scope_request
                 && !matches!(
@@ -4530,7 +4563,10 @@ pub(crate) mod tests {
                 tcode_protocol::encode_line(&tcode_protocol::HostMessage::Event(EventEnvelope {
                     request_id: Some(request_id),
                     topic: Topic::Scope,
-                    event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                    event: ServerEvent::ScopeSnapshot {
+                        scope: tcode_protocol::Scope::Full,
+                        host_unix_ms: 0,
+                    },
                 }))
                 .unwrap(),
             )
@@ -4600,7 +4636,10 @@ pub(crate) mod tests {
                             }
                             ClientPayload::Subscribe(subscription) => {
                                 let event = match (&subscription.topic, &scope) {
-                                    (Topic::Scope, _) => ServerEvent::ScopeSnapshot(scope.clone()),
+                                    (Topic::Scope, _) => ServerEvent::ScopeSnapshot {
+                                        scope: scope.clone(),
+                                        host_unix_ms: 0,
+                                    },
                                     (
                                         Topic::SpaceIndex { space_id },
                                         Scope::Space {
@@ -5247,7 +5286,10 @@ pub(crate) mod tests {
                 EventEnvelope {
                     request_id: None,
                     topic: Topic::Scope,
-                    event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                    event: ServerEvent::ScopeSnapshot {
+                        scope: tcode_protocol::Scope::Full,
+                        host_unix_ms: crate::time::now_millis(cx),
+                    },
                 },
                 cx,
             );
@@ -5281,7 +5323,10 @@ pub(crate) mod tests {
                 EventEnvelope {
                     request_id: None,
                     topic: Topic::Scope,
-                    event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                    event: ServerEvent::ScopeSnapshot {
+                        scope: tcode_protocol::Scope::Full,
+                        host_unix_ms: crate::time::now_millis(cx),
+                    },
                 },
                 cx,
             );
@@ -7351,7 +7396,10 @@ pub(crate) mod tests {
                 EventEnvelope {
                     request_id: None,
                     topic: Topic::Scope,
-                    event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                    event: ServerEvent::ScopeSnapshot {
+                        scope: tcode_protocol::Scope::Full,
+                        host_unix_ms: crate::time::now_millis(cx),
+                    },
                 },
                 cx,
             );
@@ -7406,7 +7454,7 @@ pub(crate) mod tests {
                 })
                 .await
                 .unwrap();
-                if matches!(event.event, ServerEvent::ScopeSnapshot(_)) {
+                if matches!(event.event, ServerEvent::ScopeSnapshot { .. }) {
                     scope = Some(event);
                 } else {
                     if let ServerEvent::IndexUnchanged {
@@ -7421,7 +7469,7 @@ pub(crate) mod tests {
                 }
             }
         });
-        assert!(matches!(scope.event, ServerEvent::ScopeSnapshot(_)));
+        assert!(matches!(scope.event, ServerEvent::ScopeSnapshot { .. }));
         workspace.update(cx, |store, cx| {
             store.receive(scope, cx);
             assert!(

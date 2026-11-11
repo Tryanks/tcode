@@ -167,7 +167,7 @@ fn row(
         (Some(since), _) => Some(
             crate::widgets::clock::Clock::since(
                 gpui::SharedString::from(format!("rail-agent-elapsed-{}", line.key)),
-                since,
+                store.read(cx).host_moment_here(since),
                 |elapsed| crate::chat::model::format_elapsed_seconds(elapsed).into(),
             )
             .into_any_element(),

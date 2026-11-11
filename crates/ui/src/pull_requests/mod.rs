@@ -572,22 +572,22 @@ fn source(link: Option<&ThreadPullRequestLink>) -> &'static str {
 }
 /// The number's tooltip: what made the thread show the pull request, and when the thread linked
 /// it where it did. A dismissed link and a stack layer carry no time.
-fn number_tooltip(link: Option<&ThreadPullRequestLink>, cx: &App) -> String {
+fn number_tooltip(link: Option<&ThreadPullRequestLink>, host_now: u64) -> String {
     let source = crate::tr!(source(link)).into_owned();
     match link.and_then(|link| link.linked_at) {
         Some(linked_at) => crate::tr!(
             "pull_requests.number_tooltip",
             source = source,
-            ago = crate::time::humanize_ago(crate::time::now_secs(cx).saturating_sub(linked_at))
+            ago = crate::time::humanize_ago(host_now.saturating_sub(linked_at))
         )
         .into_owned(),
         None => source,
     }
 }
 
-/// When a rate limit lifts, as the notices say it: ahead, or soon once its time has passed.
-pub(super) fn resumes(retry_at: u64, cx: &App) -> String {
-    let now = crate::time::now_secs(cx);
+/// When a rate limit lifts, as the notices say it: ahead, or soon once its time has passed by
+/// the host's clock, which reads `now` (unix seconds).
+pub(super) fn resumes(retry_at: u64, now: u64) -> String {
     if retry_at <= now {
         crate::tr!("pull_requests.notice_soon").into_owned()
     } else {
@@ -595,7 +595,7 @@ pub(super) fn resumes(retry_at: u64, cx: &App) -> String {
     }
 }
 
-fn sync_error(link: &ThreadPullRequestLink, host_name: &str, cx: &App) -> String {
+fn sync_error(link: &ThreadPullRequestLink, host_name: &str, host_now: u64) -> String {
     match link.sync_error.as_ref() {
         Some(PullRequestSyncError::NoCredential | PullRequestSyncError::HostDisabled) => {
             crate::tr!(
@@ -607,7 +607,7 @@ fn sync_error(link: &ThreadPullRequestLink, host_name: &str, cx: &App) -> String
         Some(PullRequestSyncError::RateLimited { retry_at }) => crate::tr!(
             "pull_requests.notice_rate_limited",
             host_name = host_name,
-            when = resumes(*retry_at, cx)
+            when = resumes(*retry_at, host_now)
         )
         .into_owned(),
         Some(PullRequestSyncError::NotFound) => crate::tr!(
@@ -1215,7 +1215,11 @@ impl PullRequestsPanel {
             let layer = if let Some(link) = link.filter(|_| visible) {
                 detail.insert(
                     0,
-                    sync_error(link, &host_name(self.store.read(cx), &key.host), cx),
+                    sync_error(
+                        link,
+                        &host_name(self.store.read(cx), &key.host),
+                        self.store.read(cx).host_now_secs(cx),
+                    ),
                 );
                 None
             } else {
@@ -1487,7 +1491,7 @@ impl PullRequestsPanel {
                 .map_or(&[][..], |meta| meta.pull_request_operations.as_slice());
             let running = pull_request::stack_operation(operations, links, &key)
                 .filter(|operation| operation.covers(key.number))
-                .map(|operation| stack::chip_words(operation, cx));
+                .map(|operation| stack::chip_words(operation, store.host_now_secs(cx), cx));
             (stack::row_blocker(links, &key), running)
         };
         if let Some(kept) =
@@ -1539,7 +1543,9 @@ impl PullRequestsPanel {
                     .and_then(|updated| chrono::DateTime::parse_from_rfc3339(updated).ok())
                     .map(|updated| {
                         crate::time::humanize_ago(
-                            crate::time::now_secs(cx)
+                            self.store
+                                .read(cx)
+                                .host_now_secs(cx)
                                 .saturating_sub(updated.timestamp().max(0) as u64),
                         )
                     }),
@@ -1624,7 +1630,10 @@ impl PullRequestsPanel {
                                     .text_color(cx.theme().foreground)
                                     .id("pr-number")
                                     .with_tooltip({
-                                        let label = number_tooltip(link, cx);
+                                        let label = number_tooltip(
+                                            link,
+                                            self.store.read(cx).host_now_secs(cx),
+                                        );
                                         move |_, _| {
                                             crate::widgets::tooltip::Tooltip::new(label.clone())
                                         }
@@ -2107,7 +2116,11 @@ impl PullRequestsPanel {
                     );
                     (credential || rate_limited).then(|| {
                         (
-                            sync_error(link, &host_name(self.store.read(cx), &host), cx),
+                            sync_error(
+                                link,
+                                &host_name(self.store.read(cx), &host),
+                                self.store.read(cx).host_now_secs(cx),
+                            ),
                             credential,
                         )
                     })
@@ -2221,7 +2234,14 @@ impl PullRequestsPanel {
                         stack,
                         operation,
                         links,
-                    } => stack::caption(stack, operation.as_ref(), links, compact, cx),
+                    } => stack::caption(
+                        stack,
+                        operation.as_ref(),
+                        links,
+                        self.store.read(cx).host_now_secs(cx),
+                        compact,
+                        cx,
+                    ),
                     ListEntry::Row {
                         key,
                         url,
@@ -2369,8 +2389,9 @@ impl PullRequestsPanel {
                 " · {}",
                 crate::tr!(
                     "pull_requests.summary_synced",
-                    ago =
-                        crate::time::humanize_ago(crate::time::now_secs(cx).saturating_sub(synced))
+                    ago = crate::time::humanize_ago(
+                        self.store.read(cx).host_now_secs(cx).saturating_sub(synced)
+                    )
                 )
             ));
         }
@@ -2599,7 +2620,7 @@ mod tests {
     /// A dismissed link keeps no time (`tcode_core::pull_request::unlink_pull_request` clears it); its
     /// number said it was linked some fifty years ago, the epoch.
     #[gpui::test]
-    fn a_dismissed_number_names_no_link_time(cx: &mut gpui::TestAppContext) {
+    fn a_dismissed_number_names_no_link_time(_cx: &mut gpui::TestAppContext) {
         let link = ThreadPullRequestLink {
             key: PullRequestKey::new("github.com", "owner/project", 7),
             source: PullRequestSource::Dismissed,
@@ -2610,6 +2631,6 @@ mod tests {
             sync_error: None,
             watch: None,
         };
-        assert_eq!(cx.update(|cx| number_tooltip(Some(&link), cx)), "Dismissed");
+        assert_eq!(number_tooltip(Some(&link), 0), "Dismissed");
     }
 }

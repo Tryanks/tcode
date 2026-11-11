@@ -2063,7 +2063,10 @@ mod tests {
         for (topic, expected) in [
             (
                 Topic::Scope,
-                ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                ServerEvent::ScopeSnapshot {
+                    scope: tcode_protocol::Scope::Full,
+                    host_unix_ms: 0,
+                },
             ),
             (
                 Topic::SpaceIndex {
@@ -2082,7 +2085,11 @@ mod tests {
                 after: None,
             })
             .unwrap();
-            let snapshot = next_event(&events, |event| event.topic == topic);
+            let mut snapshot = next_event(&events, |event| event.topic == topic);
+            // This host keeps the system's time, which no expectation knows.
+            if let ServerEvent::ScopeSnapshot { host_unix_ms, .. } = &mut snapshot.event {
+                *host_unix_ms = 0;
+            }
             assert_eq!(snapshot.event, expected);
             assert!(snapshot.request_id.is_some());
         }

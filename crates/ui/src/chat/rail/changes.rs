@@ -107,11 +107,10 @@ pub(super) fn summary(rail: &RailView, cx: &App) -> Option<SharedString> {
         )
         .into_owned(),
     ];
-    parts.extend(
-        ended.map(|ms| {
-            crate::time::humanize_ago(crate::time::now_secs(cx).saturating_sub(ms / 1000))
-        }),
-    );
+    parts
+        .extend(ended.map(|ms| {
+            crate::time::humanize_ago(store.host_now_secs(cx).saturating_sub(ms / 1000))
+        }));
     let mut files = match files {
         1 => crate::tr!("diff.files_changed_one"),
         count => crate::tr!("diff.files_changed", count = count),

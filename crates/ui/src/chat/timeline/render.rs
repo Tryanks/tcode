@@ -332,7 +332,10 @@ impl TimelineView {
                             match limit_resume_action(queued_id, ends_thread, queue_empty) {
                                 LimitResumeAction::Scheduled { queued_id: id } => {
                                     Some(components::error_card::LimitResume::Scheduled {
-                                        resets_at,
+                                        resets_at: self
+                                            .workspace_store
+                                            .read(cx)
+                                            .host_moment_here_secs(resets_at),
                                         on_cancel: Box::new(cx.listener(move |this, _, _, cx| {
                                             let Some(session_id) = this.session_id.clone() else {
                                                 return;
@@ -405,7 +408,9 @@ impl TimelineView {
                         .map(|retry| {
                             let turn_id = retry.turn_id;
                             components::error_card::LimitResume::Retry {
-                                retry_at: retry.retry_at,
+                                retry_at: retry.retry_at.map(|at| {
+                                    self.workspace_store.read(cx).host_moment_here_secs(at)
+                                }),
                                 on_retry: Box::new(cx.listener(move |this, _, _, cx| {
                                     let Some(session_id) = this.session_id.clone() else {
                                         return;
@@ -542,6 +547,10 @@ impl TimelineView {
                 .read(cx)
                 .session_status_for(self.session_id.as_deref(), cx)
                 .is_some_and(|status| status.stopping);
+            // The host stamped the start; the timer ticks on this client.
+            let started_here = turn
+                .start_ts
+                .map(|start| self.workspace_store.read(cx).host_moment_here(start));
             let turn = turn.clone();
             trailing = true;
             // The status moves with the trailer when the turn gains a last
@@ -575,7 +584,7 @@ impl TimelineView {
                                 .id(("working-status", index))
                                 .child(components::indicator::turn_working_indicator(
                                     number,
-                                    turn.start_ts,
+                                    started_here,
                                     stopping,
                                     served_model.clone(),
                                     &indicator_motion,
