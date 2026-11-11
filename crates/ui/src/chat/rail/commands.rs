@@ -37,7 +37,9 @@ const CHANGE: Duration = Duration::from_millis(200);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mark {
     Running,
-    Passed,
+    /// With the code it exited with when that was not 0: a harness may
+    /// count a command that exited non-zero as done.
+    Passed(Option<i32>),
     /// With the code it exited with, when its harness reported one.
     Failed(Option<i32>),
     Interrupted,
@@ -51,8 +53,8 @@ impl Mark {
     fn of(status: ItemStatus, exit_code: Option<i32>) -> Self {
         match status {
             ItemStatus::InProgress => Self::Running,
-            ItemStatus::Completed if exit_code.is_none_or(|code| code == 0) => Self::Passed,
-            ItemStatus::Completed | ItemStatus::Failed => Self::Failed(exit_code),
+            ItemStatus::Completed => Self::Passed(exit_code.filter(|code| *code != 0)),
+            ItemStatus::Failed => Self::Failed(exit_code),
             ItemStatus::Interrupted => Self::Interrupted,
             ItemStatus::Declined => Self::Declined,
         }
@@ -392,6 +394,12 @@ fn row(
                 .child(crate::tr!("tools.exit_code", code = code))
                 .into_any_element(),
         ),
+        Mark::Passed(Some(code)) => Some(
+            div()
+                .text_color(muted)
+                .child(crate::tr!("tools.exit_code", code = code))
+                .into_any_element(),
+        ),
         Mark::Interrupted => Some(
             div()
                 .text_color(warning)
@@ -404,7 +412,7 @@ fn row(
                 .child(crate::tr!("tools.status.declined"))
                 .into_any_element(),
         ),
-        Mark::Passed | Mark::Failed(None) => None,
+        Mark::Passed(None) | Mark::Failed(None) => None,
     };
     let radius = crate::material::radius_card(cx);
     let wash =
@@ -556,7 +564,7 @@ fn mark(
                 Glyph::Settled => {}
             }
             let (icon, color) = match mark {
-                Mark::Running | Mark::Passed => (IconName::CircleCheck, theme.success),
+                Mark::Running | Mark::Passed(_) => (IconName::CircleCheck, theme.success),
                 Mark::Failed(_) => (IconName::CircleX, theme.danger),
                 Mark::Interrupted => (IconName::CircleAlert, theme.warning),
                 Mark::Declined => (IconName::Ban, theme.muted_foreground),
@@ -572,4 +580,53 @@ fn mark(
             )
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use agent::{AgentEvent, ThreadItem};
+
+    use super::*;
+
+    /// A command stands as its harness reported it: one its harness counted
+    /// as done is not a failure for exiting non-zero, and the code it exited
+    /// with stays on its row; one its harness counted as failed is.
+    #[test]
+    fn a_command_stands_as_its_harness_reported_it() {
+        let command = |id: &str, exit_code, status| {
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: id.into(),
+                parent_item_id: None,
+                content: ItemContent::CommandExecution {
+                    command: "grep -q missing notes.txt".into(),
+                    output: String::new(),
+                    exit_code,
+                    status,
+                },
+            })
+        };
+        let timeline = Timeline::fold_events([
+            AgentEvent::TurnStarted {
+                turn_id: "turn".into(),
+            },
+            command("done", Some(1), ItemStatus::Completed),
+            command("failed", Some(2), ItemStatus::Failed),
+        ]);
+        let mut commands = Commands::default();
+        commands.sync(&timeline, &[]);
+        let marks: Vec<_> = commands
+            .lines
+            .iter()
+            .map(|line| (line.key.as_str(), line.mark))
+            .collect();
+        assert!(
+            marks.contains(&("done", Mark::Passed(Some(1)))),
+            "{marks:?}"
+        );
+        assert!(
+            marks.contains(&("failed", Mark::Failed(Some(2)))),
+            "{marks:?}"
+        );
+        assert_eq!(commands.failed, 1);
+    }
 }
