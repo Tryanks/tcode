@@ -150,7 +150,9 @@ impl WorkspaceStore {
     /// A message the composer sent shows its own failure in its thread. A
     /// link that closed or dropped answers nothing of the host's: its
     /// connection state says so, and a retained write waits in the outbox
-    /// for the next link.
+    /// for the next link. A write the client could not keep for it (one that
+    /// carries a secret, or was lost unacknowledged) is `disconnected`, and
+    /// that is shown: nothing will send it again.
     fn send(&self, command: Command) {
         let shown_in_thread = matches!(
             command,
@@ -167,10 +169,11 @@ impl WorkspaceStore {
                 if let Err(error) = ack.await
                     && !shown_in_thread
                     && error.code != "transport_closed"
-                    && !matches!(
-                        link.connection_state(),
-                        ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
-                    )
+                    && (error.code == "disconnected"
+                        || !matches!(
+                            link.connection_state(),
+                            ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
+                        ))
                 {
                     let _ = refused.send(error).await;
                 }
