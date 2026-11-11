@@ -550,11 +550,20 @@ mod tests {
             tcode_runtime::pipe::HostServices::default(),
         )
         .unwrap();
-        let session_id = smol::block_on(host.update_state_for_test(|state, cx| {
-            state.start_draft("trigger-menu".into(), std::env::temp_dir(), cx)
-        }))
-        .unwrap();
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let link = driver.link.clone();
+        let tcode_protocol::CommandResponse::SessionId(Some(session_id)) = driver
+            .await_with_events(
+                cx,
+                link.command(tcode_protocol::Command::StartDraft {
+                    project_id: "trigger-menu".into(),
+                    cwd: std::env::temp_dir(),
+                }),
+            )
+            .unwrap()
+        else {
+            panic!("the host starts a draft");
+        };
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
                 driver.link.clone(),

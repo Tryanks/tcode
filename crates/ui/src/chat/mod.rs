@@ -2125,24 +2125,9 @@ pub(crate) mod tests {
             held_from: usize,
             running: bool,
         ) -> Self {
-            use tcode_runtime::pipe::{HostServices, spawn_host};
-            use tcode_services::store::SessionStore;
-
             cx.update(crate::test_client::init);
             cx.update(crate::markdown::init);
-            let data_root = crate::store::tests::scratch_root("chat-glide-test");
-            let host = spawn_host(
-                SessionStore::open_at(data_root.clone()).expect("test session store"),
-                HostServices::default(),
-            )
-            .expect("spawn test host");
-            let mut status = smol::block_on(host.update_state_for_test(|state, cx| {
-                let id = state.start_draft("glide".into(), std::env::temp_dir(), cx);
-                state.session_status_snapshot(&id).unwrap()
-            }))
-            .unwrap();
-            host.shutdown_blocking().unwrap();
-            let _ = std::fs::remove_dir_all(data_root);
+            let mut status = crate::store::tests::draft_status();
             status.session_id = THREAD.into();
             status.draft = false;
             let mut meta = tcode_core::project::SessionMeta::new(

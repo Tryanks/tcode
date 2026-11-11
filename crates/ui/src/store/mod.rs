@@ -6594,16 +6594,39 @@ pub(crate) mod tests {
         });
     }
 
-    fn draft_status() -> tcode_protocol::SessionStatus {
+    /// The status a host gives a draft it starts, read as a client reads
+    /// it: the draft started with `StartDraft`, its status topic's snapshot.
+    pub(crate) fn draft_status() -> tcode_protocol::SessionStatus {
         let root = scratch_root("tcode-draft-status-test");
         let host = test_host(SessionStore::open_at(root.clone()).unwrap());
-        let status = smol::block_on(host.update_state_for_test(|state, cx| {
-            let id = state.start_draft("running".into(), std::env::temp_dir(), cx);
-            state.session_status_snapshot(&id).unwrap()
-        }))
-        .unwrap();
-        host.shutdown_blocking()
-            .expect("stop unsubscribed fixture host");
+        let link = host.link();
+        let events = link.events();
+        let tcode_protocol::CommandResponse::SessionId(Some(session_id)) = link
+            .command_blocking(Command::StartDraft {
+                project_id: "draft".into(),
+                cwd: std::env::temp_dir(),
+            })
+            .expect("start a draft")
+        else {
+            panic!("the host starts a draft");
+        };
+        link.subscribe(tcode_protocol::Subscription {
+            known_index: None,
+            topic: Topic::SessionStatus {
+                session_id: session_id.clone(),
+            },
+            after: None,
+        })
+        .expect("subscribe to the draft's status");
+        let status = loop {
+            let envelope = events.recv_blocking().expect("the host's events");
+            if let ServerEvent::SessionStatusReplaced(status) = envelope.event
+                && status.session_id == session_id
+            {
+                break *status;
+            }
+        };
+        host.shutdown_blocking().expect("stop the fixture host");
         let _ = std::fs::remove_dir_all(root);
         status
     }

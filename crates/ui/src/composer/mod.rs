@@ -2357,19 +2357,7 @@ mod replica_tests {
     ) {
         cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
-        let root = crate::store::tests::scratch_root("composer-replica");
-        let host = tcode_runtime::pipe::spawn_host(
-            tcode_services::store::SessionStore::open_at(root.clone()).unwrap(),
-            tcode_runtime::pipe::HostServices::default(),
-        )
-        .unwrap();
-        let status = smol::block_on(host.update_state_for_test(|state, cx| {
-            let id = state.start_draft("replica".into(), std::env::temp_dir(), cx);
-            state.session_status_snapshot(&id).unwrap()
-        }))
-        .unwrap();
-        host.shutdown_blocking().unwrap();
-        let _ = std::fs::remove_dir_all(root);
+        let status = crate::store::tests::draft_status();
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
