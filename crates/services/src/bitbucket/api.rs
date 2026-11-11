@@ -560,10 +560,11 @@ fn retry_at(value: &str) -> Option<SystemTime> {
     Some(SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(at.timestamp()).ok()?))
 }
 
-/// Bitbucket's words for a refusal: `error.message`, then each field's own.
+/// Bitbucket's words for a refusal: `error.message`, then each field's own; a body that is not
+/// JSON as it came.
 pub(super) fn messages(body: &[u8]) -> Vec<String> {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
-        return Vec::new();
+        return crate::forge::unparsed(body);
     };
     let error = &value["error"];
     error["message"]

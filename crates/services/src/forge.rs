@@ -286,6 +286,21 @@ impl ForgeError {
     }
 }
 
+/// A refusal whose body is not the JSON the host's API answers in, such as a proxy's error
+/// page, in the host's words: its text, cut after a thousand characters with an ellipsis so a
+/// page does not fill the notice. Nothing for an empty body.
+pub(crate) fn unparsed(body: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(body);
+    let text = text.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    vec![match text.char_indices().nth(1000) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_owned(),
+    }]
+}
+
 /// Answers a host gave, each with when it was read.
 pub(crate) type Held<K, T> = Mutex<HashMap<K, (Instant, T)>>;
 

@@ -537,9 +537,14 @@ impl Api {
             }
             return Ok(Response { body, truncated });
         }
-        let message = serde_json::from_slice::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|value| value["message"].as_str().map(str::to_owned));
+        let messages = match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(value) => value["message"]
+                .as_str()
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+            Err(_) => crate::forge::unparsed(&body),
+        };
         Err(match status {
             401 => {
                 if let Some(credential) = &credential {
@@ -567,9 +572,7 @@ impl Api {
                 format!("Forgejo response failed ({status})"),
             ),
             _ => error(
-                ForgeErrorKind::Refused {
-                    messages: message.into_iter().collect(),
-                },
+                ForgeErrorKind::Refused { messages },
                 format!("Forgejo response failed ({status})"),
             ),
         })

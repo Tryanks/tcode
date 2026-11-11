@@ -416,7 +416,9 @@ impl GitHubApi {
         }
         let truncated = body.len() > cap;
         body.truncate(cap);
-        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        let parsed: Option<serde_json::Value> = serde_json::from_slice(&body).ok();
+        let unparsed = parsed.is_none();
+        let parsed = parsed.unwrap_or_default();
         let errors = graphql
             .and_then(|_| parsed.get("errors").and_then(|errors| errors.as_array()))
             .filter(|errors| !errors.is_empty());
@@ -526,6 +528,9 @@ impl GitHubApi {
             ) {
                 messages.push(format!("{field} {code}"));
             }
+        }
+        if unparsed {
+            messages = crate::forge::unparsed(&body);
         }
         Err(GitHubError::Response { status, messages })
     }

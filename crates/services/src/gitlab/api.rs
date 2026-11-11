@@ -654,9 +654,10 @@ impl Api {
 /// GitLab's words for a refusal: `message` as text, as a field → messages map, or `error`.
 /// In the map, `error` is no field: `render_api_error!` is handed `{ error: … }` for a refusal
 /// that names none (`lib/api/merge_requests.rb`, a cancelled query), and its words stand alone.
+/// A body that is not JSON is given as it came.
 pub(super) fn messages(body: &[u8]) -> Vec<String> {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
-        return Vec::new();
+        return crate::forge::unparsed(body);
     };
     let said = |field: &str, item: &str| {
         if field == "error" {

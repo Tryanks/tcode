@@ -622,13 +622,16 @@ impl Api {
     }
 }
 
-/// Azure's words for a refusal: its `message`.
+/// Azure's words for a refusal: its `message`, or a body that is not JSON as it came.
 pub(super) fn messages(body: &[u8]) -> Vec<String> {
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|value| value["message"].as_str().map(str::to_owned))
-        .into_iter()
-        .collect()
+    match serde_json::from_slice::<Value>(body) {
+        Ok(value) => value["message"]
+            .as_str()
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        Err(_) => crate::forge::unparsed(body),
+    }
 }
 
 #[cfg(test)]
