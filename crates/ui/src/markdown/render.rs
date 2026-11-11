@@ -1230,11 +1230,6 @@ fn render_list_item(
                     window,
                     cx,
                 ));
-                #[cfg(test)]
-                let content = {
-                    let path = options.path.clone();
-                    content.debug_selector(move || format!("markdown-list-item-text-{path}"))
-                };
                 rows.push(
                     h_flex()
                         .w_full()
@@ -1290,15 +1285,13 @@ fn render_list_item(
             ))),
         }
     }
-    let item = v_flex()
+    v_flex()
         .id(options.path.clone())
         .w_full()
         .min_w_0()
         .when(*spread, |this| this.gap_2())
-        .children(rows);
-    #[cfg(test)]
-    let item = item.debug_selector(move || format!("markdown-list-item-{}", options.path));
-    item.into_any_element()
+        .children(rows)
+        .into_any_element()
 }
 
 fn cached_highlights(code: &CodeBlock, theme: &HighlightTheme) -> SharedHighlightRuns {

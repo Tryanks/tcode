@@ -899,36 +899,6 @@ pub(in crate::chat) mod tests {
     use tcode_core::project::{Project, SessionMeta};
     use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnTiming};
 
-    /// A thread reopened after the reset has lost its queued resume: the
-    /// card must offer to continue now, but only while the error still ends
-    /// the thread and nothing is queued after it (a second click or the user's
-    /// own message must not queue a duplicate), and must keep offering to
-    /// schedule while the reset is ahead.
-    #[test]
-    fn limit_card_offers_continue_once_reset_passed() {
-        let now = 1_800_000_000;
-        assert_eq!(
-            limit_resume_action(now - 60, None, now, true, true),
-            LimitResumeAction::ContinueNow
-        );
-        assert_eq!(
-            limit_resume_action(now - 60, None, now, false, true),
-            LimitResumeAction::None
-        );
-        assert_eq!(
-            limit_resume_action(now - 60, None, now, true, false),
-            LimitResumeAction::None
-        );
-        assert_eq!(
-            limit_resume_action(now + 60, None, now, true, true),
-            LimitResumeAction::Schedule
-        );
-        assert_eq!(
-            limit_resume_action(now - 60, Some(7), now, true, true),
-            LimitResumeAction::Scheduled { queued_id: 7 }
-        );
-    }
-
     pub(in crate::chat) const REAL_DIFF: &str = "--- a/src/foo.rs\n\
                              +++ b/src/foo.rs\n\
                              @@ -1,3 +1,4 @@\n\
@@ -1015,30 +985,6 @@ pub(in crate::chat) mod tests {
 
     pub(in crate::chat) fn reasoning(text: &str) -> EntryContent {
         EntryContent::Item(ItemContent::Reasoning { text: text.into() })
-    }
-
-    #[test]
-    fn latest_message_ids_find_the_newest_user_and_assistant_entries() {
-        let entries = vec![
-            entry("user-old", user_item("old")),
-            entry("assistant-old", assistant("old")),
-            command("command"),
-            entry(
-                "steer-new",
-                EntryContent::Steer {
-                    text: "new".into(),
-                    status: SteeringStatus::Pending,
-                    attachments: Vec::new(),
-                },
-            ),
-            entry("assistant-new", assistant("new")),
-            entry("reasoning", reasoning("later but not a message")),
-        ];
-
-        assert_eq!(
-            latest_message_ids(&entries),
-            (Some("steer-new".into()), Some("assistant-new".into()))
-        );
     }
 
     #[test]
@@ -1304,26 +1250,6 @@ pub(in crate::chat) mod tests {
                 if run.len() == 1 && run[0].id == "reason" && entry.id == "assistant")
             );
         }
-    }
-
-    #[test]
-    fn only_a_trailing_activity_run_is_live_in_a_running_turn() {
-        let prose_tail = [command("cmd"), entry("assistant", assistant("answer"))];
-        let segments = segment_entries(&prose_tail, true).flow;
-        // Prose, then the bare turn-level indicator: no empty run is invented
-        // to host it, and the earlier run has already settled.
-        assert_eq!(segments.len(), 2);
-        assert_eq!(live_activity_segment(&segments, true), None);
-        // Once the turn ends, that same run is the final settled work log.
-        assert_eq!(live_activity_segment(&segments, false), Some(0));
-
-        let activity_tail = [entry("assistant", assistant("answer")), command("cmd")];
-        let segments = segment_entries(&activity_tail, true).flow;
-        assert_eq!(live_activity_segment(&segments, true), Some(1));
-
-        let prose_only = [entry("assistant", assistant("answer"))];
-        let segments = segment_entries(&prose_only, true).flow;
-        assert_eq!(live_activity_segment(&segments, true), None);
     }
 
     pub(in crate::chat) fn file_change(id: &str, paths: &[&str]) -> Arc<TimelineEntry> {

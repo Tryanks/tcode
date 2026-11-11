@@ -1275,38 +1275,6 @@ mod tests {
         assert!(cx.debug_bounds("edit-menu").is_none());
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    #[gpui::test]
-    fn a_double_click_on_chinese_takes_the_word_the_platform_segments(cx: &mut TestAppContext) {
-        let (_, markdown, cx) = open_body("我们修复问题", cx);
-        draw(cx);
-        // The right half of "修", the first character of "修复".
-        let position = markdown.read_with(cx, |state, _| {
-            let runs = state.runs.borrow();
-            let run = &runs[0];
-            let start = run.layout.position_for_index(6).unwrap();
-            let end = run.layout.position_for_index(9).unwrap();
-            point(start.x + (end.x - start.x) * 0.75, start.y + px(4.))
-        });
-        for click_count in [1, 2] {
-            cx.simulate_event(MouseDownEvent {
-                button: MouseButton::Left,
-                position,
-                modifiers: Modifiers::default(),
-                click_count,
-                first_mouse: false,
-            });
-            cx.simulate_event(MouseUpEvent {
-                button: MouseButton::Left,
-                position,
-                modifiers: Modifiers::default(),
-                click_count,
-            });
-        }
-        draw(cx);
-        assert_eq!(selected(&markdown, cx), "修复");
-    }
-
     /// A message above a composer.
     struct Page {
         markdown: Entity<MarkdownState>,

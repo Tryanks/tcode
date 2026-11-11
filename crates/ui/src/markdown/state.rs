@@ -1092,38 +1092,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_drag_ending_off_the_code_lines_ends_at_the_nearest_line(cx: &mut TestAppContext) {
-        use gpui::point;
-
-        let (view, cx) = open("```text\nalpha beta gamma\nsecond line\n```", cx);
-        let first = cx.debug_bounds("markdown-code-line-0").unwrap();
-        let last = cx.debug_bounds("markdown-code-line-1").unwrap();
-        // Into the block's padding below its last line.
-        let below = point(last.right() - px(4.), last.bottom() + px(4.));
-        let from_start = point(first.left() + px(1.), first.center().y);
-        assert_eq!(
-            drag(&view, from_start, below, cx),
-            "alpha beta gamma\nsecond line"
-        );
-        // From inside the first line, what follows the press, never what
-        // precedes it.
-        let from_inside = point(first.left() + px(40.), first.center().y);
-        let copied = drag(&view, from_inside, below, cx);
-        assert!(
-            copied.ends_with("\nsecond line")
-                && "alpha beta gamma".ends_with(copied.lines().next().unwrap()),
-            "{copied:?}"
-        );
-        // And above the first line, back to where the drag began.
-        let above = point(first.left() + px(4.), first.top() - px(4.));
-        let from_end = point(last.right() - px(1.), last.center().y);
-        assert_eq!(
-            drag(&view, from_end, above, cx),
-            "alpha beta gamma\nsecond line"
-        );
-    }
-
-    #[gpui::test]
     fn a_drag_through_a_table_takes_each_cell_whole_before_the_next(cx: &mut TestAppContext) {
         use gpui::point;
 

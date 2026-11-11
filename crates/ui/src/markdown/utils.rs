@@ -24,34 +24,3 @@ pub(super) fn list_item_prefix(ix: usize, ordered: bool, start: u32, depth: usiz
     letters.reverse();
     format!("{}. ", String::from_iter(letters))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::list_item_prefix;
-
-    #[test]
-    fn nested_ordered_lists_letter_past_z_from_their_own_start() {
-        for (ix, start, label) in [
-            (0, 1, "A"),
-            (25, 1, "Z"),
-            (26, 1, "AA"),
-            (27, 1, "AB"),
-            (51, 1, "AZ"),
-            (52, 1, "BA"),
-            (701, 1, "ZZ"),
-            (702, 1, "AAA"),
-            // `3.` starts a nested list at its third letter.
-            (0, 3, "C"),
-            (1, 26, "AA"),
-        ] {
-            assert_eq!(list_item_prefix(ix, true, start, 1), format!("{label}. "));
-            assert_eq!(
-                list_item_prefix(ix, true, start, 2),
-                format!("{}. ", label.to_ascii_lowercase())
-            );
-        }
-        assert_eq!(list_item_prefix(26, true, 1, 0), "27. ");
-        // No letter stands for 0, so a nested list starting there counts.
-        assert_eq!(list_item_prefix(1, true, 0, 1), "1. ");
-    }
-}

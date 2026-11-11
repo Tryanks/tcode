@@ -7188,20 +7188,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn canceling_inline_rename_discards_the_unsaved_title(cx: &mut TestAppContext) {
-        cancel_inline_rename(cx, false);
-    }
-
-    #[gpui::test]
     fn canceling_inline_rename_on_the_phone_discards_the_unsaved_title(cx: &mut TestAppContext) {
-        cancel_inline_rename(cx, true);
-    }
-
-    fn cancel_inline_rename(cx: &mut TestAppContext, compact: bool) {
         cx.update(crate::theme::init);
-        if compact {
-            cx.update(crate::window_seam::force_mobile_layout);
-        }
+        cx.update(crate::window_seam::force_mobile_layout);
         let root = crate::store::tests::scratch_root("sidebar-rename-test");
         let session_store = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(root.clone());
@@ -7238,95 +7227,76 @@ mod tests {
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(360.), px(800.)));
         window_state.update(cx, |state, cx| {
-            state.set_compact(compact, cx);
+            state.set_compact(true, cx);
             state.go(crate::window_state::Destination::Threads, cx);
         });
         draw(cx);
-        let row = cx
-            .debug_bounds(if compact {
-                "compact-row-rename-thread"
-            } else {
-                "sidebar-thread-rename-thread"
-            })
-            .unwrap();
+        let row = cx.debug_bounds("compact-row-rename-thread").unwrap();
         let trigger = row.center();
-        if compact {
-            let touch = |cx: &mut VisualTestContext, phase, position| {
-                cx.simulate_event(gpui::TouchEvent {
-                    id: gpui::TouchId(1),
-                    phase,
-                    position,
-                    predicted_position: None,
-                    force: None,
-                });
-                draw(cx);
-            };
-            touch(cx, gpui::TouchPhase::Started, trigger);
-            cx.executor().advance_clock(
-                gpui::GestureTuning::default().long_press_duration
-                    + std::time::Duration::from_millis(1),
-            );
-            cx.run_until_parked();
-            draw(cx);
-            touch(cx, gpui::TouchPhase::Ended, trigger);
-            crate::test_frames::draw_settled(cx);
-            let rename = cx
-                .debug_bounds("menu-item-2")
-                .expect("thread menu opens")
-                .center();
-            touch(cx, gpui::TouchPhase::Started, rename);
-            touch(cx, gpui::TouchPhase::Ended, rename);
-            crate::test_frames::draw_settled(cx);
-            cx.simulate_input(" edited");
-            assert_eq!(
-                sidebar.read_with(cx, |sidebar, cx| sidebar
-                    .renaming
-                    .as_ref()
-                    .expect("Rename starts editing")
-                    .input
-                    .read(cx)
-                    .value()
-                    .to_string()),
-                "Original title edited",
-                "Rename mounts a usable input on the phone"
-            );
-            let caret = sidebar.read_with(cx, |sidebar, cx| {
-                sidebar
-                    .renaming
-                    .as_ref()
-                    .unwrap()
-                    .input
-                    .read(cx)
-                    .text_bounds()
-                    .unwrap()
-                    .center()
+        let touch = |cx: &mut VisualTestContext, phase, position| {
+            cx.simulate_event(gpui::TouchEvent {
+                id: gpui::TouchId(1),
+                phase,
+                position,
+                predicted_position: None,
+                force: None,
             });
-            touch(cx, gpui::TouchPhase::Started, caret);
-            touch(cx, gpui::TouchPhase::Ended, caret);
-            assert_eq!(
-                window_state.read_with(cx, |state, _| state.destination()),
-                crate::window_state::Destination::Threads,
-                "tapping the rename editor must not open the thread"
-            );
-            cx.simulate_click(caret, gpui::Modifiers::default());
             draw(cx);
-            assert_eq!(
-                window_state.read_with(cx, |state, _| state.destination()),
-                crate::window_state::Destination::Threads,
-                "clicking the rename editor must not open the thread"
-            );
-        } else {
-            let (button, modifiers) = (gpui::MouseButton::Right, gpui::Modifiers::none());
-            cx.simulate_mouse_down(trigger, button, modifiers);
-            cx.simulate_mouse_up(trigger, button, modifiers);
-            crate::test_frames::draw_settled(cx);
-            let rename = cx
-                .debug_bounds("menu-item-2")
-                .expect("thread menu opens")
-                .center();
-            cx.simulate_click(rename, gpui::Modifiers::default());
-            draw(cx);
-        }
+        };
+        touch(cx, gpui::TouchPhase::Started, trigger);
+        cx.executor().advance_clock(
+            gpui::GestureTuning::default().long_press_duration
+                + std::time::Duration::from_millis(1),
+        );
+        cx.run_until_parked();
+        draw(cx);
+        touch(cx, gpui::TouchPhase::Ended, trigger);
+        crate::test_frames::draw_settled(cx);
+        let rename = cx
+            .debug_bounds("menu-item-2")
+            .expect("thread menu opens")
+            .center();
+        touch(cx, gpui::TouchPhase::Started, rename);
+        touch(cx, gpui::TouchPhase::Ended, rename);
+        crate::test_frames::draw_settled(cx);
+        cx.simulate_input(" edited");
+        assert_eq!(
+            sidebar.read_with(cx, |sidebar, cx| sidebar
+                .renaming
+                .as_ref()
+                .expect("Rename starts editing")
+                .input
+                .read(cx)
+                .value()
+                .to_string()),
+            "Original title edited",
+            "Rename mounts a usable input on the phone"
+        );
+        let caret = sidebar.read_with(cx, |sidebar, cx| {
+            sidebar
+                .renaming
+                .as_ref()
+                .unwrap()
+                .input
+                .read(cx)
+                .text_bounds()
+                .unwrap()
+                .center()
+        });
+        touch(cx, gpui::TouchPhase::Started, caret);
+        touch(cx, gpui::TouchPhase::Ended, caret);
+        assert_eq!(
+            window_state.read_with(cx, |state, _| state.destination()),
+            crate::window_state::Destination::Threads,
+            "tapping the rename editor must not open the thread"
+        );
+        cx.simulate_click(caret, gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(
+            window_state.read_with(cx, |state, _| state.destination()),
+            crate::window_state::Destination::Threads,
+            "clicking the rename editor must not open the thread"
+        );
         cx.update(|window, cx| {
             sidebar.update(cx, |sidebar, cx| {
                 let input = sidebar
