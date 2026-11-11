@@ -2403,6 +2403,20 @@ impl WorkspaceStore {
             .get(*self.index_positions.get(session_id)?)
     }
 
+    /// The name the host's model list gives `model` among the models of the
+    /// thread's profile; `None` when the list has no such id.
+    pub(crate) fn thread_model_name(&self, session_id: &str, model: &str) -> Option<String> {
+        let meta = self.thread_meta(session_id)?;
+        let profile_id = meta
+            .profile_id
+            .as_deref()
+            .unwrap_or(Settings::builtin_profile_id(meta.provider));
+        self.profile_catalog(profile_id)
+            .into_iter()
+            .find(|spec| spec.id == model)
+            .map(|spec| spec.display_name)
+    }
+
     /// The thread `session_id` was forked from: its title, and its id while
     /// it still exists.
     pub(crate) fn fork_source(&self, session_id: &str) -> Option<(String, Option<String>)> {

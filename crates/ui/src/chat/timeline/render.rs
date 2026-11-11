@@ -101,10 +101,20 @@ impl TimelineView {
                     let EntryContent::ModelChanged { from, to, reason } = &entry.content else {
                         unreachable!();
                     };
+                    let name = |model: &str| {
+                        self.session_id
+                            .as_deref()
+                            .and_then(|session_id| {
+                                self.workspace_store
+                                    .read(cx)
+                                    .thread_model_name(session_id, model)
+                            })
+                            .unwrap_or_else(|| model.to_owned())
+                    };
                     column = column.child(components::dividers::model_change_divider(
                         &entry.id,
-                        from.as_deref(),
-                        to,
+                        from.as_deref().map(name).as_deref(),
+                        &name(to),
                         reason.as_deref(),
                         cx,
                     ));
