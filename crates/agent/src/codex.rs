@@ -3,7 +3,7 @@
 
 use crate::{
     ApprovalPolicy, ApprovalReviewer, ForkPoint, LaterHistory, PermissionSandbox,
-    PermissionSummary, RewindFailure, RewindFailureReason, RewindMode, Speed,
+    PermissionSummary, RewindFailure, RewindFailureReason, RewindMode, Speed, approval_class,
 };
 use std::collections::{HashMap, HashSet};
 use std::io::BufWriter;
@@ -37,6 +37,9 @@ pub use developer_instructions::PREVIEW_BROWSER_INSTRUCTIONS;
 
 /// The `additionalContext` key [`SessionOptions::instructions`] ride under.
 const INSTRUCTIONS_CONTEXT_KEY: &str = "tcode";
+
+/// The id of Codex's permission control ([`permission_control`]).
+const PERMISSIONS_OPTION_ID: &str = "permissions";
 
 const ELICITATION_URL_ACK_LABEL: &str = "I've opened the link";
 const ELICITATION_URL_CANCEL_LABEL: &str = "Cancel";
@@ -156,6 +159,7 @@ fn current_permission_option(effective: &str, settings: &Value) -> SelectOption 
             approval,
             reviewer,
         }),
+        approval: approval_class(ProviderKind::Codex, PERMISSIONS_OPTION_ID, effective),
     }
 }
 
@@ -190,7 +194,6 @@ fn permission_descriptor(
             continue;
         }
         options.push(SelectOption {
-            value,
             label: id.into(),
             description: profile
                 .get("description")
@@ -201,6 +204,8 @@ fn permission_descriptor(
                 .then(|| "Not allowed by your configuration".into()),
             speed: None,
             summary: None,
+            approval: approval_class(ProviderKind::Codex, PERMISSIONS_OPTION_ID, &value),
+            value,
         });
     }
     if !options.iter().any(|option| option.value == effective) {
@@ -410,6 +415,7 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
                     description,
                     speed: None,
                     summary: None,
+                    approval: None,
                 })
             })
             .collect();
@@ -447,6 +453,7 @@ fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Op
             description: None,
             speed: None,
             summary: None,
+            approval: None,
         });
         select_options.extend(tiers);
         options.push(OptionDescriptor::Select {
@@ -483,6 +490,7 @@ fn context_window_descriptor(windows: Option<&model_windows::ModelWindows>) -> O
             unavailable: None,
             speed: None,
             summary: None,
+            approval: None,
         }
     };
     let (options, default_value) = match windows {
@@ -533,6 +541,7 @@ fn service_tiers(model: &Value) -> Vec<SelectOption> {
                     label,
                     description,
                     summary: None,
+                    approval: None,
                 })
             })
             .collect();

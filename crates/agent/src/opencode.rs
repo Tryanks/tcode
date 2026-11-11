@@ -514,6 +514,7 @@ fn map_models(models: &Value, default: &Value) -> Vec<ModelSpec> {
                             unavailable: None,
                             speed: None,
                             summary: None,
+                            approval: None,
                         })
                         .collect(),
                     default_value: None,
@@ -920,6 +921,7 @@ impl OpenCodeActor {
                         unavailable: None,
                         speed: None,
                         summary: None,
+                        approval: None,
                     })
                     .collect(),
                 default_value: None,

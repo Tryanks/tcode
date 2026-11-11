@@ -370,6 +370,7 @@ pub use wire::{
 // RuntimeError gains title_attachment_unreadable {path, error}.
 // PullRequestFile's additions and deletions may be absent: a binary or
 // oversized file whose host gave no count.
+// SelectOption gains approval, the ApprovalClass of a permission value.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

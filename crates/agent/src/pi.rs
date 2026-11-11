@@ -168,6 +168,7 @@ fn map_model(
                     unavailable: None,
                     speed: None,
                     summary: None,
+                    approval: None,
                 })
                 .collect(),
             default_value,

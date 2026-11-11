@@ -1365,11 +1365,8 @@ impl PermissionControl {
                     .into_iter()
                     .map(|option| {
                         // A member's space may not allow every value.
-                        let refused = composer
-                            .provider
-                            .and_then(|provider| {
-                                agent::approval_class(provider, &id, &option.value)
-                            })
+                        let refused = option
+                            .approval
                             .zip(composer.space_policy.as_ref())
                             .is_some_and(|(class, policy)| !policy.allows_class(class));
                         let (label, description) = crate::i18n::permission_option(&id, &option);

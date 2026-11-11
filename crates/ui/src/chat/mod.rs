@@ -1368,6 +1368,7 @@ pub(crate) mod tests {
                             unavailable: None,
                             speed: None,
                             summary: None,
+                            approval: None,
                         }],
                         default_value: Some("xhigh".into()),
                         role: agent::OptionRole::Effort,

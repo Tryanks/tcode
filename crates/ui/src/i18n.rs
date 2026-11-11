@@ -519,6 +519,7 @@ mod tests {
                 approval: Some(agent::ApprovalPolicy::OnRequest),
                 reviewer: None,
             }),
+            approval: None,
         };
         assert_eq!(
             permission_option("permissions", &current),

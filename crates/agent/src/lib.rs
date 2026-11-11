@@ -1463,6 +1463,10 @@ pub struct SelectOption {
     /// place of a description.
     #[serde(default)]
     pub summary: Option<PermissionSummary>,
+    /// Who settles what the harness would stop to ask under this value of
+    /// its permission control; `None` for a value of any other option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalClass>,
 }
 
 type PermissionTable = (
@@ -1637,13 +1641,14 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
         label: "Permissions".into(),
         options: values
             .iter()
-            .map(|(value, label, description, _)| SelectOption {
+            .map(|(value, label, description, class)| SelectOption {
                 value: (*value).into(),
                 label: (*label).into(),
                 description: Some((*description).into()),
                 unavailable: None,
                 speed: None,
                 summary: None,
+                approval: Some(*class),
             })
             .collect(),
         default_value: Some(default.into()),

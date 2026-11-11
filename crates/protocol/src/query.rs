@@ -621,9 +621,10 @@ impl SpacePolicy {
     pub fn allows_provider(&self, provider: agent::ProviderKind) -> bool {
         self.allows_class(agent::ApprovalClass::Unrestricted)
             || match agent::permission_control(provider) {
-                Some(agent::OptionDescriptor::Select { id, options, .. }) => {
+                Some(agent::OptionDescriptor::Select { options, .. }) => {
                     options.iter().any(|option| {
-                        agent::approval_class(provider, &id, &option.value)
+                        option
+                            .approval
                             .is_some_and(|class| self.allows_class(class))
                     })
                 }

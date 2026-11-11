@@ -314,6 +314,7 @@ fn descriptor(option: &Value) -> Option<OptionDescriptor> {
                     unavailable: None,
                     speed: None,
                     summary: None,
+                    approval: None,
                 });
             }
             OptionDescriptor::Select {
@@ -354,6 +355,7 @@ fn fixed_context_window_descriptor(tokens: u64) -> OptionDescriptor {
             unavailable: None,
             speed: None,
             summary: None,
+            approval: None,
         }],
         default_value: Some(value),
         role: crate::OptionRole::ContextWindow,
@@ -889,6 +891,7 @@ mod tests {
                             unavailable: None,
                             speed: None,
                             summary: None,
+                            approval: None,
                         },
                         SelectOption {
                             value: "medium".into(),
@@ -897,6 +900,7 @@ mod tests {
                             unavailable: None,
                             speed: None,
                             summary: None,
+                            approval: None,
                         },
                         SelectOption {
                             value: "max".into(),
@@ -905,6 +909,7 @@ mod tests {
                             unavailable: None,
                             speed: None,
                             summary: None,
+                            approval: None,
                         },
                         SelectOption {
                             value: "ultracode".into(),
@@ -913,6 +918,7 @@ mod tests {
                             unavailable: None,
                             speed: None,
                             summary: None,
+                            approval: None,
                         },
                     ],
                     default_value: Some("medium".into()),
@@ -932,6 +938,7 @@ mod tests {
                             unavailable: None,
                             speed: None,
                             summary: None,
+                            approval: None,
                         },
                         SelectOption {
                             value: "1m".into(),
@@ -940,6 +947,7 @@ mod tests {
                             unavailable: None,
                             speed: None,
                             summary: None,
+                            approval: None,
                         },
                     ],
                     default_value: Some("1m".into()),
@@ -977,6 +985,7 @@ mod tests {
                     unavailable: None,
                     speed: None,
                     summary: None,
+                    approval: None,
                 }],
                 default_value: Some("1m".into()),
                 role: crate::OptionRole::ContextWindow,

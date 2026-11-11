@@ -2727,6 +2727,7 @@ impl Mapper {
                     }),
                     speed: None,
                     summary: None,
+                    approval: None,
                 });
             }
         }

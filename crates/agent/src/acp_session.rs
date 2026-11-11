@@ -970,6 +970,7 @@ async fn connected_actor<D: Dialect>(
                         unavailable: Some("Reported by the launch arguments".into()),
                         speed: None,
                         summary: None,
+                        approval: crate::approval_class(provider, &id, mode),
                     });
                 }
                 state
@@ -1658,6 +1659,11 @@ impl OptionRegistry {
                             unavailable: None,
                             speed: None,
                             summary: None,
+                            approval: crate::approval_class(
+                                ProviderKind::Acp,
+                                MODE_OPTION_ID,
+                                &mode.id.0,
+                            ),
                         })
                         .collect(),
                     default_value: Some(modes.current_mode_id.0.to_string()),
@@ -1681,6 +1687,7 @@ impl OptionRegistry {
             // canonical ids (the runtime reads `acp:mode`); every option,
             // whatever its category, is set through `session/set_config_option`.
             let id = config_option_id(&option.id.0, option.category.as_ref());
+            let approval = |value: &str| crate::approval_class(ProviderKind::Acp, &id, value);
             match &option.kind {
                 acp::SessionConfigKind::Select(select) => {
                     let options = match &select.options {
@@ -1693,6 +1700,7 @@ impl OptionRegistry {
                                 unavailable: None,
                                 speed: None,
                                 summary: None,
+                                approval: approval(&option.value.0),
                             })
                             .collect(),
                         acp::SessionConfigSelectOptions::Grouped(groups) => groups
@@ -1705,6 +1713,7 @@ impl OptionRegistry {
                                     unavailable: None,
                                     speed: None,
                                     summary: None,
+                                    approval: approval(&option.value.0),
                                 })
                             })
                             .collect(),
