@@ -11417,6 +11417,7 @@ pub(crate) mod tests {
     fn a_waiting_pane_closes_from_its_corner_and_the_keyboard(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         serve_status(&host, "thread-1", true);
         await_restore_update(&shell, cx, |store, cx| {
             store
@@ -12224,6 +12225,7 @@ pub(crate) mod tests {
     fn a_split_without_room_is_refused(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         resize(cx, 1200.);
         draw(cx);
         let _ = sent(&host);

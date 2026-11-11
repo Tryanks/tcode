@@ -968,24 +968,24 @@ fn step_until(
     thread.driver.settle_until(cx, what, done);
 }
 
-/// A command that printed five thousand lines, its host's screen of them in
+/// A command that printed more lines than its record keeps, its host's screen of them in
 /// the window's grid, scrolls back to the first line it printed. The record
 /// carried only a preview of them, but the host's screen holds them all, so
 /// the window offers nothing to load.
 #[gpui::test]
-fn a_five_thousand_line_command_scrolls_to_its_first_line(cx: &mut TestAppContext) {
+fn a_long_command_scrolls_to_its_first_line(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
-    let log = shell_log("count", 5_000);
-    assert!(numbered(5_000).len() > tcode_protocol::OUTPUT_PREVIEW_BYTES);
+    let log = shell_log("count", 300);
+    assert!(numbered(300).len() > tcode_protocol::OUTPUT_PREVIEW_BYTES);
     let (mut thread, cx) = StoredThread::open(cx, &log, 1_024.);
     thread.open_work_log("count", cx);
     click(cx, "activity-row-count");
     step_until(&mut thread, "the host's screen", cx, |cx| {
-        copied_output("count", cx).ends_with("line 5000 of the run")
+        copied_output("count", cx).ends_with("line 300 of the run")
     });
     assert!(!shows(cx, "load-output-count"), "nothing left to load");
-    scroll_output("count", 6_000., cx);
+    scroll_output("count", 400., cx);
     let start = copied_output("count", cx);
     assert!(
         start.starts_with("line 1 of the run\n"),
