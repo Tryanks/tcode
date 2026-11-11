@@ -989,6 +989,13 @@ jobs:
           pacman-key --init && pacman-key --populate
           pacman -Syu --noconfirm --needed git openssh
 
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+          path: source
+          sparse-checkout: .github/aur
+          persist-credentials: false
+
       - name: Download Linux packages
         uses: actions/download-artifact@v8
         with:
@@ -1014,13 +1021,32 @@ jobs:
       - name: Clone AUR repository
         run: git clone aur@aur.archlinux.org:tcode-bin.git aur-repo
 
-      - name: Update pkgver and checksums
+      # The PKGBUILD, dependencies included, comes from the released tag; the AUR
+      # copy is replaced, not patched. Republishing a version the AUR already has
+      # bumps pkgrel so installed packages pick the change up.
+      - name: Write PKGBUILD
         working-directory: aur-repo
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+          SHA256_X64: ${{ steps.checksums.outputs.x64 }}
+          SHA256_ARM64: ${{ steps.checksums.outputs.arm64 }}
         run: |
-          sed -i "s/^pkgver=.*/pkgver=${{ needs.setup.outputs.version }}/" PKGBUILD
-          sed -i "s/^sha256sums_x86_64=('.*')/sha256sums_x86_64=('${{ steps.checksums.outputs.x64 }}')/" PKGBUILD
-          sed -i "s/^sha256sums_aarch64=('.*')/sha256sums_aarch64=('${{ steps.checksums.outputs.arm64 }}')/" PKGBUILD
-          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          pkgrel=1
+          if [ -f PKGBUILD ] && [ "$(sed -n 's/^pkgver=//p' PKGBUILD)" = "$VERSION" ]; then
+            pkgrel=$(sed -n 's/^pkgrel=//p' PKGBUILD)
+            cp PKGBUILD PKGBUILD.published
+          fi
+          cp ../source/.github/aur/tcode-bin/PKGBUILD PKGBUILD
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
+          sed -i "s/^sha256sums_x86_64=('.*')/sha256sums_x86_64=('${SHA256_X64}')/" PKGBUILD
+          sed -i "s/^sha256sums_aarch64=('.*')/sha256sums_aarch64=('${SHA256_ARM64}')/" PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=${pkgrel}/" PKGBUILD
+          if [ -f PKGBUILD.published ]; then
+            if ! cmp -s PKGBUILD PKGBUILD.published; then
+              sed -i "s/^pkgrel=.*/pkgrel=$((pkgrel + 1))/" PKGBUILD
+            fi
+            rm PKGBUILD.published
+          fi
 
       - name: Generate .SRCINFO
         working-directory: aur-repo
