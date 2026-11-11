@@ -1683,6 +1683,38 @@ async fn write_line<W: AsyncWrite + Unpin>(stdin: &mut W, value: &Value) -> std:
 /// Build a stream-json user message line. Text comes first, followed by one
 /// `image` content block per attachment (`source: {type: "base64", media_type,
 /// data}` — the Anthropic content-block shape the CLI accepts).
+/// The texts Claude Code writes in a message of the user's role for a
+/// request, an agent or a tool call it cut off, which it reads as no one's
+/// words: the entries of its marker list that say so, matched as it matches
+/// them, by prefix (`Vxe` and `uh` in Claude Code 2.1.322).
+const INTERRUPTION_MARKERS: [&str; 7] = [
+    "[Request interrupted by user]",
+    "[Request interrupted: the session ended before this agent finished. Nobody asked it to stop.]",
+    "[Agent call interrupted: the process running this conversation stopped before this agent finished, so it returned no result. Nobody asked it to stop.]",
+    "[Tool call did not complete: the turn was ended to deliver the message that follows. Nothing refused it; re-run it if still needed.]",
+    "[Tool call interrupted: the session ended before this call's result was recorded, so its outcome is unknown. Check whether it took effect before relying on it or running it again.]",
+    "[Tool call skipped: the turn was stopped before this call ran, by the check whose denial is on another call in this batch. Nothing refused this call and it had no effects; re-run it if still needed.]",
+    "[Tool call skipped: the turn ended to deliver the message that follows before this call ran. Nothing refused it; re-run it if still needed.]",
+];
+
+/// Whether `text` is Claude Code's own mark that it cut something off, not
+/// anything the user said or a tool answered.
+pub fn is_interruption_marker(text: &str) -> bool {
+    INTERRUPTION_MARKERS
+        .iter()
+        .any(|marker| text.starts_with(marker))
+}
+
+/// How a call ended, from its `tool_result`: cut off when Claude Code says it
+/// cut it off, failed when it is an error otherwise.
+fn tool_result_status(is_error: bool, output: &str) -> ItemStatus {
+    match is_error {
+        true if is_interruption_marker(output) => ItemStatus::Interrupted,
+        true => ItemStatus::Failed,
+        false => ItemStatus::Completed,
+    }
+}
+
 fn user_message(text: &str, attachments: &[Attachment]) -> Value {
     let mut content = vec![json!({ "type": "text", "text": text })];
     for attachment in attachments {
@@ -1804,13 +1836,9 @@ impl ToolItem {
             .get("is_error")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let status = if is_error {
-            ItemStatus::Failed
-        } else {
-            ItemStatus::Completed
-        };
         let ToolOutput { text, images } =
             ToolOutput::from_content(block.get("content").unwrap_or(&Value::Null));
+        let status = tool_result_status(is_error, &text);
         match self {
             ToolItem::Command { command, .. } => {
                 let (output, exit_code) = match is_error.then(|| exited(&text)).flatten() {
@@ -2973,7 +3001,9 @@ impl Mapper {
         };
         let status = match status {
             "completed" => ItemStatus::Completed,
-            "failed" | "killed" => ItemStatus::Failed,
+            "failed" => ItemStatus::Failed,
+            // Stopped, by the user or by its session's end: it did not fail.
+            "killed" => ItemStatus::Interrupted,
             _ => ItemStatus::InProgress,
         };
         // The tail is stopped by the task_notification that follows a
@@ -3017,10 +3047,10 @@ impl Mapper {
         });
         // A notification is the task's terminal frame: `completed`, `failed`
         // or `stopped`.
-        let status = if msg.get("status").and_then(Value::as_str) == Some("completed") {
-            ItemStatus::Completed
-        } else {
-            ItemStatus::Failed
+        let status = match msg.get("status").and_then(Value::as_str) {
+            Some("completed") => ItemStatus::Completed,
+            Some("stopped") => ItemStatus::Interrupted,
+            _ => ItemStatus::Failed,
         };
         let summary = handback_summary(
             msg.get("handback"),
@@ -3682,11 +3712,7 @@ impl Mapper {
             };
             let output =
                 ToolOutput::from_content(block.get("content").unwrap_or(&Value::Null)).text;
-            let status = if is_error {
-                ItemStatus::Failed
-            } else {
-                ItemStatus::Completed
-            };
+            let status = tool_result_status(is_error, &output);
             let mut parent_item_id = None;
             let backgrounded = launched_in_background && matches!(item, ToolItem::Command { .. });
             if let Some(task_id) = msg
