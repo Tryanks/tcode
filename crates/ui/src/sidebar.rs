@@ -2627,7 +2627,6 @@ impl SessionsSidebar {
             .filter(|meta| {
                 meta.project_id.as_deref() == Some(action.0.project_id.as_str())
                     && meta.archived_at.is_none()
-                    && !store.read(cx).turn_running_for(&meta.id)
             })
             .map(|meta| meta.id.clone())
             .collect();
@@ -2647,12 +2646,50 @@ impl SessionsSidebar {
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
                 )
-                .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, _cx| {
-                        for session_id in &session_ids {
-                            store.archive_session(session_id.clone());
-                        }
-                    });
+                .on_ok(move |_, window, cx| {
+                    let requests: Vec<_> = session_ids
+                        .iter()
+                        .map(|session_id| {
+                            store.update(cx, |store, cx| {
+                                store.command(
+                                    Command::ArchiveSession {
+                                        session_id: session_id.clone(),
+                                    },
+                                    cx,
+                                )
+                            })
+                        })
+                        .collect();
+                    // The host refuses a thread it will not archive (one still running);
+                    // each distinct reason is shown once, with how many it kept.
+                    window
+                        .spawn(cx, async move |cx| {
+                            let mut refused: Vec<(String, usize)> = Vec::new();
+                            for request in requests {
+                                if let Err(error) = request.await {
+                                    match refused
+                                        .iter_mut()
+                                        .find(|(reason, _)| *reason == error.message)
+                                    {
+                                        Some((_, count)) => *count += 1,
+                                        None => refused.push((error.message, 1)),
+                                    }
+                                }
+                            }
+                            let _ = cx.update(|window, cx| {
+                                for (reason, count) in refused {
+                                    window.push_notification(
+                                        Notification::warning(crate::tr!(
+                                            "sidebar.archive_all_refused",
+                                            count = count,
+                                            reason = reason
+                                        )),
+                                        cx,
+                                    );
+                                }
+                            });
+                        })
+                        .detach();
                     true
                 })
         });

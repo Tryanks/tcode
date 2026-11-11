@@ -388,8 +388,9 @@ sidebar:
   archive_action: "Archive"
   archive_all: "Archive all threads"
   archive_all_title: "Archive all threads?"
-  archive_all_description: "Archive %{count} threads in this project? Threads with running turns are not included."
+  archive_all_description: "Archive %{count} threads in this project?"
   archive_all_action: "Archive all"
+  archive_all_refused: "%{count} threads were not archived: %{reason}"
   change_project_root: "Change path…"
   change_project_root_title: 'Change path of "%{project}"'
   change_project_root_description: "Threads keep their conversations and continue in the new directory. A project already at the new path absorbs this one, threads included."
