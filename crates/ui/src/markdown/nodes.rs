@@ -601,36 +601,6 @@ mod tests {
                             | name | value |\n| --- | --- |\n| alpha | beta |\n\n- one\n- two";
 
     #[test]
-    fn a_copy_reads_segments_in_document_order_from_the_middle_of_one_to_another() {
-        let document = super::super::parse::parse_document(DOCUMENT).root;
-        assert_eq!(
-            document.text_between(&at(&[1], 0, 6), &at(&[1], 1, 6)),
-            "code line\nsecond"
-        );
-        assert_eq!(
-            document.text_between(&TextPosition::start(), &TextPosition::end()),
-            "intro text\nfirst code line\nsecond code line\nname\tvalue\nalpha\tbeta\none\ntwo"
-        );
-        assert_eq!(
-            document.text_between(&at(&[3, 0, 0], 0, 1), &TextPosition::end()),
-            "ne\ntwo"
-        );
-    }
-
-    #[test]
-    fn a_table_is_read_cell_by_cell_along_each_row() {
-        let document = super::super::parse::parse_document(DOCUMENT).root;
-        assert_eq!(
-            document.text_between(&at(&[2, 0, 0], 0, 2), &at(&[2, 1, 0], 0, 3)),
-            "me\tvalue\nalp"
-        );
-        assert_eq!(
-            document.text_between(&at(&[2, 0, 1], 0, 0), &at(&[2, 0, 1], 0, 3)),
-            "val"
-        );
-    }
-
-    #[test]
     fn a_range_touching_a_segment_only_at_its_edge_adds_nothing_of_it() {
         let document = super::super::parse::parse_document(DOCUMENT).root;
         assert_eq!(

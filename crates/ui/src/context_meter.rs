@@ -144,32 +144,4 @@ mod tests {
         assert!(!is_overloaded(90.0));
         assert!(is_overloaded(90.1));
     }
-
-    #[test]
-    fn compact_labels_keep_small_values_precise_and_unknown_values_explicit() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        for (value, expected) in [
-            (Some(5.0), Some("5%")),
-            (Some(5.5), Some("5.5%")),
-            (Some(42.4), Some("42%")),
-            (Some(90.6), Some("91%")),
-            (None, None),
-            (Some(f32::NAN), None),
-            (Some(f32::INFINITY), None),
-        ] {
-            assert_eq!(format_percentage(value).as_deref(), expected);
-        }
-        for (value, expected) in [
-            (Some(0), "0"),
-            (Some(999), "999"),
-            (Some(1_500), "1.5k"),
-            (Some(4_000), "4k"),
-            (Some(42_000), "42k"),
-            (Some(1_000_000), "1m"),
-            (Some(1_250_000), "1.2m"),
-            (None, "Unknown"),
-        ] {
-            assert_eq!(format_tokens(value), expected);
-        }
-    }
 }

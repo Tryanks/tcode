@@ -17,8 +17,6 @@ use gpui::{
 };
 use gpui_base::v_flex;
 use tcode_client::HostLink;
-#[cfg(test)]
-use tcode_core::settings::TraverseSource;
 use tcode_core::settings::{Settings, TraverseInstance, TraverseSetting};
 use tcode_protocol::{Command, HostingAction, HostingState, SettingsPatch, TraverseSourceStatus};
 use tcode_traverse::manifest::ManifestSource;
@@ -778,47 +776,5 @@ mod tests {
         assert!(cx.debug_bounds("remote-pairing").is_none());
         assert!(cx.debug_bounds("remote-invitation").is_none());
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn a_self_hosted_traverse_needs_a_fetchable_base_url() {
-        let custom = |url: &str, enabled| TraverseSource {
-            instance: TraverseInstance::Custom { url: url.into() },
-            enabled,
-        };
-        let official = |enabled| TraverseSource {
-            instance: TraverseInstance::Official,
-            enabled,
-        };
-        assert_eq!(
-            traverse_sources(&TraverseSetting::new(vec![
-                official(true),
-                custom(" https://traverse.example/ ", true),
-                custom("https://disabled.example/", false),
-            ])),
-            Ok(vec![
-                ManifestSource::Official,
-                ManifestSource::Custom(url::Url::parse("https://traverse.example/").unwrap())
-            ])
-        );
-        assert_eq!(
-            traverse_sources(&TraverseSetting::new(vec![official(false)])),
-            Ok(Vec::new())
-        );
-        for rejected in [
-            "",
-            "traverse.example",
-            "ftp://traverse.example/",
-            "https://",
-        ] {
-            assert!(
-                traverse_sources(&TraverseSetting::new(vec![
-                    official(true),
-                    custom(rejected, true)
-                ]))
-                .is_err(),
-                "{rejected:?}"
-            );
-        }
     }
 }

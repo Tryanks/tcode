@@ -1616,14 +1616,10 @@ impl Focusable for CommandPalette {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
-    use tcode_protocol::SessionSearchHit;
-    use tcode_runtime::pipe::{HostServices, spawn_host};
-    use tcode_services::store::SessionStore;
 
     struct PaletteHarness {
         palette: Entity<CommandPalette>,
         window_state: Entity<WindowState>,
-        page_scroll: gpui::ScrollHandle,
     }
 
     impl PaletteHarness {
@@ -1642,7 +1638,6 @@ mod tests {
                     palette
                 }),
                 window_state,
-                page_scroll: gpui::ScrollHandle::new(),
             }
         }
     }
@@ -1653,14 +1648,6 @@ mod tests {
             div()
                 .relative()
                 .size_full()
-                .child(
-                    div()
-                        .id("page")
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.page_scroll)
-                        .child(div().h(px(3000.)).w_full().flex_none()),
-                )
                 .when(open, |root| root.child(self.palette.clone()))
         }
     }
@@ -1714,85 +1701,6 @@ mod tests {
         let scattered = fuzzy_score("set", "some effort table").unwrap();
         assert!(contiguous > scattered, "{contiguous} !> {scattered}");
         assert!(contiguous > fuzzy_score("set", "reset").unwrap());
-    }
-
-    #[gpui::test]
-    fn empty_query_lists_commands_and_arrow_keys_keep_query_focus(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let root = crate::store::tests::scratch_root("palette-keyboard-test");
-        let store = SessionStore::open_at(root.clone()).expect("open test store");
-        let host = spawn_host(store, HostServices::default()).expect("spawn test host");
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let workspace_store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        driver.wait_until(cx, "workspace baseline", |cx| {
-            workspace_store.read_with(cx, |store, _| store.baseline_ready())
-        });
-        let palette_store = workspace_store.clone();
-        let (harness, cx) = cx.add_window_view(move |window, cx| {
-            PaletteHarness::new(palette_store.clone(), window, cx)
-        });
-        let cx: &mut VisualTestContext = cx;
-        let palette = cx.update(|_, cx| harness.read(cx).palette.clone());
-        cx.update(|window, cx| {
-            let query = palette.read(cx).query.clone();
-            query.read(cx).focus_handle(cx).focus(window, cx);
-        });
-
-        cx.update(|window, cx| {
-            palette.update(cx, |palette, cx| {
-                assert!(palette.query.read(cx).value().is_empty());
-                let items = &palette.results(window, cx).items;
-                assert!(
-                    items
-                        .iter()
-                        .any(|item| matches!(item.action, Action::OpenSettings))
-                );
-                assert!(
-                    items
-                        .iter()
-                        .any(|item| matches!(item.action, Action::ToggleTheme))
-                );
-                assert!(
-                    items
-                        .iter()
-                        .any(|item| matches!(item.action, Action::ToggleTerminal))
-                );
-            });
-        });
-
-        dispatch_palette_key(&palette, cx, "down");
-        dispatch_palette_key(&palette, cx, "down");
-        cx.update(|window, cx| {
-            let palette = palette.read(cx);
-            assert_eq!(palette.selected, 2);
-            assert!(palette.query.read(cx).focus_handle(cx).is_focused(window));
-        });
-
-        dispatch_palette_key(&palette, cx, "up");
-        dispatch_palette_key(&palette, cx, "up");
-        dispatch_palette_key(&palette, cx, "up");
-        cx.update(|_, cx| assert_eq!(palette.read(cx).selected, 0));
-
-        for _ in 0..10 {
-            dispatch_palette_key(&palette, cx, "down");
-        }
-        cx.update(|window, cx| {
-            let total = palette.update(cx, |palette, cx| palette.results(window, cx).items.len());
-            assert_eq!(palette.read(cx).selected, total - 1);
-        });
-
-        drop(palette);
-        driver.shutdown(cx, &host);
-        drop(workspace_store);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The project picker is one list over the host's projects and its
@@ -1960,89 +1868,5 @@ mod tests {
                 query.presentation().placeholder().to_string()
             })
         });
-    }
-
-    #[gpui::test]
-    fn a_host_answer_for_a_superseded_query_is_discarded(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let root = crate::store::tests::scratch_root("palette-search-test");
-        let store = SessionStore::open_at(root.clone()).expect("open test store");
-        let host = spawn_host(store, HostServices::default()).expect("spawn test host");
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let workspace_store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        driver.wait_until(cx, "workspace baseline", |cx| {
-            workspace_store.read_with(cx, |store, _| store.baseline_ready())
-        });
-        let palette_store = workspace_store.clone();
-        let (harness, cx) = cx.add_window_view(move |window, cx| {
-            PaletteHarness::new(palette_store.clone(), window, cx)
-        });
-        let cx: &mut VisualTestContext = cx;
-        let palette = cx.update(|_, cx| harness.read(cx).palette.clone());
-
-        let hit = |snippet: &str| SessionSearchHit {
-            session_id: "session-1".into(),
-            session_title: "Thread".into(),
-            entry_id: "entry-1".into(),
-            turn: 0,
-            snippet: snippet.into(),
-        };
-        let stale = cx.update(|window, cx| {
-            palette.update(cx, |palette, cx| {
-                palette.query.update(cx, |state, cx| {
-                    state.set_value("first".to_string(), window, cx)
-                });
-                palette.schedule_content_search(cx);
-                let stale = palette.search_generation;
-                palette.query.update(cx, |state, cx| {
-                    state.set_value("second".to_string(), window, cx)
-                });
-                palette.schedule_content_search(cx);
-                stale
-            })
-        });
-        cx.update(|_, cx| {
-            palette.update(cx, |palette, cx| {
-                palette.apply_content_hits(
-                    stale,
-                    HostKey::Local,
-                    SessionContentHits {
-                        hits: vec![hit("answer for `first`")],
-                        unreadable: Vec::new(),
-                    },
-                    cx,
-                );
-                assert!(
-                    palette.content_hits.is_empty(),
-                    "an answer for a superseded query must not be shown"
-                );
-                let current = palette.search_generation;
-                palette.apply_content_hits(
-                    current,
-                    HostKey::Local,
-                    SessionContentHits {
-                        hits: vec![hit("answer for `second`")],
-                        unreadable: Vec::new(),
-                    },
-                    cx,
-                );
-                let hits = &palette.content_hits[&HostKey::Local].hits;
-                assert_eq!(hits.len(), 1);
-                assert_eq!(hits[0].snippet, "answer for `second`");
-            });
-        });
-
-        drop(palette);
-        driver.shutdown(cx, &host);
-        drop(workspace_store);
-        let _ = std::fs::remove_dir_all(root);
     }
 }

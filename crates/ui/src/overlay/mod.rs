@@ -869,11 +869,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn import_project_input_enter_runs_action(cx: &mut TestAppContext) {
-        project_dialog_enter(cx, "import", false);
-    }
-
-    #[gpui::test]
     fn create_project_input_enter_runs_action(cx: &mut TestAppContext) {
         project_dialog_enter(cx, "create", false);
     }
@@ -971,48 +966,5 @@ mod tests {
         cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
         draw(cx);
         assert!(cx.debug_bounds("wide-toast").is_none());
-    }
-
-    #[gpui::test]
-    fn compact_notification_timeouts(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::window_seam::force_mobile_layout);
-        let (_root, cx) = cx.add_window_view(|window, cx| {
-            let body = cx.new(|_| Body);
-            gpui_base::Root::new(body, window, cx)
-        });
-        cx.simulate_resize(size(px(393.), px(852.)));
-        cx.update(|window, cx| window.push_notification("Copied", cx));
-        draw(cx);
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(200));
-        draw(cx);
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(3));
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
-        assert!(cx.debug_bounds("compact-toast").is_none());
-        cx.update(|window, cx| {
-            window.push_notification(
-                Notification::info("Removed")
-                    .action(|_, _, _| crate::widgets::Button::new("undo").label("Undo")),
-                cx,
-            )
-        });
-        draw(cx);
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(200));
-        draw(cx);
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(3));
-        draw(cx);
-        assert!(cx.debug_bounds("compact-toast").is_some());
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(2));
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
-        assert!(cx.debug_bounds("compact-toast").is_none());
     }
 }

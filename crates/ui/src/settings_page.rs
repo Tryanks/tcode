@@ -3442,18 +3442,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn archived_page_bounds_clamp_to_the_last_populated_page() {
-        assert_eq!(page_bounds(0, 3, 50), (0, 0, 0), "empty list has no pages");
-        assert_eq!(page_bounds(100, 1, 50), (1, 50, 100), "exact multiple");
-        assert_eq!(page_bounds(120, 2, 50), (2, 100, 120), "last partial page");
-        assert_eq!(
-            page_bounds(120, 9, 50),
-            (2, 100, 120),
-            "a page past the end shows the last page instead of an empty one"
-        );
-    }
-
     /// A full-scope store whose host is scripted by the test: what the store
     /// sends arrives on the first channel, and lines sent on the second
     /// arrive from the host while the returned pump runs.

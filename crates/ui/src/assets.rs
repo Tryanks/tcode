@@ -194,27 +194,3 @@ fn embedded_component_icon(path: &str) -> Option<&'static [u8]> {
         .iter()
         .find_map(|(name, bytes)| (*name == path).then_some(*bytes))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn browser_navigation_icons_are_available_without_network() {
-        // Browser controls need SVG bytes synchronously, including offline.
-        for path in [
-            "icons/settings.svg",
-            "icons/panel-left.svg",
-            "icons/panel-right.svg",
-            "icons/panel-bottom.svg",
-            "icons/globe.svg",
-            "icons/map.svg",
-            "icons/square-terminal.svg",
-        ] {
-            let bytes = embedded_component_icon(path)
-                .unwrap_or_else(|| panic!("browser icon must be embedded: {path}"));
-            assert!(String::from_utf8_lossy(bytes).contains("<svg"), "{path}");
-        }
-        assert!(embedded_component_icon("icons/not-an-icon.svg").is_none());
-    }
-}

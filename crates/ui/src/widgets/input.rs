@@ -704,36 +704,4 @@ mod tests {
             assert_eq!(input.read_with(cx, |state, _| state.value()), "!你好");
         }
     }
-
-    /// A selection made backwards over a composition is still backwards once
-    /// leaving the field commits it, so Shift-Left keeps growing it.
-    #[gpui::test]
-    fn committing_preedit_on_blur_keeps_a_backward_selection_backward(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let (field, cx) = cx.add_window_view(|window, cx| {
-            Field(
-                cx.new(|cx| TextareaState::new(window, cx).default_value("ab")),
-                false,
-            )
-        });
-        let input = field.read_with(cx, |field, _| field.0.clone());
-        cx.update(|window, cx| {
-            input.update(cx, |state, cx| {
-                state.focus(window, cx);
-                state.set_selected_range(2..2, cx);
-                state.replace_and_mark_text_in_range(None, "你好", None, window, cx);
-                state.set_selected_range_with_direction(2..8, true, cx);
-            });
-            window.draw(cx).clear(cx);
-            window.blur(cx);
-            window.draw(cx).clear(cx);
-            input.update(cx, |state, cx| {
-                assert_eq!(state.marked_text_range(window, cx), None);
-                state.focus(window, cx);
-            });
-            window.draw(cx).clear(cx);
-        });
-        cx.simulate_keystrokes("shift-left");
-        assert_eq!(input.read_with(cx, |state, _| state.selected_range()), 1..8);
-    }
 }

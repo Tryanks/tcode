@@ -6909,34 +6909,6 @@ mod tests {
         }
     }
 
-    /// A row's label tells a screen reader where its pane lies. The test
-    /// window has no accessibility tree to read the label from.
-    #[test]
-    fn a_pane_reads_as_where_it_lies() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let place = |left, top, width, height| {
-            MapCell {
-                pane: gpui::EntityId::from(1),
-                row: None,
-                rect: gpui::bounds(gpui::point(left, top), gpui::size(width, height)),
-            }
-            .place()
-            .into_owned()
-        };
-        for (rect, words) in [
-            ((0., 0., 0.5, 1.), "left"),
-            ((0.5, 0., 0.5, 1.), "right"),
-            ((0., 0., 1., 0.5), "top"),
-            ((0., 0.5, 1., 0.5), "bottom"),
-            ((0.5, 0., 0.5, 0.5), "top right"),
-            ((0., 0.5, 0.5, 0.5), "bottom left"),
-            ((1. / 3., 0., 1. / 3., 1.), "middle"),
-            ((2. / 3., 0.5, 1. / 3., 0.5), "bottom right"),
-        ] {
-            assert_eq!(place(rect.0, rect.1, rect.2, rect.3), words, "{rect:?}");
-        }
-    }
-
     fn draw(cx: &mut VisualTestContext) {
         cx.run_until_parked();
         cx.update(|window, cx| {

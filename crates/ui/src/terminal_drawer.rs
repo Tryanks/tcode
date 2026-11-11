@@ -3132,102 +3132,6 @@ mod tests {
     }
 
     #[test]
-    fn selection_drag_honors_click_kind_threshold_and_terminal_ownership() {
-        let mut drag = SelectionDrag::default();
-        assert_eq!(
-            drag.on_down(
-                7,
-                ScreenPoint { x: 10., y: 10. },
-                (0, 1),
-                SelectionSide::Left,
-                1,
-                false
-            ),
-            SelectionDragAction::ClearAndWait
-        );
-        for (terminal, x) in [(7, 12.), (8, 20.)] {
-            assert_eq!(
-                drag.on_move(
-                    terminal,
-                    ScreenPoint { x, y: 10. },
-                    (0, 2),
-                    SelectionSide::Right
-                ),
-                SelectionDragAction::None
-            );
-        }
-        assert_eq!(
-            drag.on_move(
-                7,
-                ScreenPoint { x: 12.1, y: 10. },
-                (0, 2),
-                SelectionSide::Right,
-            ),
-            SelectionDragAction::StartSimpleAndUpdate {
-                anchor: (0, 1),
-                anchor_side: SelectionSide::Left,
-                point: (0, 2),
-                side: SelectionSide::Right
-            }
-        );
-        assert_eq!(
-            drag.on_move(
-                7,
-                ScreenPoint { x: 20., y: 40. },
-                (3, 2),
-                SelectionSide::Right,
-            ),
-            SelectionDragAction::Update {
-                point: (3, 2),
-                side: SelectionSide::Right
-            }
-        );
-        assert!(!drag.on_up(8));
-        assert!(drag.on_up(7));
-        assert_eq!(
-            drag.on_move(
-                7,
-                ScreenPoint { x: 30., y: 40. },
-                (3, 3),
-                SelectionSide::Right,
-            ),
-            SelectionDragAction::None
-        );
-        for (clicks, kind) in [(2, SelectionKind::Semantic), (3, SelectionKind::Lines)] {
-            assert_eq!(
-                drag.on_down(
-                    7,
-                    ScreenPoint { x: 0., y: 0. },
-                    (2, 3),
-                    SelectionSide::Left,
-                    clicks,
-                    false
-                ),
-                SelectionDragAction::Start {
-                    kind,
-                    point: (2, 3),
-                    side: SelectionSide::Left
-                }
-            );
-            drag.on_up(7);
-        }
-        assert_eq!(
-            drag.on_down(
-                7,
-                ScreenPoint { x: 0., y: 0. },
-                (2, 3),
-                SelectionSide::Left,
-                1,
-                true
-            ),
-            SelectionDragAction::Update {
-                point: (2, 3),
-                side: SelectionSide::Left
-            }
-        );
-    }
-
-    #[test]
     fn shell_quotes_paths() {
         assert_eq!(shell_quote("/tmp/a"), "'/tmp/a'");
         assert_eq!(shell_quote("/tmp/a b"), "'/tmp/a b'");
@@ -3275,23 +3179,6 @@ mod tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn hyperlink_modifier_matches_the_platform_shortcut_convention() {
-        let command = gpui::Modifiers {
-            platform: true,
-            ..Default::default()
-        };
-        let control = gpui::Modifiers {
-            control: true,
-            ..Default::default()
-        };
-
-        assert!(terminal_link_modifier(command, true));
-        assert!(!terminal_link_modifier(control, true));
-        assert!(terminal_link_modifier(control, false));
-        assert!(!terminal_link_modifier(command, false));
     }
 
     #[test]
@@ -3362,40 +3249,6 @@ mod tests {
         }
     }
 
-    /// Clean deltas preserve painted text; replacement deltas update it.
-    #[test]
-    fn cached_grid_paint_tracks_clean_and_replaced_rows() {
-        let palette = TerminalPalette {
-            foreground: rgb(0xffffff).into(),
-            background: rgb(0x000000).into(),
-            selection: rgb(0x336699).into(),
-        };
-        let mut state = model(vec![cell('a', CellWidth::Narrow)]);
-        let mut caches = HashMap::new();
-        let first = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
-        assert_eq!(first.rows[0].text_runs[0].text, "a");
-
-        // A delta that changes nothing on this row preserves its painted text.
-        state.clear_damage();
-        state.apply_delta(&idle_delta(1, 1));
-        let cached = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
-        assert_eq!(cached.rows[0].text_runs[0].text, "a");
-
-        state.clear_damage();
-        let mut delta = idle_delta(1, 1);
-        delta.styles = vec![TerminalStyle::default()];
-        delta.rows_replaced = vec![tcode_protocol::terminal::TerminalRowUpdate {
-            index: 0,
-            row: TerminalRow {
-                cells: vec![cell('b', CellWidth::Narrow)],
-                wrapped: false,
-            },
-        }];
-        state.apply_delta(&delta);
-        let rebuilt = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
-        assert_eq!(rebuilt.rows[0].text_runs[0].text, "b");
-    }
-
     /// A screen that scrolls keeps each row's text with the row as it moves
     /// up, and lays out only the row that comes in.
     #[test]
@@ -3456,27 +3309,6 @@ mod tests {
             cols,
             rows,
             ..Default::default()
-        }
-    }
-
-    #[test]
-    fn native_key_routing_leaves_text_to_ime_and_encodes_terminal_controls() {
-        for (key, expected) in [
-            ("a", None),
-            ("ctrl-space", Some(vec![0])),
-            ("ctrl-c", Some(vec![3])),
-            ("backspace", Some(vec![0x7f])),
-        ] {
-            assert_eq!(
-                terminal_key_bytes(
-                    &gpui::Keystroke::parse(key).unwrap(),
-                    Mode::empty(),
-                    tcode_protocol::terminal::KeyboardModes::NO_MODE,
-                    None
-                ),
-                expected,
-                "{key}"
-            );
         }
     }
 

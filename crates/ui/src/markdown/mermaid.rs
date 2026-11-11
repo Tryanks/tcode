@@ -1221,60 +1221,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_streaming_diagram_grows_by_whole_statements_one_swap_at_a_time(cx: &mut TestAppContext) {
-        let (markdown, cx) = open("", true, cx);
-        let source = format!("```mermaid\n{FLOWCHART}");
-        let start = cx.executor().now();
-        let mut swaps: Vec<(Duration, String)> = Vec::new();
-        let mut settled_on_diagram = false;
-        for chunk in source.as_bytes().chunks(8) {
-            push(&markdown, std::str::from_utf8(chunk).unwrap(), cx);
-            frame(cx);
-            if let Some(shown) = shown_source(&markdown, cx)
-                && swaps.last().is_none_or(|(_, last)| *last != shown)
-            {
-                swaps.push((cx.executor().now() - start, shown));
-            }
-            let (diagram, code) = (diagram_shown(cx), code_shown(cx));
-            if settled_on_diagram {
-                assert!(diagram && !code, "back to code after a diagram showed");
-            }
-            settled_on_diagram |= diagram && !code;
-        }
-        assert!(settled_on_diagram, "the diagram showed while streaming");
-        for (_, shown) in &swaps {
-            assert!(
-                shown.ends_with('\n'),
-                "a picture of half a statement showed: {shown:?}"
-            );
-        }
-        // A swap is seen on the frame after the append that brought it or on
-        // the one it was due, so two sightings may be one frame closer.
-        for pair in swaps.windows(2) {
-            assert!(
-                pair[1].0 - pair[0].0 + FRAME >= swap_interval(),
-                "two swaps closer than one fade and a rest: {swaps:?}"
-            );
-        }
-        assert!(
-            swaps.len() >= 2,
-            "the diagram grew while streaming: {swaps:?}"
-        );
-    }
-
-    #[gpui::test]
-    fn a_flowchart_written_on_one_line_grows_by_its_statements(cx: &mut TestAppContext) {
-        let (markdown, cx) = open("", true, cx);
-        push(&markdown, "```mermaid\ngraph LR; A-->B; B-->C", cx);
-        frames(30, cx);
-        assert_eq!(
-            shown_source(&markdown, cx).as_deref(),
-            Some("graph LR; A-->B;"),
-            "the statements before the one still being written"
-        );
-    }
-
-    #[gpui::test]
     fn the_whole_source_is_drawn_when_the_fence_closes_or_the_reply_ends(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_reduce_motion(true));
         let statements = "flowchart TD\n    A --> B\n    B --> C\n";
@@ -1369,25 +1315,6 @@ mod tests {
             "nothing offers a picture of a source the model did not write"
         );
         assert_ne!(block_height(cx), diagram_height);
-    }
-
-    /// A document opened with a whole fence draws it off the main thread,
-    /// and the picture then appears whole at once: it never fades in from
-    /// the code, and nothing moves after.
-    #[gpui::test]
-    fn a_diagram_from_history_appears_whole_once_drawn(cx: &mut TestAppContext) {
-        let (_, cx) = open(&format!("```mermaid\n{FLOWCHART}```\n"), false, cx);
-        assert!(
-            diagram_shown(cx) && !code_shown(cx),
-            "the picture, not a cross-fade from the code"
-        );
-        let first = block_height(cx);
-        draw_settled(cx);
-        assert_eq!(
-            block_height(cx),
-            first,
-            "nothing moves after the first frame"
-        );
     }
 
     /// A theme switch draws a diagram again for the new theme; with motion

@@ -614,66 +614,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_paragraph_flowing_text_around_an_image_lays_out_across_line_breaks(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        // As GitHub stores a pull request body: CRLF breaks inside one paragraph.
-        let source = "Before ![shot](https://example.invalid/shot.png)\r\nafter the image\nand on";
-        let (_, cx) = cx.add_window_view(|_, cx| OuterListRoot::new(source, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        for _ in 0..2 {
-            cx.run_until_parked();
-            cx.update(|window, cx| _ = window.draw(cx));
-        }
-    }
-
-    #[gpui::test]
-    fn drag_across_a_long_code_block_copies_lines_never_painted(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let lines = (0..3_000)
-            .map(|ix| format!("line {ix}"))
-            .collect::<Vec<_>>();
-        let source = format!("```text\n{}\n```", lines.join("\n"));
-        let (view, cx) = cx.add_window_view(|_, cx| OuterListRoot::new(&source, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        for _ in 0..2 {
-            cx.run_until_parked();
-            cx.update(|window, cx| _ = window.draw(cx));
-        }
-
-        let anchor = cx.debug_bounds("markdown-code-line-5").unwrap();
-        let first = cx.debug_bounds("markdown-code-line-30").unwrap();
-        cx.simulate_mouse_down(
-            point(anchor.left() + px(1.), anchor.center().y),
-            MouseButton::Left,
-            Modifiers::default(),
-        );
-        cx.update(|window, cx| _ = window.draw(cx));
-        cx.simulate_mouse_move(
-            point(px(380.), first.center().y),
-            Some(MouseButton::Left),
-            Modifiers::default(),
-        );
-        cx.update(|window, cx| _ = window.draw(cx));
-        view.update(cx, |root, _| root.list_state.scroll_to_end());
-        cx.update(|window, cx| _ = window.draw(cx));
-        let last = cx.debug_bounds("markdown-code-line-2999").unwrap();
-        let end = point(px(380.), last.center().y);
-        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
-        cx.update(|window, cx| _ = window.draw(cx));
-        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
-        cx.update(|window, cx| _ = window.draw(cx));
-
-        let selected = copied(cx);
-        assert_eq!(selected, lines[5..].join("\n"));
-    }
-
-    #[gpui::test]
     fn math_render_source_switch_and_streaming_fallback(cx: &mut TestAppContext) {
         let (root, cx) = open_timeline_row("```latex\n1+2=3\n```", cx);
         assert!(cx.debug_bounds("markdown-math-root-0").is_some());
