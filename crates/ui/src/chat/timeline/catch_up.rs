@@ -7,7 +7,7 @@ use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size}
 use tcode_protocol::{ClientMessage, ClientPayload, Subscription, Topic};
 
 use crate::chat::ChatView;
-use crate::chat::tests::{answer_event, user_event};
+use crate::chat::tests::{answer_event, record_thread, thread_meta, user_event};
 use crate::store::WorkspaceStore;
 use crate::store::tests::LocalHostDriver;
 use crate::test_frames::draw_settled;
@@ -28,15 +28,13 @@ fn turn(turn: usize, answer: &str) -> Vec<agent::AgentEvent> {
     ]
 }
 
-/// A turn of `count` commands, each holding the four kilobytes of output a
-/// record keeps, so 140 of them (560 KB) are more than a 512 KB window.
+/// A provider's turn of `count` commands, each holding the four kilobytes of
+/// output a record keeps, so 140 of them (560 KB) are more than a 512 KB
+/// window.
 fn long_run(turn: usize, count: usize) -> Vec<agent::AgentEvent> {
-    let mut events = vec![
-        agent::AgentEvent::TurnStarted {
-            turn_id: turn.to_string(),
-        },
-        user_event(&format!("user-{turn}"), "Work through the whole list."),
-    ];
+    let mut events = vec![agent::AgentEvent::TurnStarted {
+        turn_id: turn.to_string(),
+    }];
     for index in 0..count {
         events.push(agent::AgentEvent::ItemCompleted(agent::ThreadItem {
             id: format!("command-{index}"),
@@ -77,19 +75,15 @@ impl Workspace {
         cx.update(crate::markdown::init);
         let root = crate::store::tests::scratch_root("catch-up");
         let disk = tcode_services::store::SessionStore::open_at(root).unwrap();
+        let (first, second) = (thread_meta(None), thread_meta(None));
+        record_thread(
+            &disk,
+            &first,
+            (0..3).flat_map(|index| turn(index, "An answer.\n\nWith a second paragraph.")),
+        );
+        record_thread(&disk, &second, []);
+        let (first, second) = (first.id, second.id);
         let host = spawn_host(disk, HostServices::default()).unwrap();
-        let (first, second) = smol::block_on(host.update_state_for_test(|state, cx| {
-            let mut thread = |name: &str| {
-                let id = state.start_draft(name.into(), std::env::temp_dir(), cx);
-                let active = state.residents.live.get_mut(&id).unwrap();
-                active.draft = false;
-                let meta = active.meta.clone();
-                state.sessions.push(meta);
-                id
-            };
-            (thread("first"), thread("second"))
-        }))
-        .unwrap();
         let (to_host, requests) = async_channel::unbounded::<String>();
         let sent = Arc::new(Mutex::new(Vec::new()));
         let recorded = sent.clone();
@@ -123,33 +117,56 @@ impl Workspace {
         driver.wait_until(cx, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        let workspace = Self {
+        Self {
             host,
             driver,
             store,
             sent,
             first,
             second,
-        };
-        workspace.provider(
-            &workspace.first,
-            (0..3)
-                .flat_map(|index| turn(index, "An answer.\n\nWith a second paragraph."))
-                .collect(),
-        );
-        workspace
+        }
     }
 
-    /// The thread's provider reports `events`, as it does whether or not
-    /// any client shows the thread.
-    fn provider(&self, thread: &str, events: Vec<agent::AgentEvent>) {
-        let thread = thread.to_owned();
-        smol::block_on(self.host.update_state_for_test(move |state, cx| {
-            for event in events {
-                state.provider_event_for_test(&thread, event, cx);
+    /// The user sends `thread` a turn, and its provider, a scripted one,
+    /// reports `events`, as it does whether or not any client shows the
+    /// thread.
+    fn provider(
+        &mut self,
+        thread: &str,
+        events: Vec<agent::AgentEvent>,
+        cx: &mut TestAppContext,
+    ) -> crate::chat::tests::ScriptedHandles {
+        let scripted = crate::chat::tests::scripted_turn(
+            &self.host,
+            &mut self.driver,
+            thread,
+            agent::ProviderKind::ClaudeCode,
+            cx,
+        );
+        for event in events {
+            scripted.1.try_send(event).unwrap();
+        }
+        // The run is over on the host before anyone comes back to it: its
+        // log ends with the turn's end.
+        loop {
+            let link = self.driver.link.clone();
+            let page = self.driver.await_with_events(
+                cx,
+                link.query(tcode_protocol::Query::SessionHistoryPage {
+                    session_id: thread.to_owned(),
+                    before: u64::MAX,
+                    limit: 1,
+                }),
+            );
+            if let Ok(tcode_protocol::QueryResponse::SessionHistoryPage { records, .. }) = page
+                && records.last().is_some_and(|record| {
+                    matches!(record.event, agent::AgentEvent::TurnCompleted { .. })
+                })
+            {
+                return scripted;
             }
-        }))
-        .unwrap();
+            self.driver.wait_for_host("the run to finish");
+        }
     }
 
     /// Show `thread` in `chat` as the shell does when its pane switches.
@@ -227,7 +244,7 @@ fn a_thread_come_back_to_shows_its_latest_entry_brought_by_one_subscription(
         });
         draw_settled(cx);
 
-        workspace.provider(&first, long_run(3, count));
+        let _provider = workspace.provider(&first, long_run(3, count), cx);
         workspace.sent.lock().unwrap().clear();
         workspace.show(&chat, &first, cx);
         workspace

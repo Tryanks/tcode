@@ -789,18 +789,14 @@ mod tests {
         cx: &mut TestAppContext,
         delivery: agent::UserInputDelivery,
     ) -> impl FnMut(&'static str) -> ((bool, usize), bool, bool) {
-        cx.update(crate::test_client::init);
-        let host = tcode_runtime::pipe::spawn_host(
-            tcode_services::store::SessionStore::open_at(crate::store::tests::scratch_root(
-                "question-test",
-            ))
-            .unwrap(),
-            tcode_runtime::pipe::HostServices::default(),
-        )
-        .unwrap();
-        let session_id = smol::block_on(host.update_state_for_test(move |state, cx| {
-            let id = state.start_draft("question".into(), std::env::temp_dir(), cx);
-            for event in [
+        let crate::chat::tests::RunningThread {
+            store,
+            session_id,
+            provider,
+            ..
+        } = crate::chat::tests::running_thread(
+            cx,
+            vec![
                 agent::AgentEvent::TurnStarted {
                     turn_id: "turn".into(),
                 },
@@ -809,32 +805,15 @@ mod tests {
                     questions: vec![question("first"), question("second")],
                     delivery,
                 },
-            ] {
-                state.provider_event_for_test(&id, event, cx);
-            }
-            id
-        }))
-        .unwrap();
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        driver.wait_until(cx, "workspace baseline", |cx| {
-            store.read_with(cx, |store, _| store.baseline_ready())
-        });
-        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, "selected conversation", |cx| {
-            store.read_with(cx, |store, cx| {
-                store.baseline_ready()
-                    && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
-            })
-        });
+            ],
+            |store, cx| {
+                store
+                    .sole_status(cx)
+                    .is_some_and(|status| status.pending_user_input.is_some())
+            },
+        );
+        // The provider waits on the answer for as long as the test runs.
+        cx.on_quit(move || drop(provider));
         let (composer, cx) = cx.add_window_view(|window, cx| {
             Composer::new(store.clone(), Some(session_id), window, cx)
         });

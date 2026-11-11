@@ -9501,7 +9501,7 @@ pub(crate) mod tests {
         let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
         for id in ["thread-a", "thread-b"] {
             let mut meta = tcode_core::project::SessionMeta::new(
-                agent::ProviderKind::Codex,
+                agent::ProviderKind::ClaudeCode,
                 root.clone(),
                 None,
             );
@@ -9524,8 +9524,22 @@ pub(crate) mod tests {
                 None,
                 cx,
             );
-            store.show_thread("thread-a".into(), cx);
+            store.show_thread("thread-b".into(), cx);
         });
+        driver.wait_until(cx, "the other thread", |cx| {
+            store.read_with(cx, |store, cx| {
+                store.baseline_ready() && !store.chat_loading_for(Some("thread-b"), cx)
+            })
+        });
+        // The user sent the other thread a turn, which its provider runs on.
+        let provider = crate::chat::tests::scripted_turn(
+            &host,
+            &mut driver,
+            "thread-b",
+            agent::ProviderKind::ClaudeCode,
+            cx,
+        );
+        store.update(cx, |store, cx| store.show_thread("thread-a".into(), cx));
         driver.wait_until(cx, "selected conversation", |cx| {
             store.read_with(cx, |store, cx| {
                 store.baseline_ready()
@@ -9550,6 +9564,8 @@ pub(crate) mod tests {
             "draft"
         );
 
+        // The other thread's provider reports a retry, a warning and an
+        // error.
         for event in [
             agent::AgentEvent::TurnRetry {
                 retry: Some(agent::TurnRetry {
@@ -9565,27 +9581,21 @@ pub(crate) mod tests {
                 fatal: false,
             },
         ] {
-            driver
-                .await_with_events(
-                    cx,
-                    host.update_state_for_test(move |state, cx| {
-                        state.provider_event_for_test("thread-b", event, cx);
-                    }),
-                )
-                .unwrap();
-            driver.step(cx);
-            draw(cx);
-            cx.update(|window, _| {
-                assert!(
-                    focus.is_focused(window),
-                    "background provider event stole composer focus"
-                );
-            });
-            assert_eq!(
-                composer.read_with(cx, |composer, cx| composer.draft(cx)),
-                "draft"
-            );
+            provider.1.try_send(event).unwrap();
         }
+        driver.settle_until(cx, "the error's notice", |cx| {
+            cx.debug_bounds("compact-toast").is_some()
+        });
+        cx.update(|window, _| {
+            assert!(
+                focus.is_focused(window),
+                "background provider events stole composer focus"
+            );
+        });
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "draft"
+        );
         let toast = cx
             .debug_bounds("compact-toast")
             .expect("the notice remains visible");

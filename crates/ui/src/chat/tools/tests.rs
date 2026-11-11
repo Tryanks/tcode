@@ -22,6 +22,8 @@ pub(in crate::chat) struct StoredThread {
     pub(in crate::chat) store: Entity<WorkspaceStore>,
     pub(in crate::chat) driver: crate::store::tests::LocalHostDriver,
     host: tcode_runtime::pipe::SpawnedHost,
+    /// The provider [`Self::provider`] started, held while it runs.
+    scripted: Option<crate::chat::tests::ScriptedHandles>,
 }
 
 impl StoredThread {
@@ -91,6 +93,7 @@ impl StoredThread {
                 store,
                 driver,
                 host,
+                scripted: None,
             },
             cx,
         )
@@ -135,10 +138,12 @@ impl StoredThread {
         click(cx, &format!("worklog-header-0-{first}"));
     }
 
-    /// The thread's provider reports `events` while the window shows it, as
-    /// a running harness does; returns once the window has `last`.
+    /// The user sends `text`, and the thread's provider, a scripted one,
+    /// starts the turn and reports `events` while the window shows it, as a
+    /// running harness does; returns once the window has `last`.
     pub(in crate::chat) fn provider(
         &mut self,
+        text: &str,
         events: Vec<agent::AgentEvent>,
         last: &str,
         cx: &mut VisualTestContext,
@@ -147,12 +152,36 @@ impl StoredThread {
             .store
             .read_with(cx, |store, _| store.sole_thread())
             .expect("the thread is shown");
-        smol::block_on(self.host.update_state_for_test(move |state, cx| {
-            for event in events {
-                state.provider_event_for_test(&thread, event, cx);
-            }
+        let scripted = tcode_runtime::app::scripted_provider(agent::ProviderKind::ClaudeCode);
+        let (commands, sender) = (scripted.commands.clone(), scripted.events.clone());
+        smol::block_on(self.host.update_state_for_test(move |state, _| {
+            state.set_provider_launcher_for_test(scripted.launcher)
         }))
         .unwrap();
+        self.driver.command(
+            cx,
+            tcode_protocol::Command::SendTurn {
+                session_id: thread,
+                text: text.into(),
+                attachment_paths: Vec::new(),
+            },
+        );
+        let delivery_id = loop {
+            if let agent::SessionCommand::SendTurn { delivery_id, .. } =
+                self.driver.recv(cx, &commands)
+            {
+                break delivery_id;
+            }
+        };
+        let started = [
+            agent::AgentEvent::TurnAccepted { delivery_id },
+            agent::AgentEvent::TurnStarted {
+                turn_id: "live".into(),
+            },
+        ];
+        for event in started.into_iter().chain(events) {
+            sender.try_send(event).unwrap();
+        }
         let store = self.store.clone();
         self.driver.wait_until(cx, "the provider's events", |cx| {
             store.read_with(cx, |store, cx| {
@@ -166,6 +195,7 @@ impl StoredThread {
             })
         });
         draw_settled(cx);
+        self.scripted = Some((commands, sender));
     }
 
     pub(in crate::chat) fn shutdown(mut self, cx: &mut VisualTestContext) {
@@ -811,7 +841,8 @@ fn a_call_whose_work_goes_on_in_the_background_says_so_until_it_ends(cx: &mut Te
     let log = [
         serde_json::json!({ "type": "turn_started", "turn_id": "t" }),
         serde_json::json!({ "type": "item_completed", "id": "user",
-            "content": { "kind": "user_message", "text": "Start them." } }),
+            "content": { "kind": "user_message", "text": "Earlier." } }),
+        serde_json::json!({ "type": "turn_completed", "turn_id": "t", "status": "completed" }),
     ]
     .iter()
     .enumerate()
@@ -820,7 +851,7 @@ fn a_call_whose_work_goes_on_in_the_background_says_so_until_it_ends(cx: &mut Te
     .join("\n");
     // The work goes on in the background of a running harness: a log reopened
     // with no process to finish it closes it as interrupted.
-    let live = [
+    let live: Vec<agent::AgentEvent> = [
         subagent(waited, "in_progress"),
         subagent(agent, "in_progress"),
         backgrounded(agent),
@@ -837,7 +868,7 @@ fn a_call_whose_work_goes_on_in_the_background_says_so_until_it_ends(cx: &mut Te
     .map(|event| serde_json::from_value(event).unwrap())
     .collect();
     let (mut thread, cx) = StoredThread::open(cx, &log, 1_024.);
-    thread.provider(live, ended, cx);
+    thread.provider("Start them.", live, ended, cx);
     let verb = |id: &str, cx: &mut VisualTestContext| thread.header(id, cx).verb;
     assert_eq!(verb(waited, cx).as_deref(), Some("Running subagent"));
     for id in [agent, command] {

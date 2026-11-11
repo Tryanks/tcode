@@ -2609,11 +2609,15 @@ mod tests {
                         attachment_paths: Vec::new(),
                     },
                 );
-                while !matches!(
-                    driver.recv(cx, commands),
-                    agent::SessionCommand::SendTurn { .. }
-                ) {}
+                let delivery_id = loop {
+                    if let agent::SessionCommand::SendTurn { delivery_id, .. } =
+                        driver.recv(cx, commands)
+                    {
+                        break delivery_id;
+                    }
+                };
                 for event in [
+                    agent::AgentEvent::TurnAccepted { delivery_id },
                     agent::AgentEvent::TurnStarted {
                         turn_id: "turn-1".into(),
                     },

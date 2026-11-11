@@ -1669,7 +1669,7 @@ pub(crate) mod tests {
 
     /// A thread on `provider`, with a native session to resume when one is
     /// given.
-    pub(in crate::chat) fn thread_meta(
+    pub(crate) fn thread_meta(
         provider: Option<agent::ProviderKind>,
     ) -> tcode_core::project::SessionMeta {
         let mut meta = tcode_core::project::SessionMeta::new(
@@ -1687,7 +1687,7 @@ pub(crate) mod tests {
 
     /// `meta`'s thread, recorded in `store` with `log`, as a host finds a
     /// thread an earlier run recorded.
-    pub(in crate::chat) fn record_thread(
+    pub(crate) fn record_thread(
         store: &tcode_services::store::SessionStore,
         meta: &tcode_core::project::SessionMeta,
         log: impl IntoIterator<Item = agent::AgentEvent>,
@@ -1697,6 +1697,70 @@ pub(crate) mod tests {
             store
                 .append_event(&meta.id, ts as u64, &event)
                 .expect("record the thread's log");
+        }
+    }
+
+    /// A thread on a host, shown in `store`, whose turn a scripted provider
+    /// runs: it has sent the events the thread was given, and goes on
+    /// running for as long as the test holds `provider`.
+    pub(crate) struct RunningThread {
+        pub(crate) store: Entity<WorkspaceStore>,
+        pub(crate) session_id: String,
+        pub(crate) provider: ScriptedHandles,
+    }
+
+    /// A stored thread the user sends a turn, whose provider sends `events`;
+    /// returns once `arrived` says the window has them.
+    pub(crate) fn running_thread(
+        cx: &mut TestAppContext,
+        events: Vec<agent::AgentEvent>,
+        arrived: impl Fn(&WorkspaceStore, &gpui::App) -> bool,
+    ) -> RunningThread {
+        let disk = chat_store(cx);
+        let meta = thread_meta(None);
+        record_thread(&disk, &meta, []);
+        let host = spawn_chat_host(disk);
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                cx,
+            )
+        });
+        driver.wait_until(cx, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        store.update(cx, |store, cx| store.show_alone(meta.id.clone(), cx));
+        driver.wait_until(cx, "selected conversation", |cx| {
+            store.read_with(cx, |store, cx| {
+                !store.chat_loading_for(store.sole_thread().as_deref(), cx)
+            })
+        });
+        let provider = scripted_turn(
+            &host,
+            &mut driver,
+            &meta.id,
+            agent::ProviderKind::ClaudeCode,
+            cx,
+        );
+        for event in events {
+            provider.1.try_send(event).unwrap();
+        }
+        driver.wait_until(cx, "the provider's events", |cx| {
+            store.read_with(cx, |store, cx| {
+                arrived(store, cx)
+                    && store
+                        .sole_status(cx)
+                        .is_some_and(|status| status.activity.turn_running)
+            })
+        });
+        RunningThread {
+            store,
+            session_id: meta.id,
+            provider,
         }
     }
 
@@ -1714,7 +1778,7 @@ pub(crate) mod tests {
     /// The user sends `thread` a turn that a scripted `provider` plays: what
     /// the test sends on the returned channel reaches the host as the
     /// provider's events, and the commands it gets back are the provider's.
-    pub(in crate::chat) fn scripted_turn(
+    pub(crate) fn scripted_turn(
         host: &tcode_runtime::pipe::SpawnedHost,
         driver: &mut crate::store::tests::LocalHostDriver,
         thread: &str,
@@ -1735,17 +1799,21 @@ pub(crate) mod tests {
                 attachment_paths: Vec::new(),
             },
         );
+        // The provider takes the turn, as an adapter acknowledges a send.
         loop {
-            if let agent::SessionCommand::SendTurn { .. } = driver.recv(cx, &handles.0) {
+            if let agent::SessionCommand::SendTurn { delivery_id, .. } = driver.recv(cx, &handles.0)
+            {
+                handles
+                    .1
+                    .try_send(agent::AgentEvent::TurnAccepted { delivery_id })
+                    .unwrap();
                 return handles;
             }
         }
     }
 
     /// A store for one test's host, with markdown and the client set up.
-    pub(in crate::chat) fn chat_store(
-        cx: &mut TestAppContext,
-    ) -> tcode_services::store::SessionStore {
+    pub(crate) fn chat_store(cx: &mut TestAppContext) -> tcode_services::store::SessionStore {
         cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         tcode_services::store::SessionStore::open_at(crate::store::tests::scratch_root(
@@ -1754,7 +1822,7 @@ pub(crate) mod tests {
         .expect("test session store")
     }
 
-    pub(in crate::chat) fn spawn_chat_host(
+    pub(crate) fn spawn_chat_host(
         store: tcode_services::store::SessionStore,
     ) -> tcode_runtime::pipe::SpawnedHost {
         tcode_runtime::pipe::spawn_host(store, tcode_runtime::pipe::HostServices::default())
@@ -1900,7 +1968,7 @@ pub(crate) mod tests {
     }
 
     /// The commands a scripted provider receives and the events it sends.
-    pub(in crate::chat) type ScriptedHandles = (
+    pub(crate) type ScriptedHandles = (
         smol::channel::Receiver<agent::SessionCommand>,
         smol::channel::Sender<agent::AgentEvent>,
     );
