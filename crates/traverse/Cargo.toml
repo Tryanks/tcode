@@ -47,7 +47,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"],
 getrandom = "0.4"
 iroh = { version = "1.2", default-features = false, features = ["metrics", "portmapper", "tls-ring", "unstable-net-report"] }
 log = "0.4"
-mdns-sd = { version = "0.21", default-features = false, features = ["logging"] }
+mdns-sd = { version = "0.21", default-features = false, features = ["async", "logging"] }
 pbkdf2 = { version = "0.13", optional = true }
 russh = { version = "0.65", default-features = false, features = ["ring"], optional = true }
 # 3.x needs a newer wasm-bindgen-futures than the one crates/web pins.
@@ -84,5 +84,7 @@ tcode-core = { path = "../core" }
 agent = { path = "../agent" }
 base64 = "0.23"
 env_logger = "0.11"
+# Tests that run on a paused tokio clock.
+tokio = { version = "1", features = ["test-util"] }
 # Tests cover every layer, whichever features the consumer picks.
 tcode-traverse = { path = ".", features = ["browser", "native", "ssh"] }

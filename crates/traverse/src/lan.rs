@@ -12,10 +12,10 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use futures_lite::{Stream, stream::Boxed};
@@ -23,7 +23,7 @@ use iroh::{
     EndpointAddr, EndpointId, Watcher,
     address_lookup::{AddressLookup, EndpointInfo, Error, Item},
 };
-use mdns_sd::{IfKind, RecvTimeoutError, ServiceDaemon, ServiceEvent, ServiceInfo, TxtProperties};
+use mdns_sd::{IfKind, ServiceDaemon, ServiceEvent, ServiceInfo, TxtProperties};
 
 use crate::runtime::runtime;
 
@@ -317,22 +317,9 @@ type SavedAddrs = dyn Fn(EndpointId) -> Vec<SocketAddr> + Send + Sync;
 struct Inner {
     saved: Box<SavedAddrs>,
     options: LanOptions,
-    /// Resolves in flight, ended early by [`LanLookup::connected`]: the
-    /// task is aborted, and the flag stops a blocking DNS-SD browse.
-    active: Mutex<HashMap<EndpointId, Vec<Resolve>>>,
-}
-
-#[derive(Clone)]
-struct Resolve {
-    cancel: Arc<AtomicBool>,
-    task: tokio::task::AbortHandle,
-}
-
-impl Resolve {
-    fn stop(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
-        self.task.abort();
-    }
+    /// The tasks of the resolves in flight, aborted early by
+    /// [`LanLookup::connected`].
+    active: Mutex<HashMap<EndpointId, Vec<tokio::task::AbortHandle>>>,
 }
 
 impl std::fmt::Debug for LanLookup {
@@ -365,21 +352,18 @@ impl LanLookup {
     pub fn connected(&self, id: EndpointId) {
         if let Some(resolves) = self.inner.active.lock().unwrap().remove(&id) {
             for resolve in resolves {
-                resolve.stop();
+                resolve.abort();
             }
         }
     }
 }
 
 impl AddressLookup for LanLookup {
+    /// The resolve runs on the runtime of the endpoint asking, so its
+    /// browse is timed by that runtime's clock.
     fn resolve(&self, id: EndpointId) -> Option<Boxed<Result<Item, Error>>> {
         let (sender, receiver) = async_channel::bounded(16);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let task = runtime().spawn(self.inner.clone().run(id, sender, cancel.clone()));
-        let resolve = Resolve {
-            cancel,
-            task: task.abort_handle(),
-        };
+        let resolve = tokio::spawn(self.inner.clone().run(id, sender)).abort_handle();
         self.inner
             .active
             .lock()
@@ -416,17 +400,17 @@ impl Stream for Resolving {
 }
 
 struct Stop {
-    resolve: Resolve,
+    resolve: tokio::task::AbortHandle,
     inner: Arc<Inner>,
     id: EndpointId,
 }
 
 impl Drop for Stop {
     fn drop(&mut self) {
-        self.resolve.stop();
+        self.resolve.abort();
         let mut active = self.inner.active.lock().unwrap();
         if let Some(resolves) = active.get_mut(&self.id) {
-            resolves.retain(|resolve| !Arc::ptr_eq(&resolve.cancel, &self.resolve.cancel));
+            resolves.retain(|resolve| resolve.id() != self.resolve.id());
             if resolves.is_empty() {
                 active.remove(&self.id);
             }
@@ -439,27 +423,17 @@ fn item(id: EndpointId, provenance: &'static str, addrs: Vec<SocketAddr>) -> Ite
 }
 
 impl Inner {
-    async fn run(
-        self: Arc<Self>,
-        id: EndpointId,
-        sender: async_channel::Sender<Item>,
-        cancel: Arc<AtomicBool>,
-    ) {
+    async fn run(self: Arc<Self>, id: EndpointId, sender: async_channel::Sender<Item>) {
         let saved = (self.saved)(id);
         if !saved.is_empty() && sender.send(item(id, "lan-saved", saved)).await.is_err() {
             return;
         }
-        self.browse(id, &sender, &cancel).await;
+        self.browse(id, &sender).await;
     }
 
     /// Browse for [`BROWSE_TIME`], yielding every instance that claims `id`
     /// as it resolves.
-    async fn browse(
-        &self,
-        id: EndpointId,
-        sender: &async_channel::Sender<Item>,
-        cancel: &Arc<AtomicBool>,
-    ) {
+    async fn browse(&self, id: EndpointId, sender: &async_channel::Sender<Item>) {
         match &self.options.browse {
             Browse::Off => {}
             Browse::DnsSd => {
@@ -468,10 +442,7 @@ impl Inner {
                     .multicast_lock
                     .clone()
                     .map(MulticastLock::acquire);
-                let sender = sender.clone();
-                let cancel = cancel.clone();
-                let _ =
-                    tokio::task::spawn_blocking(move || browse_dns_sd(id, &sender, &cancel)).await;
+                browse_dns_sd(id, sender).await;
             }
             Browse::System(browser) => {
                 let _lock = self
@@ -526,34 +497,32 @@ impl Drop for MulticastLock {
     }
 }
 
-/// One mdns-sd browse of [`BROWSE_TIME`] on a blocking thread; mdns-sd
-/// answers through a synchronous channel.
-fn browse_dns_sd(id: EndpointId, sender: &async_channel::Sender<Item>, cancel: &AtomicBool) {
+/// One mdns-sd browse of [`BROWSE_TIME`]. Dropped with an aborted resolve,
+/// it stops the browse and its daemon all the same.
+async fn browse_dns_sd(id: EndpointId, sender: &async_channel::Sender<Item>) {
     let daemon = match ServiceDaemon::new() {
-        Ok(daemon) => daemon,
+        Ok(daemon) => Browsing(daemon),
         Err(error) => {
             log::debug!("DNS-SD unavailable: {error}");
             return;
         }
     };
-    let events = match daemon.browse(SERVICE_TYPE) {
+    let events = match daemon.0.browse(SERVICE_TYPE) {
         Ok(events) => events,
         Err(error) => {
             log::debug!("DNS-SD browse failed: {error}");
-            let _ = daemon.shutdown();
             return;
         }
     };
-    let deadline = Instant::now() + BROWSE_TIME;
+    let deadline = tokio::time::Instant::now() + BROWSE_TIME;
     let mut seen: Vec<SocketAddr> = Vec::new();
-    while !cancel.load(Ordering::Relaxed) {
-        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-            break;
+    loop {
+        let event = tokio::select! {
+            event = events.recv_async() => event,
+            _ = tokio::time::sleep_until(deadline) => break,
         };
-        let event = match events.recv_timeout(left.min(Duration::from_millis(100))) {
-            Ok(event) => event,
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => break,
+        let Ok(event) = event else {
+            break;
         };
         let ServiceEvent::ServiceResolved(info) = event else {
             continue;
@@ -572,12 +541,20 @@ fn browse_dns_sd(id: EndpointId, sender: &async_channel::Sender<Item>, cancel: &
         }
         seen.extend(fresh.iter().copied());
         log::debug!("DNS-SD found {} at {fresh:?}", id.fmt_short());
-        if sender.send_blocking(item(id, "lan-dns-sd", fresh)).is_err() {
+        if sender.send(item(id, "lan-dns-sd", fresh)).await.is_err() {
             break;
         }
     }
-    let _ = daemon.stop_browse(SERVICE_TYPE);
-    let _ = daemon.shutdown();
+}
+
+/// The daemon behind one browse, shut down however the browse ends.
+struct Browsing(ServiceDaemon);
+
+impl Drop for Browsing {
+    fn drop(&mut self) {
+        let _ = self.0.stop_browse(SERVICE_TYPE);
+        let _ = self.0.shutdown();
+    }
 }
 
 #[cfg(test)]
