@@ -158,6 +158,9 @@ impl AppState {
 
     /// Remove an installed ACP agent (its files and its settings entry).
     pub fn remove_acp_agent(&mut self, id: &str, cx: &mut HostCx) {
+        if self.settings_change_refused(cx) {
+            return;
+        }
         self.settings.acp_agents.remove(id);
         self.persist_settings(cx);
         let data_dir = self.store.root().clone();
@@ -194,7 +197,7 @@ impl AppState {
     ) {
         let name = name.trim().to_string();
         let command = command.trim().to_string();
-        if name.is_empty() || command.is_empty() {
+        if name.is_empty() || command.is_empty() || self.settings_change_refused(cx) {
             return;
         }
         let id = custom_acp_id(&name);
@@ -220,6 +223,9 @@ impl AppState {
 
     /// Update one installed ACP agent in place (enable switch, env rows, args).
     pub fn update_acp_agent(&mut self, id: &str, patch: AcpAgentPatch, cx: &mut HostCx) {
+        if self.settings_change_refused(cx) {
+            return;
+        }
         if let Some(agent) = self.settings.acp_agents.get_mut(id) {
             match patch {
                 AcpAgentPatch::SetEnabled { enabled } => agent.enabled = enabled,

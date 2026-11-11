@@ -784,7 +784,7 @@ impl AppState {
     /// sessions still pointing at it (they fall back to the built-in profile).
     /// Built-in ids are ignored.
     pub fn delete_profile(&mut self, id: &str, cx: &mut HostCx) {
-        if Settings::is_builtin_profile_id(id) {
+        if Settings::is_builtin_profile_id(id) || self.settings_change_refused(cx) {
             return;
         }
         let mut settings = self.settings.clone();

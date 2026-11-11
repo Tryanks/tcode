@@ -2505,7 +2505,7 @@ fn a_new_profile_never_takes_over_a_directory_left_in_profile_homes() {
 
 /// A settings file this build cannot read — one a newer build wrote, opened
 /// by an older install on the same machine — is never written over: the
-/// host runs on defaults, the first write it refuses says why, and the file
+/// host runs on defaults, every change it refuses says why, and the file
 /// stays for the build that reads it.
 #[test]
 fn an_unreadable_settings_file_is_never_written_over() {
@@ -2543,7 +2543,7 @@ fn an_unreadable_settings_file_is_never_written_over() {
             )
         })
         .count();
-    assert_eq!(refusals, 1);
+    assert_eq!(refusals, 2);
     state.update(cx, |state, _| state.close_store().unwrap());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
 }

@@ -501,7 +501,8 @@ pub struct AppState {
 
 /// A file of the host's own that exists and could not be read at start. The
 /// host runs on the default standing in for it and writes nothing over the
-/// file, which may be a newer build's; the first write refused says why.
+/// file, which may be a newer build's; the first write refused says why, and
+/// so does every change to it the user asks for.
 pub(super) struct UnreadableFile {
     error: String,
     reported: bool,
@@ -525,6 +526,12 @@ impl UnreadableFile {
     /// The reason, the first time a write is refused.
     pub(super) fn first_refusal(&mut self) -> Option<String> {
         (!std::mem::replace(&mut self.reported, true)).then(|| self.error.clone())
+    }
+
+    /// The reason, for a change the user asked for: they hear it each time.
+    pub(super) fn refusal(&mut self) -> String {
+        self.reported = true;
+        self.error.clone()
     }
 }
 
@@ -811,6 +818,18 @@ impl AppState {
                 cx,
             ),
         }
+    }
+
+    /// Whether a change to the settings the user asked for is refused, because
+    /// settings.json could not be read; the refusal says why. Nothing of the
+    /// change is applied, so no client shows it as made.
+    pub(super) fn settings_change_refused(&mut self, cx: &mut HostCx) -> bool {
+        let Some(unreadable) = &mut self.settings_unreadable else {
+            return false;
+        };
+        let error = unreadable.refusal();
+        self.report_error(RuntimeError::SettingsUnreadable { error }, cx);
+        true
     }
 
     fn persist_settings(&mut self, cx: &mut HostCx) {
