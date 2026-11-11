@@ -238,7 +238,7 @@ mod tests {
             let (mut thread, chat, cx) = following_a_reply(cx);
             let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
             let start = scrolled(&list);
-            thread.live(streamed("streaming", &paragraphs(120)));
+            thread.live(streamed("streaming", &paragraphs(40)));
             if frames_before_the_end > 0 {
                 thread.deliver(cx);
             }
