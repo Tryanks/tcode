@@ -1596,7 +1596,8 @@ fn render_permission_pane(
 /// The traits pane's effort control, in Codex's model-picker style: the
 /// resolved level centered over a stepped slider of the active model's
 /// `reasoningEffort` levels. Each step applies as it is reached and leaves the
-/// pane open. `None` when the model describes fewer than two levels.
+/// pane open. `None` when the model describes fewer than two levels, or
+/// neither a selection nor a default names the level it runs at.
 fn render_effort_slider(
     store_entity: &Entity<WorkspaceStore>,
     session_id: Option<String>,
@@ -1628,9 +1629,8 @@ fn render_effort_slider(
     if levels.len() < 2 {
         return None;
     }
-    let current = current
-        .and_then(|value| levels.iter().position(|level| level.value == value))
-        .unwrap_or(0);
+    // No level known to run: the rows show the levels with none checked.
+    let current = current.and_then(|value| levels.iter().position(|level| level.value == value))?;
     let key = levels
         .iter()
         .map(|level| level.value.as_str())
