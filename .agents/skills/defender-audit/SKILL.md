@@ -187,7 +187,14 @@ family afterwards, or name a new one.
 
 ## Steps
 
-Inventory and rewrite are separate rounds with the maintainer between them.
+The first run in a codebase keeps inventory and rewrite as separate rounds
+with the maintainer between them: the answers are what later runs go by.
+Once [PATTERNS.md](PATTERNS.md) holds rulings that cover a lane, one agent
+reads the lane and rewrites it in the same pass, decides by those rulings,
+and brings back only what none of them settles. The maintainer has said to
+go ahead on the main session's judgment; do not ask leave for what was never
+forbidden, and do not turn a question the maintainer asked out of curiosity
+into an instruction to stop.
 
 1. **Scope.** The maintainer gives an area, not paths. Follow it through the
    code from its entry points to every layer it touches and list the files,
@@ -239,11 +246,54 @@ Inventory and rewrite are separate rounds with the maintainer between them.
    Done when the checks pass on the final commit and the pull request names
    each entry left out and why.
 
-7. **Record.** Add to [PATTERNS.md](PATTERNS.md) the cases this run produced
+7. **Look at it running.** Before the next round starts, go through the
+   surfaces this one changed in the running app ([Running the app](#running-the-app)).
+   Done when each changed surface is marked seen, wrong, or not reached with
+   the reason, and what was wrong is fixed or written down.
+
+8. **Record.** Add to [PATTERNS.md](PATTERNS.md) the cases this run produced
    that the file does not already carry: a new pattern, a keep with new
    grounds, an inventory entry the rewrite overturned, a maintainer answer
    that will decide later entries.
    Done when a later run in another area would not have to rediscover them.
+
+## The tests of an area
+
+Tests take two passes, and the second is not optional.
+
+- The first pass removes tests that are wholly about a primitive, a
+  dependency or a private table. It leaves the ones that prove a decision
+  and also step frames, compare pixels or read private state on the way.
+- The second pass goes by what the first left behind. Count the marks before
+  it starts: frame and clock stepping, assertions on a position or a size,
+  fixed loops, tests over a second and a half. Each is then a wait for the
+  window to rest, an assertion to take out of a kept test, or a whole test
+  to delete. A kept test is renamed to what it still proves, and its scene
+  is cut to what that takes.
+- Report, for each mark, how many remain and why each stays.
+- Deleting tests leaves things behind that only another platform's build
+  shows: a module compiled under `cfg(any(test, …))` for the sake of its
+  tests, a helper that only a `cfg`-gated test called. Look for both before
+  pushing; the other platforms' Clippy is CI's to run.
+- Remove a leftover helper by its file, never by its name: the same name in
+  another file may be production code.
+
+## Running the app
+
+- Start a second instance on a throwaway data directory (`TCODE_DATA_DIR`).
+  Never the maintainer's data, and never the maintainer's own window.
+- A window that is fully covered does not redraw, and presses on it do
+  nothing. Bring the instance's own window to the front.
+- Threads opened to try a conversation use the cheapest model at its lowest
+  effort, chosen before the first prompt. The default model is the
+  maintainer's money spent on "reply PONG".
+- What a walk-through did not see is not thereby absent: a notice may have
+  come and gone before the screenshot. Synthetic input can also mislead: a
+  drag that "would not widen" was, under the maintainer's hand, a panel that
+  did not repaint while dragged. When a finding is about feel, start the
+  same build for the maintainer and ask what they see.
+- Report each surface as seen, wrong or not reached. Screenshots carry no
+  real session content, path, name or address.
 
 ## Rewrite rules
 
@@ -286,7 +336,15 @@ Inventory and rewrite are separate rounds with the maintainer between them.
   agent's prompt is its lane, its report path and the brief's path. The brief
   carries the definition of a defence, the grounds, the record format and, for the
   rewrite round, the rewrite rules and the maintainer's answers.
-- Use the model and effort the maintainer names for delegated work.
+- Use the model and effort the maintainer names for delegated work. That
+  covers everything a lane starts in turn: its own subagents, and any thread
+  it opens in a running app.
+- A lane may start read-only subagents to read for it. They count against
+  the session's limit on concurrent agents, and every agent shares one
+  allowance of requests to the code host: four lanes reading in parallel
+  can use up both. Fetch a CI log once and keep it.
+- Before a lane ends it stops what it started. A stopped lane's subagents
+  and watchers do not stop with it.
 - Inventory agents write nothing but their report. Rewrite agents each get an
   isolated worktree and a lane of files no other agent has, commit locally,
   and neither push nor open a pull request.

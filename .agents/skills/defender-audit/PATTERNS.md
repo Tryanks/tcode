@@ -282,6 +282,21 @@ From the rounds over the UI and across the layers:
   platform five minutes before Principle 10 could be applied to it.
 - **It answered a measured question from memory.** "Compilation is most of
   CI" was said before any log was read; test execution was half.
+- **It called a pass thorough that was not.** After the first pass over the
+  tests, sixty-two frame steps and fourteen pixel assertions were still in
+  one file. Nobody had counted.
+- **It passed on a lane's doubt as a question.** A lane noted that a deleted
+  fade test came in with a commit saying the maintainer had chosen that fade
+  out of three, and the main session asked whether to restore it without
+  reading the test, which stepped six hundred frames comparing opacities.
+- **It deleted by name.** A script removing unused test helpers by function
+  name took a production method of the same name in another file.
+- **It left the model to default.** A walk-through sent eight prompts on the
+  most expensive model to see a reply arrive.
+- **It asked leave it already had**, to bring a window to the front, and
+  waited a round for the answer.
+- **It stopped a lane and not what the lane had started.** Three subagents
+  and watchers ran on after their parents were stopped.
 
 ## Families beyond the defence
 
@@ -431,6 +446,23 @@ motion the maintainer chose out of three prototypes:
 > test to guard it. I did choose one of three. So what? What has that to do
 > with a test? It cannot be there to make sure the animation is the one I
 > chose and not one of two that do not exist. — the maintainer
+
+On whether the audit may build as well as delete:
+
+> Building is not a problem in my eyes. Everything that benefits this
+> codebase rather than harming it is what we are here for. — the maintainer
+
+On running the app to look, and on what it costs:
+
+> When did I say you could not verify? — the maintainer
+
+> For a real run use the cheapest model. Do not carry on with the largest
+> one just to test that a conversation works. — the maintainer
+
+On checks before a push:
+
+> Add Clippy to your own checks. — the maintainer, and then: there is no
+> need to run all three platforms here; this machine runs its own.
 
 ## Defects met on the way
 
