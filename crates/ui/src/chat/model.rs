@@ -78,28 +78,23 @@ pub(crate) enum LimitResumeAction {
     Scheduled {
         queued_id: u64,
     },
-    /// The reset is still ahead and nothing is queued for it.
+    /// The error still ends the thread and nothing is queued after it: offer
+    /// to resume at the reset. The host holds it until then by its own clock,
+    /// and sends it at once when the reset has passed. A queued message (the
+    /// resume itself while the provider starts, or the user's own) means
+    /// something already follows the error.
     Schedule,
-    /// The reset has passed while the error still ends the thread and nothing
-    /// is queued after it. The scheduled resume lives in the host's in-memory
-    /// queue, so a restart loses it; the card offers to continue now instead.
-    /// A queued message (the continue itself while the provider starts, or
-    /// the user's own) means something already follows the error.
-    ContinueNow,
     None,
 }
 
 pub(crate) fn limit_resume_action(
-    resets_at: u64,
     queued_id: Option<u64>,
-    now: u64,
     ends_thread: bool,
     queue_empty: bool,
 ) -> LimitResumeAction {
     match queued_id {
         Some(queued_id) => LimitResumeAction::Scheduled { queued_id },
-        None if resets_at > now => LimitResumeAction::Schedule,
-        None if ends_thread && queue_empty => LimitResumeAction::ContinueNow,
+        None if ends_thread && queue_empty => LimitResumeAction::Schedule,
         None => LimitResumeAction::None,
     }
 }

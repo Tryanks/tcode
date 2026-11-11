@@ -113,7 +113,6 @@ chat:
     resumes_in: "%{countdown} 後に再開"
     cancel: "キャンセル"
     schedule: "上限のリセット後に再開"
-    continue_now: "続行"
   steering: "追加指示中…"
   steered: "追加指示済み"
   plan_title: "計画"

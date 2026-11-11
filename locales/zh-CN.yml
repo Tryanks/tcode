@@ -113,7 +113,6 @@ chat:
     resumes_in: "将在 %{countdown} 后继续"
     cancel: "取消"
     schedule: "用量上限重置后继续"
-    continue_now: "继续"
   steering: "正在追加提示…"
   steered: "已追加提示"
   plan_title: "计划"

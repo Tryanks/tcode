@@ -329,13 +329,7 @@ impl TimelineView {
                                     cx,
                                 )
                                 .unwrap_or(false);
-                            match limit_resume_action(
-                                resets_at,
-                                queued_id,
-                                now_secs(cx),
-                                ends_thread,
-                                queue_empty,
-                            ) {
+                            match limit_resume_action(queued_id, ends_thread, queue_empty) {
                                 LimitResumeAction::Scheduled { queued_id: id } => {
                                     Some(components::error_card::LimitResume::Scheduled {
                                         resets_at,
@@ -363,24 +357,6 @@ impl TimelineView {
                                                         tcode_protocol::TurnDue::AtUnixSecs(
                                                             resets_at,
                                                         ),
-                                                    )
-                                                });
-                                            },
-                                        )),
-                                    })
-                                }
-                                LimitResumeAction::ContinueNow => {
-                                    Some(components::error_card::LimitResume::Continue {
-                                        on_continue: Box::new(cx.listener(
-                                            move |this, _, _, cx| {
-                                                let session_id =
-                                                    this.session_id.clone().unwrap_or_default();
-                                                this.workspace_store.update(cx, |store, _| {
-                                                    store.send_turn_for(
-                                                        session_id,
-                                                        tcode_core::session::RESUME_PROMPT
-                                                            .to_string(),
-                                                        vec![],
                                                     )
                                                 });
                                             },
