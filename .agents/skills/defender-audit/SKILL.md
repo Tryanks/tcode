@@ -159,6 +159,21 @@ impossible, the finding is in production, which should take time from one
 owner that the running app and the test both go through. A bound that only a
 failure reaches belongs to the test runner, not to the test.
 
+A test proves a decision Tcode makes: which thread shows, what command goes
+to which host, which pane holds the keyboard, whether the reader stays where
+they were, whether a source is shown as it gave itself. A test of how a
+primitive behaves is a test of the dependency (Principle 6): how a scroll
+bounces, which rows a virtual list builds, how a dock divides a width, what
+path an animation takes. So is a test of serde's round trip, of git's own
+status, of a terminal library's parsing. These are deleted; the ones with an
+incident behind them are kept, asserting the incident's visible result.
+
+Moving a guess is not removing it. A window that guessed a harness's output
+by tool name was a defence; an adapter that parses the same output's text
+layout is the same belief in a better place. What counts as said by the
+source is a field the source gives; where the source gives only text, the
+text is shown as it is.
+
 The list is open, and the worst of the codebase is not confined to it. In
 the inventory, report anything in the lane that the maintainer would not have
 asked for and that has no ground, whether or not it has a name here: say what
@@ -276,6 +291,17 @@ Inventory and rewrite are separate rounds with the maintainer between them.
   left alone and reported.
 - Rewrite agents run only their own crate's tests; the main session runs the
   workspace after merging.
+- A lane is a set of files while the work is deletion. Work that needs the
+  contract, the host and the UI changed together goes by theme instead, and
+  is where an audit starts to build: before a theme is dispatched, say what
+  it deletes. A theme that only adds is a feature, and is the maintainer's to
+  ask for.
+- Lanes that run at once break each other's tests where they meet: a helper
+  one removed, a signature one changed, a fixture two extended. Run the
+  workspace after every merge, not after the last.
+- Build output is per worktree and per revision. Have each lane clean its
+  target when it ends, and prune the main checkout's after each merge; a
+  full disk stops every lane at once.
 - Read every report's claims against the code before acting on them. In PR
   #1051 an inventory called a test seam uncalled that had a dozen callers,
   and a rewrite found three inventory entries wrong.
@@ -288,6 +314,9 @@ Report to the maintainer:
 - what was kept, with its ground;
 - what was left out of the rewrite and the precondition it waits on;
 - the tests removed or changed and where each contract is still proved;
-- the checks actually run, and the ones not run;
+- the checks actually run, and the ones not run, and, round after round,
+  what has still not been looked at in the running app or run against a real
+  harness: a list of unverified surfaces that only grows is a debt, and the
+  next round does not start until it has been paid down;
 - defects met on the way that are not defences;
 - the questions that remain, as yes/no questions.
