@@ -594,6 +594,8 @@ fn claude_thread(dir: &Path, id: &str, text: &str) -> ExternalThread {
             serde_json::json!({
                 "type": "user",
                 "message": {"role": "user", "content": text},
+                "uuid": "00000000-0000-4000-8000-000000000001",
+                "parentUuid": null,
                 "timestamp": "2026-01-02T03:04:05.006Z",
                 "cwd": "/synthetic",
                 "sessionId": id,
@@ -601,6 +603,8 @@ fn claude_thread(dir: &Path, id: &str, text: &str) -> ExternalThread {
             serde_json::json!({
                 "type": "assistant",
                 "message": {"role": "assistant", "content": [{"type": "text", "text": "acknowledged"}]},
+                "uuid": "00000000-0000-4000-8000-000000000002",
+                "parentUuid": "00000000-0000-4000-8000-000000000001",
                 "timestamp": "2026-01-02T03:04:06.006Z",
                 "cwd": "/synthetic",
                 "sessionId": id,

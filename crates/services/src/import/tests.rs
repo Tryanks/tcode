@@ -439,7 +439,8 @@ fn a_paginated_codex_rollout_shows_the_items_codex_recorded() {
 /// as that CLI writes a transcript line; `message` holds an Anthropic
 /// Messages API message (text, `thinking`, `tool_use` and `tool_result`
 /// blocks), and a compaction is a `system` line of subtype
-/// `compact_boundary`. A slash command is the user text that CLI builds for
+/// `compact_boundary` that starts a new chain (`parentUuid` null) and names
+/// the message before it as its `logicalParentUuid`. A slash command is the user text that CLI builds for
 /// it (`<command-message>`, `<command-name>`, `<command-args>`), a prompt
 /// command's expansion and a local command's caveat are meta lines, and a
 /// local command's output is a `<local-command-stdout>` user text. Titles
@@ -458,7 +459,7 @@ const CLAUDE_TRANSCRIPT: &str = r#"{"type":"user","message":{"role":"user","cont
 {"type":"ai-title","aiTitle":"Read and build the example","sessionId":"00000000-0000-4000-8000-000000000010"}
 {"type":"custom-title","customTitle":"Readme review","sessionId":"00000000-0000-4000-8000-000000000010"}
 {"type":"ai-title","aiTitle":"Review the example","sessionId":"00000000-0000-4000-8000-000000000010"}
-{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","uuid":"00000000-0000-4000-8000-000000000017","parentUuid":null,"isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:11.000Z"}
+{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","uuid":"00000000-0000-4000-8000-000000000017","parentUuid":null,"logicalParentUuid":"00000000-0000-4000-8000-000000000028","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:11.000Z"}
 {"type":"assistant","message":{"id":"msg_example_3","type":"message","role":"assistant","model":"claude-example","content":[{"type":"text","text":"Done."}]},"uuid":"00000000-0000-4000-8000-000000000018","parentUuid":"00000000-0000-4000-8000-000000000017","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:12.000Z"}
 {"type":"user","message":{"role":"user","content":"<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>src</command-args>"},"uuid":"00000000-0000-4000-8000-000000000019","parentUuid":"00000000-0000-4000-8000-000000000018","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:13.000Z"}
 {"type":"user","message":{"role":"user","content":"Review the code in src."},"isMeta":true,"uuid":"00000000-0000-4000-8000-000000000020","parentUuid":"00000000-0000-4000-8000-000000000019","isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:13.000Z"}
@@ -528,5 +529,78 @@ fn a_claude_transcript_imports_as_claude_recorded_it() {
                 status: ItemStatus::Interrupted,
             }),
         ]
+    );
+}
+
+/// A Claude Code transcript line in the shape of [`CLAUDE_TRANSCRIPT`]'s,
+/// numbered `n`, under parent `parent`.
+fn claude_line(n: u32, parent: Option<u32>, role: &str, content: &str) -> String {
+    let uuid = |n: u32| format!("00000000-0000-4000-8000-{n:012}");
+    let parent = parent.map_or("null".to_owned(), |parent| format!("\"{}\"", uuid(parent)));
+    let message = if role == "user" {
+        format!(r#"{{"role":"user","content":"{content}"}}"#)
+    } else {
+        format!(
+            r#"{{"id":"msg_{n}","type":"message","role":"assistant","model":"claude-example","content":[{{"type":"text","text":"{content}"}}]}}"#
+        )
+    };
+    format!(
+        r#"{{"type":"{role}","message":{message},"uuid":"{}","parentUuid":{parent},"isSidechain":false,"cwd":"/work/example","userType":"external","entrypoint":"cli","version":"2.1.322","gitBranch":"main","sessionId":"00000000-0000-4000-8000-000000000010","timestamp":"2026-01-02T03:04:{n:02}.000Z"}}"#,
+        uuid(n)
+    )
+}
+
+/// A conversation rewound in Claude Code shows the branch Claude Code
+/// resumes, not the messages the rewind left behind. A message sent after a
+/// rewind takes the restore point as its `parentUuid`, and the transcript's
+/// last message is the leaf; a rewind with nothing sent after it is the
+/// `last-prompt` record it writes (`{type, leafUuid, explicit: true,
+/// rewound: true, sessionId}`), which names the restore point. Both as the
+/// 2.1.322 bundle writes and reads them; content invented.
+#[test]
+fn a_rewound_claude_conversation_shows_the_branch_claude_resumes() {
+    let asked = [
+        claude_line(1, None, "user", "Start"),
+        claude_line(2, Some(1), "assistant", "First answer."),
+        claude_line(3, Some(2), "user", "Try the risky way"),
+        claude_line(4, Some(3), "assistant", "Risky."),
+    ];
+    let assistant = |text: &str| {
+        Some(ItemContent::AssistantMessage {
+            text: text.into(),
+            summarized: false,
+        })
+    };
+    let resent = Transcript::new(
+        &[
+            &asked[..],
+            &[
+                claude_line(5, Some(2), "user", "Try the safe way"),
+                claude_line(6, Some(5), "assistant", "Safe."),
+            ],
+        ]
+        .concat()
+        .join("\n"),
+    );
+    assert_eq!(
+        shown(claude::convert(&resent.0, "claude:example").unwrap()),
+        [
+            user("Start"),
+            assistant("First answer."),
+            user("Try the safe way"),
+            assistant("Safe."),
+        ]
+    );
+    let rewound = Transcript::new(
+        &[
+            &asked[..],
+            &[r#"{"type":"last-prompt","leafUuid":"00000000-0000-4000-8000-000000000002","explicit":true,"rewound":true,"sessionId":"00000000-0000-4000-8000-000000000010"}"#.to_owned()],
+        ]
+        .concat()
+        .join("\n"),
+    );
+    assert_eq!(
+        shown(claude::convert(&rewound.0, "claude:example").unwrap()),
+        [user("Start"), assistant("First answer.")]
     );
 }
