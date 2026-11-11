@@ -2491,8 +2491,8 @@ mod tests {
                     path: format!("src/{index}.rs"),
                     previous_path: None,
                     kind: agent::FileChangeKind::Modify,
-                    additions: 1,
-                    deletions: 0,
+                    additions: Some(1),
+                    deletions: Some(0),
                     patch: PullRequestPatch::Hunks("@@ -1 +1,2 @@\n a\n+b\n".into()),
                     url: None,
                 })

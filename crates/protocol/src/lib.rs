@@ -368,6 +368,8 @@ pub use wire::{
 // tools}; skill {name}.
 // The served_model event gains from, the model the harness named before it.
 // RuntimeError gains title_attachment_unreadable {path, error}.
+// PullRequestFile's additions and deletions may be absent: a binary or
+// oversized file whose host gave no count.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

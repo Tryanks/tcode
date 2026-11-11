@@ -93,8 +93,10 @@ pub struct PullRequestFile {
     pub path: String,
     pub previous_path: Option<String>,
     pub kind: FileChangeKind,
-    pub additions: u64,
-    pub deletions: u64,
+    /// Lines added and removed; `None` when the host gave no count and the
+    /// patch it gave has none, such as a binary or oversized file.
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
     pub patch: PullRequestPatch,
     /// The file's page on the host: at the head, or at the base for a deleted file.
     pub url: Option<String>,

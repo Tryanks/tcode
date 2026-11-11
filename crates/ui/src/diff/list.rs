@@ -1264,7 +1264,7 @@ fn render_file_header<H: DiffListHost>(
         })
         .children(host.header_note(file_index, cx))
         .child(div().flex_1())
-        .child(
+        .children(added.zip(removed).map(|(added, removed)| {
             h_flex()
                 .flex_none()
                 .gap_2()
@@ -1278,8 +1278,8 @@ fn render_file_header<H: DiffListHost>(
                     div()
                         .text_color(cx.theme().danger)
                         .child(format!("-{removed}")),
-                ),
-        )
+                )
+        }))
         .children(host.header_trailing(file_index, cx))
         .on_click(cx.listener(move |host, _, _, cx| host.header_clicked(file_index, cx)))
         .context_menu(move |popup, window, cx| (menu)(popup, window, cx));

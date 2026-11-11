@@ -1152,8 +1152,8 @@ fn listed_file(row: &Value) -> Option<PullRequestFile> {
             .flatten(),
         path,
         kind,
-        additions,
-        deletions,
+        additions: Some(additions),
+        deletions: Some(deletions),
         patch,
         url: None,
     })
@@ -1182,11 +1182,14 @@ pub(crate) fn diff_files(diff: &str) -> Option<Vec<PullRequestFile>> {
                 binary |= line.starts_with("Binary files ") || line == "GIT binary patch";
             }
             let hunks = hunks_at.map_or("", |at| &section[at..]);
+            // Git writes no line counts for a binary file.
             let count = |sign: char| {
-                hunks
-                    .lines()
-                    .filter(|line| line.starts_with(sign) && !line.starts_with("@@"))
-                    .count() as u64
+                (!binary).then(|| {
+                    hunks
+                        .lines()
+                        .filter(|line| line.starts_with(sign) && !line.starts_with("@@"))
+                        .count() as u64
+                })
             };
             Some(PullRequestFile {
                 previous_path: previous_path.filter(|_| change.kind == FileChangeKind::Rename),

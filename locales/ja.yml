@@ -2186,6 +2186,7 @@ pull_requests:
     too_large_to_expand: "大きすぎるため展開できません（1 MiB 超）。"
     binary: "バイナリファイルのため、内容は表示されません。"
     oversized: "この差分は大きすぎるため表示できません（%{size}）。"
+    oversized_unsized: "この差分は大きすぎるため表示できません。"
     withheld: "%{host_name} はこのファイルの差分を提供していません。"
     line_changes: "%{count} 行の変更"
     loading_more: "さらにファイルを読み込み中…"

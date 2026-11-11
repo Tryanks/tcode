@@ -64,8 +64,9 @@ pub struct PairedRow {
 pub struct RenderedFile {
     pub path: String,
     pub kind: FileChangeKind,
-    pub added: u64,
-    pub removed: u64,
+    /// `None` where no count is known, as for a binary file.
+    pub added: Option<u64>,
+    pub removed: Option<u64>,
     pub all_rows: Vec<RenderedRow>,
     pub hunks: Vec<RenderedHunk>,
     pub expanded: Vec<Range<usize>>,
@@ -285,8 +286,8 @@ pub fn build_file(
         RenderedFile {
             path: display_path,
             kind: input.kind,
-            added: 0,
-            removed: 0,
+            added: None,
+            removed: None,
             all_rows: Vec::new(),
             hunks: Vec::new(),
             expanded: Vec::new(),
@@ -437,8 +438,8 @@ fn build_from_texts(
     RenderedFile {
         path: display_path,
         kind: input.kind,
-        added: hunks_count(&rows, RowKind::Added),
-        removed: hunks_count(&rows, RowKind::Removed),
+        added: Some(hunks_count(&rows, RowKind::Added)),
+        removed: Some(hunks_count(&rows, RowKind::Removed)),
         all_rows: rows,
         hunks,
         expanded: Vec::new(),
@@ -543,8 +544,8 @@ fn build_from_patch(
     RenderedFile {
         path: display_path,
         kind: input.kind,
-        added: parsed.added.into(),
-        removed: parsed.removed.into(),
+        added: Some(parsed.added.into()),
+        removed: Some(parsed.removed.into()),
         all_rows,
         pairs,
         hunks,
@@ -950,7 +951,7 @@ mod tests {
             &colors(),
             &HighlightStyle::default(),
         );
-        assert_eq!((file.added, file.removed), (0, 0));
+        assert_eq!((file.added, file.removed), (Some(0), Some(0)));
         let row = &file.all_rows[0];
         assert_eq!(row.source_text, "let  名\t=1;");
         assert_eq!(row.text, "let··名→=1;");

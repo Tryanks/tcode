@@ -2135,7 +2135,7 @@ mod tests {
                 Some(super::super::model::FileNotice::Binary)
             );
             assert!(cache.list.files[2].all_rows.is_empty());
-            assert_eq!(cache.list.files[0].added, 1);
+            assert_eq!(cache.list.files[0].added, Some(1));
         });
     }
 
@@ -2231,7 +2231,7 @@ mod tests {
         panel.read_with(cx, |panel, _| {
             let files = &panel.cache.as_ref().unwrap().list.files;
             let oversized = &files[1];
-            assert_eq!((oversized.added, oversized.removed), (1, 1));
+            assert_eq!((oversized.added, oversized.removed), (Some(1), Some(1)));
             assert!(
                 !oversized.expandable,
                 "an oversized preview never invents unseen context"
@@ -2269,8 +2269,8 @@ mod tests {
         );
 
         assert_eq!(file.path, path);
-        assert_eq!(file.added, 1);
-        assert_eq!(file.removed, 1);
+        assert_eq!(file.added, Some(1));
+        assert_eq!(file.removed, Some(1));
         assert_eq!(file.all_rows.len(), 2);
         let items = build_list_items_with(std::slice::from_ref(&file), &[]);
         for rows in [&items.unified, &items.split] {
