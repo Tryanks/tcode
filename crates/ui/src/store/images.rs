@@ -638,8 +638,8 @@ fn draw(
 }
 
 /// Lets go of what no element asks for: past the budget, the decodes released longest ago, and at
-/// once answers without a picture and those of a host this client no longer reads; then every
-/// retired image's atlas tiles.
+/// once answers without a picture, first reads still in flight and those of a host this client no
+/// longer reads; then every retired image's atlas tiles.
 fn sweep(cx: &mut App) {
     let windows: Vec<WindowId> = cx
         .windows()
@@ -666,11 +666,13 @@ fn sweep(cx: &mut App) {
             _ => 0,
         };
         total += cost;
-        // An answer without a picture is kept only while something asks for it.
+        // An answer without a picture is kept only while something asks for it, and so is a
+        // first read still on its way: dropping it stops the read.
         let pictureless = entry.answer.is_some() && cost == 0;
+        let unanswered = entry.answer.is_none();
         let gone = source.host().is_some_and(|held| !open.contains(&held));
-        if !entry.held() && (cost > 0 || pictureless || gone) {
-            let keep = !(pictureless || gone);
+        if !entry.held() && (cost > 0 || pictureless || unanswered || gone) {
+            let keep = !(pictureless || unanswered || gone);
             unheld.push((keep, entry.hold.released.get(), cost, source.clone()));
         }
     }

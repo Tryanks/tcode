@@ -112,6 +112,8 @@ impl Composer {
         let available = state.is_available(cx);
         let tooltip: SharedString = if !available {
             crate::tr!("composer.voice_unavailable")
+        } else if status == SpeechStatus::Stopping {
+            crate::tr!("composer.voice_stop_waiting")
         } else if preparing {
             crate::tr!("composer.voice_preparing")
         } else if status.is_active() {

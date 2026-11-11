@@ -652,6 +652,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                 cx,
             ));
         }
+        Command::StopStackRebase { key, stack, .. } => app.stop_stack_rebase(&key, stack),
         Command::RunPullRequestAction {
             session_id,
             key,
@@ -749,6 +750,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::CheckProviderVersions => app.check_provider_versions(cx),
         Command::MeasureDiskUsage => app.measure_disk_usage(cx),
         Command::UpdateProviders { providers } => app.update_providers(providers, cx),
+        Command::CancelProviderUpdate => app.cancel_provider_update(cx),
         Command::SetSidebarCollapsed { collapsed } => app.set_sidebar_collapsed(collapsed, cx),
         Command::RunGitAction {
             session_id,
@@ -761,6 +763,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         }
         Command::RefreshAcpRegistry => app.refresh_acp_registry(cx),
         Command::InstallAcpAgent { id } => app.install_acp_agent(id, cx),
+        Command::CancelAcpInstall { id } => app.cancel_acp_install(&id, cx),
         Command::RemoveAcpAgent { id } => app.remove_acp_agent(&id, cx),
         Command::AddCustomAcpAgent {
             name,
@@ -1038,6 +1041,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::RegenerateSessionTitle { session_id } => {
             app.regenerate_session_title(&session_id, cx)
         }
+        Command::CancelTitleGeneration { session_id } => app.cancel_title_generation(&session_id),
         Command::ForkThread { id, at: None } => match app.fork_thread(&id, cx) {
             Ok(forked) => response = CommandResponse::SessionId(Some(forked)),
             Err(refusal) => {

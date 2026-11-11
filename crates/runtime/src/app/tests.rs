@@ -2430,7 +2430,14 @@ fn marketplace_items_are_runtime_owned_views() {
             launch_args: None,
         },
     );
-    state.acp_installing.insert("last".into());
+    state.acp_installing.insert(
+        "last".into(),
+        acp::AcpInstall {
+            operation: RuntimeOperationId(1),
+            name: "Last".into(),
+            cancelled: Default::default(),
+        },
+    );
 
     assert_eq!(
         state.acp_marketplace_items(),

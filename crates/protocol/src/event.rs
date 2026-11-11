@@ -1161,6 +1161,11 @@ pub enum RuntimeToast {
         operation: RuntimeOperationId,
         run: ProviderUpdateRun,
     },
+    /// The user stopped it during `run.current`'s update; the rest were not run.
+    ProviderUpdateCancelled {
+        operation: RuntimeOperationId,
+        run: ProviderUpdateRun,
+    },
     GitBusy,
     GitStarted {
         operation: RuntimeOperationId,
@@ -1183,6 +1188,8 @@ pub enum RuntimeToast {
     },
     AcpInstallStarted {
         operation: RuntimeOperationId,
+        /// The registry id the install is cancelled by.
+        id: String,
         name: String,
     },
     AcpInstallSucceeded {
@@ -1193,6 +1200,11 @@ pub enum RuntimeToast {
         operation: RuntimeOperationId,
         name: String,
         detail: String,
+    },
+    /// The user stopped it before the download ended.
+    AcpInstallCancelled {
+        operation: RuntimeOperationId,
+        name: String,
     },
     PluginOperationStarted {
         operation: RuntimeOperationId,

@@ -211,6 +211,10 @@ pub(super) enum RuntimeToastAction {
     UpdateProviders(Vec<ProviderKind>),
     /// Stop the profile's running plugin change.
     CancelPluginOperation(String),
+    /// Stop the ACP agent's install, by registry id.
+    CancelAcpInstall(String),
+    /// Stop the running harness updates.
+    CancelProviderUpdate,
 }
 
 fn git_action_toast_titles(action: GitAction) -> (String, String) {
@@ -392,11 +396,33 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
                 detail: (!failed.is_empty()).then(|| {
                     crate::tr!("providers.update_failures", providers = failed).into_owned()
                 }),
-                action: None,
+                action: (!finished).then_some(RuntimeToastAction::CancelProviderUpdate),
                 progress: (!finished)
                     .then_some(100. * run.completed as f32 / run.total.max(1) as f32),
             };
         }
+        RuntimeToast::ProviderUpdateCancelled { operation, run } => (
+            RuntimeToastDisposition::Finish(*operation),
+            ToastKind::Info,
+            crate::tr!(
+                "providers.update_stopped",
+                provider = run
+                    .current
+                    .map(|provider| provider.display_name())
+                    .unwrap_or_default()
+            )
+            .into_owned(),
+            (!run.failed.is_empty()).then(|| {
+                crate::tr!(
+                    "providers.update_failures",
+                    providers = crate::i18n::join_list(
+                        run.failed.iter().map(|provider| provider.display_name())
+                    )
+                )
+                .into_owned()
+            }),
+            None,
+        ),
         RuntimeToast::GitBusy => (
             RuntimeToastDisposition::Push,
             ToastKind::Warning,
@@ -443,10 +469,21 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
             Some(detail.clone()),
             None,
         ),
-        RuntimeToast::AcpInstallStarted { operation, name } => (
+        RuntimeToast::AcpInstallStarted {
+            operation,
+            id,
+            name,
+        } => (
             RuntimeToastDisposition::Start(*operation),
             ToastKind::Loading,
             crate::tr!("providers.acp.installing", name = name).into_owned(),
+            None,
+            Some(RuntimeToastAction::CancelAcpInstall(id.clone())),
+        ),
+        RuntimeToast::AcpInstallCancelled { operation, name } => (
+            RuntimeToastDisposition::Finish(*operation),
+            ToastKind::Info,
+            crate::tr!("providers.acp.install_cancelled", name = name).into_owned(),
             None,
             None,
         ),

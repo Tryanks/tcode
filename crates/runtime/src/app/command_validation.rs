@@ -156,7 +156,7 @@ impl AppState {
             _ => {}
         }
         match command {
-            Command::InstallAcpAgent { id } if self.acp_installing.contains(id) => {
+            Command::InstallAcpAgent { id } if self.acp_installing.contains_key(id) => {
                 return Err(error(
                     "acp_installing",
                     "This agent is already being installed.",
@@ -281,6 +281,7 @@ impl AppState {
                 | Command::UnarchiveSession { .. }
                 | Command::RenameSession { .. }
                 | Command::RegenerateSessionTitle { .. }
+                | Command::CancelTitleGeneration { .. }
                 | Command::DeleteSession { .. }
                 | Command::MarkSessionUnread { .. }
                 | Command::MarkSessionRead { .. }
@@ -289,6 +290,7 @@ impl AppState {
                 | Command::WatchPullRequest { .. }
                 | Command::SetPullRequestWatchesPaused { .. }
                 | Command::RunPullRequestAction { .. }
+                | Command::StopStackRebase { .. }
                 | Command::EditPullRequestReviewDraft { .. }
                 | Command::SetControlGrant { .. }
                 | Command::RespondControlGrant { .. }

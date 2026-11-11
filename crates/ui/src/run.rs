@@ -126,7 +126,6 @@ pub fn init_client(cx: &mut App, host: &dyn ClientHost, options: &ShellOptions) 
     {
         let client = reqwest::Client::builder()
             .use_rustls_tls()
-            .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("failed to initialize image HTTP client");
         cx.set_http_client(std::sync::Arc::new(reqwest_client::ReqwestClient::from(

@@ -1,4 +1,13 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::*;
+
+/// A registry agent being installed. Setting `cancelled` stops its download.
+pub(crate) struct AcpInstall {
+    pub(super) operation: RuntimeOperationId,
+    pub(super) name: String,
+    pub(super) cancelled: Arc<AtomicBool>,
+}
 
 impl AppState {
     /// Load the registry index (cache first, network when stale). Cheap enough
@@ -58,7 +67,7 @@ impl AppState {
                         version: agent.version.clone(),
                         description: agent.description.clone(),
                         installed: self.settings.acp_agents.contains_key(&agent.id),
-                        installing: self.acp_installing.contains(&agent.id),
+                        installing: self.acp_installing.contains_key(&agent.id),
                         supported: resolve_recipe(agent, &platform).is_some(),
                     })
                     .collect()
@@ -96,7 +105,12 @@ impl AppState {
         native.chain(agents).collect()
     }
 
-    /// Download + install one registry agent, with a progress toast.
+    pub(super) fn acp_installing_ids(&self) -> HashSet<String> {
+        self.acp_installing.keys().cloned().collect()
+    }
+
+    /// Download + install one registry agent, with a progress toast the user
+    /// can cancel it from.
     pub fn install_acp_agent(&mut self, id: String, cx: &mut HostCx) {
         let Some(agent) = self
             .acp_marketplace()
@@ -105,26 +119,47 @@ impl AppState {
         else {
             return;
         };
-        if !self.acp_installing.insert(id.clone()) {
+        if self.acp_installing.contains_key(&id) {
             return;
         }
         let operation = self.next_operation_id();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.acp_installing.insert(
+            id.clone(),
+            AcpInstall {
+                operation,
+                name: agent.name.clone(),
+                cancelled: cancelled.clone(),
+            },
+        );
         let data_dir = self.store.root().clone();
-        let name = agent.name.clone();
         emit_runtime(
             cx,
             RuntimeEvent::Toast(RuntimeToast::AcpInstallStarted {
                 operation,
-                name: name.clone(),
+                id: id.clone(),
+                name: agent.name.clone(),
             }),
         );
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let result = host_cx
-                .unblock(move || install(&agent, &data_dir, |_done, _total| {}))
+                .unblock(move || install(&agent, &data_dir, &cancelled))
                 .await;
             host_cx.enqueue(move |state, cx| {
-                state.acp_installing.remove(&id);
+                // A cancelled install was already reported, and the id may
+                // be installing again since.
+                if state
+                    .acp_installing
+                    .get(&id)
+                    .is_none_or(|install| install.operation != operation)
+                {
+                    return;
+                }
+                let Some(install) = state.acp_installing.remove(&id) else {
+                    return;
+                };
+                let name = install.name;
                 match result {
                     Ok(mut installed) => {
                         // An update keeps what the user set for the agent.
@@ -154,6 +189,22 @@ impl AppState {
                 }
             });
         });
+    }
+
+    /// Stop an agent's install: its download ends at the next read and
+    /// nothing is written.
+    pub(crate) fn cancel_acp_install(&mut self, id: &str, cx: &mut HostCx) {
+        let Some(install) = self.acp_installing.remove(id) else {
+            return;
+        };
+        install.cancelled.store(true, Ordering::Relaxed);
+        emit_runtime(
+            cx,
+            RuntimeEvent::Toast(RuntimeToast::AcpInstallCancelled {
+                operation: install.operation,
+                name: install.name,
+            }),
+        );
     }
 
     /// Remove an installed ACP agent (its files and its settings entry).

@@ -184,7 +184,7 @@ impl DomainDiff {
                     || self.providers_revisions != providers_revisions
                     || last.acp_registry_loading != state.acp_registry_loading
                     || last.acp_registry_error != state.acp_registry_error
-                    || last.acp_installing != state.acp_installing
+                    || last.acp_installing != state.acp_installing_ids()
             });
             if stale {
                 let providers = state.providers_status_snapshot();
@@ -707,7 +707,7 @@ impl AppState {
     fn build_index_summary(&self) -> IndexSummary {
         let activity = ActivityProjection::new(self);
         let mut summary = IndexSummary {
-            title_generating: self.title_generating.clone(),
+            title_generating: self.title_generating.keys().cloned().collect(),
             archived_revision: self.archived_revision,
             ..IndexSummary::default()
         };
@@ -826,7 +826,7 @@ impl AppState {
                 meta.id.clone(),
                 activity.session_activity(resident.map_or(meta, |s| &s.meta), resident),
             );
-            if self.title_generating.contains(&meta.id) {
+            if self.title_generating.contains_key(&meta.id) {
                 summary.title_generating.insert(meta.id.clone());
             }
             if meta.worktree.is_some()
@@ -1055,7 +1055,7 @@ impl AppState {
             self.acp_marketplace_items(),
             self.acp_registry_loading,
             self.acp_registry_error.clone(),
-            self.acp_installing.clone(),
+            self.acp_installing_ids(),
             self.provider_plugin_catalogs(),
         );
         self.flag_shared_credentials(&mut status.provider_snapshots);

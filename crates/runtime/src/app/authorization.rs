@@ -373,6 +373,7 @@ impl AppState {
                 | Command::SetPullRequestFilesViewed { session_id, .. }
                 | Command::RefreshPullRequest { session_id, .. }
                 | Command::RunPullRequestAction { session_id, .. }
+                | Command::StopStackRebase { session_id, .. }
                 | Command::EditPullRequestReviewDraft { session_id, .. }
                 | Command::WatchPullRequest { session_id, .. }
                 | Command::SetPullRequestWatchesPaused { session_id, .. } => {
@@ -393,6 +394,7 @@ impl AppState {
                 | Command::MoveToBackground { session_id, .. }
                 | Command::ForceTerminate { session_id }
                 | Command::RenameSession { session_id, .. }
+                | Command::CancelTitleGeneration { session_id }
                 | Command::ArchiveSession { session_id }
                 | Command::UnarchiveSession { session_id }
                 | Command::SettleChildren { session_id }
@@ -493,8 +495,10 @@ impl AppState {
                 | Command::CheckProviderVersions
                 | Command::MeasureDiskUsage
                 | Command::UpdateProviders { .. }
+                | Command::CancelProviderUpdate
                 | Command::RefreshAcpRegistry
                 | Command::InstallAcpAgent { .. }
+                | Command::CancelAcpInstall { .. }
                 | Command::RemoveAcpAgent { .. }
                 | Command::AddCustomAcpAgent { .. }
                 | Command::UpdateAcpAgent { .. }

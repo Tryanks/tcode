@@ -69,8 +69,10 @@ impl WorkspaceStore {
                 | Command::CheckProviderVersions
                 | Command::MeasureDiskUsage
                 | Command::UpdateProviders { .. }
+                | Command::CancelProviderUpdate
                 | Command::RefreshAcpRegistry
                 | Command::InstallAcpAgent { .. }
+                | Command::CancelAcpInstall { .. }
                 | Command::RemoveAcpAgent { .. }
                 | Command::AddCustomAcpAgent { .. }
                 | Command::UpdateAcpAgent { .. }
@@ -459,6 +461,10 @@ impl WorkspaceStore {
 
     pub fn regenerate_session_title(&mut self, session_id: String) {
         self.dispatch(Command::RegenerateSessionTitle { session_id });
+    }
+
+    pub fn cancel_title_generation(&mut self, session_id: String) {
+        self.dispatch(Command::CancelTitleGeneration { session_id });
     }
     pub fn fork_thread(&mut self, id: String, cx: &mut Context<Self>) {
         self.create_and_show(Command::ForkThread { id, at: None }, true, cx);
@@ -1363,6 +1369,9 @@ impl WorkspaceStore {
     pub fn update_providers(&mut self, providers: Vec<ProviderKind>) {
         self.dispatch(Command::UpdateProviders { providers });
     }
+    pub fn cancel_provider_update(&mut self) {
+        self.dispatch(Command::CancelProviderUpdate);
+    }
     pub fn set_active_model_for(
         &mut self,
         session_id: String,
@@ -1411,6 +1420,9 @@ impl WorkspaceStore {
     }
     pub fn install_acp_agent(&mut self, id: String) {
         self.dispatch(Command::InstallAcpAgent { id });
+    }
+    pub fn cancel_acp_install(&mut self, id: String) {
+        self.dispatch(Command::CancelAcpInstall { id });
     }
     pub fn remove_acp_agent(&mut self, id: String) {
         self.dispatch(Command::RemoveAcpAgent { id });

@@ -1,6 +1,13 @@
 use super::*;
 use tcode_core::control::WatchEvent;
 
+/// A title being generated in a scratch session of its own.
+pub(super) struct TitleGeneration {
+    run: RuntimeOperationId,
+    /// The scratch session's harness, killed when the user stops it.
+    processes: agent::SessionProcesses,
+}
+
 impl AppState {
     /// Handle one canonical event from the live provider.
     pub(super) fn on_event(&mut self, session_id: &str, event: AgentEvent, cx: &mut HostCx) {
@@ -830,9 +837,18 @@ impl AppState {
         first_message: Option<(String, Vec<Attachment>)>,
         cx: &mut HostCx,
     ) {
-        if !self.ai_title_generation_enabled || !self.title_generating.insert(meta.id.clone()) {
+        if !self.ai_title_generation_enabled || self.title_generating.contains_key(&meta.id) {
             return;
         }
+        let run = self.next_operation_id();
+        let processes = agent::SessionProcesses::default();
+        self.title_generating.insert(
+            meta.id.clone(),
+            TitleGeneration {
+                run,
+                processes: processes.clone(),
+            },
+        );
 
         let session_id = meta.id;
         let previous_title = meta.title;
@@ -899,8 +915,9 @@ impl AppState {
                 Ok(input) => input,
                 Err(error) => {
                     host_cx.enqueue(move |state, cx| {
-                        state.title_generating.remove(&session_id);
-                        state.report_error(error, cx);
+                        if state.title_generation_ended(&session_id, run) {
+                            state.report_error(error, cx);
+                        }
                     });
                     return;
                 }
@@ -909,14 +926,16 @@ impl AppState {
                 Ok(env) => env,
                 Err(error) => {
                     host_cx.enqueue(move |state, cx| {
-                        state.title_generating.remove(&session_id);
-                        state.report_error(RuntimeError::PersistSettings { error }, cx);
+                        if state.title_generation_ended(&session_id, run) {
+                            state.report_error(RuntimeError::PersistSettings { error }, cx);
+                        }
                     });
                     return;
                 }
             };
-            let options =
+            let mut options =
                 session_options(&title_meta, &settings, launch_env, McpServers::default());
+            options.processes = processes;
             let title = generate_ai_title(
                 provider_launcher,
                 title_meta.provider,
@@ -927,7 +946,9 @@ impl AppState {
             )
             .await;
             host_cx.enqueue(move |state, cx| {
-                state.title_generating.remove(&session_id);
+                if !state.title_generation_ended(&session_id, run) {
+                    return;
+                }
                 if let Some(title) = title {
                     state.apply_generated_title(&session_id, &previous_title, &title, cx);
                 } else if regenerate && state.sessions.iter().any(|meta| meta.id == session_id) {
@@ -939,6 +960,28 @@ impl AppState {
                 }
             });
         });
+    }
+
+    /// Whether `run` was still the thread's title generation, which ends with
+    /// this; a generation the user stopped has nothing left to report.
+    fn title_generation_ended(&mut self, session_id: &str, run: RuntimeOperationId) -> bool {
+        if self
+            .title_generating
+            .get(session_id)
+            .is_none_or(|generation| generation.run != run)
+        {
+            return false;
+        }
+        self.title_generating.remove(session_id);
+        true
+    }
+
+    /// Stop generating the thread's title: the scratch session's harness is
+    /// killed and the title stays as it is.
+    pub(crate) fn cancel_title_generation(&mut self, session_id: &str) {
+        if let Some(generation) = self.title_generating.remove(session_id) {
+            generation.processes.stop();
+        }
     }
 
     pub(super) fn apply_generated_title(
@@ -1010,21 +1053,8 @@ pub(super) async fn generate_ai_title(
     }
     options.cwd = scratch.clone();
 
-    let generated = smol::future::or(
-        generate_ai_title_inner(
-            provider_launcher,
-            provider,
-            options,
-            prompt,
-            attachments,
-            executor.clock(),
-        ),
-        async {
-            executor.clock().timer(AI_TITLE_TIMEOUT).await;
-            None
-        },
-    )
-    .await;
+    let generated =
+        generate_ai_title_inner(provider_launcher, provider, options, prompt, attachments).await;
     let _ = executor
         .unblock(move || std::fs::remove_dir_all(scratch))
         .await;
@@ -1037,8 +1067,8 @@ pub(super) async fn generate_ai_title_inner(
     options: SessionOptions,
     prompt: String,
     attachments: Vec<Attachment>,
-    clock: &crate::clock::HostClock,
 ) -> Option<String> {
+    let processes = options.processes.clone();
     let handle = provider_launcher.launch(provider, options).await.ok()?;
     handle
         .commands
@@ -1088,20 +1118,15 @@ pub(super) async fn generate_ai_title_inner(
             _ => {}
         }
     };
+    // The scratch session has nothing left to keep: its harness is killed
+    // rather than waited on, and its directory goes once the session closed.
     let _ = handle.commands.send(SessionCommand::Shutdown).await;
-    smol::future::or(
-        async {
-            while let Ok(event) = handle.events.recv().await {
-                if matches!(event, AgentEvent::SessionClosed { .. }) {
-                    break;
-                }
-            }
-        },
-        async {
-            clock.timer(std::time::Duration::from_secs(2)).await;
-        },
-    )
-    .await;
+    processes.stop();
+    while let Ok(event) = handle.events.recv().await {
+        if matches!(event, AgentEvent::SessionClosed { .. }) {
+            break;
+        }
+    }
     raw_title
 }
 

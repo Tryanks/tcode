@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use agent::{AcpLaunch, HIDDEN_ACP_AGENT_IDS};
@@ -37,6 +38,8 @@ pub enum RegistryError {
     Parse(String),
     Install(String),
     Io(std::io::Error),
+    /// The user stopped the install.
+    Cancelled,
 }
 
 impl std::fmt::Display for RegistryError {
@@ -46,6 +49,7 @@ impl std::fmt::Display for RegistryError {
             Self::Parse(err) => write!(f, "the ACP registry returned something unreadable: {err}"),
             Self::Install(err) => write!(f, "{err}"),
             Self::Io(err) => err.fmt(f),
+            Self::Cancelled => write!(f, "the install was cancelled"),
         }
     }
 }
@@ -270,15 +274,17 @@ pub fn install_dir(data_dir: &Path, id: &str, version: &str) -> PathBuf {
         })
 }
 
-/// Install `agent` for this platform, reporting progress in bytes.
+/// Install `agent` for this platform.
 ///
 /// npx recipes install nothing (npm resolves the package on first launch);
-/// binary recipes are downloaded, extracted, and made executable.
+/// binary recipes are downloaded, extracted, and made executable. The
+/// download runs until it ends or `cancelled` is set, which stops it before
+/// anything is written.
 /// Blocking — call it from `smol::unblock`.
 pub fn install(
     agent: &RegistryAgent,
     data_dir: &Path,
-    mut progress: impl FnMut(u64, Option<u64>),
+    cancelled: &AtomicBool,
 ) -> Result<InstalledAgent, RegistryError> {
     let recipe = resolve_recipe(agent, &platform_key()).ok_or_else(|| {
         RegistryError::Install(format!(
@@ -295,12 +301,12 @@ pub fn install(
             env: pairs(&npx.env),
         },
         Recipe::Binary(binary) => {
+            let bytes = download(&binary.archive, cancelled)?;
             let dir = install_dir(data_dir, &agent.id, &agent.version);
             // A fresh install every time: a half-extracted tree from a failed
             // attempt must not be mistaken for a good one.
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir)?;
-            let bytes = download(&binary.archive, &mut progress)?;
             extract(&binary.archive, &bytes, &dir)?;
             let command = resolve_cmd(&dir, &binary.cmd)?;
             match command {
@@ -340,12 +346,8 @@ pub fn uninstall(data_dir: &Path, id: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn download(
-    url: &str,
-    progress: &mut impl FnMut(u64, Option<u64>),
-) -> Result<Vec<u8>, RegistryError> {
+fn download(url: &str, cancelled: &AtomicBool) -> Result<Vec<u8>, RegistryError> {
     let response = ureq::get(url)
-        .timeout(Duration::from_secs(600))
         .call()
         .map_err(|err| RegistryError::Network(err.to_string()))?;
     let total: Option<u64> = response
@@ -355,6 +357,9 @@ fn download(
     let mut bytes = Vec::with_capacity(total.unwrap_or(0) as usize);
     let mut buf = [0u8; 64 * 1024];
     loop {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err(RegistryError::Cancelled);
+        }
         let read = reader
             .read(&mut buf)
             .map_err(|err| RegistryError::Network(err.to_string()))?;
@@ -362,7 +367,9 @@ fn download(
             break;
         }
         bytes.extend_from_slice(&buf[..read]);
-        progress(bytes.len() as u64, total);
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(RegistryError::Cancelled);
     }
     Ok(bytes)
 }
@@ -487,7 +494,8 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("tcode-acp-live-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
-        let installed = install(&agent, &dir, |_, _| {}).expect("install must succeed");
+        let installed =
+            install(&agent, &dir, &AtomicBool::new(false)).expect("install must succeed");
         assert_eq!(installed.id, agent.id);
         match &installed.launch {
             AcpLaunch::Binary { command, .. } => {

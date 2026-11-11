@@ -85,7 +85,6 @@ use tcode_services::worktree::{
 
 const TITLE_MAX_CHARS: usize = 40;
 const TITLE_SOURCE_MAX_CHARS: usize = 8_000;
-const AI_TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 /// Anthropic's prompt cache expires after one hour, so a provider kept longer
 /// cannot preserve a useful cached conversation prefix.
 const RESIDENT_IDLE_GRACE: Duration = Duration::from_secs(60 * 60);
@@ -437,7 +436,8 @@ pub struct AppState {
     /// Kept off in unit tests so dispatching a synthetic turn never launches a
     /// real provider process. Production titles are generated in the background.
     ai_title_generation_enabled: bool,
-    title_generating: Revisioned<HashSet<String>>,
+    /// Titles being generated, by thread.
+    title_generating: Revisioned<HashMap<String, events::TitleGeneration>>,
     provider_launcher: ProviderLauncher,
     /// The ACP agent marketplace: the registry index (from the CDN, cached on
     /// disk with a one-hour TTL), whether a refresh is in flight, and the last
@@ -445,8 +445,9 @@ pub struct AppState {
     pub acp_registry: Revisioned<Option<Registry>>,
     pub acp_registry_loading: bool,
     pub acp_registry_error: Option<String>,
-    /// Registry ids currently downloading (their marketplace row shows a spinner).
-    pub acp_installing: std::collections::HashSet<String>,
+    /// Registry agents currently installing, by id (their marketplace row
+    /// shows a spinner).
+    pub(crate) acp_installing: HashMap<String, acp::AcpInstall>,
     /// Native plugin catalogs by profile and context, listed on demand.
     plugin_catalogs: Revisioned<HashMap<plugins::CatalogKey, plugins::PluginCatalog>>,
     mcp: McpWiring,
@@ -685,7 +686,7 @@ impl AppState {
             acp_registry: None.into(),
             acp_registry_loading: false,
             acp_registry_error: None,
-            acp_installing: std::collections::HashSet::new(),
+            acp_installing: HashMap::new(),
             plugin_catalogs: HashMap::new().into(),
             mcp: McpWiring::default(),
             control: control::ControlState::new(

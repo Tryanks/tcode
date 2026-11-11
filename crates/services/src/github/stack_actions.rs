@@ -500,14 +500,20 @@ impl PullRequestReads {
 }
 
 impl RebasePlan {
-    /// Runs the planned rebase, telling `progress` each layer's step, and answers how it ended.
-    pub fn run(&self, progress: impl FnMut(usize, StackRebaseStep)) -> Outcome {
+    /// Runs the planned rebase until it ends or `stop` stops it, telling `progress` each layer's
+    /// step, and answers how it ended.
+    pub fn run(
+        &self,
+        stop: &stack_rebase::Stop,
+        progress: impl FnMut(usize, StackRebaseStep),
+    ) -> Outcome {
         let steps = stack_rebase::cascade(
             &self.remote,
             &self.token,
             &self.identity,
             &self.base,
             &self.layers,
+            stop,
             progress,
         );
         rebase_outcome(&self.layers, &steps)

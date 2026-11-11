@@ -342,12 +342,16 @@ pub struct StackRebase {
     pub layers: Vec<(u64, String)>,
     run: Run,
 }
-/// Rebases and pushes the layers, telling its argument each layer's step as it happens.
-type Run = Box<dyn FnOnce(&mut dyn FnMut(usize, StackRebaseStep)) -> Outcome + Send>;
+/// Rebases and pushes the layers until they end or the stop stops them, telling its argument
+/// each layer's step as it happens.
+type Run = Box<dyn FnOnce(&RebaseStop, &mut dyn FnMut(usize, StackRebaseStep)) -> Outcome + Send>;
+pub use crate::github::stack_rebase::Stop as RebaseStop;
 impl StackRebase {
     pub fn new(
         layers: Vec<(u64, String)>,
-        run: impl FnOnce(&mut dyn FnMut(usize, StackRebaseStep)) -> Outcome + Send + 'static,
+        run: impl FnOnce(&RebaseStop, &mut dyn FnMut(usize, StackRebaseStep)) -> Outcome
+        + Send
+        + 'static,
     ) -> Self {
         Self {
             layers,
@@ -355,9 +359,14 @@ impl StackRebase {
         }
     }
 
-    /// Runs the rebase, telling `progress` each layer's step, and answers how it ended.
-    pub fn run(self, mut progress: impl FnMut(usize, StackRebaseStep)) -> Outcome {
-        (self.run)(&mut progress)
+    /// Runs the rebase until it ends or `stop` stops it, telling `progress` each layer's step,
+    /// and answers how it ended.
+    pub fn run(
+        self,
+        stop: &RebaseStop,
+        mut progress: impl FnMut(usize, StackRebaseStep),
+    ) -> Outcome {
+        (self.run)(stop, &mut progress)
     }
 }
 

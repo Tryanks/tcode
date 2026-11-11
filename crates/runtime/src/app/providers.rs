@@ -13,6 +13,8 @@ struct UpdateRun {
     operation: RuntimeOperationId,
     status: ProviderUpdateRun,
     pending: std::collections::VecDeque<ProviderKind>,
+    /// The current harness's update while it runs; dropping it stops the update.
+    running: Option<HostTask<()>>,
 }
 
 #[derive(Default)]
@@ -1387,6 +1389,7 @@ impl AppState {
             operation,
             status,
             pending,
+            running: None,
         });
         self.start_next_provider_update(cx);
     }
@@ -1456,12 +1459,42 @@ impl AppState {
         status.revision += 1;
 
         let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
+        let running = cx.spawn_background(async move {
             let ok = command.run().await;
             host_cx.enqueue(move |state, cx| {
                 state.complete_provider_update(provider, ok, cx);
             });
         });
+        if let Some(run) = self.providers.update_run.as_mut() {
+            run.running = Some(running);
+        }
+    }
+
+    /// Stop the running harness updates: the current one's command and what it
+    /// started are killed, the rest are not run, and every harness's version
+    /// is read again, since the one stopped may be partly updated.
+    pub(crate) fn cancel_provider_update(&mut self, cx: &mut HostCx) {
+        let Some(run) = self.providers.update_run.take() else {
+            return;
+        };
+        drop(run.running);
+        if let Some(status) = run
+            .status
+            .current
+            .and_then(|provider| self.providers.provider_versions.get_mut(&provider))
+        {
+            status.updating = false;
+            status.revision += 1;
+        }
+        emit_runtime(
+            cx,
+            RuntimeEvent::Toast(RuntimeToast::ProviderUpdateCancelled {
+                operation: run.operation,
+                run: run.status,
+            }),
+        );
+        self.refresh_provider_status(cx);
+        self.check_provider_versions(cx);
     }
 
     /// The installation a session's command menus come from: a native

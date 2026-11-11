@@ -50,7 +50,7 @@ pub use cmd_shim::CmdShim;
 #[cfg(feature = "process")]
 mod process;
 #[cfg(feature = "process")]
-pub use process::{SessionProcesses, command, stop_every_tree};
+pub use process::{SessionProcesses, command, stop_every_tree, tree_output};
 #[cfg(feature = "process")]
 mod subagent_tail;
 mod tool_name;

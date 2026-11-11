@@ -146,6 +146,12 @@ pub enum Command {
         key: tcode_core::pull_request::PullRequestKey,
         action: crate::PullRequestAction,
     },
+    /// Stop the running rebase of the native stack `stack` that `key` is a layer of.
+    StopStackRebase {
+        session_id: String,
+        key: tcode_core::pull_request::PullRequestKey,
+        stack: u64,
+    },
     EditPullRequestReviewDraft {
         session_id: String,
         key: tcode_core::pull_request::PullRequestKey,
@@ -209,6 +215,8 @@ pub enum Command {
     UpdateProviders {
         providers: Vec<ProviderKind>,
     },
+    /// Stop the running harness updates.
+    CancelProviderUpdate,
     SetSidebarCollapsed {
         collapsed: bool,
     },
@@ -221,6 +229,10 @@ pub enum Command {
     },
     RefreshAcpRegistry,
     InstallAcpAgent {
+        id: String,
+    },
+    /// Stop the agent's install while it downloads.
+    CancelAcpInstall {
         id: String,
     },
     RemoveAcpAgent {
@@ -472,6 +484,10 @@ pub enum Command {
         title: String,
     },
     RegenerateSessionTitle {
+        session_id: String,
+    },
+    /// Stop generating the thread's title; the title stays as it is.
+    CancelTitleGeneration {
         session_id: String,
     },
     /// Fork the whole thread, or what came before the message `at` names.
@@ -744,6 +760,7 @@ impl Command {
             | Self::SetPullRequestFilesViewed { session_id, .. }
             | Self::RefreshPullRequest { session_id, .. }
             | Self::RunPullRequestAction { session_id, .. }
+            | Self::StopStackRebase { session_id, .. }
             | Self::EditPullRequestReviewDraft { session_id, .. }
             | Self::RunGitAction { session_id, .. }
             | Self::SetActiveAcpAgent { session_id, .. }
@@ -781,6 +798,7 @@ impl Command {
             | Self::UnarchiveSession { session_id, .. }
             | Self::RenameSession { session_id, .. }
             | Self::RegenerateSessionTitle { session_id }
+            | Self::CancelTitleGeneration { session_id }
             | Self::DeleteSession { session_id, .. }
             | Self::MergeWorktree { session_id, .. }
             | Self::MarkSessionUnread { session_id, .. }

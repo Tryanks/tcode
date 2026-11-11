@@ -75,11 +75,22 @@ impl UpdateCommand {
         }
     }
 
+    /// Runs the update to its end; dropping the future stops it and everything it started, as
+    /// the user's cancel does.
     pub async fn run(&self) -> bool {
         if self.requires_terminal {
             return false;
         }
-        run_process(self, Duration::from_secs(300)).await.is_some()
+        let mut process = crate::process::command(&self.program);
+        process
+            .args(&self.args)
+            .envs(self.env.iter().cloned())
+            .env_remove("CLAUDECODE")
+            .env_remove("CLAUDE_CODE_ENTRYPOINT")
+            .current_dir(&self.cwd);
+        agent::tree_output(process)
+            .await
+            .is_ok_and(|output| output.status.success())
     }
 }
 

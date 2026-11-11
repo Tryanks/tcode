@@ -293,7 +293,9 @@ impl Forge for GitHub {
             .iter()
             .map(|layer| (layer.number, layer.branch.clone()))
             .collect();
-        Ok(StackRebase::new(layers, move |progress| plan.run(progress)))
+        Ok(StackRebase::new(layers, move |stop, progress| {
+            plan.run(stop, progress)
+        }))
     }
 
     fn fingerprints(

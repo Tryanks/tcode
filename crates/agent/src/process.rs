@@ -494,19 +494,32 @@ pub(crate) fn refuse_batch_line_breaks<'a>(
     Ok(())
 }
 
-/// Run a harness's management command to its end and collect what it wrote.
-/// Its stdin is null, so a prompt can never wait on input; dropping the
-/// future stops the command and everything it started, as a cancelled
-/// plugin change does.
-pub(crate) async fn tree_output(
-    mut command: std::process::Command,
+/// Run a command to its end and collect what it wrote. Its stdin is null, so
+/// a prompt can never wait on input; dropping the future stops the command
+/// and everything it started, as a cancelled plugin change or harness update
+/// does.
+pub async fn tree_output(command: std::process::Command) -> std::io::Result<std::process::Output> {
+    held_output(command, &SessionProcesses::default()).await
+}
+
+/// [`tree_output`] for a command a session runs before its harness: the
+/// session's stop kills it as it kills the harness.
+pub(crate) async fn held_output(
+    command: std::process::Command,
+    processes: &SessionProcesses,
 ) -> std::io::Result<std::process::Output> {
     use smol::io::AsyncReadExt as _;
     #[cfg(unix)]
-    {
+    let command = {
         use std::os::unix::process::CommandExt as _;
+        let mut command = command;
         command.process_group(0);
-    }
+        command
+    };
+    // Set on the `smol` command: spawning it gives the child this process's own
+    // stdio wherever its own setters were not called, whatever the `std`
+    // command it came from says.
+    let mut command = smol::process::Command::from(command);
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -518,7 +531,7 @@ pub(crate) async fn tree_output(
         }
         Ok(bytes)
     }
-    let mut child = ProcessTree::new(smol::process::Command::from(command).spawn()?);
+    let mut child = processes.hold(ProcessTree::new(command.spawn()?));
     let (stdout, stderr) =
         smol::future::try_zip(read_all(child.stdout.take()), read_all(child.stderr.take())).await?;
     let status = child.status().await?;
@@ -527,12 +540,6 @@ pub(crate) async fn tree_output(
         stdout,
         stderr,
     })
-}
-
-/// An async (`smol`) command with the console suppressed. `async_process`
-/// exposes no `creation_flags`, so the flag rides in through the `From` impl.
-pub(crate) fn async_command<S: AsRef<std::ffi::OsStr>>(program: S) -> smol::process::Command {
-    smol::process::Command::from(command(program))
 }
 
 /// Runs blocking work on `smol`'s blocking pool. The one approved
@@ -550,8 +557,9 @@ pub(crate) async fn probe_version(
     binary: &std::path::Path,
     launch_env: &crate::LaunchEnv,
     provider: crate::ProviderKind,
+    processes: &SessionProcesses,
 ) -> Option<(u32, u32, u32)> {
-    let mut command = async_command(binary);
+    let mut command = command(binary);
     command.arg("--version");
     if provider == crate::ProviderKind::ClaudeCode {
         command
@@ -561,7 +569,7 @@ pub(crate) async fn probe_version(
     for (key, value) in launch_env.pairs(provider) {
         command.env(key, value);
     }
-    let output = command.output().await.ok()?;
+    let output = held_output(command, processes).await.ok()?;
     crate::parse_semver(&String::from_utf8_lossy(&output.stdout))
 }
 

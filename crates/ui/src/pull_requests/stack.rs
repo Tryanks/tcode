@@ -1247,6 +1247,21 @@ pub(super) fn answer_toast(
                         &[("number", failed_number)],
                     )),
                 ),
+                StackRebaseFailure::Stopped => Notification::info(
+                    tr_with(
+                        "result_rebase_user_stopped_body",
+                        &[
+                            ("pushed", stayed.clone()),
+                            ("number", failed_number.clone()),
+                        ],
+                    )
+                    .trim()
+                    .to_owned(),
+                )
+                .title(tr_with(
+                    "result_rebase_stopped",
+                    &[("number", failed_number)],
+                )),
                 _ => {
                     let body = match reason {
                         StackRebaseFailure::Conflict => tr_with(
@@ -1279,7 +1294,9 @@ pub(super) fn answer_toast(
                                 ("pushed", stayed.clone()),
                             ],
                         ),
-                        StackRebaseFailure::PushUnconfirmed => unreachable!(),
+                        StackRebaseFailure::PushUnconfirmed | StackRebaseFailure::Stopped => {
+                            unreachable!()
+                        }
                     };
                     open(Notification::error(body.trim().to_owned()).title(tr_with(
                         "result_rebase_stopped",
@@ -2780,10 +2797,12 @@ fn step_parts(
         StackRebaseStep::Failed { reason } => (
             Icon::new(match reason {
                 StackRebaseFailure::PushUnconfirmed => IconName::CircleQuestionMark,
+                StackRebaseFailure::Stopped => IconName::Minus,
                 _ => IconName::CircleX,
             })
             .text_color(match reason {
                 StackRebaseFailure::PushUnconfirmed => theme.warning,
+                StackRebaseFailure::Stopped => muted,
                 _ => theme.danger,
             })
             .into_any_element(),
@@ -2791,6 +2810,7 @@ fn step_parts(
                 StackRebaseFailure::Conflict => tr("step_conflict"),
                 StackRebaseFailure::LeaseRefused => tr("step_lease"),
                 StackRebaseFailure::PushUnconfirmed => tr("step_unknown"),
+                StackRebaseFailure::Stopped => tr("step_stopped"),
                 StackRebaseFailure::Git { step, .. } => {
                     tr_with("step_git", &[("step", git_step(*step))])
                 }
@@ -2823,9 +2843,11 @@ fn progress_view(
     );
     let base = offer.as_ref().map(StackOffer::base).unwrap_or_default();
     let mut started_at = None;
+    let mut running = None;
     if let Some(operation) = offer.and_then(|offer| offer.operation) {
         if let StackOperationKind::Rebasing { .. } = operation.kind {
             started_at = Some(operation.started_at);
+            running = Some(operation.stack);
         }
         if let StackOperationKind::Rebasing { .. } | StackOperationKind::RebaseEnded { .. } =
             operation.kind
@@ -2956,6 +2978,7 @@ fn progress_view(
                 tr_with("recovery_lease", &[("branch", branch.clone())])
             }
             StackRebaseFailure::Git { .. } => tr("recovery_git"),
+            StackRebaseFailure::Stopped => tr("recovery_stopped"),
         };
         let can_ask = !target
             .store
@@ -3018,8 +3041,31 @@ fn progress_view(
             );
         body = body.children(shown.map(|shown| shown.fold(wash)));
     }
+    let stop = running.filter(|_| !ended).map(|stack| {
+        let store = target.store.clone();
+        let session = target.session.clone();
+        let key = target.offer.key.clone();
+        Button::new("pr-stack-progress-stop")
+            .ghost()
+            .small()
+            .label(tr("stop_rebase"))
+            .on_click(move |_, _, cx| {
+                store.update(cx, |store, cx| {
+                    store
+                        .command(
+                            Command::StopStackRebase {
+                                session_id: session.clone(),
+                                key: key.clone(),
+                                stack,
+                            },
+                            cx,
+                        )
+                        .detach();
+                });
+            })
+    });
     body.child(
-        h_flex().justify_end().child(
+        h_flex().justify_end().gap_2().children(stop).child(
             Button::new("pr-stack-progress-close")
                 .outline()
                 .small()
