@@ -2240,6 +2240,7 @@ pull_requests:
     load_failed: "会話を読み込めませんでした。"
   media:
     unavailable: "画像を表示できません"
+    unavailable_because: "画像を表示できません: %{reason}"
     too_large: "画像が大きすぎるため表示できません（%{size}）"
     video: "動画"
     audio: "音声"

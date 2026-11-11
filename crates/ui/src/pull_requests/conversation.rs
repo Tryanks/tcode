@@ -2159,10 +2159,16 @@ fn media_stand_in(
     match state {
         MediaState::Ready => None,
         MediaState::Loading => Some((true, loading_media(cx).into_any_element())),
-        MediaState::Unavailable => Some((
+        MediaState::Unavailable(reason) => Some((
             false,
             unavailable(
-                crate::tr!("pull_requests.media.unavailable").into_owned(),
+                match reason {
+                    Some(reason) => {
+                        crate::tr!("pull_requests.media.unavailable_because", reason = reason)
+                    }
+                    None => crate::tr!("pull_requests.media.unavailable"),
+                }
+                .into_owned(),
                 cx,
             ),
         )),

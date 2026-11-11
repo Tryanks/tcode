@@ -468,10 +468,10 @@ fn reading(source: &Source, validator: Option<String>, cx: &mut App) -> Reading 
         }
         Source::Media(host, request) => {
             let host = HostImages::link(host, cx);
+            let executor = cx.background_executor().clone();
             Box::pin(async move {
-                let unavailable = || Read::Unavailable("pull request media is unavailable".into());
                 let Some(host) = host else {
-                    return unavailable();
+                    return Read::Unreached(executor.now());
                 };
                 let query = Query::PullRequest {
                     session_id: request.session_id,
@@ -485,7 +485,13 @@ fn reading(source: &Source, validator: Option<String>, cx: &mut App) -> Reading 
                 let response = match host.query(query).await {
                     Ok(QueryResponse::PullRequest { response, .. }) => *response,
                     Err(error) if error.code == "pull_request_too_large" => return Read::TooLarge,
-                    _ => return unavailable(),
+                    Err(error) if UNREACHED.contains(&error.code.as_str()) => {
+                        return Read::Unreached(executor.now());
+                    }
+                    Err(error) => return Read::Unavailable(error.message.into()),
+                    Ok(response) => {
+                        return Read::Unavailable(format!("unexpected {response:?}").into());
+                    }
                 };
                 match response {
                     PullRequestReadResponse::Media(PullRequestMedia::Image {
@@ -505,7 +511,9 @@ fn reading(source: &Source, validator: Option<String>, cx: &mut App) -> Reading 
                                     validator,
                                 }),
                             ),
-                            None => unavailable(),
+                            None => {
+                                Read::Unavailable(format!("unsupported image type {mime}").into())
+                            }
                         }
                     }
                     PullRequestReadResponse::Media(PullRequestMedia::NotModified {
@@ -517,7 +525,7 @@ fn reading(source: &Source, validator: Option<String>, cx: &mut App) -> Reading 
                     PullRequestReadResponse::Media(PullRequestMedia::Unsupported) => {
                         Read::Elsewhere
                     }
-                    _ => unavailable(),
+                    response => Read::Unavailable(format!("unexpected {response:?}").into()),
                 }
             })
         }
@@ -773,7 +781,8 @@ pub(crate) enum MediaState {
     /// Video or audio, by MIME type.
     External(String),
     TooLarge,
-    Unavailable,
+    /// The read failed, in the host's words when it answered.
+    Unavailable(Option<SharedString>),
 }
 
 /// The host's answer for a media URL; an image past its expiry keeps drawing while it is read
@@ -829,7 +838,8 @@ pub(crate) fn pull_request_media_state(
         Some(Answer::Image(_) | Answer::Elsewhere) => MediaState::Ready,
         Some(Answer::External(mime)) => MediaState::External(mime),
         Some(Answer::TooLarge) => MediaState::TooLarge,
-        Some(Answer::Unavailable(_) | Answer::Unreached(_)) => MediaState::Unavailable,
+        Some(Answer::Unavailable(reason)) => MediaState::Unavailable(Some(reason)),
+        Some(Answer::Unreached(_)) => MediaState::Unavailable(None),
     }
 }
 

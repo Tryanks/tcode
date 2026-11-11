@@ -2240,6 +2240,7 @@ pull_requests:
     load_failed: "Couldn't load the conversation."
   media:
     unavailable: "Image unavailable"
+    unavailable_because: "Image unavailable: %{reason}"
     too_large: "Image too large to show (%{size})"
     video: "Video"
     audio: "Audio"

@@ -2233,6 +2233,7 @@ pull_requests:
     load_failed: "无法加载讨论。"
   media:
     unavailable: "图片不可用"
+    unavailable_because: "图片不可用：%{reason}"
     too_large: "图片过大，无法显示（%{size}）"
     video: "视频"
     audio: "音频"
