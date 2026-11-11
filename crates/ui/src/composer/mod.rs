@@ -2129,16 +2129,13 @@ impl Composer {
         }
         panels.extend(self.render_force_terminate(window, cx));
         panels.extend(self.render_queue_strip(window, cx));
-        // The checkout row under the card carries the space above it; it
-        // folds away as the window turns compact.
+        // The checkout row under the card carries the space above it, at
+        // every width: a phone switches branches and starts worktrees too.
         let checkout = self
             .motion
             .shown(
                 self.motion_key("checkout"),
-                composer_state
-                    .checkout
-                    .clone()
-                    .filter(|_| !self.compact && !subagent),
+                composer_state.checkout.clone().filter(|_| !subagent),
                 SHOW,
                 window,
                 cx,
