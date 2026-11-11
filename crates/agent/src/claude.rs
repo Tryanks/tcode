@@ -2976,7 +2976,9 @@ impl Mapper {
                         .to_owned(),
                     kind: match task.get("task_type").and_then(Value::as_str) {
                         Some("local_bash") => crate::BackgroundKind::Command,
-                        Some("local_agent" | "remote_agent") => crate::BackgroundKind::Agent,
+                        Some("local_agent" | "remote_agent" | "in_process_teammate") => {
+                            crate::BackgroundKind::Agent
+                        }
                         _ => crate::BackgroundKind::Other,
                     },
                     item_id: self.task_tools.get(id).cloned(),
