@@ -8266,6 +8266,72 @@ pub(crate) mod tests {
         );
     }
 
+    /// A failed git action's toast carries git's own words, which Copy
+    /// error gives back as they came, and its Retry sends the host the
+    /// action that failed, as it was asked.
+    #[gpui::test]
+    fn a_failed_git_actions_toast_gives_its_detail_and_retries_the_same_action(
+        cx: &mut TestAppContext,
+    ) {
+        use tcode_protocol::{
+            GitActionRequest, RuntimeNotification, RuntimeOperationId, RuntimeToast,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (_shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+        let host = &hosts[&HostKey::Remote("host-a".into())].host;
+        let detail = "fatal: the remote end hung up unexpectedly\n  (see `git help push`)";
+        let failed = GitActionRequest {
+            session_id: "thread-1".into(),
+            action: tcode_core::git::GitAction::CommitPush,
+            message: Some("Ship the parser".into()),
+            included: Some(vec!["src/parse.rs".into()]),
+            feature_branch: Some("parser".into()),
+        };
+        send_events(
+            host,
+            vec![(
+                Topic::RuntimeEvents,
+                ServerEvent::Runtime(RuntimeNotification::Toast(RuntimeToast::GitFailed {
+                    operation: RuntimeOperationId(1),
+                    detail: detail.into(),
+                    retry: failed.clone(),
+                })),
+            )],
+        );
+        draw(cx);
+        cx.run_until_parked();
+        draw(cx);
+
+        click("toast-copy", cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(detail.to_owned())
+        );
+        let _ = sent(host);
+        click("toast-action", cx);
+        let retried: Vec<_> = sent(host)
+            .into_iter()
+            .filter_map(|payload| match payload {
+                ClientPayload::Command(Command::RunGitAction {
+                    session_id,
+                    action,
+                    message,
+                    included,
+                    feature_branch,
+                }) => Some(GitActionRequest {
+                    session_id,
+                    action,
+                    message,
+                    included,
+                    feature_branch,
+                }),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(retried, [failed]);
+    }
+
     /// Over two hosts Settings opens on the current thread's host and
     /// names a selector for the other: a host's setting changed there goes
     /// to the host chosen alone, on the section the page was on, on a wide
