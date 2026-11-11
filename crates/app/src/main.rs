@@ -352,6 +352,9 @@ impl LocalKernel {
         cx.set_global(RemoteController::new(
             self.mux.clone(),
             data_dir.to_path_buf(),
+            // Fixed, so the invitation's port, firewall rules and LAN probes
+            // survive restarts.
+            Some(tcode_traverse::lan::DEFAULT_PORT),
             self.control_link.clone(),
             local_settings.clone(),
         ));

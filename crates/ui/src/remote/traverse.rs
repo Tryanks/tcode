@@ -924,6 +924,7 @@ mod tests {
             cx.set_global(RemoteController::new(
                 HostMux::new(attachments, from_host.clone()),
                 root.clone(),
+                None,
                 HostLink::new(to_host, from_host),
                 Settings::default(),
             ))

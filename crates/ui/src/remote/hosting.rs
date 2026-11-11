@@ -36,6 +36,8 @@ pub struct RemoteController {
     mux: HostMux,
     host: Option<TraverseHost>,
     data_dir: PathBuf,
+    /// The port hosting binds; `None` lets the system pick one.
+    bind_port: Option<u16>,
     local_settings_link: HostLink,
     local_settings: Settings,
     /// Why the last start did not bind, until hosting starts or is turned
@@ -49,6 +51,7 @@ impl RemoteController {
     pub fn new(
         mux: HostMux,
         data_dir: PathBuf,
+        bind_port: Option<u16>,
         local_settings_link: HostLink,
         local_settings: Settings,
     ) -> Self {
@@ -56,6 +59,7 @@ impl RemoteController {
             mux,
             host: None,
             data_dir,
+            bind_port,
             local_settings_link,
             local_settings,
             start_failure: None,
@@ -129,9 +133,7 @@ impl RemoteController {
                     data_dir: self.data_dir.clone(),
                     traverse,
                     pairing_enabled: true,
-                    // Fixed, so the invitation's port, firewall rules and LAN
-                    // probes survive restarts.
-                    bind_port: Some(tcode_traverse::lan::DEFAULT_PORT),
+                    bind_port: self.bind_port,
                 },
             )
             .map_err(|error| match error.kind() {
@@ -158,13 +160,6 @@ impl RemoteController {
     /// Why hosting did not start the last time it was asked to.
     pub fn start_failure(&self) -> Option<&str> {
         self.start_failure.as_deref()
-    }
-
-    /// Adopt a host started elsewhere: tests bind a random port, since the
-    /// desktop's fixed one may be taken on the machine running them.
-    #[cfg(test)]
-    pub(crate) fn adopt_host(&mut self, host: TraverseHost) {
-        self.host = Some(host);
     }
 
     pub fn stop_hosting(&mut self) {
@@ -623,6 +618,7 @@ mod tests {
             cx.set_global(RemoteController::new(
                 HostMux::new(attachments, from_host.clone()),
                 root,
+                None,
                 HostLink::new(to_host.clone(), from_host.clone()),
                 Settings::default(),
             ))
@@ -680,6 +676,7 @@ mod tests {
             cx.set_global(RemoteController::new(
                 mux.clone(),
                 root.clone(),
+                None,
                 HostLink::new(to_host.clone(), from_host.clone()),
                 Settings::default(),
             ))
@@ -703,22 +700,17 @@ mod tests {
             "no pairing switch while not hosting"
         );
         assert!(cx.debug_bounds("remote-invitation").is_none());
-
-        // A random port: the desktop's fixed one may be taken on this machine.
-        let host = TraverseHost::start(
-            mux,
-            HostConfig {
-                host_name: "Studio".into(),
-                data_dir: root.clone(),
-                traverse: Vec::new(),
-                pairing_enabled: true,
-                bind_port: None,
-            },
-        )
-        .unwrap();
-        host.new_invitation();
         cx.update(|_, cx| {
-            cx.update_global::<RemoteController, _>(|controller, _| controller.adopt_host(host));
+            cx.update_global::<RemoteController, _>(|controller, _| {
+                controller
+                    .start_hosting(
+                        &TraverseSetting {
+                            sources: Vec::new(),
+                        },
+                        "Studio".into(),
+                    )
+                    .unwrap()
+            });
         });
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("remote-pairing").is_some());

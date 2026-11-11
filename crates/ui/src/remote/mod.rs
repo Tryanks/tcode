@@ -2171,7 +2171,8 @@ mod tests {
     fn the_hosts_page_offers_this_machines_invitation(cx: &mut TestAppContext) {
         use gpui::BorrowAppContext as _;
         use tcode_client::HostLink;
-        use tcode_traverse::{HostConfig, HostMux, TraverseHost};
+        use tcode_core::settings::TraverseSetting;
+        use tcode_traverse::HostMux;
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         // The machine's host runs on its own threads and tells the window
         // of hosting changes from there, as it does in the app.
@@ -2187,6 +2188,7 @@ mod tests {
             cx.set_global(RemoteController::new(
                 mux.clone(),
                 root.clone(),
+                None,
                 HostLink::new(to_host, from_host),
                 tcode_core::settings::Settings::default(),
             ));
@@ -2227,20 +2229,17 @@ mod tests {
         assert!(cx.debug_bounds("remote-invitation").is_none());
         assert!(cx.debug_bounds("hosting-settings").is_none());
 
-        let host = TraverseHost::start(
-            mux,
-            HostConfig {
-                host_name: "Studio".into(),
-                data_dir: root.clone(),
-                traverse: Vec::new(),
-                pairing_enabled: true,
-                bind_port: None,
-            },
-        )
-        .unwrap();
-        host.new_invitation();
         cx.update(|_, cx| {
-            cx.update_global::<RemoteController, _>(|controller, _| controller.adopt_host(host));
+            cx.update_global::<RemoteController, _>(|controller, _| {
+                controller
+                    .start_hosting(
+                        &TraverseSetting {
+                            sources: Vec::new(),
+                        },
+                        "Studio".into(),
+                    )
+                    .unwrap()
+            });
         });
         draw(cx);
         assert!(
