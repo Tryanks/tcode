@@ -628,8 +628,11 @@ impl Composer {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            self.pending_images
-                .push(components::images::PendingImage { path, name });
+            self.pending_images.push(components::images::PendingImage {
+                path,
+                name,
+                scaled: None,
+            });
         }
         let typed = self.input.read(cx).value().trim().to_owned();
         let text = if typed.is_empty() {

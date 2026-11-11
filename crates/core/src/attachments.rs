@@ -6,8 +6,13 @@ use std::path::Path;
 pub const MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// Largest source file a client decodes before fitting it to the limits.
 pub const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
-/// Longest edge a client keeps when fitting an image before upload; models
-/// gain nothing from more pixels and phone photos start far larger.
+/// Longest edge a client keeps when fitting an image before upload, and says
+/// so on the attachment when it shrinks one. Anthropic rejects an image over
+/// 8000 px on a side, and over 3000 px once a request carries more than 20
+/// images, counting those of earlier turns the harness sends again
+/// (platform.claude.com, Vision, "Request limits", read 2026-11-11). 2048 is
+/// also the most OpenAI's `high` detail reads; Claude reads at most 2576 px
+/// and downscales anything larger itself.
 pub const MAX_EDGE_PX: u32 = 2048;
 /// Default per-image ceiling a device applies when it reaches the machine
 /// across the internet (tunnel or relay). Adjustable on the device.

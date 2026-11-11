@@ -1456,6 +1456,8 @@ attach:
   retry: "アップロードを再試行"
   remove_file: "ファイルを削除"
   wait_for_files: "アップロード中または失敗したファイルがあります。完了を待つか、再試行または削除してから送信してください。"
+  scaled: "%{size} に縮小"
+  scaled_detail: "モデル提供元が受け付けるサイズに収めるため、%{from} から %{to} px に縮小して送信します。"
 image_viewer:
   cancelled: "元画像の読み込みをキャンセルしました"
   progress: "%{received} / %{total} バイト"

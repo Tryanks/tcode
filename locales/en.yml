@@ -1456,6 +1456,8 @@ attach:
   retry: "Retry upload"
   remove_file: "Remove file"
   wait_for_files: "Files are still uploading or failed. Wait for them, or retry or remove them, before sending."
+  scaled: "scaled to %{size}"
+  scaled_detail: "Scaled down from %{from} to %{to} px before sending, to stay within what model providers accept."
 image_viewer:
   cancelled: "Original read cancelled"
   progress: "%{received} / %{total} bytes"
