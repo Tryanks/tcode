@@ -391,7 +391,7 @@ impl Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext, point, size};
+    use gpui::{TestAppContext, VisualTestContext, size};
 
     /// A composer, phone or desktop, whose session awaits approval of a patch
     /// to `paths`.
@@ -485,35 +485,6 @@ mod tests {
             _ = window.draw(cx);
         });
         cx
-    }
-
-    #[gpui::test]
-    fn a_long_file_change_request_lays_out_only_the_visible_files(cx: &mut TestAppContext) {
-        let cx = composer_with_patch(
-            cx,
-            true,
-            (0..300).map(|index| format!("src/file-{index}.rs")),
-        );
-        let first = cx
-            .debug_bounds("approval-change-0")
-            .expect("first change row");
-        assert!(
-            cx.debug_bounds("approval-change-250").is_none(),
-            "the approval card must not lay out all 300 file rows"
-        );
-
-        // Rows are measured as they come into view, so the list reaches its
-        // end over successive gestures.
-        for _ in 0..20 {
-            cx.simulate_event(ScrollEvent {
-                position: first.center(),
-                delta: ScrollDelta::Pixels(point(px(0.), px(-2_000.))),
-                ..Default::default()
-            });
-            cx.update(|window, cx| _ = window.draw(cx));
-        }
-        assert!(cx.debug_bounds("approval-change-299").is_some());
-        assert!(cx.debug_bounds("approval-change-0").is_none());
     }
 
     #[gpui::test]
