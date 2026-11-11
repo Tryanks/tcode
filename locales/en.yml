@@ -1436,6 +1436,7 @@ notice:
   reference_boundary_crossed: "The model in “%{thread}” referenced “%{title}” from another project or Harness: what it reads there goes to that model's provider"
 attach:
   unsupported_type: "'%{name}' could not be read as an image."
+  decode_failed: "'%{name}' could not be read as an image: %{error}"
   too_large: "'%{name}' exceeds the 10MB attachment limit."
   add: "Add"
   photo_library: "Photo library"

@@ -5,7 +5,7 @@ use crate::widgets::menu::ContextMenuExt as _;
 use gpui::StyledImage as _;
 use image::GenericImageView as _;
 use std::cell::RefCell;
-use tcode_core::attachments::{AttachError, MAX_EDGE_PX, MAX_SOURCE_BYTES};
+use tcode_core::attachments::{AttachError, MAX_EDGE_PX};
 
 /// How long a row drawn here takes to fold in or out, or to move to a new place.
 const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
@@ -54,7 +54,14 @@ pub(in super::super) enum PendingImageSource {
 
 pub(in super::super) enum AddImageError {
     Attachment(AttachError),
-    Read { name: String, error: std::io::Error },
+    Read {
+        name: String,
+        error: std::io::Error,
+    },
+    Decode {
+        name: String,
+        error: image::ImageError,
+    },
     Persist(std::io::Error),
 }
 
@@ -237,33 +244,24 @@ impl Composer {
             let prepared = cx
                 .background_executor()
                 .spawn(async move {
-                    let too_large =
-                        || AddImageError::Attachment(AttachError::TooLarge { name: name.clone() });
                     let bytes = match source {
                         PendingImageSource::Bytes(bytes) => bytes,
                         PendingImageSource::Path(path) => {
-                            let read = |error| AddImageError::Read {
+                            std::fs::read(path).map_err(|error| AddImageError::Read {
                                 name: name.clone(),
                                 error,
-                            };
-                            let size = std::fs::metadata(&path).map_err(read)?.len();
-                            if size > MAX_SOURCE_BYTES {
-                                return Err(too_large());
-                            }
-                            std::fs::read(path).map_err(read)?
+                            })?
                         }
                     };
-                    if bytes.len() as u64 > MAX_SOURCE_BYTES {
-                        return Err(too_large());
-                    }
+                    // How much memory decoding may take is the decoder's
+                    // own limit; when it is reached, its error says so.
                     let Fitted {
                         mime,
                         bytes,
                         scaled,
-                    } = fit_for_upload(&mime, bytes).map_err(|_| {
-                        AddImageError::Attachment(AttachError::UnsupportedType {
-                            name: name.clone(),
-                        })
+                    } = fit_for_upload(&mime, bytes).map_err(|error| AddImageError::Decode {
+                        name: name.clone(),
+                        error,
                     })?;
                     validate_attachment(&name, &mime, bytes.len() as u64)
                         .map_err(AddImageError::Attachment)?;
@@ -372,6 +370,9 @@ impl Composer {
             AddImageError::Attachment(err) => attach_error_message(&err),
             AddImageError::Read { name, error } => {
                 crate::tr!("attach.read_failed", name = name, error = error).into_owned()
+            }
+            AddImageError::Decode { name, error } => {
+                crate::tr!("attach.decode_failed", name = name, error = error).into_owned()
             }
             AddImageError::Persist(err) => {
                 crate::tr!("errors.persist_event", error = err).into_owned()

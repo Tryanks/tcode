@@ -1429,6 +1429,7 @@ notice:
   reference_boundary_crossed: "“%{thread}”中的模型引用了来自其他项目或其他 Harness 的“%{title}”：它从中读取的内容会发送给该模型的提供方"
 attach:
   unsupported_type: "无法将“%{name}”读取为图片。"
+  decode_failed: "无法将“%{name}”读取为图片：%{error}"
   too_large: "'%{name}' 超过了 10MB 的附件大小限制。"
   add: "添加"
   photo_library: "相册"

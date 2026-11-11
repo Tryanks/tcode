@@ -1436,6 +1436,7 @@ notice:
   reference_boundary_crossed: "「%{thread}」のモデルが、別のプロジェクトまたはハーネスの「%{title}」を参照しました。そこで読み取った内容は、そのモデルの提供元に送信されます"
 attach:
   unsupported_type: "「%{name}」を画像として読み込めませんでした。"
+  decode_failed: "「%{name}」を画像として読み込めませんでした: %{error}"
   too_large: "「%{name}」は添付ファイルの上限（10MB）を超えています。"
   add: "追加"
   photo_library: "フォトライブラリ"

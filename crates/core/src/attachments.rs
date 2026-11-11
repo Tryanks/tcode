@@ -4,8 +4,6 @@ use std::path::Path;
 
 /// Maximum bytes per image as stored on the host and sent to the model.
 pub const MAX_BYTES: u64 = 10 * 1024 * 1024;
-/// Largest source file a client decodes before fitting it to the limits.
-pub const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 /// Longest edge a client keeps when fitting an image before upload, and says
 /// so on the attachment when it shrinks one. Anthropic rejects an image over
 /// 8000 px on a side, and over 3000 px once a request carries more than 20
