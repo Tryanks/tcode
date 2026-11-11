@@ -398,12 +398,6 @@ impl TraverseHost {
         self.shared.allow_pairing && self.shared.state.lock().unwrap().identity.pairing_enabled
     }
 
-    /// Turn pairing on or off; a switch the machine cannot write is left as
-    /// it was and answers why.
-    pub fn set_pairing_enabled(&self, enabled: bool) -> io::Result<()> {
-        self.shared.set_pairing_enabled(enabled)
-    }
-
     /// Paired devices, oldest first, with how each connected one reaches us.
     pub fn devices(&self) -> Vec<DeviceInfo> {
         self.shared.devices()
