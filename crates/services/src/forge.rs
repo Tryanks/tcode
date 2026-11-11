@@ -217,6 +217,8 @@ pub enum ForgeErrorKind {
     Uncertain,
     Deadline,
     TooLarge,
+    /// The host is of no kind Tcode knows, so nothing was asked of it.
+    UnknownKind,
     /// A read Tcode refuses before any request: an invalid revision, path or media URL.
     InvalidInput,
     /// Media whose type is not an image, video or audio, or an image that does not decode.
@@ -447,8 +449,130 @@ fn offered(capabilities: &PullRequestCapabilities, action: &PullRequestAction) -
     }
 }
 
+/// A host of no kind Tcode knows: nothing is asked of it, and each read or write says that
+/// its kind is to be chosen in settings.
+struct Unknown;
+
+impl Unknown {
+    fn error(host: &str) -> ForgeError {
+        ForgeError {
+            kind: ForgeErrorKind::UnknownKind,
+            description: format!(
+                "Tcode does not know what kind of host {host} is; choose its kind in Source Control settings."
+            ),
+        }
+    }
+}
+
+impl Forge for Unknown {
+    fn terms(&self, _: &PullRequestKey) -> &'static HostTerms {
+        &tcode_core::pull_request::UNKNOWN
+    }
+    fn capabilities(&self, _: &PullRequestKey) -> PullRequestCapabilities {
+        PullRequestCapabilities {
+            reply: false,
+            resolve: false,
+            reactions: false,
+            labels: false,
+            request_changes: false,
+            draft: false,
+            reopen: false,
+            auto_merge: false,
+            update_branch: false,
+            update_merge: false,
+            revert: false,
+            host_viewed_marks: false,
+            merge_message: false,
+        }
+    }
+    fn configure(&self, _: BTreeMap<String, HostSettings>) {}
+    fn credential_status(&self) -> BTreeMap<String, HostStatus> {
+        BTreeMap::new()
+    }
+    fn forget_credential(&self, _: &str) {}
+    fn check_token(&self, _: &str, _: &str, _: Option<&str>) -> TokenCheck {
+        TokenCheck::Unreachable { status: None }
+    }
+    fn identify(&self, _: &str) {}
+    fn pull_request_url(&self, _: &str) -> Option<(PullRequestKey, String)> {
+        None
+    }
+    fn checkout_repository(&self, _: &Checkout<'_>) -> Option<Repository> {
+        None
+    }
+    fn repository(&self, _: &str, _: &str) -> Option<Repository> {
+        None
+    }
+    fn url(&self, _: &PullRequestKey) -> Option<String> {
+        None
+    }
+    fn file_url(&self, _: &PullRequestKey, _: &str, _: &str) -> Option<String> {
+        None
+    }
+    fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {
+        Err(Self::error(&key.host))
+    }
+    fn stack(&self, key: &PullRequestKey) -> Result<PullRequestStackState, ForgeError> {
+        Err(Self::error(&key.host))
+    }
+    fn read(
+        &self,
+        key: &PullRequestKey,
+        _: PullRequestRead,
+    ) -> Result<(PullRequestReadResponse, SystemTime), ForgeError> {
+        Err(Self::error(&key.host))
+    }
+    fn invalidate(&self, _: &PullRequestKey) {}
+    fn account(&self, key: &PullRequestKey) -> Result<String, ForgeError> {
+        Err(Self::error(&key.host))
+    }
+    fn set_viewed(&self, key: &PullRequestKey, _: &[String], _: bool) -> Result<(), ForgeError> {
+        Err(Self::error(&key.host))
+    }
+    fn act(&self, key: &PullRequestKey, _: &PullRequestAction) -> Outcome {
+        Outcome::Rejected(Self::error(&key.host).rejection())
+    }
+    fn submit_review(
+        &self,
+        key: &PullRequestKey,
+        _: PullRequestReviewVerdict,
+        _: &str,
+        _: &str,
+        _: &[PullRequestReviewDraftComment],
+    ) -> Outcome {
+        Outcome::Rejected(Self::error(&key.host).rejection())
+    }
+    fn commentable(
+        &self,
+        key: &PullRequestKey,
+        _: &str,
+        _: &str,
+        _: ReviewSide,
+        _: (u32, u32),
+    ) -> Result<Anchoring, ForgeError> {
+        Err(Self::error(&key.host))
+    }
+    fn reanchor(
+        &self,
+        key: &PullRequestKey,
+        _: &[PullRequestReviewDraftComment],
+    ) -> Result<(String, Vec<Moved>), ForgeError> {
+        Err(Self::error(&key.host))
+    }
+    fn watch_detail(&self, key: &PullRequestKey) -> Result<PullRequestWatchRead, ForgeError> {
+        Err(Self::error(&key.host))
+    }
+    fn activity(
+        &self,
+        key: &PullRequestKey,
+        _: &mut Tails,
+    ) -> Result<Option<Vec<PullRequestRemark>>, ForgeError> {
+        Err(Self::error(&key.host))
+    }
+}
+
 /// Routes each key and host to the implementation of its kind: the kind settings give it, else
-/// the one its name says, else GitHub, as every host was before hosts had kinds.
+/// the one its name says. A host of neither goes to [`Unknown`].
 struct Hosts {
     store: SettingsStore,
     github: Arc<dyn Forge>,
@@ -490,7 +614,7 @@ impl Hosts {
         ]
     }
 
-    fn kind(&self, host: &str) -> HostKind {
+    fn kind(&self, host: &str) -> Option<HostKind> {
         HostKind::of(self.kinds.read().unwrap().get(host).copied(), host)
     }
 
@@ -505,12 +629,16 @@ impl Hosts {
     }
 
     fn host(&self, host: &str) -> &dyn Forge {
-        self.of(self.kind(host))
+        match self.kind(host) {
+            Some(kind) => self.of(kind),
+            None => &Unknown,
+        }
     }
 
     /// Whether `host`'s kind is served by `forge`.
     fn serves(&self, forge: &dyn Forge, host: &str) -> bool {
-        std::ptr::addr_eq(self.host(host), forge)
+        self.kind(host)
+            .is_some_and(|kind| std::ptr::addr_eq(self.of(kind), forge))
     }
 }
 
@@ -545,22 +673,23 @@ impl Forge for Hosts {
         // A host two kinds list, such as one a gh login and a glab login both name, stays the
         // kind settings say.
         for (host, gitlab) in self.gitlab.credential_status() {
-            if !status.contains_key(&host) || self.kind(&host) == HostKind::Gitlab {
+            if !status.contains_key(&host) || self.kind(&host) == Some(HostKind::Gitlab) {
                 status.insert(host, gitlab);
             }
         }
         for (host, bitbucket) in self.bitbucket.credential_status() {
-            if !status.contains_key(&host) || self.kind(&host) == HostKind::Bitbucket {
+            if !status.contains_key(&host) || self.kind(&host) == Some(HostKind::Bitbucket) {
                 status.insert(host, bitbucket);
             }
         }
         for (host, azure) in self.azure.credential_status() {
-            if !status.contains_key(&host) || self.kind(&host) == HostKind::Azure {
+            if !status.contains_key(&host) || self.kind(&host) == Some(HostKind::Azure) {
                 status.insert(host, azure);
             }
         }
         for (host, github) in self.github.credential_status() {
-            if self.kind(&host) == HostKind::Github {
+            // gh names only GitHub hosts, whatever their names say.
+            if matches!(self.kind(&host), None | Some(HostKind::Github)) {
                 status.insert(host, github);
             }
         }
@@ -815,7 +944,7 @@ mod tests {
     }
 
     /// A host is served by the kind settings give it; otherwise its name decides, and a host
-    /// whose name says nothing is GitHub's, as every host was before hosts had kinds.
+    /// whose name says nothing is of no kind, which goes by its own name.
     #[test]
     fn each_host_goes_to_its_kinds_implementation() {
         let root = std::env::temp_dir().join(format!("tcode-hosts-{}", uuid::Uuid::new_v4()));
@@ -839,14 +968,14 @@ mod tests {
         assert_eq!(name("gitea.acme.test"), "GitHub");
         assert_eq!(name("codeberg.org"), "Forgejo");
         assert_eq!(name("gitea.com"), "Gitea");
-        assert_eq!(name("git.example.com"), "GitHub");
+        assert_eq!(name("git.example.com"), "");
         assert_eq!(name("gitlab.com"), "GitLab");
         assert_eq!(name("gitlab.example.com"), "GitLab");
         assert_eq!(name("gitlab.acme.test"), "Forgejo");
         assert_eq!(name("code.acme.test:8443"), "GitLab");
         assert_eq!(name("bitbucket.org"), "Bitbucket");
         // Bitbucket Data Center is not read as Bitbucket.
-        assert_eq!(name("bitbucket.acme.test"), "GitHub");
+        assert_eq!(name("bitbucket.acme.test"), "");
         // Each Azure DevOps organization is a host of its own, and an older visualstudio.com
         // URL reads as the same one.
         assert_eq!(name("dev.azure.com/fabrikam"), "Azure DevOps");
@@ -886,16 +1015,13 @@ mod tests {
                 .map(|(key, _)| key),
             Some(PullRequestKey::new("codeberg.org", "a/b", 2))
         );
-        assert_eq!(
-            forge
-                .pull_request_url("https://git.example.com/a/b/pull/3")
-                .map(|(key, _)| key),
-            Some(PullRequestKey::new("git.example.com", "a/b", 3))
-        );
-        assert_eq!(
-            forge.pull_request_url("https://git.example.com/a/b/pulls/3"),
-            None
-        );
+        // Nothing reads a URL on a host of no kind, whatever its path looks like.
+        for url in [
+            "https://git.example.com/a/b/pull/3",
+            "https://git.example.com/a/b/pulls/3",
+        ] {
+            assert_eq!(forge.pull_request_url(url), None);
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

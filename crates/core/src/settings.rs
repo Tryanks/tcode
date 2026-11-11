@@ -19,8 +19,9 @@ pub struct SourceControlSettings {
 }
 
 impl SourceControlSettings {
-    /// The kind a host is read as: the one settings give it, configured or found.
-    pub fn kind(&self, host: &str) -> HostKind {
+    /// The kind a host is read as: the one settings give it, configured or found, else the one
+    /// its name says; `None` for a host of no kind Tcode knows.
+    pub fn kind(&self, host: &str) -> Option<HostKind> {
         HostKind::of(
             self.hosts
                 .get(host)

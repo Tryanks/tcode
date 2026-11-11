@@ -87,7 +87,8 @@ impl AddHost {
             store.patch_source_control_host(host.clone(), kind, Some(true), None)
         });
         let store = self.store.clone();
-        let editor = cx.new(|cx| HostEditor::new(store, host, true, false, window, cx));
+        let editor =
+            cx.new(|cx| HostEditor::new(store, host, true, false, window, cx).chosen(kind));
         editor.update(cx, |editor, cx| editor.focus_token(window, cx));
         self.connecting = Some(editor);
         cx.notify();

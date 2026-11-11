@@ -43,7 +43,8 @@ fn mark(kind: HostKind) -> Icon {
 }
 
 /// The platforms to list, each with its kind: configured, reported by the host, and github.com;
-/// by kind, then the kind's public platform, then by name.
+/// by kind, then the kind's public platform, then by name. Each has a kind: settings or a CLI
+/// gave it one, or its name says it.
 fn listed(settings: &SourceControlSettings) -> Vec<(String, HostKind)> {
     let names: BTreeSet<_> = settings
         .hosts
@@ -54,9 +55,9 @@ fn listed(settings: &SourceControlSettings) -> Vec<(String, HostKind)> {
         .collect();
     let mut listed: Vec<_> = names
         .into_iter()
-        .map(|host| {
-            let kind = settings.kind(&host);
-            (host, kind)
+        .filter_map(|host| {
+            let kind = settings.kind(&host)?;
+            Some((host, kind))
         })
         .collect();
     listed.sort_by(|(left, left_kind), (right, right_kind)| {
@@ -81,9 +82,15 @@ pub(crate) struct Platform {
 }
 
 impl Platform {
-    pub(crate) fn read(store: &WorkspaceStore, host: &str) -> Self {
+    /// `chosen` is the kind the user just gave the host, until settings name it; `None` for a
+    /// host of no kind Tcode knows.
+    pub(crate) fn read(
+        store: &WorkspaceStore,
+        host: &str,
+        chosen: Option<HostKind>,
+    ) -> Option<Self> {
         let settings = &store.settings().source_control;
-        let kind = settings.kind(host);
+        let kind = settings.kind(host).or(chosen)?;
         let choice = settings
             .hosts
             .get(host)
@@ -94,13 +101,13 @@ impl Platform {
             .as_ref()
             .map_or(settings.hosts.contains_key(host), |status| status.added)
             && host != kind.public_host();
-        Self {
+        Some(Self {
             host: host.to_owned(),
             kind,
             choice,
             status,
             added,
-        }
+        })
     }
 
     pub(crate) fn source(&self) -> Option<&CredentialSource> {
@@ -530,7 +537,7 @@ impl Render for SourceControlPanel {
         let settings = store.settings().source_control.clone();
         let platforms: Vec<Platform> = listed(&settings)
             .into_iter()
-            .map(|(host, _)| Platform::read(store, &host))
+            .filter_map(|(host, _)| Platform::read(store, &host, None))
             .collect();
         let compact = self.window_state.read(cx).compact;
         let names: Vec<String> = platforms

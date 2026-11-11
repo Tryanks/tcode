@@ -57,7 +57,13 @@ impl AppState {
         }
         let host_kind = match command {
             Command::SetHostToken { host, .. } | Command::VerifyHostToken { host, .. } => {
-                Some((host, self.settings.source_control.kind(host)))
+                let Some(kind) = self.settings.source_control.kind(host) else {
+                    return Err(error(
+                        "unknown_host_kind",
+                        "Choose what kind of host this is before giving it a token.",
+                    ));
+                };
+                Some((host, kind))
             }
             Command::PatchSettings {
                 patch: SettingsPatch::SourceControlHost { host, kind, .. },

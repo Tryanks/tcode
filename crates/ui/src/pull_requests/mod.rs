@@ -744,9 +744,13 @@ fn change_link<T: 'static>(
     .detach();
 }
 
-/// What Tcode says about the pull request host at `host`, by the kind settings give it.
+/// What Tcode says about the pull request host at `host`, by the kind settings give it; a host
+/// of no kind Tcode knows goes by its own name.
 pub(crate) fn host_terms(store: &WorkspaceStore, host: &str) -> &'static HostTerms {
-    store.settings().source_control.kind(host).terms()
+    store.settings().source_control.kind(host).map_or(
+        &tcode_core::pull_request::UNKNOWN,
+        tcode_core::pull_request::HostKind::terms,
+    )
 }
 
 /// The pull request host at `host` as a person reads it.
