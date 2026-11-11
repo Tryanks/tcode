@@ -2600,6 +2600,136 @@ mod tests {
         }
     }
 
+    /// A plan the agent waits on is decided on its block, not in the
+    /// composer: a choice there answers with that option. Words sent from
+    /// the composer while one waits answer it instead, as feedback.
+    #[gpui::test]
+    fn a_plan_is_decided_on_its_block_and_answered_in_words_from_the_composer(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{Modifiers, VisualTestContext, px, size};
+
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (store, window_state, session_id, mut driver, scripted) = seed_chat_scripted(
+            cx,
+            log_of(&Timeline::default()),
+            false,
+            Some(agent::ProviderKind::ClaudeCode),
+            true,
+        );
+        let (commands, events) = scripted.expect("the provider is scripted");
+        driver.command(
+            cx,
+            tcode_protocol::Command::SendTurn {
+                session_id: session_id.clone(),
+                text: "Plan it first".into(),
+                attachment_paths: Vec::new(),
+            },
+        );
+        while !matches!(
+            driver.recv(cx, &commands),
+            agent::SessionCommand::SendTurn { .. }
+        ) {}
+        let (chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(800.)));
+        let propose = |id: &str, request: &str| {
+            let markdown = format!("# Plan {id}\n\n1. Write hello.txt");
+            for event in [
+                agent::AgentEvent::ItemStarted(agent::ThreadItem {
+                    id: id.into(),
+                    parent_item_id: None,
+                    content: ItemContent::Plan {
+                        markdown: markdown.clone(),
+                    },
+                }),
+                agent::AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                    id: request.into(),
+                    turn_id: None,
+                    parent_item_id: None,
+                    kind: agent::ApprovalKind::Plan {
+                        item_id: id.into(),
+                        markdown,
+                    },
+                    reason: None,
+                    blocked_path: None,
+                    options: vec![
+                        agent::ApprovalOption {
+                            id: "allow".into(),
+                            label: "Approve".into(),
+                            kind: agent::ApprovalOptionKind::AllowOnce,
+                        },
+                        agent::ApprovalOption {
+                            id: "deny".into(),
+                            label: "Keep planning".into(),
+                            kind: agent::ApprovalOptionKind::RejectOnce,
+                        },
+                    ],
+                }),
+            ] {
+                events.try_send(event).expect("provider event");
+            }
+        };
+        let decided = |driver: &mut crate::store::tests::LocalHostDriver,
+                       cx: &mut VisualTestContext| loop {
+            if let agent::SessionCommand::RespondApproval {
+                request_id,
+                decision,
+            } = driver.recv(cx, &commands)
+            {
+                return (request_id, decision);
+            }
+        };
+
+        propose("plan-1", "decide-1");
+        driver.settle_until(cx, "the first plan's decision", |cx| {
+            cx.debug_bounds("plan-decision").is_some()
+        });
+        assert!(
+            cx.debug_bounds("approval-header").is_none(),
+            "a plan is decided on its block, not in the composer"
+        );
+        let approve = cx
+            .debug_bounds("plan-option-allow")
+            .expect("approve button");
+        cx.simulate_click(approve.center(), Modifiers::default());
+        assert_eq!(
+            decided(&mut driver, cx),
+            (
+                "decide-1".to_string(),
+                agent::ApprovalDecision::Option("allow".into())
+            )
+        );
+        // The first plan's choices go once the host has told this window
+        // the plan is answered; only then is a decision drawn the second's.
+        driver.settle_until(cx, "the first plan answered", |cx| {
+            cx.debug_bounds("plan-decision").is_none()
+        });
+
+        propose("plan-2", "decide-2");
+        driver.settle_until(cx, "the second plan's decision", |cx| {
+            cx.debug_bounds("plan-decision").is_some()
+        });
+        chat.update_in(cx, |chat, window, cx| chat.focus_composer(window, cx));
+        cx.simulate_input("Split step one");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            decided(&mut driver, cx),
+            (
+                "decide-2".to_string(),
+                agent::ApprovalDecision::Feedback("Split step one".into())
+            )
+        );
+    }
+
     /// A finished turn's fork is beside its answer's Copy where the Harness
     /// has one, whatever it is called, and never on a user message or a turn
     /// still running. Used, it opens a thread that names where it came from.
