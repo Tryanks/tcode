@@ -231,7 +231,7 @@ background:
   running: "%{harness} · %{count} 件実行中"
   stop: "停止"
   stop_task: "この作業を停止"
-  stop_all: "すべて停止"
+  stop_all: "すべてのバックグラウンドタスクを停止"
   stop_confirm_title: "この %{count} 件を停止しますか？"
   stop_confirm_description: "停止するもの：\n%{names}"
   stop_confirm: "停止"
