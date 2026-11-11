@@ -51,6 +51,35 @@ fn a_history_directory_the_scan_cannot_read_is_reported() {
     );
 }
 
+/// A Codex rollout that does not start with the session_meta Codex reads its
+/// thread from is reported as unreadable rather than left out unsaid.
+#[test]
+fn a_codex_rollout_without_its_session_meta_is_reported() {
+    let home = std::env::temp_dir().join(format!("tcode-codex-{}", uuid::Uuid::new_v4()));
+    let day = home.join("sessions/2026/01/02");
+    std::fs::create_dir_all(&day).unwrap();
+    let rollout =
+        day.join("rollout-2026-01-02T03-04-05-00000000-0000-4000-8000-000000000041.jsonl");
+    std::fs::write(&rollout, "{\"timestamp\":\"2026-01-02T03:04:05.000Z\",\n").unwrap();
+    let history = super::scan_recent_dirs(
+        &super::ExternalRoots {
+            claude_projects: Vec::new(),
+            claude_desktop_meta: None,
+            codex_session_roots: vec![(None, home.join("sessions"))],
+        },
+        &[],
+    );
+    std::fs::remove_dir_all(&home).unwrap();
+    assert!(history.dirs.is_empty());
+    let [unreadable] = &history.unreadable[..] else {
+        panic!("{:?}", history.unreadable);
+    };
+    assert!(
+        unreadable.starts_with(&rollout.display().to_string()),
+        "{unreadable}"
+    );
+}
+
 /// What the thread shows, in order: each item's content, `None` for a
 /// compaction.
 fn shown(thread: ConvertedThread) -> Vec<Option<ItemContent>> {

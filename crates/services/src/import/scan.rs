@@ -134,17 +134,23 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Ext
                     continue;
                 }
             };
-            let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            if value.get("type").and_then(Value::as_str) != Some("session_meta") {
-                continue;
-            }
-            let payload = value.get("payload").unwrap_or(&Value::Null);
-            let Some(id) = payload.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(cwd) = payload.get("cwd").and_then(Value::as_str) else {
+            // Codex reads a rollout's thread from the session_meta it starts
+            // with; one without it cannot be resumed there either.
+            let value = serde_json::from_str::<Value>(&line)
+                .ok()
+                .filter(|value| value.get("type").and_then(Value::as_str) == Some("session_meta"));
+            let payload = value.as_ref().and_then(|value| value.get("payload"));
+            let head = payload.and_then(|payload| {
+                Some((
+                    payload.get("id").and_then(Value::as_str)?,
+                    payload.get("cwd").and_then(Value::as_str)?,
+                ))
+            });
+            let (Some(value), Some(payload), Some((id, cwd))) = (&value, payload, head) else {
+                unreadable.push(format!(
+                    "{}: does not start with a session_meta naming its thread and directory",
+                    path.display()
+                ));
                 continue;
             };
             let originator = payload.get("originator").and_then(Value::as_str);
