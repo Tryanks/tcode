@@ -85,6 +85,7 @@ impl WorkspaceStore {
                 | Command::RemoveProviderMarketplace { .. }
                 | Command::ResolvePluginChallenge { .. }
                 | Command::CancelPluginOperation { .. }
+                | Command::StopPluginListing { .. }
         )
     }
 
@@ -1515,6 +1516,9 @@ impl WorkspaceStore {
     }
     pub fn resolve_plugin_challenge(&mut self, op_id: RuntimeOperationId, accept: bool) {
         self.dispatch(Command::ResolvePluginChallenge { op_id, accept });
+    }
+    pub fn stop_plugin_listing(&mut self, profile_id: String) {
+        self.dispatch(Command::StopPluginListing { profile_id });
     }
     pub fn cancel_plugin_operation(&mut self, profile_id: String) {
         self.dispatch(Command::CancelPluginOperation { profile_id });

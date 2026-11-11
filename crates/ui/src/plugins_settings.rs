@@ -23,8 +23,8 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use tcode_protocol::{
-    PluginCatalogState, PluginChallenge, PluginChallengeKind, ProviderPluginCatalog,
-    RuntimeOperationId,
+    PluginCatalogState, PluginChallenge, PluginChallengeKind, PluginStaleReason,
+    ProviderPluginCatalog, RuntimeOperationId,
 };
 
 use crate::icon::{Icon, IconName};
@@ -190,6 +190,14 @@ impl Account {
             .into_iter()
             .flatten()
             .any(|catalog| catalog.loading)
+    }
+
+    /// Whether the user stopped one of its listings before it finished.
+    fn stopped(&self) -> bool {
+        [&self.user, &self.project]
+            .into_iter()
+            .flatten()
+            .any(stopped)
     }
 
     fn failure(&self) -> Option<String> {
@@ -1114,6 +1122,11 @@ impl PluginsSettingsPanel {
         let body = if user_rows.is_empty() {
             if listing {
                 note_card(crate::tr!("providers.plugins.listing").into_owned(), cx)
+            } else if columns
+                .iter()
+                .any(|account| account.user.as_ref().is_some_and(stopped))
+            {
+                note_card(crate::tr!("providers.plugins.stopped").into_owned(), cx)
             } else {
                 self.empty_user(kind, &accounts, cx)
             }
@@ -1194,16 +1207,40 @@ impl PluginsSettingsPanel {
                     .child(state)
             })
             .collect();
-        let refresh = Button::new("plugins-refresh")
-            .debug_selector(|| "plugins-refresh".into())
-            .ghost()
-            .small()
-            .icon(IconName::RotateCcw)
-            .tooltip(crate::tr!(
-                "providers.plugins.refresh",
-                name = kind.display_name()
-            ))
-            .on_click(cx.listener(move |this, _, _, cx| this.relist(kind, cx)));
+        let listing: Vec<String> = accounts
+            .iter()
+            .filter(|account| account.loading())
+            .map(|account| account.id.clone())
+            .collect();
+        let refresh = if listing.is_empty() {
+            Button::new("plugins-refresh")
+                .debug_selector(|| "plugins-refresh".into())
+                .ghost()
+                .small()
+                .icon(IconName::RotateCcw)
+                .tooltip(crate::tr!(
+                    "providers.plugins.refresh",
+                    name = kind.display_name()
+                ))
+                .on_click(cx.listener(move |this, _, _, cx| this.relist(kind, cx)))
+        } else {
+            Button::new("plugins-stop-listing")
+                .debug_selector(|| "plugins-stop-listing".into())
+                .ghost()
+                .small()
+                .icon(IconName::Square)
+                .tooltip(crate::tr!(
+                    "providers.plugins.stop_listing",
+                    name = kind.display_name()
+                ))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.store.update(cx, |store, _| {
+                        for profile_id in &listing {
+                            store.stop_plugin_listing(profile_id.clone());
+                        }
+                    })
+                }))
+        };
         let installs = plugins_of(self.store.read(cx), kind).supports(PluginActionKind::Install);
         let browse = installs.then(|| {
             self.install_button("plugins-browse", kind, accounts, compact, cx)
@@ -1297,10 +1334,11 @@ impl PluginsSettingsPanel {
                         .flat_map(|catalog| catalog.errors.iter().cloned()),
                 )
                 .collect();
-            if errors.is_empty() {
+            let failed = account.failure().is_some();
+            let stopped = !failed && account.stopped();
+            if errors.is_empty() && !stopped {
                 continue;
             }
-            let failed = account.failure().is_some();
             let tone = if failed {
                 cx.theme().danger
             } else {
@@ -1326,6 +1364,12 @@ impl PluginsSettingsPanel {
                                             name = account.name
                                         )
                                         .into_owned()
+                                    } else if stopped {
+                                        crate::tr!(
+                                            "providers.plugins.list_stopped",
+                                            name = account.name
+                                        )
+                                        .into_owned()
                                     } else {
                                         crate::tr!(
                                             "providers.plugins.catalog_errors",
@@ -1337,7 +1381,7 @@ impl PluginsSettingsPanel {
                                         div().text_meta_mono(false, cx).child(verbatim(error, cx))
                                     })),
                             )
-                            .when(failed, |row| {
+                            .when(failed || stopped, |row| {
                                 row.child(
                                     Button::new(SharedString::from(format!(
                                         "plugins-retry-{}",
@@ -2313,6 +2357,11 @@ impl PluginsSettingsPanel {
                     )
                 } else if listing {
                     note_card(crate::tr!("providers.plugins.listing").into_owned(), cx)
+                } else if columns
+                    .iter()
+                    .any(|account| account.project.as_ref().is_some_and(stopped))
+                {
+                    note_card(crate::tr!("providers.plugins.stopped").into_owned(), cx)
                 } else {
                     note_card(
                         crate::tr!("providers.plugins.no_project_plugins").into_owned(),
@@ -2351,8 +2400,9 @@ impl PluginsSettingsPanel {
                 }
             }
         }
+        let names_empty = names.is_empty();
         // A listing still running has not said which marketplaces there are.
-        let listing = names.is_empty()
+        let listing = names_empty
             && columns.iter().all(|account| {
                 account
                     .user
@@ -2526,6 +2576,12 @@ impl PluginsSettingsPanel {
         }
         let body = if listing {
             note_card(crate::tr!("providers.plugins.listing").into_owned(), cx)
+        } else if names_empty
+            && columns
+                .iter()
+                .any(|account| account.user.as_ref().is_some_and(stopped))
+        {
+            note_card(crate::tr!("providers.plugins.stopped").into_owned(), cx)
         } else if rows.is_empty() {
             note_card(
                 crate::tr!("providers.plugins.no_marketplaces").into_owned(),
@@ -3066,6 +3122,13 @@ fn note_row(text: String, cx: &App) -> AnyElement {
 }
 
 /// A card holding one muted line, for a section with nothing to list.
+fn stopped(catalog: &ProviderPluginCatalog) -> bool {
+    catalog.state
+        == PluginCatalogState::Stale {
+            reason: PluginStaleReason::Stopped,
+        }
+}
+
 fn note_card(text: String, cx: &App) -> AnyElement {
     material::grouped(vec![note_row(text, cx)], cx).into_any_element()
 }

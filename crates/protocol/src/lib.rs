@@ -388,6 +388,7 @@ pub use wire::{
 // running too, and answers unknown_session or git's or the file system's error
 // where it was an empty list.
 // ProvidersStatus gains acp_registry_loaded and loses acp_registry_loading.
+// Command gains stop_plugin_listing; PluginStaleReason gains stopped.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

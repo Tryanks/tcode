@@ -6,7 +6,6 @@
 //! `grok inspect` reports a disabled plugin as enabled.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -19,21 +18,12 @@ use crate::{
     native_message,
 };
 
-const LIST_TIMEOUT: Duration = Duration::from_secs(60);
 const DETAILS_CONCURRENCY: usize = 4;
 
 pub(crate) async fn list(context: &PluginContext) -> Result<PluginListing, AgentError> {
     let (plugins, marketplaces) = smol::future::zip(
-        run_cli(
-            context,
-            &args(&["plugin", "list", "--json", "--available"]),
-            Some(LIST_TIMEOUT),
-        ),
-        run_cli(
-            context,
-            &args(&["plugin", "marketplace", "list", "--json"]),
-            Some(LIST_TIMEOUT),
-        ),
+        run_cli(context, &args(&["plugin", "list", "--json", "--available"])),
+        run_cli(context, &args(&["plugin", "marketplace", "list", "--json"])),
     )
     .await;
     let plugins = parse_listed(&succeeded(plugins?)?)?;
@@ -55,13 +45,9 @@ pub(crate) async fn list(context: &PluginContext) -> Result<PluginListing, Agent
                 let (index, name) = (*index, name.clone());
                 smol::spawn(async move {
                     let details = match operand(&name) {
-                        Ok(name) => run_cli(
-                            &context,
-                            &["plugin".into(), "details".into(), name],
-                            Some(LIST_TIMEOUT),
-                        )
-                        .await
-                        .and_then(succeeded),
+                        Ok(name) => run_cli(&context, &["plugin".into(), "details".into(), name])
+                            .await
+                            .and_then(succeeded),
                         Err(error) => Err(error),
                     };
                     (index, details)
@@ -89,20 +75,20 @@ pub(crate) async fn run(
     let mut argv = op_args(op)?;
     match op {
         PluginOp::Install { accept_command, .. } => {
-            let untrusted = run_cli(context, &argv, None).await?;
+            let untrusted = run_cli(context, &argv).await?;
             match install_step(untrusted, accept_command.as_deref())? {
                 InstallStep::Finished(outcome) => Ok(outcome),
                 InstallStep::Trust => {
                     argv.push("--trust".into());
-                    message_outcome(run_cli(context, &argv, None).await?)
+                    message_outcome(run_cli(context, &argv).await?)
                 }
             }
         }
         PluginOp::Update { .. } => {
-            let stdout = succeeded(run_cli(context, &argv, None).await?)?;
+            let stdout = succeeded(run_cli(context, &argv).await?)?;
             Ok(update_outcome(&stdout))
         }
-        _ => message_outcome(run_cli(context, &argv, None).await?),
+        _ => message_outcome(run_cli(context, &argv).await?),
     }
 }
 
@@ -130,25 +116,13 @@ struct CliOutput {
     stderr: String,
 }
 
-async fn run_cli(
-    context: &PluginContext,
-    args: &[String],
-    bound: Option<Duration>,
-) -> Result<CliOutput, AgentError> {
+async fn run_cli(context: &PluginContext, args: &[String]) -> Result<CliOutput, AgentError> {
     let display = format!("grok {}", args.join(" "));
-    // A listing, which no one can stop, is bounded; a change runs until it
-    // ends or the user cancels it, which drops this and stops the command.
-    let output = crate::process::tree_output(management_command(context, args)?);
-    let output = match bound {
-        Some(bound) => smol::future::or(async { Some(output.await) }, async {
-            smol::Timer::after(bound).await;
-            None
-        })
+    // The command runs until it ends or the user stops it, which drops this
+    // and stops the command.
+    let output = crate::process::tree_output(management_command(context, args)?)
         .await
-        .ok_or_else(|| AgentError::Provider(format!("`{display}` timed out")))?,
-        None => output.await,
-    }
-    .map_err(|error| AgentError::Spawn(format!("spawning `{display}`: {error}")))?;
+        .map_err(|error| AgentError::Spawn(format!("spawning `{display}`: {error}")))?;
     Ok(CliOutput {
         success: output.status.success(),
         status: output.status.to_string(),

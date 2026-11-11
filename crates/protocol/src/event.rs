@@ -612,6 +612,8 @@ pub enum PluginStaleReason {
     ContextChanged,
     /// A native change went through and has not been listed yet.
     Changed,
+    /// The user stopped the listing before it finished.
+    Stopped,
 }
 
 /// A native confirmation an operation is waiting on. It is answered with

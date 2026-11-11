@@ -1,9 +1,8 @@
 //! Claude Code's native plugin management, driven through `claude plugin …`
-//! with one bounded child process per command.
+//! with one child process per command.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -16,7 +15,6 @@ use crate::{
     Tri, native_message,
 };
 
-const LIST_TIMEOUT: Duration = Duration::from_secs(60);
 const DETAILS_CONCURRENCY: usize = 4;
 const OFFICIAL_MARKETPLACE: &str = "claude-plugins-official";
 const OFFICIAL_MARKETPLACE_REPO: &str = "anthropics/claude-plugins-official";
@@ -33,16 +31,8 @@ const NESTED_SESSION_VARS: [&str; 3] = [
 
 pub(crate) async fn list(context: &PluginContext) -> Result<PluginListing, AgentError> {
     let (plugins, marketplaces) = smol::future::zip(
-        run_cli(
-            context,
-            &args(&["plugin", "list", "--json", "--available"]),
-            Some(LIST_TIMEOUT),
-        ),
-        run_cli(
-            context,
-            &args(&["plugin", "marketplace", "list", "--json"]),
-            Some(LIST_TIMEOUT),
-        ),
+        run_cli(context, &args(&["plugin", "list", "--json", "--available"])),
+        run_cli(context, &args(&["plugin", "marketplace", "list", "--json"])),
     )
     .await;
     let plugins = parse_listed(&succeeded(plugins?)?)?;
@@ -76,13 +66,9 @@ pub(crate) async fn list(context: &PluginContext) -> Result<PluginListing, Agent
                 let context = context.clone();
                 let id = id.clone();
                 smol::spawn(async move {
-                    let output = run_cli(
-                        &context,
-                        &args(&["plugin", "details", &id]),
-                        Some(LIST_TIMEOUT),
-                    )
-                    .await
-                    .and_then(succeeded);
+                    let output = run_cli(&context, &args(&["plugin", "details", &id]))
+                        .await
+                        .and_then(succeeded);
                     (id, output)
                 })
             })
@@ -108,7 +94,7 @@ pub(crate) async fn run(
     context: &PluginContext,
     op: &PluginOp,
 ) -> Result<PluginOpOutcome, AgentError> {
-    let output = run_cli(context, &op_args(op)?, None).await?;
+    let output = run_cli(context, &op_args(op)?).await?;
     match op {
         PluginOp::AddMarketplace { .. } | PluginOp::RemoveMarketplace { .. } => {
             let stdout = succeeded(output)?;
@@ -157,25 +143,13 @@ struct CliOutput {
     stderr: String,
 }
 
-async fn run_cli(
-    context: &PluginContext,
-    args: &[String],
-    bound: Option<Duration>,
-) -> Result<CliOutput, AgentError> {
+async fn run_cli(context: &PluginContext, args: &[String]) -> Result<CliOutput, AgentError> {
     let display = format!("claude {}", args.join(" "));
-    // A listing, which no one can stop, is bounded; a change runs until it
-    // ends or the user cancels it, which drops this and stops the command.
-    let output = crate::process::tree_output(management_command(context, args)?);
-    let output = match bound {
-        Some(bound) => smol::future::or(async { Some(output.await) }, async {
-            smol::Timer::after(bound).await;
-            None
-        })
+    // The command runs until it ends or the user stops it, which drops this
+    // and stops the command.
+    let output = crate::process::tree_output(management_command(context, args)?)
         .await
-        .ok_or_else(|| AgentError::Provider(format!("`{display}` timed out")))?,
-        None => output.await,
-    }
-    .map_err(|error| AgentError::Spawn(format!("spawning `{display}`: {error}")))?;
+        .map_err(|error| AgentError::Spawn(format!("spawning `{display}`: {error}")))?;
     Ok(CliOutput {
         success: output.status.success(),
         status: output.status.to_string(),

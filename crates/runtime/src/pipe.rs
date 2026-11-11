@@ -858,6 +858,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::CancelPluginOperation { profile_id } => {
             app.cancel_plugin_operation(&profile_id, cx)
         }
+        Command::StopPluginListing { profile_id } => app.stop_plugin_listing(&profile_id),
         Command::ResetSettings => app.reset_settings(cx),
         Command::WriteRelaunchMarker {
             session_id,

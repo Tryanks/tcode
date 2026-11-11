@@ -35,7 +35,8 @@ pub(super) struct PluginCatalog {
     launch: PluginLaunch,
     listing: PluginListing,
     state: PluginCatalogState,
-    loading: bool,
+    /// The listing running, which stops when this is dropped.
+    listing_task: Option<HostTask<()>>,
     /// Bumped when the context or the profile's CLI/home changes; listings
     /// and challenges from an older generation are discarded.
     generation: u64,
@@ -116,7 +117,7 @@ impl AppState {
                 state: PluginCatalogState::Stale {
                     reason: PluginStaleReason::NotLoaded,
                 },
-                loading: false,
+                listing_task: None,
                 generation: 0,
                 list_request: 0,
                 operation: None,
@@ -168,14 +169,14 @@ impl AppState {
             return;
         };
         catalog.list_request += 1;
-        catalog.loading = true;
         let request = catalog.list_request;
         let provider = catalog.launch.provider;
         let cwd = catalog.context_cwd.clone();
         let context = self.plugin_context(&key.profile_id, cwd, cx);
+        let owner = key.clone();
         let key = key.clone();
         let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
+        let task = cx.spawn_background(async move {
             let result = match context.await {
                 Ok(context) => list_plugins(provider, &context).await,
                 Err(error) => Err(error),
@@ -187,7 +188,7 @@ impl AppState {
                 if catalog.list_request != request {
                     return;
                 }
-                catalog.loading = false;
+                catalog.listing_task = None;
                 match result {
                     Ok(listing) => {
                         catalog.listing = listing;
@@ -201,6 +202,23 @@ impl AppState {
                 }
             });
         });
+        // A listing started while another runs replaces it, which stops it.
+        if let Some(catalog) = self.plugin_catalogs.get_mut(&owner) {
+            catalog.listing_task = Some(task);
+        }
+    }
+
+    /// Stop the profile's listings still running. What each catalog last
+    /// listed stays, marked stopped, until it is listed again.
+    pub(crate) fn stop_plugin_listing(&mut self, profile_id: &str) {
+        for (key, catalog) in self.plugin_catalogs.iter_mut() {
+            if key.profile_id == profile_id && catalog.listing_task.take().is_some() {
+                catalog.list_request += 1;
+                catalog.state = PluginCatalogState::Stale {
+                    reason: PluginStaleReason::Stopped,
+                };
+            }
+        }
     }
 
     /// Check a plugin command against the catalog it was offered from, so a
@@ -707,7 +725,7 @@ impl AppState {
                         reason: PluginStaleReason::ContextChanged,
                     }
                 },
-                loading: catalog.loading,
+                loading: catalog.listing_task.is_some(),
                 pending: catalog
                     .operation
                     .iter()

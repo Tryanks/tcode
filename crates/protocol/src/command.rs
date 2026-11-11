@@ -300,6 +300,11 @@ pub enum Command {
     CancelPluginOperation {
         profile_id: String,
     },
+    /// Stop the profile's plugin listings still running and the commands
+    /// they run; each catalog keeps what it last listed, marked stopped.
+    StopPluginListing {
+        profile_id: String,
+    },
     ResetSettings,
     WriteRelaunchMarker {
         /// The thread to reopen; absent when none is on screen.
