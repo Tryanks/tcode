@@ -748,6 +748,8 @@ struct PendingApproval {
     replies: HashMap<String, Value>,
     cancel_reply: Value,
     cancel_interrupt: Option<Value>,
+    /// The command or file change the approval would let run.
+    item_id: Option<String>,
 }
 
 struct PendingElicitation {
@@ -2553,6 +2555,7 @@ impl Actor {
                 cancel_interrupt: (method == "item/permissions/requestApproval").then(
                     || json!({"threadId":params.get("threadId"),"turnId":params.get("turnId")}),
                 ),
+                item_id: (!item_id.is_empty()).then(|| item_id.to_owned()),
             },
         );
         self.events
@@ -2640,6 +2643,7 @@ impl Actor {
                     replies,
                     cancel_reply: json!({"action":"cancel"}),
                     cancel_interrupt: None,
+                    item_id: None,
                 },
             );
             self.events
@@ -3313,11 +3317,34 @@ impl Actor {
             return;
         };
         let request_id = request_id_string(id);
-        let event = if self.approvals.remove(&request_id).is_some() {
-            AgentEvent::ApprovalResolved {
-                request_id,
-                decision: ApprovalDecision::Cancel,
+        let event = if let Some(approval) = self.approvals.remove(&request_id) {
+            self.events
+                .emit(AgentEvent::ApprovalResolved {
+                    request_id,
+                    decision: ApprovalDecision::Cancel,
+                })
+                .await;
+            // Codex started the item when it asked, and on settling the
+            // request itself, as a turn's end does, drops the item without
+            // completing it (`on_command_execution_request_approval_response`
+            // and its file-change twin in `bespoke_event_handling.rs`
+            // return on a turn-transition error): it never ran.
+            let Some(mut item) = approval
+                .item_id
+                .and_then(|item_id| self.items.get(&item_id).cloned())
+                .filter(|item| item_status(&item.content) == ItemStatus::InProgress)
+            else {
+                return;
+            };
+            if let ItemContent::CommandExecution { status, .. }
+            | ItemContent::FileChange { status, .. } = &mut item.content
+            {
+                *status = ItemStatus::Interrupted;
+            } else {
+                return;
             }
+            self.items.insert(item.id.clone(), item.clone());
+            AgentEvent::ItemCompleted(item)
         } else if self.user_inputs.remove(&request_id).is_some()
             || self.elicitations.remove(&request_id).is_some()
         {
