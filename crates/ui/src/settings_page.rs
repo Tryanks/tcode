@@ -210,8 +210,9 @@ struct RemotePanels {
     #[cfg(feature = "remote-hosting")]
     machine_spaces: Entity<crate::remote::SpacesSection>,
     group: Entity<crate::remote::GroupSection>,
+    /// Where this process hosts; the section is not offered elsewhere.
     #[cfg(feature = "remote-hosting")]
-    traverse: Entity<crate::remote::TraversePanel>,
+    traverse: Option<Entity<crate::remote::TraversePanel>>,
 }
 
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -244,7 +245,9 @@ impl RemotePanels {
             }),
             group: cx.new(|_| crate::remote::GroupSection::new(store.clone(), resolve)),
             #[cfg(feature = "remote-hosting")]
-            traverse: cx.new(|cx| crate::remote::TraversePanel::new(window, cx)),
+            traverse: cx
+                .has_global::<crate::remote::RemoteController>()
+                .then(|| cx.new(|cx| crate::remote::TraversePanel::new(window, cx))),
         }
     }
 }
@@ -1714,7 +1717,7 @@ impl SettingsPage {
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Section::Group => v_flex().child(self.remote.group.clone()),
             #[cfg(feature = "remote-hosting")]
-            Section::Traverse => v_flex().child(self.remote.traverse.clone()),
+            Section::Traverse => v_flex().children(self.remote.traverse.clone()),
             Section::Archived => self.render_archived(window, cx),
             Section::Maintenance => self.render_maintenance(window, cx),
         };

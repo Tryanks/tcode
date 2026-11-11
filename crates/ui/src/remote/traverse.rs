@@ -53,6 +53,8 @@ struct TraverseRow {
 pub struct TraversePanel {
     /// The sources in order, the official service first.
     rows: Vec<TraverseRow>,
+    /// The saved setting the rows last took up or saved.
+    saved: TraverseSetting,
     /// The URL of a self-hosted instance about to be added.
     add_input: Entity<InputState>,
     /// Repaints the status as it changes while hosting.
@@ -60,27 +62,20 @@ pub struct TraversePanel {
     /// The panel's size-class motion: the window draws it under another
     /// parent when it turns compact or wide.
     motion: crate::motion::owned::Owned,
-    _subscription: gpui::Subscription,
+    _subscriptions: [gpui::Subscription; 2],
 }
 
 impl TraversePanel {
+    /// Built only where this process hosts: the page edits the
+    /// [`RemoteController`]'s Traverse setting, and follows it when another
+    /// host's settings page saves it.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let traverse = cx
-            .try_global::<RemoteController>()
-            .map(|controller| controller.local_settings().traverse.clone())
-            .unwrap_or_default();
-        let rows = traverse
-            .sources
-            .iter()
-            .map(|source| TraverseRow {
-                enabled: source.enabled,
-                expanded: false,
-                url: match &source.instance {
-                    TraverseInstance::Official => None,
-                    TraverseInstance::Custom { url } => Some(url_input(url, window, cx)),
-                },
-            })
-            .collect();
+        let saved = cx
+            .global::<RemoteController>()
+            .local_settings()
+            .traverse
+            .clone();
+        let rows = rows_for(&saved, window, cx);
         let add_input = cx.new(|cx| InputState::new(window, cx));
         // Enter adds the typed instance; the field repaints as the URL turns
         // valid.
@@ -93,22 +88,32 @@ impl TraversePanel {
                 InputEvent::Blur | InputEvent::Focus => {}
             },
         );
+        let follow = cx.observe_global_in::<RemoteController>(window, |this, window, cx| {
+            let saved = cx
+                .global::<RemoteController>()
+                .local_settings()
+                .traverse
+                .clone();
+            if saved != this.saved {
+                this.rows = rows_for(&saved, window, cx);
+                this.saved = saved;
+                cx.notify();
+            }
+        });
         Self {
             rows,
+            saved,
             add_input,
             status_events: None,
             motion: Default::default(),
-            _subscription: subscription,
+            _subscriptions: [subscription, follow],
         }
     }
 
     fn follow_status(&mut self, hosting: bool, cx: &mut Context<Self>) {
         match (hosting, self.status_events.is_some()) {
             (true, false) => {
-                let Some(events) = cx
-                    .try_global::<RemoteController>()
-                    .and_then(RemoteController::traverse_events)
-                else {
+                let Some(events) = cx.global::<RemoteController>().traverse_events() else {
                     return;
                 };
                 self.status_events = Some(cx.spawn(async move |this, cx| {
@@ -204,12 +209,11 @@ impl TraversePanel {
     /// effect at once. Nothing happens while they match what is saved or are
     /// incomplete, so leaving a field untouched never restarts the host.
     fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(controller) = cx.try_global::<RemoteController>() else {
-            return;
-        };
+        let controller = cx.global::<RemoteController>();
         let name = controller.local_settings().remote_host_name.clone();
         match self.typed(cx) {
             Some(traverse) if traverse != controller.local_settings().traverse => {
+                self.saved = traverse.clone();
                 // The hosting switch that shows a failure is on another page.
                 if let Err(error) = apply_hosting_settings(traverse, name, cx) {
                     window.push_notification(Notification::error(error), cx);
@@ -274,10 +278,8 @@ impl TraversePanel {
     ) -> Vec<AnyElement> {
         let motion = self.motion.clone();
         let urls = self.typed_urls(cx);
-        let (hosting, statuses) = cx
-            .try_global::<RemoteController>()
-            .map(|controller| (controller.is_hosting(), controller.traverse_status()))
-            .unwrap_or_default();
+        let controller = cx.global::<RemoteController>();
+        let (hosting, statuses) = (controller.is_hosting(), controller.traverse_status());
         self.follow_status(hosting, cx);
         // A source keeps its key for as long as it is listed, whatever its
         // place: a removed one folds away and the ones below move up.
@@ -498,6 +500,26 @@ fn url_controls(
 
 /// The field holding a self-hosted instance's URL, which takes effect when it
 /// is left or Enter is pressed.
+/// One row per saved source.
+fn rows_for(
+    traverse: &TraverseSetting,
+    window: &mut Window,
+    cx: &mut Context<TraversePanel>,
+) -> Vec<TraverseRow> {
+    traverse
+        .sources
+        .iter()
+        .map(|source| TraverseRow {
+            enabled: source.enabled,
+            expanded: false,
+            url: match &source.instance {
+                TraverseInstance::Official => None,
+                TraverseInstance::Custom { url } => Some(url_input(url, window, cx)),
+            },
+        })
+        .collect()
+}
+
 fn url_input(
     url: &str,
     window: &mut Window,
