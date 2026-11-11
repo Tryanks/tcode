@@ -715,7 +715,7 @@ impl LatestActivity {
                 ..
             } => match family.as_deref() {
                 Some(ToolFamily::Read { path, .. }) => Self::Read { path: clip(path) },
-                None => Self::Tool {
+                _ => Self::Tool {
                     name: clip(name),
                     target: identifying_argument(input).map(|target| clip(&target)),
                 },

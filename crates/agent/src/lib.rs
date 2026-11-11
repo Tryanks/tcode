@@ -3094,6 +3094,47 @@ pub enum ToolFamily {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
+    /// A search of the workspace. The call's `output` stays the harness's
+    /// whole answer, `hits` what its adapter read out of it.
+    Search {
+        scope: SearchScope,
+        /// What it looked for: a pattern of text, or of file names.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+        /// Where it looked, as the harness was asked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        /// The files it looked in, when it was narrowed to some.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        glob: Option<String>,
+        /// What it found, once it finished and its result could be read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hits: Option<Vec<SearchHit>>,
+    },
+}
+
+/// What a search looked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchScope {
+    /// Lines of files matching a pattern.
+    Content,
+    /// Files whose names match a pattern.
+    Files,
+    /// What a directory holds.
+    Entries,
+}
+
+/// One thing a search found: a file or directory, or a line of a file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHit {
+    /// Absolute, or relative to the directory the session works in.
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
+    /// The matching line's text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

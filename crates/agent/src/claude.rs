@@ -44,9 +44,9 @@ use crate::{
     ApprovalRequest, Attachment, CatalogRefresh, DeltaKind, FileChange, FileChangeKind, GoalStatus,
     ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
     PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode,
-    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput,
-    TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion, WorktreeAnswer,
-    WorktreeRequest, selection_bool, selection_str,
+    SearchHit, SearchScope, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
+    ToolFamily, ToolOutput, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion,
+    WorktreeAnswer, WorktreeRequest, selection_bool, selection_str,
 };
 
 /// The hook callbacks `initialize` registers. With `onFailure: "block"` an error
@@ -4480,9 +4480,82 @@ fn tool_family(
                 note: None,
             }
         }
+        // `GrepOutput`: `filenames` in `files_with_matches` mode (relative
+        // to the working directory), `content` in `content` mode, rg's
+        // `path:N:text` lines (`N:text` when it searched one file).
+        "Grep" => {
+            let path = text("path").map(str::to_owned);
+            let hits = structured.and_then(|result| {
+                match text("output_mode").unwrap_or("files_with_matches") {
+                    "files_with_matches" => filenames(result),
+                    "content" => result
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .map(|content| grep_lines(content, path.as_deref())),
+                    _ => None,
+                }
+            });
+            ToolFamily::Search {
+                scope: SearchScope::Content,
+                pattern: text("pattern").map(str::to_owned),
+                path,
+                glob: text("glob").map(str::to_owned),
+                hits,
+            }
+        }
+        // `GlobOutput`: the files it found, as `filenames`.
+        "Glob" => ToolFamily::Search {
+            scope: SearchScope::Files,
+            pattern: text("pattern").map(str::to_owned),
+            path: text("path").map(str::to_owned),
+            glob: None,
+            hits: structured.and_then(filenames),
+        },
         _ => return (None, output),
     };
     (Some(family), output)
+}
+
+/// A Grep or Glob output's `filenames`, each a file it found.
+fn filenames(result: &Value) -> Option<Vec<SearchHit>> {
+    let names = result.get("filenames")?.as_array()?;
+    Some(
+        names
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|path| SearchHit {
+                path: path.to_owned(),
+                line: None,
+                text: None,
+            })
+            .collect(),
+    )
+}
+
+/// The matches among a content-mode Grep's lines: `path:N:text`, or `N:text`
+/// when it searched the one file `searched`. Context lines (`path-N-text`)
+/// and group separators (`--`) are not matches.
+fn grep_lines(content: &str, searched: Option<&str>) -> Vec<SearchHit> {
+    fn numbered(text: &str) -> Option<(u64, &str)> {
+        let (number, rest) = text.split_once(':')?;
+        Some((number.parse().ok()?, rest))
+    }
+    content
+        .lines()
+        .filter_map(|line| {
+            let (path, (number, text)) = match numbered(line) {
+                Some(found) => (searched?, found),
+                None => line
+                    .match_indices(':')
+                    .find_map(|(at, _)| Some((&line[..at], numbered(&line[at + 1..])?)))?,
+            };
+            Some(SearchHit {
+                path: path.to_owned(),
+                line: Some(number),
+                text: Some(text.to_owned()),
+            })
+        })
+        .collect()
 }
 
 /// A Read tool result's numbered lines (`N\t` before each, 2.1.322's
@@ -6603,6 +6676,66 @@ mod tests {
                 first_line: Some(40),
                 note: None,
             })
+        );
+    }
+
+    /// A Grep is a search of what its output object found: in content mode
+    /// rg's `path:N:text` lines, context lines left out; a Glob the files in
+    /// its `filenames` (`GrepOutput`, `GlobOutput` of `sdk-tools.d.ts` in
+    /// `@anthropic-ai/claude-agent-sdk` 0.3.322; content invented).
+    #[test]
+    fn a_search_is_what_its_output_object_found() {
+        let mut mapper = Mapper::new();
+        feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg_grep","content":[{"type":"tool_use","id":"toolu_grep","name":"Grep","input":{"pattern":"TODO","path":"src","output_mode":"content","-C":1}},{"type":"tool_use","id":"toolu_glob","name":"Glob","input":{"pattern":"**/*.rs"}}]}}"#,
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_grep","content":"src/a.rs-2-fn a() {\nsrc/a.rs:3:    // TODO: one\n--\nsrc/b.rs:7:// TODO: two"}]},"tool_use_result":{"mode":"content","numFiles":0,"filenames":[],"content":"src/a.rs-2-fn a() {\nsrc/a.rs:3:    // TODO: one\n--\nsrc/b.rs:7:// TODO: two","numLines":4}}"#,
+        );
+        let [AgentEvent::ItemCompleted(grep)] = completed.as_slice() else {
+            panic!("{completed:?}");
+        };
+        let ItemContent::ToolCall { family, .. } = &grep.content else {
+            panic!("{grep:?}");
+        };
+        let hit = |path: &str, line, text: &str| SearchHit {
+            path: path.into(),
+            line: Some(line),
+            text: Some(text.into()),
+        };
+        assert_eq!(
+            family.as_deref(),
+            Some(&ToolFamily::Search {
+                scope: SearchScope::Content,
+                pattern: Some("TODO".into()),
+                path: Some("src".into()),
+                glob: None,
+                hits: Some(vec![
+                    hit("src/a.rs", 3, "    // TODO: one"),
+                    hit("src/b.rs", 7, "// TODO: two"),
+                ]),
+            })
+        );
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_glob","content":"src/a.rs\nsrc/b.rs"}]},"tool_use_result":{"filenames":["src/a.rs","src/b.rs"],"durationMs":3,"numFiles":2,"truncated":false}}"#,
+        );
+        let [AgentEvent::ItemCompleted(glob)] = completed.as_slice() else {
+            panic!("{completed:?}");
+        };
+        let ItemContent::ToolCall { family, .. } = &glob.content else {
+            panic!("{glob:?}");
+        };
+        let Some(ToolFamily::Search { scope, hits, .. }) = family.as_deref() else {
+            panic!("{family:?}");
+        };
+        assert_eq!(*scope, SearchScope::Files);
+        assert_eq!(
+            hits.as_deref()
+                .map(|hits| hits.iter().map(|hit| hit.path.as_str()).collect::<Vec<_>>()),
+            Some(vec!["src/a.rs", "src/b.rs"])
         );
     }
 

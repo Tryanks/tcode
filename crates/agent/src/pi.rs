@@ -17,9 +17,9 @@ use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
     ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ForkPoint, ItemContent,
     ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand,
-    ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
-    SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput, UserInputDelivery,
-    UserInputOption, UserInputQuestion,
+    ProviderCommandKind, ProviderKind, ResumeCursor, SearchHit, SearchScope, SelectOption,
+    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput,
+    UserInputDelivery, UserInputOption, UserInputQuestion,
 };
 
 /// The directory pi launched with `launch_env` keeps its settings, sign-in
@@ -1729,8 +1729,82 @@ fn tool_family(
                 lines,
             )
         }
+        // `grep.js`, `find.js`, `ls.js`: one line each, relative to the
+        // directory searched, before any `[…]` notice after a blank line.
+        "grep" | "find" | "ls" => {
+            let path = field("path");
+            let hits = text
+                .as_deref()
+                .filter(|_| status == ItemStatus::Completed)
+                .map(|text| found(name, path.as_deref(), text));
+            (
+                Some(ToolFamily::Search {
+                    scope: match name {
+                        "grep" => SearchScope::Content,
+                        "find" => SearchScope::Files,
+                        _ => SearchScope::Entries,
+                    },
+                    pattern: field("pattern"),
+                    path,
+                    glob: field("glob"),
+                    hits,
+                }),
+                text,
+            )
+        }
         _ => (None, text),
     }
+}
+
+/// What a finished grep, find or ls returned. grep's matches are
+/// `path:N: text` (`path-N- text` is context), its path the searched file's
+/// name when it searched one file; find's and ls's lines are paths; an empty
+/// result is one line of pi's words.
+fn found(tool: &str, searched: Option<&str>, text: &str) -> Vec<SearchHit> {
+    let lines = match text.rsplit_once("\n\n[") {
+        Some((lines, notice)) if notice.ends_with(']') => lines,
+        _ => text,
+    };
+    let base = searched.map(Path::new);
+    let resolve = |relative: &str| match base {
+        Some(base) if base.file_name().and_then(|name| name.to_str()) == Some(relative) => {
+            base.to_string_lossy().into_owned()
+        }
+        Some(base) => base.join(relative).to_string_lossy().into_owned(),
+        None => relative.to_owned(),
+    };
+    let empty = [
+        "No matches found",
+        "No files found matching pattern",
+        "(empty directory)",
+    ];
+    if empty.contains(&lines.trim()) {
+        return Vec::new();
+    }
+    lines
+        .lines()
+        .filter_map(|line| {
+            if tool != "grep" {
+                return Some(SearchHit {
+                    path: match base {
+                        Some(base) => base.join(line).to_string_lossy().into_owned(),
+                        None => line.to_owned(),
+                    },
+                    line: None,
+                    text: None,
+                });
+            }
+            let (path, number, text) = line.match_indices(':').find_map(|(at, _)| {
+                let (number, text) = line[at + 1..].split_once(": ")?;
+                Some((&line[..at], number.parse().ok()?, text))
+            })?;
+            Some(SearchHit {
+                path: resolve(path),
+                line: Some(number),
+                text: Some(text.to_owned()),
+            })
+        })
+        .collect()
 }
 
 /// The text of a `notify` from a pi extension, at any of its levels.
@@ -2499,6 +2573,46 @@ mod tests {
                 Some("fn main() {\n}".into()),
             )
         );
+    }
+
+    /// grep names a match `path:N: text` under the directory it searched,
+    /// a context line `path-N- text`, and its limits in a `[…]` notice after
+    /// a blank line; ls lists the names in its directory (1.5.2's
+    /// `dist/core/tools/grep.js` and `ls.js`; content invented).
+    #[test]
+    fn a_search_is_what_it_found_under_where_it_looked() {
+        let (family, _) = tool_family(
+            "grep",
+            &json!({"pattern": "TODO", "path": "src"}),
+            Some("a.rs-2- fn a() {\na.rs:3: // TODO: one\n\n[100 matches limit reached. Use limit=200 for more, or refine pattern]".into()),
+            None,
+            ItemStatus::Completed,
+        );
+        assert_eq!(
+            family,
+            Some(ToolFamily::Search {
+                scope: SearchScope::Content,
+                pattern: Some("TODO".into()),
+                path: Some("src".into()),
+                glob: None,
+                hits: Some(vec![SearchHit {
+                    path: "src/a.rs".into(),
+                    line: Some(3),
+                    text: Some("// TODO: one".into()),
+                }]),
+            })
+        );
+        let (family, _) = tool_family(
+            "ls",
+            &json!({"path": "src"}),
+            Some("(empty directory)".into()),
+            None,
+            ItemStatus::Completed,
+        );
+        assert!(matches!(
+            family,
+            Some(ToolFamily::Search { scope: SearchScope::Entries, hits: Some(hits), .. }) if hits.is_empty()
+        ));
     }
 
     #[test]

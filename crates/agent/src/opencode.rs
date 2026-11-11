@@ -22,9 +22,9 @@ use crate::{
     ApprovalRequest, Attachment, ChangeCompleteness, Compaction, DeltaKind, FileChange,
     FileChangeKind, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
     OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
-    ResumeCursor, RewindMode, SelectOption, SessionCommand, SessionHandle, SessionOptions,
-    ThreadItem, TokenUsage, ToolFamily, ToolOutput, UserInputDelivery, UserInputOption,
-    UserInputQuestion,
+    ResumeCursor, RewindMode, SearchHit, SearchScope, SelectOption, SessionCommand, SessionHandle,
+    SessionOptions, ThreadItem, TokenUsage, ToolFamily, ToolOutput, UserInputDelivery,
+    UserInputOption, UserInputQuestion,
 };
 
 /// The directory OpenCode launched with `launch_env` keeps its sessions,
@@ -2382,8 +2382,22 @@ fn tool_family(
                     }),
                     Some(lines),
                 ),
-                // A directory's entries are a listing, not a file's lines.
-                Some(Some(Page::Directory)) => (None, output),
+                // A directory's page is what it holds, not a file's lines.
+                Some(Some(Page::Directory(entries))) => (
+                    Some(ToolFamily::Search {
+                        scope: SearchScope::Entries,
+                        pattern: None,
+                        hits: Some(
+                            entries
+                                .iter()
+                                .map(|entry| hit(Path::new(&path).join(entry)))
+                                .collect(),
+                        ),
+                        path: Some(path),
+                        glob: None,
+                    }),
+                    output,
+                ),
                 _ => (
                     Some(ToolFamily::Read {
                         path,
@@ -2394,27 +2408,94 @@ fn tool_family(
                 ),
             }
         }
+        // `grep.ts`: `Found N matches`, then each file's absolute path and
+        // its matches as `  Line N: text`.
+        "grep" => (
+            Some(ToolFamily::Search {
+                scope: SearchScope::Content,
+                pattern: field("pattern"),
+                path: field("path"),
+                glob: field("include"),
+                hits: output.as_deref().map(grep_matches),
+            }),
+            output,
+        ),
+        // `glob.ts`: the absolute path of each file it found.
+        "glob" => (
+            Some(ToolFamily::Search {
+                scope: SearchScope::Files,
+                pattern: field("pattern"),
+                path: field("path"),
+                glob: None,
+                hits: output.as_deref().map(|text| {
+                    text.lines()
+                        .filter(|line| Path::new(line).is_absolute())
+                        .map(hit)
+                        .collect()
+                }),
+            }),
+            output,
+        ),
         _ => (None, output),
     }
 }
 
+fn hit(path: impl AsRef<Path>) -> SearchHit {
+    SearchHit {
+        path: path.as_ref().to_string_lossy().into_owned(),
+        line: None,
+        text: None,
+    }
+}
+
+/// The matches in grep's text: a file's `<path>:` line, then its
+/// `  Line N: text` lines; the count before and the truncation note after
+/// are not matches.
+fn grep_matches(text: &str) -> Vec<SearchHit> {
+    let mut file = None;
+    let mut hits = Vec::new();
+    for row in text.lines() {
+        if let Some(rest) = row.strip_prefix("  Line ")
+            && let Some(path) = file
+            && let Some((number, text)) = rest.split_once(": ")
+            && let Ok(number) = number.parse()
+        {
+            hits.push(SearchHit {
+                path: String::from(path),
+                line: Some(number),
+                text: Some(text.to_owned()),
+            });
+        } else if let Some(path) = row.strip_suffix(':')
+            && Path::new(path).is_absolute()
+        {
+            file = Some(path);
+        }
+    }
+    hits
+}
+
 /// A page `read` returned (`toModelContent` in `read.ts`): a file's
 /// `Read file <path>, lines S-E` header, then each line as `N: text`, then
-/// `[Output truncated. …]` when the file goes on; or a directory's entries.
+/// `[Output truncated. …]` when the file goes on; or a directory's
+/// `Read directory` header, then its entries by name.
 enum Page {
     File {
         first_line: Option<u64>,
         lines: String,
         note: Option<String>,
     },
-    Directory,
+    Directory(Vec<String>),
 }
 
 fn read_page(text: &str) -> Option<Page> {
     let mut rows = text.lines();
     let header = rows.next()?;
     if header.starts_with("Read directory ") {
-        return Some(Page::Directory);
+        return Some(Page::Directory(
+            rows.filter(|row| !row.starts_with("[Output truncated."))
+                .map(str::to_owned)
+                .collect(),
+        ));
     }
     header.strip_prefix("Read file ")?;
     let mut first_line = None;
@@ -3038,7 +3119,7 @@ mod tests {
     /// `read` gives a page of `N: text` lines under its `Read file` header,
     /// and says where to continue when the file goes on (v2.2.7's
     /// `toModelContent`, `packages/core/src/tool/plugin/read.ts`; content
-    /// invented). A directory's page is its entries, not a file's lines.
+    /// invented). A directory's page is a listing of its entries.
     #[test]
     fn a_read_is_the_lines_it_read_from_where_it_began() {
         let page = "Read file src/lib.rs, lines 40-41\n40: fn main() {\n41: }\n[Output truncated. Continue reading with offset: 42]";
@@ -3060,7 +3141,66 @@ mod tests {
         let listing = "Read directory src, entries 1-2\nlib.rs\nbin/";
         assert_eq!(
             tool_family("read", &json!({"path": "src"}), Some(listing.into())),
-            (None, Some(listing.into()))
+            (
+                Some(ToolFamily::Search {
+                    scope: SearchScope::Entries,
+                    pattern: None,
+                    path: Some("src".into()),
+                    glob: None,
+                    hits: Some(vec![hit("src/lib.rs"), hit("src/bin/")]),
+                }),
+                Some(listing.into())
+            )
+        );
+    }
+
+    /// grep names each file by its absolute path and its matches under it
+    /// as `  Line N: text`; glob lists the absolute path of each file
+    /// (v2.2.7's `toModelContent` in `grep.ts` and `glob.ts`; content
+    /// invented).
+    #[test]
+    fn a_search_is_what_it_found() {
+        let grep = "Found 2 matches\n/work/src/a.rs:\n  Line 3: fn new() {}\n  Line 9: fn new_at(x: u8) {}\n\n(Results are truncated: showing first 2 results. Consider using a more specific path or pattern.)";
+        let (family, _) = tool_family(
+            "grep",
+            &json!({"pattern": "fn new", "path": "src", "include": "*.rs"}),
+            Some(grep.into()),
+        );
+        assert_eq!(
+            family,
+            Some(ToolFamily::Search {
+                scope: SearchScope::Content,
+                pattern: Some("fn new".into()),
+                path: Some("src".into()),
+                glob: Some("*.rs".into()),
+                hits: Some(vec![
+                    SearchHit {
+                        path: "/work/src/a.rs".into(),
+                        line: Some(3),
+                        text: Some("fn new() {}".into()),
+                    },
+                    SearchHit {
+                        path: "/work/src/a.rs".into(),
+                        line: Some(9),
+                        text: Some("fn new_at(x: u8) {}".into()),
+                    },
+                ]),
+            })
+        );
+        let (family, _) = tool_family(
+            "glob",
+            &json!({"pattern": "**/*.rs"}),
+            Some("/work/src/a.rs\n/work/src/b.rs".into()),
+        );
+        assert_eq!(
+            family,
+            Some(ToolFamily::Search {
+                scope: SearchScope::Files,
+                pattern: Some("**/*.rs".into()),
+                path: None,
+                glob: None,
+                hits: Some(vec![hit("/work/src/a.rs"), hit("/work/src/b.rs")]),
+            })
         );
     }
 

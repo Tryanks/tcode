@@ -547,7 +547,8 @@ fn a_read_reads_as_its_file_and_lines(cx: &mut TestAppContext) {
 /// listing's names, each opening its file. The one recorded search is a
 /// Claude Grep its harness refused; no recorded thread holds a search that
 /// returned results, so the others are calls in the shapes OpenCode's glob
-/// and grep and pi's grep and ls return.
+/// and grep and pi's grep and ls return, with what their adapters read out
+/// of them.
 #[gpui::test]
 fn a_search_reads_as_its_pattern_and_opens_on_what_it_found(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
