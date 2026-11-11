@@ -8059,25 +8059,20 @@ pub(crate) mod tests {
         let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
         meta.id = "reconnect".into();
         disk.upsert_meta(&meta).unwrap();
+        for (ts, text) in [(1, "one"), (2, "two"), (3, "three")] {
+            disk.append_event(
+                "reconnect",
+                ts,
+                &AgentEvent::Warning {
+                    message: text.into(),
+                },
+            )
+            .unwrap();
+        }
         let host = test_host(disk);
         let mut driver = LocalHostDriver::new(&host);
         let workspace = driver.workspace(cx);
         workspace.update(cx, |store, cx| store.show_alone("reconnect".into(), cx));
-        driver.wait_until(cx, "selected status", |cx| {
-            workspace.read_with(cx, |store, cx| store.sole_status(cx).is_some())
-        });
-        update_host!(&host, |state, cx| {
-            for (ts, text) in [(1, "one"), (2, "two"), (3, "three")] {
-                state.record_event_for_replica_test(
-                    "reconnect",
-                    ts,
-                    &AgentEvent::Warning {
-                        message: text.into(),
-                    },
-                    cx,
-                );
-            }
-        });
         driver.wait_until(cx, "three records", |cx| {
             workspace.read_with(cx, |store, _| {
                 held_window(store, "reconnect").is_some_and(|held| held.records.len() == 3)
