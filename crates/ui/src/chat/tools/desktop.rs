@@ -119,7 +119,7 @@ enum Tool<'a> {
 }
 
 pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView + 'a>> {
-    let on = |name: &str| call.served(SERVER, &[name], true);
+    let on = |name: &str| call.served(SERVER, &[name]);
     let tool = if on("find_roots") {
         Tool::FindRoots(call.input().unwrap_or_default())
     } else if on("observe_ui") {
@@ -145,7 +145,7 @@ pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView
 /// Whether `call` observes a window: the one call whose result carries the
 /// screenshot the server read back.
 pub(in crate::chat) fn is_observation(call: &Call<'_>) -> bool {
-    call.served(SERVER, &["observe_ui"], true)
+    call.served(SERVER, &["observe_ui"])
 }
 
 /// The app and the window title of the root an observation's `output`

@@ -159,6 +159,8 @@ const CODEX_ROLLOUT: &str = r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"s
 {"timestamp":"2026-01-02T03:04:11.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_read","output":"Chunk ID: 0a1b2c\nWall time: 0.0123 seconds\nProcess exited with code 0\nOriginal token count: 4\nOutput:\nExample readme\n"}}
 {"timestamp":"2026-01-02T03:04:11.200Z","type":"response_item","payload":{"type":"function_call","name":"view_image","arguments":"{\"path\":\"/work/example/shot.png\"}","call_id":"call_view"}}
 {"timestamp":"2026-01-02T03:04:11.300Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_view","output":[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==","detail":"high"}]}}
+{"timestamp":"2026-01-02T03:04:11.320Z","type":"response_item","payload":{"type":"function_call","name":"js","namespace":"mcp__cua_repl","arguments":"{\"code\":\"await app.click(3);\",\"title\":\"Press OK\"}","call_id":"call_script"}}
+{"timestamp":"2026-01-02T03:04:11.330Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_script","output":[{"type":"input_text","text":"Wall time: 0.4200 seconds\nOutput:"},{"type":"input_text","text":"clicked OK"}]}}
 {"timestamp":"2026-01-02T03:04:11.400Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","arguments":"{\"explanation\":\"Lint next\",\"plan\":[{\"step\":\"Read the readme\",\"status\":\"completed\"},{\"step\":\"Lint\",\"status\":\"in_progress\"}]}","call_id":"call_plan"}}
 {"timestamp":"2026-01-02T03:04:11.450Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_plan","output":"Plan updated"}}
 {"timestamp":"2026-01-02T03:04:11.500Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"make lint\"}","call_id":"call_lint"}}
@@ -398,7 +400,10 @@ fn readme_revised(status: ItemStatus) -> Option<ItemContent> {
 /// A rollout shows what Codex recorded: a local shell call shows the
 /// command in its `action`, a command shows what it printed and the code
 /// it exited with, failing when that is not 0 as Codex judges it, an image
-/// Codex was shown is that image as Codex reports it live, an
+/// Codex was shown is that image as Codex reports it live, an MCP call is
+/// what its server returned, without the `Wall time` header Codex writes
+/// before it for the model (`McpToolOutput::response_payload`,
+/// `core/src/tools/context.rs`), an
 /// `update_plan` is the plan it sets (`UpdatePlanArgs`,
 /// `protocol/src/plan_tool.rs`), as live, a patch
 /// shows the changes Codex applied, a call Codex dropped, stopped or never
@@ -436,6 +441,12 @@ fn a_codex_rollout_imports_as_codex_recorded_it() {
                     source_path: None,
                 }),
             }),
+            tool(
+                "cua_repl/js",
+                json!({"code": "await app.click(3);", "title": "Press OK"}),
+                Some("clicked OK"),
+                ItemStatus::Completed,
+            ),
             command(
                 "make lint",
                 "make: *** No rule to make target 'lint'.  Stop.\n",

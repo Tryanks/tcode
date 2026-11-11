@@ -382,7 +382,16 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
                                     ItemStatus::Completed
                                 };
                                 *image_reads = result.images;
-                                *output = Some(result.text);
+                                // Codex puts `Wall time: …` and `Output:`
+                                // before an MCP tool's result for the model
+                                // (`McpToolOutput::response_payload`,
+                                // `core/src/tools/context.rs`); live, the
+                                // result comes as the server gave it.
+                                *output = Some(if name.contains('/') {
+                                    exec_result(&result.text).1.to_owned()
+                                } else {
+                                    result.text
+                                });
                             }
                             _ => {}
                         }

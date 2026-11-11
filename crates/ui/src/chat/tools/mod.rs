@@ -97,15 +97,11 @@ impl<'a> Call<'a> {
     }
 
     /// Whether the call is to one of `servers`' tools named one of `names`.
-    /// A transcript imported without its MCP namespace keeps only the tool's
-    /// name, so `bare` also accepts the name alone, for names no harness
-    /// gives a tool of its own.
-    pub(in crate::chat) fn served(&self, servers: &[&str], names: &[&str], bare: bool) -> bool {
-        let server = match self.name.server {
-            Some(server) => servers.contains(&server),
-            None => bare,
-        };
-        server && names.contains(&self.name.tool)
+    pub(in crate::chat) fn served(&self, servers: &[&str], names: &[&str]) -> bool {
+        self.name
+            .server
+            .is_some_and(|server| servers.contains(&server))
+            && names.contains(&self.name.tool)
     }
 
     /// The input as a view's typed fields, borrowing its strings; `None`
@@ -730,31 +726,16 @@ pub(in crate::chat) fn output_section(
     limit: Bound,
     ctx: &mut ToolCtx<'_, '_>,
 ) -> Option<AnyElement> {
-    output_section_with(call, limit, ctx, |text| text)
-}
-
-/// [`output_section`] over the part of the output `part` takes from it:
-/// what a script printed, past its harness's report.
-pub(in crate::chat) fn output_section_with(
-    call: &Call<'_>,
-    limit: Bound,
-    ctx: &mut ToolCtx<'_, '_>,
-    part: impl FnOnce(&str) -> &str,
-) -> Option<AnyElement> {
     let (text, control) = held_output(call.entry, call.output.unwrap_or_default(), ctx);
     if call.output.is_none() && matches!(text, HeldOutput::Record(_)) {
         return None;
     }
     // A half result is not JSON.
     let done = call.status != ItemStatus::InProgress;
-    let text = ctx.derived(
-        format!("tool-output-{}-{done}", call.id()),
-        part(&text),
-        |text| {
-            let pretty = done.then(|| pretty_json(text)).flatten();
-            SharedString::from(pretty.unwrap_or_else(|| text.to_owned()))
-        },
-    );
+    let text = ctx.derived(format!("tool-output-{}-{done}", call.id()), &text, |text| {
+        let pretty = done.then(|| pretty_json(text)).flatten();
+        SharedString::from(pretty.unwrap_or_else(|| text.to_owned()))
+    });
     let failed = call.status == ItemStatus::Failed;
     let label = if failed {
         crate::tr!("tools.error")

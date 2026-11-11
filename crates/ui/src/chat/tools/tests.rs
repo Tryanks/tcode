@@ -1081,9 +1081,8 @@ fn titled(title: &str, error: Option<&str>) -> Read {
 
 /// A computer-use script reads as the title the model gave it, verbatim in
 /// the user's language, never as its code; a failure by the server's own
-/// line; an imported one with the wall time its harness reported. Opened,
-/// it shows the screenshot it got back, what it printed, and its code a
-/// click away.
+/// line. Opened, it shows the screenshot it got back, what it printed,
+/// and its code a click away.
 #[gpui::test]
 fn a_computer_use_script_reads_as_its_title_and_shows_what_it_got_back(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
@@ -1092,7 +1091,6 @@ fn a_computer_use_script_reads_as_its_title_and_shows_what_it_got_back(cx: &mut 
     let first = "call_000000000000000000000054";
     let shot = "call_000000000000000000000053";
     let failed = "call_000000000000000000000057";
-    let imported = "call_000000000000000000000059";
     for (id, expected) in [
         (first, titled("Open the seeded example desktop app", None)),
         (shot, titled("核对设置页当前内容", None)),
@@ -1103,7 +1101,6 @@ fn a_computer_use_script_reads_as_its_title_and_shows_what_it_got_back(cx: &mut 
                 Some("Computer Use server error -10005: noWindowsAvailable"),
             ),
         ),
-        (imported, titled("Refilter orders by status", None)),
         (
             "call_000000000000000000000062",
             read("Reset the script kernel", None, None, None),
@@ -1111,14 +1108,11 @@ fn a_computer_use_script_reads_as_its_title_and_shows_what_it_got_back(cx: &mut 
     ] {
         assert_eq!(thread.header(id, cx), expected, "{id}");
     }
-    let entry = thread.entry(imported, cx);
-    let header = activity(&entry, false, std::path::Path::new("")).header;
-    assert_eq!(header.elapsed_ms, Some(3_874));
 
     let entries = thread.entries(cx);
     let refs: Vec<&TimelineEntry> = entries.iter().map(Arc::as_ref).collect();
     let counts = crate::chat::model::work_log_counts(&refs);
-    assert_eq!((counts.computer, counts.tools), (9, 0));
+    assert_eq!((counts.computer, counts.tools), (7, 0));
 
     thread.open_work_log(first, cx);
     click(cx, &format!("activity-row-run-{first}"));
