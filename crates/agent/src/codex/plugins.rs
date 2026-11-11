@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 use smol::channel::Receiver;
 
 use super::{
-    describe_rpc_error, enrich_startup_error, initialize, send_json, settle_child_exit,
-    spawn_server, stop_child,
+    EXITED_BEFORE_ANSWERING, describe_rpc_error, enrich_startup_error, exit_status_once_gone,
+    initialize, send_json, spawn_server, stop_child,
 };
 use crate::process::{ChildOutput, ProcessTree, StderrTail};
 use crate::{
@@ -78,11 +78,11 @@ async fn with_server<T>(
     // listing or cancels a change.
     let mut server = Server::start(context).await?;
     let result = work(&mut server).await;
-    server.close(result)
+    server.close(result).await
 }
 
 struct Server {
-    child: ProcessTree<Child>,
+    child: Option<ProcessTree<Child>>,
     stdin: Option<BufWriter<ChildStdin>>,
     lines: Receiver<ChildOutput>,
     stderr_tail: StderrTail,
@@ -105,7 +105,7 @@ impl Server {
         let (child, stdin, lines, stderr_tail) =
             spawn_server(context.binary_path.as_deref(), &[], &context.launch_env)?;
         let mut server = Self {
-            child,
+            child: Some(child),
             stdin: Some(stdin),
             lines,
             stderr_tail,
@@ -114,7 +114,7 @@ impl Server {
         let stdin = server.stdin.as_mut().expect("the server has not stopped");
         match initialize(stdin, &server.lines).await {
             Ok(()) => Ok(server),
-            Err(error) => server.close(Err(error)),
+            Err(error) => server.close(Err(error)).await,
         }
     }
 
@@ -148,7 +148,7 @@ impl Server {
             let line = match self.lines.recv().await {
                 Ok(ChildOutput::Line(line)) => line,
                 Ok(ChildOutput::Eof) | Err(_) => {
-                    return Err(AgentError::Protocol("codex exited before answering".into()));
+                    return Err(AgentError::Protocol(EXITED_BEFORE_ANSWERING.into()));
                 }
                 Ok(ChildOutput::Error(error)) => return Err(AgentError::Protocol(error)),
             };
@@ -180,12 +180,16 @@ impl Server {
 
     /// A broken connection is explained by the process: its exit status and
     /// stderr. Native errors pass through.
-    fn close<T>(mut self, result: Result<T, AgentError>) -> Result<T, AgentError> {
+    async fn close<T>(mut self, result: Result<T, AgentError>) -> Result<T, AgentError> {
         match result {
             Err(error @ (AgentError::Protocol(_) | AgentError::Io(_))) => {
-                let status = settle_child_exit(&mut self.child);
-                // The stderr tail joins its reader, so the child must be gone.
-                self.stop();
+                let mut status = None;
+                if let (Some(child), Some(stdin)) = (self.child.take(), self.stdin.take()) {
+                    let (mut child, exit) = exit_status_once_gone(child, &error).await;
+                    status = exit;
+                    // The stderr tail joins its reader, so the child must be gone.
+                    stop_child(&mut child, stdin);
+                }
                 Err(enrich_startup_error(error, status, &mut self.stderr_tail))
             }
             other => other,
@@ -193,8 +197,8 @@ impl Server {
     }
 
     fn stop(&mut self) {
-        if let Some(stdin) = self.stdin.take() {
-            stop_child(&mut self.child, stdin);
+        if let (Some(mut child), Some(stdin)) = (self.child.take(), self.stdin.take()) {
+            stop_child(&mut child, stdin);
         }
     }
 }

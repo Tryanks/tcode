@@ -231,21 +231,13 @@ pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
-    let (mut child, mut stdin, lines, mut stderr_tail) =
+    let (child, mut stdin, lines, mut stderr_tail) =
         spawn_server(binary_path.as_deref(), &[], &launch_env)?;
     let windows = home_dir(&launch_env)
         .map(|home| model_windows::read(&home))
         .unwrap_or_default();
     let result = collect_models(&mut stdin, &lines, &windows).await;
-    // The stdout reader can observe EOF a few milliseconds before the process
-    // becomes waitable. Give a self-exiting child time to publish its real
-    // status so `stop_child` does not replace it with a kill status.
-    let status = result
-        .is_err()
-        .then(|| settle_child_exit(&mut child))
-        .flatten();
-    stop_child(&mut child, stdin);
-    result.map_err(|err| enrich_startup_error(err, status, &mut stderr_tail))
+    finish_one_shot(child, stdin, &mut stderr_tail, result).await
 }
 
 /// Read the account-wide rate limits from `codex app-server` and tear the
@@ -254,7 +246,7 @@ pub async fn read_rate_limits(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Result<Value, AgentError> {
-    let (mut child, mut stdin, lines, mut stderr_tail) =
+    let (child, mut stdin, lines, mut stderr_tail) =
         spawn_server(binary_path.as_deref(), &[], &launch_env)?;
     let result = async {
         initialize(&mut stdin, &lines).await?;
@@ -265,12 +257,29 @@ pub async fn read_rate_limits(
         wait_for_response(&lines, 2).await
     }
     .await;
-    let status = result
-        .is_err()
-        .then(|| settle_child_exit(&mut child))
-        .flatten();
-    stop_child(&mut child, stdin);
-    result.map_err(|err| enrich_startup_error(err, status, &mut stderr_tail))
+    finish_one_shot(child, stdin, &mut stderr_tail, result).await
+}
+
+/// Stop a server started for one request, and fold its death into the
+/// request's error.
+async fn finish_one_shot<T>(
+    child: ProcessTree<Child>,
+    stdin: BufWriter<ChildStdin>,
+    stderr_tail: &mut StderrTail,
+    result: Result<T, AgentError>,
+) -> Result<T, AgentError> {
+    match result {
+        Ok(value) => {
+            let mut child = child;
+            stop_child(&mut child, stdin);
+            Ok(value)
+        }
+        Err(err) => {
+            let (mut child, status) = exit_status_once_gone(child, &err).await;
+            stop_child(&mut child, stdin);
+            Err(enrich_startup_error(err, status, stderr_tail))
+        }
+    }
 }
 
 async fn initialize(
@@ -851,7 +860,7 @@ async fn run_actor(
 ) {
     let mut extra_args = mcp_args(&opts.mcp_servers);
     extra_args.extend(opts.extra_args.iter().cloned());
-    let (mut child, mut stdin, lines, mut stderr_tail) =
+    let (child, mut stdin, lines, mut stderr_tail) =
         match spawn_server(opts.binary_path.as_deref(), &extra_args, &opts.launch_env) {
             Ok((child, stdin, lines, tail)) => (opts.processes.hold(child), stdin, lines, tail),
             Err(err) => {
@@ -876,9 +885,7 @@ async fn run_actor(
     } = match startup {
         Ok(value) => value,
         Err(err) => {
-            // As in model discovery, stdout EOF may beat process termination
-            // by a scheduling tick. Preserve the provider's natural status.
-            let status = settle_child_exit(&mut child);
+            let (mut child, status) = exit_status_once_gone(child, &err).await;
             stop_child(&mut child, stdin);
             let err = enrich_startup_error(err, status, &mut stderr_tail);
             let _ = ready.send(Err(err)).await;
@@ -1795,7 +1802,7 @@ async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Val
         match lines
             .recv()
             .await
-            .map_err(|_| AgentError::Protocol("codex stdout closed during startup".into()))?
+            .map_err(|_| AgentError::Protocol(STDOUT_CLOSED.into()))?
         {
             ChildOutput::Line(line) => {
                 let value: Value = serde_json::from_str(&line).map_err(|err| {
@@ -1813,7 +1820,7 @@ async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Val
                     .ok_or_else(|| AgentError::Protocol(format!("response {id} omitted result")));
             }
             ChildOutput::Eof => {
-                return Err(AgentError::Protocol("codex exited during startup".into()));
+                return Err(AgentError::Protocol(EXITED.into()));
             }
             ChildOutput::Error(err) => return Err(AgentError::Protocol(err)),
         }
@@ -1832,18 +1839,34 @@ fn send_json(stdin: &mut BufWriter<ChildStdin>, value: &Value) -> Result<(), Age
     write_json(stdin, value, None)
 }
 
-/// Wait briefly for a child that has already closed stdout to become waitable.
-/// Startup failures are rare, and preserving the real exit code is worth this
-/// bounded delay. A child that remains alive is still killed by `stop_child`.
-fn settle_child_exit(child: &mut ProcessTree<Child>) -> Option<std::process::ExitStatus> {
-    for _ in 0..50 {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
-            Err(_) => return None,
+const STDOUT_CLOSED: &str = "codex stdout closed during startup";
+const EXITED: &str = "codex exited during startup";
+const EXITED_BEFORE_ANSWERING: &str = "codex exited before answering";
+
+/// The exit status of a child that `err` shows has closed its pipes: its
+/// stdout reached EOF, or writing to its stdin broke. It is exiting, and
+/// becomes waitable a moment later; waiting keeps `stop_child`'s kill from
+/// standing in for the status it exits with. A child any other failure
+/// leaves is still running, and `stop_child` stops it.
+async fn exit_status_once_gone(
+    mut child: ProcessTree<Child>,
+    err: &AgentError,
+) -> (ProcessTree<Child>, Option<std::process::ExitStatus>) {
+    let gone = match err {
+        AgentError::Protocol(message) => {
+            [EXITED, STDOUT_CLOSED, EXITED_BEFORE_ANSWERING].contains(&message.as_str())
         }
+        AgentError::Io(error) => error.kind() == std::io::ErrorKind::BrokenPipe,
+        _ => false,
+    };
+    if !gone {
+        return (child, None);
     }
-    None
+    crate::process::unblock(move || {
+        let status = child.wait().ok();
+        (child, status)
+    })
+    .await
 }
 
 impl Actor {
