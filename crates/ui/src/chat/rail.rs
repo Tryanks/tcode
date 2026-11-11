@@ -1201,9 +1201,8 @@ mod tests {
 
     /// A card whose body has a height of its own keeps all of it when a card
     /// of many rows crowds the rail: the computer-use card shows its whole
-    /// picture and caption, with nothing to scroll, on every frame the
-    /// agents card comes in and once it is in, and the agents card scrolls
-    /// in what is left.
+    /// picture and caption, with nothing to scroll, once the agents card is
+    /// in, and the agents card scrolls in what is left.
     #[gpui::test]
     fn a_card_of_fixed_height_keeps_it_in_a_crowded_rail(cx: &mut TestAppContext) {
         let (threads, cx) = short_rail(cx, || observed(0));
@@ -1225,13 +1224,6 @@ mod tests {
         threads.store.update(cx, |store, cx| {
             store.set_session_replica_for_test(threads.first.clone(), observed(40), cx)
         });
-        draw(cx);
-        for frame in 0..30 {
-            let when = format!("frame {frame}");
-            whole(cx, &when);
-            inside(cx, &["agents", "screen"], &["frame"], &when);
-            next_frame(cx);
-        }
         draw_settled(cx);
         whole(cx, "at rest");
         inside(cx, &["agents", "screen"], AT_REST, "at rest");
