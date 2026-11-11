@@ -422,8 +422,11 @@ pub struct HarnessDescription {
     /// Tcode runs the harness's account sign-in, so accounts can be added.
     pub account_login: bool,
     pub launch_args: bool,
-    /// Its plugins are managed in Settings → Plugins.
-    pub plugins: bool,
+    /// What Settings → Plugins does with its plugins.
+    pub plugins: PluginsDescription,
+    /// Each account keeps its plugins in its own home; otherwise every
+    /// account shares one.
+    pub home_path: bool,
     pub mcp_servers: bool,
     pub native_computer_use: bool,
     /// Its own configuration can be listed ([`crate::Query::NativeMcpServers`]).
@@ -433,6 +436,43 @@ pub struct HarnessDescription {
     pub permission: Option<HarnessPermission>,
     /// A newer version of an ACP agent in the registry.
     pub registry_update: Option<String>,
+}
+
+/// What Settings → Plugins does with a harness's plugins.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginsDescription {
+    /// The native operations Tcode drives.
+    pub actions: Vec<agent::PluginActionKind>,
+    pub marketplaces: bool,
+    /// The native scopes plugins are installed or enabled in, in the
+    /// harness's order.
+    pub scopes: Vec<agent::PluginScope>,
+    /// There is no catalog: an install takes a package source a person
+    /// types.
+    pub source_install: bool,
+    /// How a harness Tcode does not manage plugins for extends itself.
+    pub unmanaged: Option<agent::UnmanagedPluginsKind>,
+}
+
+impl PluginsDescription {
+    fn of(management: agent::PluginManagement) -> Self {
+        Self {
+            actions: management.actions.to_vec(),
+            marketplaces: management.marketplaces,
+            scopes: management.scopes.to_vec(),
+            source_install: management.source_install,
+            unmanaged: management.unmanaged.map(|unmanaged| unmanaged.kind),
+        }
+    }
+
+    /// Whether Tcode lists and changes this harness's plugins.
+    pub fn manages(&self) -> bool {
+        !self.actions.is_empty() || self.marketplaces
+    }
+
+    pub fn supports(&self, action: agent::PluginActionKind) -> bool {
+        self.actions.contains(&action)
+    }
 }
 
 /// A harness's permission control, as its adapter publishes it.
@@ -513,7 +553,8 @@ impl HarnessDescription {
             toggles: facts.toggles.iter().map(|id| (*id).to_owned()).collect(),
             account_login: caps.account_login,
             launch_args: caps.launch_args,
-            plugins: caps.plugin_management.manages(),
+            plugins: PluginsDescription::of(caps.plugin_management),
+            home_path: caps.home_path,
             mcp_servers: caps.mcp_servers,
             native_computer_use: caps.native_computer_use,
             native_mcp_config: facts.native_mcp.is_some(),

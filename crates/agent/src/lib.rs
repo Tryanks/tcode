@@ -706,7 +706,8 @@ pub struct UnmanagedPlugins {
     pub kind: UnmanagedPluginsKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UnmanagedPluginsKind {
     /// Plugins installed only from the harness's own editor.
     EditorOnly,

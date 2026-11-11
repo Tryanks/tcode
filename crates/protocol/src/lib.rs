@@ -45,12 +45,12 @@ pub use event::{
     GitStatusStatus, HarnessDescription, HarnessPermission, ImportFailure, IndexSnapshot,
     IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools,
     MergeWorktreeFailure, NoticeSeverity, PendingRewind, PluginCatalogState, PluginChallenge,
-    PluginChallengeKind, PluginOperationTarget, PluginStaleReason, ProviderDiskUsage,
-    ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus,
-    ProvidersStatus, QueuedMessageStatus, RewindBlocked, RewindStatus, RuntimeEffect, RuntimeError,
-    RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope,
-    ScopedProviderChoice, ServerEvent, SessionActivity, SessionPlan, SessionStatus,
-    StorageMigration, TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus,
+    PluginChallengeKind, PluginOperationTarget, PluginStaleReason, PluginsDescription,
+    ProviderDiskUsage, ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun,
+    ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RewindBlocked, RewindStatus,
+    RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId,
+    RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity, SessionPlan,
+    SessionStatus, StorageMigration, TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus,
     TerminalSplitStatus, TerminalStatus, ThreadReferenceStatus, ThreadWakes, Topic,
 };
 pub use query::{
@@ -372,6 +372,8 @@ pub use wire::{
 // oversized file whose host gave no count.
 // SelectOption gains approval, the ApprovalClass of a permission value.
 // SessionStatus gains background_control {stop, move_running}.
+// HarnessDescription's plugins is a PluginsDescription {actions, marketplaces,
+// scopes, source_install, unmanaged} instead of a bool; it gains home_path.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

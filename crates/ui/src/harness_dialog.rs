@@ -2628,7 +2628,7 @@ impl HarnessDialog {
     ) -> Option<AnyElement> {
         let mut rows = Vec::new();
         let name = harness_name(self.store.read(cx), &self.harness);
-        if description.plugins {
+        if description.plugins.manages() {
             let builtin = self.builtin_id().to_owned();
             rows.push(
                 crate::material::accessible_clickable(
