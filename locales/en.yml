@@ -709,6 +709,7 @@ providers:
   tcode_update_aria: "Tcode update available — view details"
   tcode_update_title: "Tcode update available"
   tcode_update_message: "Download the latest release from GitHub."
+  login_shell_unread: "Couldn't read your login shell's environment, so harnesses are looked up on the PATH Tcode was started with: %{error}"
   tcode_update_unchecked: "Couldn't check for a Tcode update: %{error}"
   view_release: "View release"
   # A harness's settings (Settings → Harnesses → a harness).

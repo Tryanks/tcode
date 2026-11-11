@@ -73,6 +73,8 @@ pub struct ProviderCatalog {
     /// Why secrets.json could not be read when the names above were last
     /// read. No secret is shown as saved and none is written over the file.
     pub(super) secrets_unreadable: Option<String>,
+    /// Why the login shell's environment could not be read at start.
+    login_shell_unread: Option<String>,
     logins: HashMap<String, RunningLogin>,
     next_login: u64,
 }
@@ -104,6 +106,7 @@ impl ProviderCatalog {
             secret_writes: HashMap::new(),
             provider_secret_names,
             secrets_unreadable,
+            login_shell_unread: None,
             logins: HashMap::new(),
             next_login: 0,
         }
@@ -328,6 +331,7 @@ impl ProviderCatalog {
                 || self.tcode_update.checking,
             secret_names: self.provider_secret_names.clone(),
             secrets_unreadable: self.secrets_unreadable.clone(),
+            login_shell_unread: self.login_shell_unread.clone(),
             plugins,
             harnesses: Vec::new(),
         }
@@ -335,6 +339,12 @@ impl ProviderCatalog {
 }
 
 impl AppState {
+    /// Why the login shell's environment could not be read before the host
+    /// started, which every client is shown with the harnesses.
+    pub(crate) fn login_shell_unread(&mut self, error: Option<String>) {
+        self.providers.login_shell_unread = error;
+    }
+
     /// Kick off a background refresh of every provider's model catalog (called
     /// at app start and after a binary-path change). Results update
     /// `model_catalogs` and are persisted so the next launch is instant.

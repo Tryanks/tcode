@@ -705,6 +705,7 @@ providers:
   tcode_update_aria: "Tcode 有可用更新 — 查看详情"
   tcode_update_title: "Tcode 有可用更新"
   tcode_update_message: "从 GitHub 下载最新版本。"
+  login_shell_unread: "无法读取登录 shell 的环境，因此按 Tcode 启动时的 PATH 查找 harness：%{error}"
   tcode_update_unchecked: "无法检查 Tcode 更新：%{error}"
   view_release: "查看发布版本"
   # 一个 Harness 的设置（设置 › Harness › 某个 Harness）。

@@ -348,6 +348,8 @@ pub use wire::{
 // failed.
 // ProviderVersionStatus gains latest_error and TcodeUpdateStatus check_error,
 // why the latest version could not be looked up.
+// ProvidersStatus gains login_shell_unread, why the host could not read the
+// login shell's environment at start.
 // The agent event stream gains unreadable_record {line}: a row of a thread's
 // log the host cannot read is sent as it is stored instead of left out, and so
 // is a subagent's item (with parent_item_id) a build before v0.1.42 wrote

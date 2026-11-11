@@ -3090,6 +3090,10 @@ impl WorkspaceStore {
     }
 
     /// Why the host's saved secrets could not be read.
+    pub fn login_shell_unread(&self) -> Option<&str> {
+        self.providers_replica.login_shell_unread.as_deref()
+    }
+
     pub fn provider_secrets_unreadable(&self) -> Option<&str> {
         self.providers_replica.secrets_unreadable.as_deref()
     }
