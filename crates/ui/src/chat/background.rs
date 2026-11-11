@@ -162,8 +162,9 @@ impl Place {
     }
 }
 
-/// The stop for every piece at once, beside the title, wherever the harness
-/// stops them. More than one piece asks first: a stop takes a dev server
+/// The stop for every piece at once, wherever the harness stops them: a chip
+/// at the end of the row over the composer, there whether or not the rail
+/// lists the work. More than one piece asks first: a stop takes a dev server
 /// down along with what the reader meant to end.
 pub(in crate::chat) fn stop_all(
     background: &Background,
@@ -186,9 +187,9 @@ pub(in crate::chat) fn stop_all(
         )))
         .debug_selector(|| "background-stop-all".into())
         .ghost()
-        .xsmall()
-        .touch(place.touch)
-        .text_secondary(false, cx)
+        .outline()
+        .chip()
+        .text_body(false, cx)
         .label(crate::tr!("background.stop_all").into_owned())
         .on_click(move |_, window, cx| {
             cx.stop_propagation();

@@ -278,9 +278,16 @@ impl ChatView {
         let agents = agents
             .filter(|_| !subagent && shows(RailCard::Agents))
             .map(|agents| (agents.count(), agents.cue(cx)));
+        // The stop for all of the background work ends the row wherever the
+        // work is listed, the rail included.
+        let stop_all = self.background(cx).and_then(|background| {
+            let place = self.background_place("strip", cx)?;
+            super::background::stop_all(&background, &place, cx)
+        });
         let strip = self.motion.shown(
             "phone-strip",
             (background.is_some()
+                || stop_all.is_some()
                 || agents.is_some()
                 || !started.is_empty()
                 || links.is_some()
@@ -444,6 +451,14 @@ impl ChatView {
                                 .map(|pill| div().flex_none().child(pill)),
                         )
                         .overflow_x_scroll_area();
+                    // The pills take the row's start and scroll within what
+                    // the stop for all, held at its end, leaves them.
+                    let pills = h_flex()
+                        .size_full()
+                        .items_center()
+                        .gap(gap)
+                        .child(div().flex_1().min_w_0().h_full().child(pills))
+                        .children(stop_all.map(|stop| floating_backing(radius, cx).child(stop)));
                     if compact {
                         pills
                             .px(px(crate::material::COMPACT_PAGE_INSET))
@@ -546,8 +561,7 @@ impl ChatView {
                             .text_secondary(place.touch, cx)
                             .text_color(cx.theme().muted_foreground)
                             .child(crate::widgets::fade_text(background.summary())),
-                    )
-                    .children(super::background::stop_all(&background, &place, cx));
+                    );
                 v_flex()
                     .w_full()
                     .when(!place.touch, |list| list.w(px(340.)))

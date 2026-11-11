@@ -484,23 +484,6 @@ impl RailCard {
         }
     }
 
-    /// What its header offers at its end: the stop for all of the thread's
-    /// background work, on the Commands card, or on the Agents card while
-    /// the thread has no commands to list.
-    fn action(self, rail: &RailView, cx: &mut Context<RailView>) -> Option<AnyElement> {
-        let stops_all = match self {
-            Self::Commands => true,
-            Self::Agents => !commands::present(rail, cx),
-            _ => false,
-        };
-        if !stops_all {
-            return None;
-        }
-        let background = rail.background(cx)?;
-        let place = rail.background_place(cx)?;
-        super::background::stop_all(&background, &place, cx)
-    }
-
     fn body(
         self,
         rail: &RailView,
@@ -800,10 +783,6 @@ impl RailView {
                             crate::widgets::fade_text(summary.clone()).into_any_element()
                         },
                     )),
-            )
-            .children(
-                card.action(self, cx)
-                    .map(|action| div().flex_none().child(action)),
             )
             .into_any_element();
         let fit = card.fit(self, cx);
