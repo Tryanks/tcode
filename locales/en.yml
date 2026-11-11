@@ -1437,7 +1437,6 @@ notice:
 attach:
   unsupported_type: "'%{name}' could not be read as an image."
   too_large: "'%{name}' exceeds the 10MB attachment limit."
-  too_many: "You can attach up to 8 images per message."
   add: "Add"
   photo_library: "Photo library"
   pick_failed: "Could not open the photo library: %{error}"

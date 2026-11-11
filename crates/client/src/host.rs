@@ -377,11 +377,10 @@ pub trait ClientHost: 'static {
         false
     }
 
-    /// Let the user choose up to `limit` images in the platform's media
-    /// picker. Dismissing the picker resolves to an empty list; `Err` is a
-    /// real failure to show.
-    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedFile>, DeviceFailure>> {
-        let _ = limit;
+    /// Let the user choose images in the platform's media picker, as many as
+    /// the picker itself allows. Dismissing the picker resolves to an empty
+    /// list; `Err` is a real failure to show.
+    fn pick_images(&self) -> HostFuture<'_, Result<Vec<PickedFile>, DeviceFailure>> {
         Box::pin(async { Err(DeviceFailure::Unsupported) })
     }
 

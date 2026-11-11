@@ -147,14 +147,15 @@ public func tcodeIosHostStartCameraScan(
 private var imagePickers: [UInt64: ImagePickerDelegate] = [:]
 
 @_cdecl("tcode_ios_host_pick_images")
-public func tcodeIosHostPickImages(_ requestId: UInt64, _ limit: Int) {
+public func tcodeIosHostPickImages(_ requestId: UInt64) {
     guard let presenter = topPresenter() else {
         finishImagePick(requestId, error: "cannot_open")
         return
     }
     var configuration = PHPickerConfiguration(photoLibrary: .shared())
     configuration.filter = .images
-    configuration.selectionLimit = max(1, limit)
+    // Zero is the picker's own "no limit".
+    configuration.selectionLimit = 0
     // HEIC and other formats the machine cannot decode arrive as JPEG.
     configuration.preferredAssetRepresentationMode = .compatible
     let delegate = ImagePickerDelegate(requestId: requestId)

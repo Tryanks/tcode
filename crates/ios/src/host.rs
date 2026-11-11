@@ -47,7 +47,7 @@ unsafe extern "C" {
         hint_bytes: *const u8,
         hint_length: usize,
     );
-    fn tcode_ios_host_pick_images(request_id: u64, limit: usize);
+    fn tcode_ios_host_pick_images(request_id: u64);
     fn tcode_ios_host_pick_files(request_id: u64);
     fn tcode_ios_host_browse_start(request: u64);
     fn tcode_ios_host_browse_stop(request: u64);
@@ -137,7 +137,7 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (Rc<NativeClientHost>, Option<S
             },
         )
         .with_image_picker(
-            |limit| -> HostFuture<'static, Result<Vec<PickedFile>, DeviceFailure>> {
+            || -> HostFuture<'static, Result<Vec<PickedFile>, DeviceFailure>> {
                 let (done, receiver) = async_channel::bounded(1);
                 let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
                 PICK_REQUESTS.with(|requests| {
@@ -150,7 +150,7 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (Rc<NativeClientHost>, Option<S
                     );
                 });
                 // SAFETY: UIKit retains the id and finishes the request exactly once.
-                unsafe { tcode_ios_host_pick_images(request_id, limit) };
+                unsafe { tcode_ios_host_pick_images(request_id) };
                 Box::pin(async move {
                     receiver
                         .recv()

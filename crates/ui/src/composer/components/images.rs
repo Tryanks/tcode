@@ -5,7 +5,7 @@ use crate::widgets::menu::ContextMenuExt as _;
 use gpui::StyledImage as _;
 use image::GenericImageView as _;
 use std::cell::RefCell;
-use tcode_core::attachments::{AttachError, MAX_EDGE_PX, MAX_IMAGES, MAX_SOURCE_BYTES};
+use tcode_core::attachments::{AttachError, MAX_EDGE_PX, MAX_SOURCE_BYTES};
 
 /// How long a row drawn here takes to fold in or out, or to move to a new place.
 const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
@@ -187,10 +187,9 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> bool {
         self.sync_images_session(cx);
-        let current_count = self.pending_images.len() + self.pending_image_loads;
-        // Type and count are known now; the size is checked once the image is
+        // The type is known now; the size is checked once the image is
         // fitted, since a phone photo starts far larger than it is sent.
-        if let Err(err) = validate_attachment(&name, &mime, 0, current_count) {
+        if let Err(err) = validate_attachment(&name, &mime, 0) {
             window.push_notification(Notification::error(attach_error_message(&err)), cx);
             return false;
         }
@@ -229,7 +228,7 @@ impl Composer {
                             name: name.clone(),
                         })
                     })?;
-                    validate_attachment(&name, &mime, bytes.len() as u64, current_count)
+                    validate_attachment(&name, &mime, bytes.len() as u64)
                         .map_err(AddImageError::Attachment)?;
                     let dir = attachments_dir.ok_or_else(|| {
                         AddImageError::Persist(std::io::Error::new(
@@ -377,17 +376,8 @@ impl Composer {
     ) {
         let host = cx.global::<crate::remote::ClientAttachment>().host();
         self.sync_images_session(cx);
-        let remaining =
-            MAX_IMAGES.saturating_sub(self.pending_images.len() + self.pending_image_loads);
-        if remaining == 0 {
-            window.push_notification(
-                Notification::error(attach_error_message(&AttachError::TooMany)),
-                cx,
-            );
-            return;
-        }
         cx.spawn_in(window, async move |this, cx| {
-            let picked = host.pick_images(remaining).await;
+            let picked = host.pick_images().await;
             let _ = this.update_in(cx, |composer, window, cx| match picked {
                 Ok(images) => {
                     for image in images {

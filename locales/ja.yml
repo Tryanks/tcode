@@ -1437,7 +1437,6 @@ notice:
 attach:
   unsupported_type: "「%{name}」を画像として読み込めませんでした。"
   too_large: "「%{name}」は添付ファイルの上限（10MB）を超えています。"
-  too_many: "1 件のメッセージに添付できる画像は 8 枚までです。"
   add: "追加"
   photo_library: "フォトライブラリ"
   pick_failed: "フォトライブラリを開けませんでした：%{error}"

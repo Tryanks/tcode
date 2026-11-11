@@ -190,18 +190,15 @@ impl JavaBridge {
         }));
     }
 
-    fn pick_images(&self, request_id: u64, limit: usize) {
+    fn pick_images(&self, request_id: u64) {
         let object = self.object.clone();
         self.app.run_on_java_main_thread(Box::new(move || {
             if let Err(error) = object.with_env(|env, activity| {
                 env.call_method(
                     activity,
                     jni_str!("gpuiPickImages"),
-                    jni_sig!("(JI)V"),
-                    &[
-                        JValue::Long(request_id as i64),
-                        JValue::Int(i32::try_from(limit).unwrap_or(i32::MAX)),
-                    ],
+                    jni_sig!("(J)V"),
+                    &[JValue::Long(request_id as i64)],
                 )?;
                 Ok(())
             }) {
@@ -314,7 +311,7 @@ pub(crate) fn native_host(
             },
         )
         .with_image_picker(
-            move |limit| -> HostFuture<'static, Result<Vec<PickedFile>, DeviceFailure>> {
+            move || -> HostFuture<'static, Result<Vec<PickedFile>, DeviceFailure>> {
                 let (done, receiver) = async_channel::bounded(1);
                 let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
                 picks.borrow_mut().insert(
@@ -324,7 +321,7 @@ pub(crate) fn native_host(
                         done,
                     },
                 );
-                picker.pick_images(request_id, limit);
+                picker.pick_images(request_id);
                 Box::pin(async move {
                     receiver
                         .recv()

@@ -1430,7 +1430,6 @@ notice:
 attach:
   unsupported_type: "无法将“%{name}”读取为图片。"
   too_large: "'%{name}' 超过了 10MB 的附件大小限制。"
-  too_many: "每条消息最多只能附加 8 张图片。"
   add: "添加"
   photo_library: "相册"
   pick_failed: "无法打开相册：%{error}"
