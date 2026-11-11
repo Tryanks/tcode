@@ -691,6 +691,11 @@ pub struct ProviderVersionStatus {
     pub installed: Option<String>,
     pub latest: Option<String>,
     pub update_available: bool,
+    /// Why the latest version could not be looked up, in the words of what
+    /// failed; then `latest` is not known, and nothing says there is no
+    /// newer one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_error: Option<String>,
     pub checking: bool,
     pub updating: bool,
     pub update_command: Option<String>,
@@ -707,6 +712,9 @@ pub struct TcodeUpdateStatus {
     pub latest: Option<String>,
     pub release_url: Option<String>,
     pub update_available: bool,
+    /// Why the latest release could not be looked up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_error: Option<String>,
     pub checking: bool,
 }
 

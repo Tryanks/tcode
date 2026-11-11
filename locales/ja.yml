@@ -709,6 +709,7 @@ providers:
   tcode_update_aria: "Tcode の更新があります：詳細を表示"
   tcode_update_title: "Tcode の更新があります"
   tcode_update_message: "GitHub から最新リリースをダウンロードしてください。"
+  tcode_update_unchecked: "Tcode の更新を確認できませんでした: %{error}"
   view_release: "リリースを表示"
   # A harness's settings (Settings → Harnesses → a harness).
   configure: "%{name} を設定"
@@ -994,6 +995,7 @@ providers:
     install_help: "Tcode を実行しているマシンのターミナルで実行し、終わったら再チェックしてください。"
     integrations: "連携"
     key_saved: "保存済み — 置き換えるには新しいキーを入力"
+    latest_unknown: "新しいバージョンを確認できませんでした: %{error}"
     mcp: "MCP ツール"
     model_id: "モデル ID"
     more_models: "ほか %{count} 個のモデル"

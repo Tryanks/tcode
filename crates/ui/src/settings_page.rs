@@ -2286,6 +2286,15 @@ impl SettingsPage {
                 ),
             );
         }
+        if let Some(error) = self.store.read(cx).tcode_update_status().check_error {
+            section = section.child(
+                crate::material::notice(cx.theme().warning, cx)
+                    .debug_selector(|| "providers-tcode-update-unchecked".into())
+                    .child(div().flex_1().min_w_0().text_secondary(compact, cx).child(
+                        crate::tr!("providers.tcode_update_unchecked", error = error).into_owned(),
+                    )),
+            );
+        }
         section = section.child(crate::material::group(cx).child(provider_rows));
         // The update toggle follows the cards it governs; above them its caption
         // would stack straight under the page's own header row.

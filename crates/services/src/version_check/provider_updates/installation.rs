@@ -166,6 +166,11 @@ pub(super) struct SystemProbe;
 
 impl SystemProbe {
     pub(super) async fn output(&self, command: &UpdateCommand) -> Option<String> {
+        self.run(command).await.ok()
+    }
+
+    /// What `command` printed, or why it printed nothing usable.
+    pub(super) async fn run(&self, command: &UpdateCommand) -> Result<String, String> {
         run_process(command, Duration::from_secs(12)).await
     }
 
@@ -210,9 +215,10 @@ impl SystemProbe {
     }
 }
 
-async fn run_process(command: &UpdateCommand, timeout: Duration) -> Option<String> {
+async fn run_process(command: &UpdateCommand, timeout: Duration) -> Result<String, String> {
     use smol::io::AsyncReadExt as _;
 
+    let name = command.summary();
     let mut process = crate::process::async_command(&command.program);
     process
         .args(&command.args)
@@ -224,23 +230,36 @@ async fn run_process(command: &UpdateCommand, timeout: Duration) -> Option<Strin
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    let mut child = process.spawn().ok()?;
-    let mut stdout = child.stdout.take()?;
+    let mut child = process
+        .spawn()
+        .map_err(|error| format!("could not run `{name}`: {error}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("`{name}` gave no output"))?;
     smol::future::race(
         async {
             let mut output = Vec::new();
-            stdout.read_to_end(&mut output).await.ok()?;
-            child
+            stdout
+                .read_to_end(&mut output)
+                .await
+                .map_err(|error| format!("`{name}`: {error}"))?;
+            let status = child
                 .status()
                 .await
-                .ok()?
-                .success()
-                .then(|| String::from_utf8(output).ok())
-                .flatten()
+                .map_err(|error| format!("`{name}`: {error}"))?;
+            if !status.success() {
+                return Err(format!("`{name}` exited with {status}"));
+            }
+            String::from_utf8(output)
+                .map_err(|_| format!("`{name}` printed text that is not UTF-8"))
         },
         async {
             smol::Timer::after(timeout).await;
-            None
+            Err(format!(
+                "`{name}` did not finish within {} s",
+                timeout.as_secs()
+            ))
         },
     )
     .await
@@ -368,63 +387,87 @@ async fn resolve(
     native(&context).unwrap_or_else(|| context.managed(InstallSource::Unknown, None))
 }
 
-/// Run on the host's blocking worker: release registries use synchronous HTTP.
-pub fn latest_version(installation: &Installation) -> Option<String> {
+/// The newest version the installation's channel offers: `None` where it
+/// has no channel to ask or holds the provider at the version it has, an
+/// error where the channel could not be asked or its answer not read. Run
+/// on the host's blocking worker: release registries use synchronous HTTP.
+pub fn latest_version(installation: &Installation) -> Result<Option<String>, String> {
     smol::block_on(latest(&SystemProbe, &installation.latest))
 }
 
-async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Option<String> {
+/// That `source` answered something without a version Tcode can read.
+pub(super) fn unread(source: &str) -> String {
+    format!("could not read a version in what `{source}` answered")
+}
+
+async fn latest(probe: &SystemProbe, query: &LatestQuery) -> Result<Option<String>, String> {
     match query {
-        LatestQuery::None => None,
+        LatestQuery::None => Ok(None),
         LatestQuery::Registry(package) => {
             let url = format!("https://registry.npmjs.org/{package}/latest");
             let response = ureq::get(&url)
                 .timeout(Duration::from_secs(10))
                 .call()
-                .ok()?;
+                .map_err(|error| error.to_string())?;
             let mut bytes = Vec::new();
-            response.into_reader().read_to_end(&mut bytes).ok()?;
-            let json: Value = serde_json::from_slice(&bytes).ok()?;
-            json.get("version")?.as_str().map(str::to_string)
+            response
+                .into_reader()
+                .read_to_end(&mut bytes)
+                .map_err(|error| format!("{url}: {error}"))?;
+            serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .and_then(|json| json.get("version")?.as_str().map(str::to_string))
+                .map(Some)
+                .ok_or_else(|| unread(&url))
         }
-        LatestQuery::Package { command, yarn } => {
-            package_latest(&probe.output(command).await?, *yarn)
-        }
+        LatestQuery::Package { command, yarn } => package_latest(&probe.run(command).await?, *yarn)
+            .map(Some)
+            .ok_or_else(|| unread(&command.summary())),
         LatestQuery::Claude { channel, maximum } => {
             let url = format!("https://downloads.claude.ai/claude-code-releases/{channel}");
             let response = ureq::get(&url)
                 .timeout(Duration::from_secs(10))
                 .call()
-                .ok()?;
+                .map_err(|error| error.to_string())?;
             let mut version = String::new();
-            response.into_reader().read_to_string(&mut version).ok()?;
-            let parsed = super::parse_version(&version)?;
+            response
+                .into_reader()
+                .read_to_string(&mut version)
+                .map_err(|error| format!("{url}: {error}"))?;
+            let parsed = super::parse_version(&version).ok_or_else(|| unread(&url))?;
             if maximum.is_some_and(|maximum| parsed > maximum) {
-                return None;
+                return Ok(None);
             }
-            Some(version.trim().to_string())
+            Ok(Some(version.trim().to_string()))
         }
         LatestQuery::Mise {
             command,
             tool,
             current,
         } => {
-            let json: Value = serde_json::from_str(&probe.output(command).await?).ok()?;
-            let entries = json.as_object()?;
+            let unread = || unread(&command.summary());
+            let json: Value =
+                serde_json::from_str(&probe.run(command).await?).map_err(|_| unread())?;
+            let entries = json.as_object().ok_or_else(unread)?;
             match entries.get(tool) {
-                Some(entry) => entry.get("latest")?.as_str().map(str::to_string),
-                None if entries.is_empty() => Some(current.clone()),
-                None => None,
+                Some(entry) => entry
+                    .get("latest")
+                    .and_then(Value::as_str)
+                    .map(|latest| Some(latest.to_string()))
+                    .ok_or_else(unread),
+                None if entries.is_empty() => Ok(Some(current.clone())),
+                None => Ok(None),
             }
         }
         LatestQuery::Brew {
             command,
             target,
             cask,
-        } => {
-            let json: Value = serde_json::from_str(&probe.output(command).await?).ok()?;
-            brew_latest(&json, target, *cask)
-        }
+        } => serde_json::from_str::<Value>(&probe.run(command).await?)
+            .ok()
+            .and_then(|json| brew_latest(&json, target, *cask))
+            .map(Some)
+            .ok_or_else(|| unread(&command.summary())),
         LatestQuery::System(query) => super::system_managers::latest(probe, query).await,
     }
 }

@@ -322,6 +322,8 @@ pub struct ProviderVersionState {
     pub latest: Option<String>,
     /// Whether `latest` is strictly newer than `installed`.
     pub update_available: bool,
+    /// Why `latest` could not be looked up.
+    pub latest_error: Option<String>,
     /// The newest version a notice has offered. It outlives a configuration
     /// change, so a check after one does not offer the same update again.
     announced: Option<String>,
@@ -340,6 +342,8 @@ pub struct TcodeUpdateState {
     pub latest: Option<String>,
     pub release_url: Option<String>,
     pub update_available: bool,
+    /// Why the latest release could not be looked up.
+    pub check_error: Option<String>,
     pub checking: bool,
 }
 
@@ -352,6 +356,7 @@ impl Default for TcodeUpdateState {
             latest: None,
             release_url: None,
             update_available: false,
+            check_error: None,
             checking: false,
         }
     }

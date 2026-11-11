@@ -170,6 +170,7 @@ impl ProviderCatalog {
         revision: u64,
         installation: Option<Installation>,
         assessment: provider_updates::Assessment,
+        latest_error: Option<String>,
     ) -> Option<RuntimeToast> {
         let status = self.provider_versions.entry(provider).or_default();
         let update = if status.revision == revision {
@@ -177,6 +178,7 @@ impl ProviderCatalog {
             status.installation = installation;
             status.installed = assessment.current;
             status.latest = assessment.latest;
+            status.latest_error = latest_error;
             status.update_available = assessment.update_available;
             if status.update_available
                 && status.announced != status.latest
@@ -283,6 +285,7 @@ impl ProviderCatalog {
                             installed: status.installed.clone(),
                             latest: status.latest.clone(),
                             update_available: status.update_available,
+                            latest_error: status.latest_error.clone(),
                             checking: status.checking,
                             updating: status.updating,
                             update_command: command.map(|command| command.display()),
@@ -299,6 +302,7 @@ impl ProviderCatalog {
                 latest: self.tcode_update.latest.clone(),
                 release_url: self.tcode_update.release_url.clone(),
                 update_available: self.tcode_update.update_available,
+                check_error: self.tcode_update.check_error.clone(),
                 checking: self.tcode_update.checking,
             },
             provider_snapshots: self.provider_snapshots.clone(),
@@ -1281,10 +1285,9 @@ impl AppState {
                                 installed_output: None,
                                 latest_output: None,
                             });
-                            if let Some(toast) = state
-                                .providers
-                                .complete_version_check(round, provider, revision, None, assessment)
-                            {
+                            if let Some(toast) = state.providers.complete_version_check(
+                                round, provider, revision, None, assessment, None,
+                            ) {
                                 emit_runtime(cx, RuntimeEvent::Toast(toast));
                             }
                             state.report_error(RuntimeError::PersistSettings { error }, cx);
@@ -1306,7 +1309,11 @@ impl AppState {
                             .unblock(move || provider_updates::latest_version(&installation))
                             .await
                     }
-                    None => None,
+                    None => Ok(None),
+                };
+                let (latest, latest_error) = match latest {
+                    Ok(latest) => (latest, None),
+                    Err(error) => (None, Some(error)),
                 };
                 let assessment = provider_updates::check(ProviderCheckInput {
                     installed_output: installed.as_deref(),
@@ -1319,6 +1326,7 @@ impl AppState {
                         revision,
                         installation,
                         assessment,
+                        latest_error,
                     ) {
                         emit_runtime(cx, RuntimeEvent::Toast(toast));
                     }
@@ -1340,7 +1348,7 @@ impl AppState {
             let fetched = host_cx.unblock(move || releases.latest_json()).await;
             let fetched = match &fetched {
                 Ok(bytes) => Ok(bytes.as_slice()),
-                Err(error) => Err(*error),
+                Err(error) => Err(error.as_str()),
             };
             let assessment = app_releases::check(&current, fetched);
             host_cx.enqueue(move |state, cx| {
@@ -1350,6 +1358,7 @@ impl AppState {
                 status.latest = assessment.latest;
                 status.release_url = assessment.release_url;
                 status.update_available = assessment.update_available;
+                status.check_error = assessment.failure;
                 if status.update_available
                     && !already
                     && let Some(version) = &status.latest

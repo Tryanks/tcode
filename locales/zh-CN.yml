@@ -705,6 +705,7 @@ providers:
   tcode_update_aria: "Tcode 有可用更新 — 查看详情"
   tcode_update_title: "Tcode 有可用更新"
   tcode_update_message: "从 GitHub 下载最新版本。"
+  tcode_update_unchecked: "无法检查 Tcode 更新：%{error}"
   view_release: "查看发布版本"
   # 一个 Harness 的设置（设置 › Harness › 某个 Harness）。
   configure: "配置 %{name}"
@@ -987,6 +988,7 @@ providers:
     install_help: "在运行 Tcode 的主机上，在终端执行；装好后点“重新检查”。"
     integrations: "集成"
     key_saved: "已保存 —— 输入新的 Key 即可替换"
+    latest_unknown: "无法检查是否有新版本：%{error}"
     mcp: "MCP 工具"
     model_id: "模型标识"
     more_models: "另外 %{count} 个模型"

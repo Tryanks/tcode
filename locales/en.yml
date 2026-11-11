@@ -709,6 +709,7 @@ providers:
   tcode_update_aria: "Tcode update available — view details"
   tcode_update_title: "Tcode update available"
   tcode_update_message: "Download the latest release from GitHub."
+  tcode_update_unchecked: "Couldn't check for a Tcode update: %{error}"
   view_release: "View release"
   # A harness's settings (Settings → Harnesses → a harness).
   configure: "Configure %{name}"
@@ -994,6 +995,7 @@ providers:
     install_help: "Run it in a terminal on the machine running Tcode, then check again."
     integrations: "Integrations"
     key_saved: "Saved — enter a new key to replace it"
+    latest_unknown: "Couldn't check for a newer version: %{error}"
     mcp: "MCP tools"
     model_id: "Model ID"
     more_models: "%{count} more models"
