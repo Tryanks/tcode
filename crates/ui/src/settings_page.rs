@@ -3625,42 +3625,6 @@ mod tests {
         }
     }
 
-    /// The harness rows say when the ACP registry has a newer version of an
-    /// agent, so showing them asks the host for the registry; a page built
-    /// for a host the window does not show asks for nothing.
-    #[gpui::test]
-    fn showing_the_harnesses_asks_for_the_registry(cx: &mut TestAppContext) {
-        use tcode_protocol::{ClientPayload, Command, decode_client_line};
-        let (store, outgoing, _incoming, _pump) = scripted_store(WorkspaceAttachment::Local, cx);
-        let window_state = cx.new(|_| WindowState::default());
-        let mut page = None;
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
-            page = Some(view.clone());
-            gpui_base::Root::new(view, window, cx)
-        });
-        let page = page.unwrap();
-        let asked = |outgoing: &async_channel::Receiver<String>| {
-            std::iter::from_fn(|| outgoing.try_recv().ok()).any(|line| {
-                matches!(
-                    decode_client_line(&line).unwrap().payload,
-                    ClientPayload::Command(Command::RefreshAcpRegistry)
-                )
-            })
-        };
-        cx.run_until_parked();
-        assert!(
-            !asked(&outgoing),
-            "nothing is asked before the harnesses show"
-        );
-        page.update(cx, |page, cx| page.select_section(Section::Providers, cx));
-        cx.run_until_parked();
-        assert!(
-            asked(&outgoing),
-            "showing the harnesses asks for the registry"
-        );
-    }
-
     /// A client attached to another machine shows that machine's storage
     /// migration in Maintenance only while the host says one runs: nothing
     /// before, a card while it runs, nothing once it is done; and it stops

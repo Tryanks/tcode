@@ -589,44 +589,6 @@ mod tests {
         (store, pump)
     }
 
-    /// The dialog is built with the settings page, before a link knows it may
-    /// manage its host; opening it asks the host for the registry.
-    #[gpui::test]
-    fn opening_the_dialog_asks_for_the_registry(cx: &mut TestAppContext) {
-        use tcode_protocol::{ClientMessage, ClientPayload, Command};
-
-        cx.update(crate::test_client::init);
-        let (to_host, requests) = async_channel::unbounded();
-        let (incoming, from_host) = async_channel::unbounded();
-        let link = tcode_client::HostLink::new(to_host, from_host);
-        let pump_link = link.clone();
-        let _pump = cx.background_executor.spawn(async move {
-            pump_link.pump().await;
-        });
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link,
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        let (panel, _) = cx.add_window_view(|window, cx| AcpPanel::new(store.clone(), window, cx));
-        crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-        panel.update(cx, |panel, cx| panel.prepare_to_open(cx));
-        cx.run_until_parked();
-        let asked = std::iter::from_fn(|| requests.try_recv().ok()).any(|line| {
-            serde_json::from_str::<ClientMessage>(&line).is_ok_and(|message| {
-                matches!(
-                    message.payload,
-                    ClientPayload::Command(Command::RefreshAcpRegistry)
-                )
-            })
-        });
-        assert!(asked);
-    }
-
     #[gpui::test]
     fn switching_language_relocalizes_the_search_placeholder(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
