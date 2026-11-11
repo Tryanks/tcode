@@ -150,11 +150,7 @@ impl Phone {
 
     /// Everything sent so far has reached the host and come back.
     fn round_trip(&mut self, cx: &mut VisualTestContext) {
-        let link = self.driver.link.clone();
-        self.driver
-            .await_with_events(cx, link.query(tcode_protocol::Query::Ping))
-            .unwrap();
-        self.driver.step(cx);
+        self.driver.round_trip(cx);
     }
 
     fn command(&mut self, cx: &mut VisualTestContext, command: Command) {

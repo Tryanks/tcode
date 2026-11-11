@@ -7705,13 +7705,7 @@ pub(crate) mod tests {
         });
 
         workspace.update(cx, |store, _| store.set_auto_settle_after_days(Some(0.5)));
-        // The host answers in order: once a later ping is answered, the
-        // refusal has arrived too.
-        let link = driver.link.clone();
-        driver
-            .await_with_events(cx, link.query(tcode_protocol::Query::Ping))
-            .expect("ping");
-        cx.run_until_parked();
+        driver.round_trip(cx);
         let refusal = Settings::default()
             .apply(tcode_core::settings::SettingsPatch::AutoSettleAfterDays(
                 Some(0.5),

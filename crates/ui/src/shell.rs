@@ -15689,7 +15689,10 @@ pub(crate) mod tests {
             store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Plan, cx)
         });
         crate::test_frames::draw_settled(cx);
-        assert!(cx.debug_bounds("right-panel").is_some(), "the panel is open");
+        assert!(
+            cx.debug_bounds("right-panel").is_some(),
+            "the panel is open"
+        );
         assert_eq!(top_row(cx), Some(reading), "the reader is where they were");
 
         driver.shutdown(cx, &host);
