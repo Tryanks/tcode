@@ -46,6 +46,8 @@ pub struct AcpPanel {
     custom_name: Entity<InputState>,
     custom_command: Entity<InputState>,
     custom_args: Entity<InputState>,
+    /// Why the custom agent's arguments could not be split, when they could not.
+    custom_args_error: Option<String>,
     /// Measured rows stay valid while the filtered agents keep their ids. The
     /// registry is small enough to measure whole, so the scrollbar and the
     /// touch edge bounce see its full extent.
@@ -79,6 +81,7 @@ impl AcpPanel {
             custom_name: input(&crate::tr!("providers.acp.name_placeholder"), window, cx),
             custom_command: input("node", window, cx),
             custom_args: input("/path/to/agent.js --acp", window, cx),
+            custom_args_error: None,
             market_list: ListState::new(0, ListAlignment::Top, px(120.)).measure_all(),
             market_rows: crate::motion::list_rows::ListRows::over(crate::motion::KEYSTROKE),
             market_flip: Default::default(),
@@ -453,6 +456,14 @@ impl AcpPanel {
             .child(Input::new(&self.custom_name))
             .child(Input::new(&self.custom_command))
             .child(Input::new(&self.custom_args))
+            .when_some(self.custom_args_error.clone(), |form, error| {
+                form.child(
+                    div()
+                        .text_secondary(false, cx)
+                        .text_color(cx.theme().danger_foreground)
+                        .child(crate::tr!("providers.acp.args_unreadable", error = error)),
+                )
+            })
             .child(
                 DialogActions::new()
                     .w_full()
@@ -474,12 +485,17 @@ impl AcpPanel {
                                 if name.trim().is_empty() || command.trim().is_empty() {
                                     return;
                                 }
-                                let args = args
-                                    .read(cx)
-                                    .value()
-                                    .split_whitespace()
-                                    .map(str::to_string)
-                                    .collect();
+                                let args = match tcode_core::settings::split_args(
+                                    &args.read(cx).value(),
+                                ) {
+                                    Ok(args) => args,
+                                    Err(error) => {
+                                        this.custom_args_error = Some(error);
+                                        cx.notify();
+                                        return;
+                                    }
+                                };
+                                this.custom_args_error = None;
                                 this.store.update(cx, |store, _cx| {
                                     store.add_custom_acp_agent(name, command, args);
                                 });

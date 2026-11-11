@@ -784,6 +784,7 @@ providers:
     cancel_install: "キャンセル"
     install_cancelled: "%{name} のインストールを中止しました"
     custom: "カスタムハーネス…"
+    args_unreadable: "この引数を読み取れません: %{error}"
     custom_help: "標準入出力で ACP 通信を行う任意のコマンドを使用できます。"
     add: "ハーネスを追加"
     name_placeholder: "マイハーネス"

@@ -2377,7 +2377,8 @@ fn installed_acp_duplicates_of_native_providers_only_serve_their_existing_sessio
             &state.settings,
             LaunchEnv::default(),
             McpServers::default(),
-        );
+        )
+        .unwrap();
         assert_eq!(opts.acp.map(|agent| agent.id).as_deref(), Some("cursor"));
     });
 }
@@ -3024,7 +3025,8 @@ fn provider_binary_and_launch_arguments_follow_the_selected_profile() {
         &settings,
         LaunchEnv::default(),
         McpServers::default(),
-    );
+    )
+    .unwrap();
     assert_eq!(opts.binary_path, Some(PathBuf::from("/custom/claude")));
     assert_eq!(opts.extra_args, vec!["--chrome", "--verbose"]);
 
@@ -3035,7 +3037,8 @@ fn provider_binary_and_launch_arguments_follow_the_selected_profile() {
         &settings,
         LaunchEnv::default(),
         McpServers::default(),
-    );
+    )
+    .unwrap();
     assert_eq!(opts.binary_path, Some(PathBuf::from("/custom/codex")));
     assert!(opts.extra_args.is_empty());
 
@@ -3046,7 +3049,8 @@ fn provider_binary_and_launch_arguments_follow_the_selected_profile() {
         &settings,
         LaunchEnv::default(),
         McpServers::default(),
-    );
+    )
+    .unwrap();
     assert_eq!(opts.extra_args, vec!["--verbose"]);
 
     settings
@@ -3058,7 +3062,8 @@ fn provider_binary_and_launch_arguments_follow_the_selected_profile() {
         &settings,
         LaunchEnv::default(),
         McpServers::default(),
-    );
+    )
+    .unwrap();
     assert_eq!(opts.extra_args, vec!["--verbose", "--approve"]);
 }
 
@@ -3245,7 +3250,7 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
             .iter()
             .any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v == "https://api.kimi.com/coding/")
     );
-    let opts = session_options(&meta, &state.settings, launch_env, McpServers::default());
+    let opts = session_options(&meta, &state.settings, launch_env, McpServers::default()).unwrap();
     assert_eq!(opts.binary_path, Some(PathBuf::from("/opt/kimi/claude")));
 }
 
@@ -3277,7 +3282,8 @@ fn session_launch_scopes_mcp_registrations() {
                     computer_use: Some(computer.clone()),
                     control: Some(control.clone()),
                 },
-            );
+            )
+            .unwrap();
             let mut expected = Vec::new();
             for (enabled, reg) in [
                 (preview_supported, &preview),

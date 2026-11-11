@@ -921,19 +921,26 @@ impl AppState {
                     return;
                 }
             };
-            let mut options =
-                session_options(&title_meta, &settings, launch_env, McpServers::default());
-            options.processes = processes;
-            options.clock = agent::Clock::new(host_cx.clock().clone());
-            let title = generate_ai_title(
-                provider_launcher,
-                title_meta.provider,
-                options,
-                prompt,
-                attachments,
-                executor,
-            )
-            .await;
+            let title =
+                match session_options(&title_meta, &settings, launch_env, McpServers::default()) {
+                    Ok(mut options) => {
+                        options.processes = processes;
+                        options.clock = agent::Clock::new(host_cx.clock().clone());
+                        generate_ai_title(
+                            provider_launcher,
+                            title_meta.provider,
+                            options,
+                            prompt,
+                            attachments,
+                            executor,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        log::debug!("no AI title for session {session_id}: {error}");
+                        None
+                    }
+                };
             host_cx.enqueue(move |state, cx| {
                 if !state.title_generation_ended(&session_id, run) {
                     return;

@@ -785,6 +785,7 @@ providers:
     install_cancelled: "Stopped installing %{name}"
     custom: "Custom Harness…"
     custom_help: "Any command that speaks ACP over its standard input and output."
+    args_unreadable: "These arguments cannot be read: %{error}"
     add: "Add Harness"
     name_placeholder: "My Harness"
   # Native provider plugins (claude plugin …), managed on the host.

@@ -778,6 +778,7 @@ providers:
     cancel_install: "取消"
     install_cancelled: "已停止安装 %{name}"
     custom: "自定义 Harness…"
+    args_unreadable: "无法解析这些参数：%{error}"
     custom_help: "任何通过标准输入输出使用 ACP 的命令。"
     add: "添加 Harness"
     name_placeholder: "我的 Harness"

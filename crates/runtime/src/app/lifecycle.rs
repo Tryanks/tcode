@@ -140,7 +140,8 @@ impl AppState {
                         computer_use: computer_use_registration,
                         control: control_registration,
                     },
-                );
+                )
+                .map_err(agent::AgentError::Spawn)?;
                 opts.mcp_servers.extend(pull_request_registration);
                 opts.instructions = instructions;
                 opts.processes = processes.clone();

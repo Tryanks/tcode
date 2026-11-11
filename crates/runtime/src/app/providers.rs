@@ -1919,7 +1919,7 @@ pub(super) fn session_options(
     settings: &Settings,
     launch_env: LaunchEnv,
     servers: McpServers,
-) -> SessionOptions {
+) -> Result<SessionOptions, String> {
     // A session's binary / launch-args come from its selected profile (built-in
     // or user-created), so a third-party profile can point at its own CLI while
     // sharing the protocol adapter. Falls back to the kind's built-in card.
@@ -1931,7 +1931,30 @@ pub(super) fn session_options(
         .as_deref()
         .and_then(|id| settings.acp_agent(id))
         .cloned();
-    SessionOptions {
+    // Native providers that expose "Launch arguments" use their profile;
+    // an ACP agent carries its own from the installed-agent card.
+    let extra_args = if meta.provider.caps().launch_args {
+        match meta.provider {
+            ProviderKind::ClaudeCode
+            | ProviderKind::OpenCode
+            | ProviderKind::Cursor
+            | ProviderKind::Grok => provider_settings.extra_args(),
+            ProviderKind::Pi => provider_settings.extra_args().map(|mut extra_args| {
+                if provider_settings.pi.trust_project_extensions {
+                    extra_args.push("--approve".into());
+                }
+                extra_args
+            }),
+            ProviderKind::Acp => acp_agent
+                .as_ref()
+                .map_or(Ok(Vec::new()), InstalledAgent::extra_args),
+            ProviderKind::Codex => Ok(Vec::new()),
+        }
+        .map_err(|error| format!("Launch arguments: {error}"))?
+    } else {
+        Vec::new()
+    };
+    Ok(SessionOptions {
         cwd: meta.cwd.clone(),
         model: meta.model.clone(),
         resume: meta.resume_cursor.clone(),
@@ -1957,30 +1980,7 @@ pub(super) fn session_options(
         .flatten()
         .collect(),
         launch_env,
-        // Native providers that expose "Launch arguments" use their profile;
-        // an ACP agent carries its own from the installed-agent card.
-        extra_args: if meta.provider.caps().launch_args {
-            match meta.provider {
-                ProviderKind::ClaudeCode
-                | ProviderKind::OpenCode
-                | ProviderKind::Cursor
-                | ProviderKind::Grok => provider_settings.extra_args(),
-                ProviderKind::Pi => {
-                    let mut extra_args = provider_settings.extra_args();
-                    if provider_settings.pi.trust_project_extensions {
-                        extra_args.push("--approve".into());
-                    }
-                    extra_args
-                }
-                ProviderKind::Acp => acp_agent
-                    .as_ref()
-                    .map(|agent| agent.extra_args())
-                    .unwrap_or_default(),
-                ProviderKind::Codex => Vec::new(),
-            }
-        } else {
-            Vec::new()
-        },
+        extra_args,
         acp: acp_agent.map(|agent| agent::AcpAgent {
             id: agent.id.clone(),
             name: agent.name.clone(),
@@ -1989,7 +1989,7 @@ pub(super) fn session_options(
         instructions: None,
         processes: Default::default(),
         clock: Default::default(),
-    }
+    })
 }
 
 /// Claude Code before 2.1.144 keeps the OAuth sign-in in one macOS Keychain
