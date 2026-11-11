@@ -184,7 +184,6 @@ pub struct CommandPalette {
     selected: usize,
     pub(crate) outside_dismissal: crate::overlay::OutsideDismissal,
     content_hits: HashMap<HostKey, SessionContentHits>,
-    search_generation: u64,
     results: Option<Rc<Results>>,
     list_state: ListState,
     /// The rows a search of the messages brought, by index, folding in
@@ -201,6 +200,8 @@ pub struct CommandPalette {
     opened: bool,
     /// The project picker's next listing selects where it was opened from.
     select_current: bool,
+    /// The searches of the query shown; a new query drops them, and with
+    /// them any answer to an earlier one still on its way.
     _search_tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
     /// The card's move between the centred card and the bottom sheet when
@@ -242,7 +243,6 @@ impl CommandPalette {
             outside_dismissal: crate::overlay::OutsideDismissal::default(),
             motion: Default::default(),
             content_hits: HashMap::new(),
-            search_generation: 0,
             results: None,
             list_state: ListState::new(0, ListAlignment::Top, px(120.)),
             arrived: crate::motion::list_rows::ListRows::over(ARRIVE),
@@ -318,7 +318,10 @@ impl CommandPalette {
             self.focus_handle.focus(window, cx);
         }
         self.selected = 0;
+        // Clearing the query does not report a change, so the searches of
+        // the last opening are dropped here.
         self.content_hits.clear();
+        self._search_tasks.clear();
         self.invalidate_results(true, cx);
         self.opened = true;
         // The project picker opens on where it was opened from, once its
@@ -327,11 +330,8 @@ impl CommandPalette {
     }
 
     /// Debounce, then ask each host for content hits. The index, cache and
-    /// session metadata are host-owned; this keeps only the debounce and the
-    /// generation guard that discards an answer a newer query superseded.
+    /// session metadata are host-owned.
     fn schedule_content_search(&mut self, cx: &mut Context<Self>) {
-        self.search_generation = self.search_generation.wrapping_add(1);
-        let generation = self.search_generation;
         self.content_hits.clear();
         self._search_tasks.clear();
 
@@ -345,7 +345,6 @@ impl CommandPalette {
                 host.store.clone(),
                 query.to_string(),
                 MESSAGE_HITS,
-                generation,
                 Some(Duration::from_millis(150)),
                 cx,
             );
@@ -353,13 +352,11 @@ impl CommandPalette {
         }
     }
 
-    /// Ask `store`'s host for `limit` content hits after `debounce`, adopted
-    /// while `generation` is still the query shown.
+    /// Ask `store`'s host for `limit` content hits after `debounce`.
     fn search_host(
         store: Entity<WorkspaceStore>,
         query: String,
         limit: u32,
-        generation: u64,
         debounce: Option<Duration>,
         cx: &mut Context<Self>,
     ) -> Task<()> {
@@ -375,7 +372,7 @@ impl CommandPalette {
             });
             let hits = hits.await;
             let _ = this.update(cx, |palette, cx| {
-                palette.apply_content_hits(generation, host, hits, cx);
+                palette.apply_content_hits(host, hits, cx);
             });
         })
     }
@@ -393,22 +390,16 @@ impl CommandPalette {
         let limit = u32::try_from(shown)
             .unwrap_or(u32::MAX)
             .saturating_add(MESSAGE_HITS);
-        let task = Self::search_host(store, query, limit, self.search_generation, None, cx);
+        let task = Self::search_host(store, query, limit, None, cx);
         self._search_tasks.push(task);
     }
 
-    /// Adopt `host`'s answer only while it still belongs to the current
-    /// query. A host may answer an earlier keystroke after a later one.
     fn apply_content_hits(
         &mut self,
-        generation: u64,
         host: HostKey,
         hits: SessionContentHits,
         cx: &mut Context<Self>,
     ) {
-        if self.search_generation != generation {
-            return;
-        }
         self.content_hits.insert(host.clone(), hits);
         self.hits_arrived.push(host);
         self.invalidate_results(false, cx);
