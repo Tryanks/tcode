@@ -987,7 +987,10 @@ impl AppState {
     /// Stop the thread's turn. Before the next turn reaches the provider there
     /// is none to interrupt: with `hand_back` the messages waiting for it are
     /// taken out of the queue and answered back, for the composer of the
-    /// person who pressed Stop; without, they stay queued.
+    /// person who pressed Stop; without, they stay queued. A running turn is
+    /// interrupted and its queue left as it is: the turn's end sends the next
+    /// queued message whether the turn finished, failed or was stopped, so a
+    /// message queued behind a stopped turn goes out as the next one.
     pub fn interrupt(
         &mut self,
         target_id: &str,
