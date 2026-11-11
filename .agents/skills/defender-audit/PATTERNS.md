@@ -270,9 +270,13 @@ From the rounds over the UI and across the layers:
 - **It let the tests pass by.** The brief for the UI round said the tests had
   been cleaned already. Two hundred and thirty-three of them were two thirds
   of the suite's time, and a third to a half tested primitives.
-- **It built.** The fourth round let "add no mechanism" go and came out three
-  thousand lines longer, the largest part of it adapters parsing the text
-  layout of harness output: the guess moved, and grew.
+- **It did not say what its building cost.** The fourth round came out three
+  thousand lines longer. The maintainer's answer was that building is not a
+  problem: whatever leaves the codebase better is wanted, whatever harms it
+  is not. What was missing was the account. The largest part was adapters
+  reading the text layout of harness output, where a guess had moved rather
+  than gone, and nobody had checked that a layout an adapter does not
+  recognise is still shown as the harness wrote it.
 - **Removing a bound made a hang last.** With the in-test limits gone a wait
   that never ends is held only by the runner, and the first one met cost a
   platform five minutes before Principle 10 could be applied to it.

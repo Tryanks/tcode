@@ -293,9 +293,10 @@ Inventory and rewrite are separate rounds with the maintainer between them.
   workspace after merging.
 - A lane is a set of files while the work is deletion. Work that needs the
   contract, the host and the UI changed together goes by theme instead, and
-  is where an audit starts to build: before a theme is dispatched, say what
-  it deletes. A theme that only adds is a feature, and is the maintainer's to
-  ask for.
+  a theme may build: a cancel path, a typed error, a field the source can
+  say for itself. Building is not a fault and deleting is not the goal; the
+  question for either is whether the codebase is better for it. Before a
+  theme is dispatched, say what it leaves better and what it costs.
 - Lanes that run at once break each other's tests where they meet: a helper
   one removed, a signature one changed, a fixture two extended. Run the
   workspace after every merge, not after the last.
