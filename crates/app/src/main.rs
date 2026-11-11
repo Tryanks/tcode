@@ -523,7 +523,6 @@ impl MainWindow {
                 lifecycle: None,
                 window: options,
                 setup: ShellSetup {
-                    client_host: Some(state.native_client.clone()),
                     local: Some(state.local.clone()),
                     ..setup
                 },

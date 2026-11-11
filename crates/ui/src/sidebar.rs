@@ -8545,7 +8545,6 @@ mod tests {
         // counted them would take active rows' places.
         sessions.push(settled("many-settled-0", "many", 41, 41));
         sessions.push(settled("many-settled-1", "many", 40, 40));
-        cx.update(|cx| DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx));
         send(
             Topic::Settings,
             ServerEvent::SettingsSnapshot(Default::default()),
@@ -8574,6 +8573,8 @@ mod tests {
             )
         });
         crate::shell::tests::shell_behind(&store, cx);
+        // Chosen on this device once its shell has read its preferences.
+        cx.update(|cx| DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx));
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, cx| store.show_thread("mixed-a".into(), cx));
         let window_state = cx.new(|_| WindowState::default());

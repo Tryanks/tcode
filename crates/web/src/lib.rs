@@ -132,7 +132,6 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
                     setup: tcode_ui::ShellSetup {
                         initial,
                         initial_pairing_error: None,
-                        client_host: Some(host),
                         // A browser tab runs no host of its own.
                         local: None,
                         local_failure: None,

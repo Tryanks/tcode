@@ -51,7 +51,6 @@ pub extern "C" fn tcode_ios_start() {
                         setup: ShellSetup {
                             initial: tcode_ui::last_host_target(host.as_ref()),
                             initial_pairing_error: None,
-                            client_host: Some(host),
                             // A phone runs no host of its own.
                             local: None,
                             local_failure: None,
