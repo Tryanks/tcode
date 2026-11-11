@@ -41,11 +41,12 @@ impl Composer {
                 .tooltip(crate::tr!("composer.wait_turn"))
                 .child(
                     h_flex()
+                        .min_w_0()
                         .gap_1p5()
                         .items_center()
                         .text_color(muted)
                         .child(Icon::empty().path("icons/git-branch.svg"))
-                        .child(crate::widgets::fade_text(picker_current.clone())),
+                        .child(fading(picker_current.clone())),
                 )
                 .into_any_element()
         } else {
@@ -62,11 +63,12 @@ impl Composer {
                 .aria_label(picker_label)
                 .child(
                     h_flex()
+                        .min_w_0()
                         .gap_1p5()
                         .items_center()
                         .text_color(muted)
                         .child(Icon::empty().path("icons/git-branch.svg"))
-                        .child(crate::widgets::fade_text(picker_current.clone()))
+                        .child(fading(picker_current.clone()))
                         .child(Icon::new(IconName::ChevronDown)),
                 );
             crate::material::overlay_popover("branch-popover", cx)
@@ -179,14 +181,17 @@ impl Composer {
         let left =
             self.render_workspace_chip(is_draft, worktree_mode, worktree.is_some(), &branch, cx);
 
+        // Each side gives way as the column narrows, its name fading; a
+        // button keeps its own width in a row, so each is boxed.
         h_flex()
             .w_full()
             .px_2()
+            .gap_2()
             .items_center()
             .justify_between()
             .text_secondary(self.compact, cx)
-            .child(left)
-            .child(right)
+            .child(div().min_w_0().child(left))
+            .child(div().min_w_0().child(right))
             .into_any_element()
     }
 
@@ -214,7 +219,7 @@ impl Composer {
                 .items_center()
                 .text_color(muted)
                 .child(Icon::empty().path("icons/folder-closed.svg"))
-                .child(crate::widgets::fade_text(label))
+                .child(fading(label))
                 .into_any_element();
         }
 
@@ -228,11 +233,12 @@ impl Composer {
             .compact()
             .child(
                 h_flex()
+                    .min_w_0()
                     .gap_1p5()
                     .items_center()
                     .text_color(muted)
                     .child(Icon::empty().path("icons/folder-closed.svg"))
-                    .child(crate::widgets::fade_text(label))
+                    .child(fading(label))
                     .child(Icon::new(IconName::ChevronDown)),
             );
         crate::material::overlay_popover("workspace-popover", cx)
@@ -317,6 +323,14 @@ impl Composer {
             })
             .into_any_element()
     }
+}
+
+/// A label that fades out at its end when its side of the bar is narrow.
+fn fading(label: impl Into<gpui::SharedString>) -> gpui::Div {
+    div()
+        .min_w_0()
+        .overflow_hidden()
+        .child(crate::widgets::fade_text(label))
 }
 
 fn branch_row(
