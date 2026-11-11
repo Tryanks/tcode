@@ -2865,6 +2865,89 @@ mod replica_tests {
         }
     }
 
+    /// A platform's dictation the test speaks for: what it would hear is
+    /// sent on the channel it was started with.
+    #[derive(Default)]
+    struct Recognizer {
+        events:
+            std::cell::RefCell<Option<async_channel::Sender<tcode_client::speech::SpeechEvent>>>,
+        finished: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+
+    struct Listening(std::rc::Rc<std::cell::Cell<bool>>);
+
+    impl tcode_client::speech::SpeechSession for Listening {
+        fn finish(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    impl tcode_client::speech::SpeechRecognizer for Recognizer {
+        fn is_available(&self, _: &str) -> bool {
+            true
+        }
+        fn start(
+            &self,
+            _: &str,
+            events: async_channel::Sender<tcode_client::speech::SpeechEvent>,
+        ) -> Result<Box<dyn tcode_client::speech::SpeechSession>, tcode_client::speech::SpeechError>
+        {
+            *self.events.borrow_mut() = Some(events);
+            Ok(Box::new(Listening(self.finished.clone())))
+        }
+    }
+
+    /// Dictation started from the mic writes where the cursor was, and a
+    /// send pressed while it listens asks the recognizer to finish and goes
+    /// once its last words are in the draft, with them.
+    #[gpui::test]
+    fn a_send_during_dictation_goes_with_the_recognizers_last_words(cx: &mut TestAppContext) {
+        use tcode_client::speech::SpeechEvent;
+        let (store, incoming, outgoing, status) = attach(cx);
+        let recognizer = std::rc::Rc::new(Recognizer::default());
+        cx.update(|cx| crate::test_client::dictate_with(recognizer.clone(), cx));
+        let (_composer, cx) = composer_on(&store, &incoming, status, cx);
+        cx.simulate_input("Note: ");
+        draw_settled(cx);
+        let mic = cx.debug_bounds("voice-mic").expect("mic button");
+        cx.simulate_click(mic.center(), Modifiers::default());
+        let events = recognizer
+            .events
+            .borrow()
+            .clone()
+            .expect("the mic starts the platform's dictation");
+        for event in [
+            SpeechEvent::Ready,
+            SpeechEvent::Hypothesis("fix the".into()),
+            SpeechEvent::Phrase("fix the bug".into()),
+        ] {
+            events.try_send(event).unwrap();
+            cx.run_until_parked();
+        }
+
+        // Sent with the button: the test platform types an Enter the field
+        // passes on as a line break, which neither macOS nor Windows does.
+        draw_settled(cx);
+        let send = cx.debug_bounds("send-message").expect("send button");
+        cx.simulate_click(send.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            sent_texts(&outgoing).is_empty(),
+            "the send waits for what is spoken but not yet written"
+        );
+        assert!(
+            recognizer.finished.get(),
+            "the recognizer is asked to finish"
+        );
+
+        events
+            .try_send(SpeechEvent::Phrase(" before lunch".into()))
+            .unwrap();
+        events.try_send(SpeechEvent::Finished).unwrap();
+        cx.run_until_parked();
+        assert_eq!(sent_texts(&outgoing), ["Note: fix the bug before lunch"]);
+    }
+
     /// A value the provider reports as unavailable is shown but never sent.
     #[gpui::test]
     fn unavailable_permission_rows_cannot_be_chosen(cx: &mut TestAppContext) {
