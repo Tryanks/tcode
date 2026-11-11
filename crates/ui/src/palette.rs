@@ -27,8 +27,8 @@ use agent::ProviderKind;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
     IntoElement, KeyDownEvent, ListAlignment, ListState, ParentElement as _, Render, Role,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, list,
-    prelude::FluentBuilder as _, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
+    list, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_protocol::{SessionContentHits, ThreadExportFormat};
@@ -135,7 +135,8 @@ struct Item {
     /// last-activity time (right side).
     provider: Option<(ProviderKind, Option<String>)>,
     updated_at: Option<u64>,
-    /// The project picker's rows: the host the place is on, named after it.
+    /// A project picker's row over several hosts: the host the place is on,
+    /// named after it.
     host_name: Option<String>,
     /// The project picker's row for where it was opened from.
     current: bool,
@@ -844,7 +845,7 @@ impl CommandPalette {
                         subtitle: None,
                         provider: None,
                         updated_at: last,
-                        host_name: Some(host_name.clone()),
+                        host_name: several.then(|| host_name.clone()),
                         current: from.host == key && from.project_id == project_id,
                         action,
                     });
@@ -1062,8 +1063,8 @@ impl CommandPalette {
         let item = &items[index];
         let store = item.action.host().and_then(|host| self.store_of(host, cx));
         let is_sel = index == self.selected;
-        if let Some(host_name) = item.host_name.clone() {
-            return self.render_picker_row(index, item, host_name, store, compact, cx);
+        if self.window_state.read(cx).palette_picker.is_some() {
+            return self.render_picker_row(index, item, store, compact, window, cx);
         }
         let action = item.action.clone();
         let key = match &item.action {
@@ -1182,19 +1183,69 @@ impl CommandPalette {
 
 impl CommandPalette {
     /// A row of the project picker: the place's icon and name, the host it is
-    /// on, when it was last active, and a check on where the picker was
-    /// opened from.
+    /// on when there are several, when it was last active, and a check on
+    /// where the picker was opened from.
     fn render_picker_row(
         &self,
         index: usize,
         item: &Item,
-        host_name: String,
         store: Option<Entity<WorkspaceStore>>,
         compact: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_sel = index == self.selected;
         let action = item.action.clone();
+        // The row centres its lines; the smaller ones are moved onto the
+        // name's baseline.
+        let (family, name_size, secondary_size) = {
+            let theme = cx.theme();
+            let typography = &theme.tokens.typography;
+            let (name, secondary) = if compact {
+                (&typography.md, &typography.sm)
+            } else {
+                (&typography.sm, &typography.xs)
+            };
+            (theme.font_family.clone(), name.size, secondary.size)
+        };
+        let name_baseline = crate::typography::baseline_below_centre(
+            SharedString::from(item.label.clone()),
+            family.clone(),
+            name_size,
+            window,
+        );
+        let drop_of = |text: &str| {
+            name_baseline
+                - crate::typography::baseline_below_centre(
+                    SharedString::from(text.to_owned()),
+                    family.clone(),
+                    secondary_size,
+                    window,
+                )
+        };
+        let host = item.host_name.clone().map(|host| {
+            div()
+                .flex_shrink(1.)
+                .min_w_0()
+                .overflow_hidden()
+                .text_secondary(compact, cx)
+                .relative()
+                .top(drop_of(&host))
+                .child(crate::widgets::fade_text(host))
+        });
+        let ago = item.updated_at.map(|at| {
+            let ago = humanize_ago(now_secs(cx).saturating_sub(at));
+            div()
+                .flex_none()
+                .text_secondary(compact, cx)
+                .relative()
+                .top(drop_of(&ago))
+                .child(ago)
+        });
+        let aria_label = match &item.host_name {
+            Some(host) => format!("{} · {host}", item.label),
+            None => item.label.clone(),
+        };
         // A quick thread's artwork is its glyph, whether or not the host has
         // its project yet.
         let icon = match (&item.action, &store) {
@@ -1238,7 +1289,7 @@ impl CommandPalette {
                     }
                 })
                 .role(Role::ListBoxOption)
-                .aria_label(format!("{} · {host_name}", item.label))
+                .aria_label(aria_label)
                 .aria_selected(is_sel)
                 .when(is_sel, |row| row.aria_active_descendant())
                 .flex_none()
@@ -1251,7 +1302,6 @@ impl CommandPalette {
                         .flex_1()
                         .min_w_0()
                         .gap_2()
-                        .items_baseline()
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -1263,23 +1313,9 @@ impl CommandPalette {
                                 })
                                 .child(crate::widgets::fade_text(item.label.clone())),
                         )
-                        .child(
-                            div()
-                                .flex_shrink(1.)
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_secondary(compact, cx)
-                                .child(crate::widgets::fade_text(host_name)),
-                        ),
+                        .children(host),
                 )
-                .when_some(item.updated_at, |row, at| {
-                    row.child(
-                        div()
-                            .flex_none()
-                            .text_secondary(compact, cx)
-                            .child(humanize_ago(now_secs(cx).saturating_sub(at))),
-                    )
-                })
+                .children(ago)
                 .child(div().flex_none().w(px(16.)).when(item.current, |mark| {
                     mark.debug_selector(|| "picker-current".into()).child(
                         Icon::new(IconName::Check)
