@@ -947,6 +947,6 @@ mod tests {
             saved(cx),
             serde_json::json!({"sources": [{"kind": "official", "enabled": true}]})
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

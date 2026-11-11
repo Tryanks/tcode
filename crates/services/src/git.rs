@@ -769,7 +769,7 @@ mod tests {
         assert!(branch.error.is_none());
         assert_eq!(branch.changes.len(), 2);
         assert_eq!(branch.texts.len(), branch.changes.len());
-        std::fs::remove_dir_all(temp).unwrap();
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]

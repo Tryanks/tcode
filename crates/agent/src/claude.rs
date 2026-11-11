@@ -5668,7 +5668,7 @@ mod tests {
                 "{refused}"
             );
         }
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A launch asks for the native permission prompt in the selected mode
@@ -8214,7 +8214,7 @@ mod tests {
                     AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::ToolCall {status: ItemStatus::Completed, ..}, .. }) if id == "send"
                 )), "SendMessage must retain its own tool result");
             }
-            std::fs::remove_dir_all(root).unwrap();
+            let _ = std::fs::remove_dir_all(root);
         });
     }
 
@@ -8326,7 +8326,7 @@ mod tests {
                     "the launch returns the subagent's call: {events:?}"
                 );
             }
-            std::fs::remove_dir_all(root).unwrap();
+            let _ = std::fs::remove_dir_all(root);
         });
     }
 

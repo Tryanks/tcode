@@ -950,7 +950,7 @@ mod tests {
         }
         let loader = ManifestLoader::new(ManifestSource::Official, &dir);
         assert_eq!(loader.current().unwrap().relay_map(), bundled().relay_map());
-        fs::remove_dir_all(dir).unwrap();
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -982,7 +982,7 @@ mod tests {
 
         fs::write(base.cache_path(&dir), "garbage").unwrap();
         assert!(ManifestLoader::new(base, &dir).current().is_err());
-        fs::remove_dir_all(dir).unwrap();
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1036,6 +1036,6 @@ mod tests {
                 .as_str(),
             "https://second.example/"
         );
-        fs::remove_dir_all(dir).unwrap();
+        let _ = fs::remove_dir_all(dir);
     }
 }

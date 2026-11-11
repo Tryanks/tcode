@@ -394,7 +394,7 @@ mod tests {
                 node_path: None,
             })
         );
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -435,7 +435,7 @@ mod tests {
                 assert_eq!(launch.node_path, Some(value));
             }
         }
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The shim's program, started directly, receives every argument as
@@ -483,7 +483,7 @@ mod tests {
                 spanning
             ]
         );
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A batch file that is not a shim still runs through `cmd.exe`, so a
@@ -518,6 +518,6 @@ mod tests {
             Err(crate::AgentError::BatchLineBreak { program }) => assert_eq!(program, launcher),
             other => panic!("{:?}", other.err()),
         }
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

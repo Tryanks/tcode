@@ -2034,7 +2034,7 @@ mod tests {
         let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("hosts-unreadable").is_some());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A scanned link that opens no path to the machine: the Hosts page asks
@@ -2291,7 +2291,7 @@ mod tests {
         cx.update(|_, cx| {
             cx.update_global::<RemoteController, _>(|controller, _| controller.stop_hosting());
         });
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(feature = "remote-hosting")]
@@ -2345,6 +2345,6 @@ mod tests {
             });
         });
         assert_eq!(client.load_hosts().unwrap(), vec![host("current pairing")]);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

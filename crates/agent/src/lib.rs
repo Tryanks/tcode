@@ -3641,7 +3641,7 @@ mod resolve_binary_tests {
             )),
             None
         );
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The resolved file name, lowercased: the extension comes from `PATHEXT`

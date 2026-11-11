@@ -4943,7 +4943,7 @@ pub(crate) mod tests {
             serde_json::to_value(sort).unwrap()
         );
         assert_eq!(saved.sidebar_layout, Some(SidebarLayout::Grouped));
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Another account runs the CLI the default one does, so both pickers list
@@ -5393,7 +5393,7 @@ pub(crate) mod tests {
             client.load_hosts().unwrap()[0].addrs,
             ["192.168.31.5:47420"]
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(preview_backend)]
@@ -6534,7 +6534,7 @@ pub(crate) mod tests {
         .unwrap();
         host.shutdown_blocking()
             .expect("stop unsubscribed fixture host");
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
         status
     }
 
@@ -8264,7 +8264,7 @@ pub(crate) mod tests {
         });
 
         driver.shutdown(cx, &host);
-        std::fs::remove_dir_all(root).expect("remove test data");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
@@ -8350,7 +8350,7 @@ pub(crate) mod tests {
         );
 
         driver.shutdown(cx, &host);
-        std::fs::remove_dir_all(root).expect("remove test data");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
@@ -8451,7 +8451,7 @@ pub(crate) mod tests {
         );
 
         driver.shutdown(cx, &host);
-        std::fs::remove_dir_all(root).expect("remove test data");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A draft's client state follows its project, so deleting the project

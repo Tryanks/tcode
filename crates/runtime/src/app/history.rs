@@ -1657,6 +1657,6 @@ mod tests {
         );
         drop(cut);
         store.close().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

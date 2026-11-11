@@ -1079,10 +1079,10 @@ mod tests {
         assert_eq!(remove(&root, &created.path), Ok(()));
 
         let external = provision_for_test(&root, "external", &temp);
-        std::fs::remove_dir_all(&external.path).unwrap();
+        let _ = std::fs::remove_dir_all(&external.path);
         assert_eq!(remove(&root, &external.path), Ok(()));
         assert_eq!(remove(&root, &external.path), Ok(()));
-        std::fs::remove_dir_all(temp).unwrap();
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
@@ -1121,7 +1121,7 @@ mod tests {
                 );
             }
             remove(&root, &created.path).unwrap();
-            std::fs::remove_dir_all(temp).unwrap();
+            let _ = std::fs::remove_dir_all(temp);
         }
     }
 
@@ -1146,7 +1146,7 @@ mod tests {
                 "uncommitted\n"
             );
             assert!(!root.join("feature.txt").exists());
-            std::fs::remove_dir_all(temp).unwrap();
+            let _ = std::fs::remove_dir_all(temp);
         }
     }
 
@@ -1238,7 +1238,7 @@ mod tests {
         let worked = provision_for_test(&root, "worked", &temp);
         commit_file(&worked.path, "feature.txt", "feature\n", "feature");
         let vanished = provision_for_test(&root, "vanished", &temp);
-        std::fs::remove_dir_all(&vanished.path).unwrap();
+        let _ = std::fs::remove_dir_all(&vanished.path);
 
         for created in [&untouched, &worked, &vanished] {
             remove(&root, &created.path).unwrap();

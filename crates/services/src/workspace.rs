@@ -177,7 +177,7 @@ mod tests {
             assert_eq!(composer.basename, "composer.rs");
             assert_eq!(composer.parent, "src/ui");
         }
-        std::fs::remove_dir_all(&root).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
         assert!(list_workspace(&root).is_empty());
     }
 }

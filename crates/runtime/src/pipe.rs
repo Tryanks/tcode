@@ -1682,7 +1682,7 @@ mod tests {
         working.join().unwrap().unwrap();
         assert!(catalog.join().unwrap().is_err());
         host.stopped.recv_blocking().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     pub(super) fn next_event(
@@ -1831,7 +1831,7 @@ mod tests {
         link.shutdown_blocking().expect("stop host");
         host.stopped.recv_blocking().expect("host thread stopped");
         drop(host);
-        std::fs::remove_dir_all(data_root).expect("remove test data");
+        let _ = std::fs::remove_dir_all(data_root);
     }
 
     /// Command output is rendered by the host at the width a subscriber asked
@@ -2041,7 +2041,7 @@ mod tests {
         link.shutdown_blocking().expect("stop host");
         host.stopped.recv_blocking().expect("host thread stopped");
         drop(host);
-        std::fs::remove_dir_all(data_root).expect("remove test data");
+        let _ = std::fs::remove_dir_all(data_root);
     }
 
     #[test]
@@ -2083,7 +2083,7 @@ mod tests {
         link.shutdown_blocking().unwrap();
         host.stopped.recv_blocking().unwrap();
         drop(host);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     const LEGACY_START_DIR: &str = "TCODE_LEGACY_START_DIR";
@@ -2209,7 +2209,7 @@ mod tests {
             assert!(!data_root.join("sessions.json").exists(), "{start}");
             assert!(!data_root.join("legacy-thread.jsonl").exists(), "{start}");
         }
-        std::fs::remove_dir_all(data_root).unwrap();
+        let _ = std::fs::remove_dir_all(data_root);
     }
 
     /// One start of the app: migrate if an older build's files are there,
@@ -2370,7 +2370,7 @@ mod tests {
             .recv_blocking()
             .expect("wait for host thread to stop");
         drop(host);
-        std::fs::remove_dir_all(data_root).expect("remove test data");
+        let _ = std::fs::remove_dir_all(data_root);
     }
 }
 

@@ -527,7 +527,7 @@ mod tests {
         assert_eq!(hits("İSTANBUL").len(), 1);
         assert_eq!(hits("äbc").len(), 1);
         store.close().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -724,7 +724,7 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert!(hits[0].snippet.contains("AUTH.rs"));
         assert!(hits[0].snippet.starts_with('…') && hits[0].snippet.ends_with('…'));
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A scoped search counts every hit the filter admits per thread and per
@@ -876,6 +876,6 @@ mod tests {
         let last = search.search_filtered(&sessions, "auth.rs", &all(10, 5));
         assert_eq!((last.hits.len(), last.truncated), (1, false));
         assert_eq!(search.search(&sessions, "auth.rs", 50).hits.len(), 6);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

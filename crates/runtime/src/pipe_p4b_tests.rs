@@ -555,7 +555,7 @@ fn runtime_read_budget_comes_from_the_attachment() {
         assert_eq!(result.map_err(|error| error.code), expected);
     }
     host.shutdown_blocking().unwrap();
-    std::fs::remove_dir_all(root).unwrap();
+    let _ = std::fs::remove_dir_all(root);
 }
 
 /// A host with a project but no session, plus the temp root the store owns.

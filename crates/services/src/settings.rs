@@ -528,7 +528,7 @@ mod tests {
             store.try_load().unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
-        fs::remove_dir_all(root).unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     /// Files of the host's own that are missing read as empty; ones that do not

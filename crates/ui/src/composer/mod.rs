@@ -2279,7 +2279,7 @@ mod replica_tests {
         }))
         .unwrap();
         host.shutdown_blocking().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
@@ -2427,7 +2427,7 @@ mod replica_tests {
             )]
         );
         assert!(cx.debug_bounds("attached-file-0").is_none());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The desktop's "+" opens the system's file picker for any number of
@@ -2469,7 +2469,7 @@ mod replica_tests {
                 plan.display()
             )]
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Copying a file in the file manager and pasting it attaches the file.
@@ -2493,7 +2493,7 @@ mod replica_tests {
         });
         draw_settled(cx);
         assert!(cx.debug_bounds("attached-file-0").is_some());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A remote client uploads the file in chunks and the message carries the
@@ -2577,7 +2577,7 @@ mod replica_tests {
             sent_texts(&outgoing),
             [format!("read this\n\n{}", host_path.display())]
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A folder has no remote path to carry, and a file over the device's
@@ -2599,7 +2599,7 @@ mod replica_tests {
             answer_upload(&outgoing, &incoming, |_| Err("unexpected".into())),
             None
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn replace(incoming: &async_channel::Sender<String>, topic: Topic, event: ServerEvent) {

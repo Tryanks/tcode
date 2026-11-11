@@ -755,6 +755,6 @@ mod tests {
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("remote-pairing").is_none());
         assert!(cx.debug_bounds("remote-invitation").is_none());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -4331,7 +4331,7 @@ mod tests {
         };
         assert_eq!(type_and_leave("", cx), (None, in_effect));
         assert_eq!(type_and_leave("12", cx), (Some(12), "12".to_owned()));
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]

@@ -14395,7 +14395,7 @@ pub(crate) mod tests {
             cx.update(|window, _| assert!(!search.is_focused(window)));
         }
         driver.shutdown(cx, &host);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
@@ -14580,7 +14580,7 @@ pub(crate) mod tests {
         });
         assert!(!cx.update(|window, cx| window.has_notification::<crate::sidebar::ThreadUndo>(cx)));
         driver.shutdown(cx, &host);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A desktop tiled to half a screen is still the whole product: the width

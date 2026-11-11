@@ -468,7 +468,7 @@ mod tests {
         }))
         .unwrap();
         host.shutdown_blocking().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
         status.terminals = vec![tcode_protocol::TerminalStatus {
             id: 7,
             title: "shell".into(),

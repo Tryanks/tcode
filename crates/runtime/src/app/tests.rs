@@ -1417,7 +1417,7 @@ fn a_turn_refreshes_only_its_profiles_usage_from_its_running_harness() {
     assert_eq!(usage.keys().collect::<Vec<_>>(), ["claude"]);
     assert_eq!(usage["claude"].plan.as_deref(), Some("Ultra"));
     assert_eq!(usage["claude"].windows.len(), 1);
-    std::fs::remove_dir_all(account).unwrap();
+    let _ = std::fs::remove_dir_all(account);
 }
 
 /// Another Claude account starts from a copy of the user's own configuration,
