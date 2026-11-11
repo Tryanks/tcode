@@ -2168,6 +2168,7 @@ pull_requests:
     layer_not_linked: "関連付けなし"
     no_longer_linked: "このスレッドとの関連付けは解除されています。"
     refresh_failed: "再読み込みできませんでした。読み込み済みの内容（%{ago}）を表示しています。"
+    refresh_failed_unloaded: "再読み込みできませんでした。"
     retry: "再試行"
     unavailable_title: "%{pr_title} #%{number} を利用できません"
     unavailable_desc: "削除されたか、接続中のアカウントに閲覧権限がない可能性があります。"

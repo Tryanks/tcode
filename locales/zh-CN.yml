@@ -2161,6 +2161,7 @@ pull_requests:
     layer_not_linked: "未关联"
     no_longer_linked: "已不再关联到此线程。"
     refresh_failed: "无法刷新，显示的是%{ago}加载的内容。"
+    refresh_failed_unloaded: "无法刷新。"
     retry: "重试"
     unavailable_title: "%{pr} #%{number} 不可用"
     unavailable_desc: "它可能已被删除，或当前连接的账号无权查看。"

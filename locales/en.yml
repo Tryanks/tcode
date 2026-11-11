@@ -2168,6 +2168,7 @@ pull_requests:
     layer_not_linked: "Not linked"
     no_longer_linked: "No longer linked to this thread."
     refresh_failed: "Couldn't refresh. Showing what was loaded %{ago}."
+    refresh_failed_unloaded: "Couldn't refresh."
     retry: "Retry"
     unavailable_title: "%{pr_title} #%{number} isn't available"
     unavailable_desc: "It may have been deleted, or the connected account can't see it."
