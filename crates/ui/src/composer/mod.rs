@@ -332,27 +332,6 @@ impl Composer {
         window.defer(cx, move |window, cx| target.focus(window, cx));
     }
 
-    #[cfg(test)]
-    pub(crate) fn input_focus_handle(&self, cx: &App) -> gpui::FocusHandle {
-        self.input.read(cx).focus_handle(cx)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn model_search_focus_handle(&self, cx: &App) -> gpui::FocusHandle {
-        self.model_search.read(cx).focus_handle(cx)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn draft(&self, cx: &App) -> String {
-        self.input.read(cx).value().to_string()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.input
-            .update(cx, |input, cx| input.replace_all(text, window, cx));
-    }
-
     /// Write to `session_id`'s thread, or none. What the composer holds for
     /// a thread follows on the next render. Another thread is a new scene:
     /// its controls are drawn at rest, rather than carrying on from where

@@ -308,11 +308,6 @@ impl ChatView {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn composer(&self) -> Entity<crate::composer::Composer> {
-        self.composer.clone()
-    }
-
     /// The thread's terminal workspace. Compact windows have no room to split
     /// it under the timeline, so the shell shows this same entity as its own
     /// destination rather than compiling the portable terminal away.
