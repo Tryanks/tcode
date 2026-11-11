@@ -156,7 +156,7 @@ impl AppState {
             _ => {}
         }
         match command {
-            Command::InstallAcpAgent { id } if self.acp_installing.contains(id) => {
+            Command::InstallAcpAgent { id } if self.acp_installing.contains_key(id) => {
                 return Err(error(
                     "acp_installing",
                     "This agent is already being installed.",

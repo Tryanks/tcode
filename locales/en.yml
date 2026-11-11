@@ -776,6 +776,8 @@ providers:
     installing: "Installing %{name}…"
     installed_toast: "%{name} installed"
     install_failed: "Could not install %{name}"
+    cancel_install: "Cancel"
+    install_cancelled: "Stopped installing %{name}"
     custom: "Custom Harness…"
     custom_help: "Any command that speaks ACP over its standard input and output."
     add: "Add Harness"

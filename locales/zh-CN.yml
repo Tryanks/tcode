@@ -770,6 +770,8 @@ providers:
     installing: "正在安装 %{name}…"
     installed_toast: "%{name} 安装完成"
     install_failed: "无法安装 %{name}"
+    cancel_install: "取消"
+    install_cancelled: "已停止安装 %{name}"
     custom: "自定义 Harness…"
     custom_help: "任何通过标准输入输出使用 ACP 的命令。"
     add: "添加 Harness"

@@ -71,6 +71,7 @@ impl WorkspaceStore {
                 | Command::UpdateProviders { .. }
                 | Command::RefreshAcpRegistry
                 | Command::InstallAcpAgent { .. }
+                | Command::CancelAcpInstall { .. }
                 | Command::RemoveAcpAgent { .. }
                 | Command::AddCustomAcpAgent { .. }
                 | Command::UpdateAcpAgent { .. }
@@ -1411,6 +1412,9 @@ impl WorkspaceStore {
     }
     pub fn install_acp_agent(&mut self, id: String) {
         self.dispatch(Command::InstallAcpAgent { id });
+    }
+    pub fn cancel_acp_install(&mut self, id: String) {
+        self.dispatch(Command::CancelAcpInstall { id });
     }
     pub fn remove_acp_agent(&mut self, id: String) {
         self.dispatch(Command::RemoveAcpAgent { id });

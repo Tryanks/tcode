@@ -761,6 +761,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         }
         Command::RefreshAcpRegistry => app.refresh_acp_registry(cx),
         Command::InstallAcpAgent { id } => app.install_acp_agent(id, cx),
+        Command::CancelAcpInstall { id } => app.cancel_acp_install(&id, cx),
         Command::RemoveAcpAgent { id } => app.remove_acp_agent(&id, cx),
         Command::AddCustomAcpAgent {
             name,

@@ -184,7 +184,7 @@ impl DomainDiff {
                     || self.providers_revisions != providers_revisions
                     || last.acp_registry_loading != state.acp_registry_loading
                     || last.acp_registry_error != state.acp_registry_error
-                    || last.acp_installing != state.acp_installing
+                    || last.acp_installing != state.acp_installing_ids()
             });
             if stale {
                 let providers = state.providers_status_snapshot();
@@ -1055,7 +1055,7 @@ impl AppState {
             self.acp_marketplace_items(),
             self.acp_registry_loading,
             self.acp_registry_error.clone(),
-            self.acp_installing.clone(),
+            self.acp_installing_ids(),
             self.provider_plugin_catalogs(),
         );
         self.flag_shared_credentials(&mut status.provider_snapshots);

@@ -211,6 +211,8 @@ pub(super) enum RuntimeToastAction {
     UpdateProviders(Vec<ProviderKind>),
     /// Stop the profile's running plugin change.
     CancelPluginOperation(String),
+    /// Stop the ACP agent's install, by registry id.
+    CancelAcpInstall(String),
 }
 
 fn git_action_toast_titles(action: GitAction) -> (String, String) {
@@ -443,10 +445,21 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
             Some(detail.clone()),
             None,
         ),
-        RuntimeToast::AcpInstallStarted { operation, name } => (
+        RuntimeToast::AcpInstallStarted {
+            operation,
+            id,
+            name,
+        } => (
             RuntimeToastDisposition::Start(*operation),
             ToastKind::Loading,
             crate::tr!("providers.acp.installing", name = name).into_owned(),
+            None,
+            Some(RuntimeToastAction::CancelAcpInstall(id.clone())),
+        ),
+        RuntimeToast::AcpInstallCancelled { operation, name } => (
+            RuntimeToastDisposition::Finish(*operation),
+            ToastKind::Info,
+            crate::tr!("providers.acp.install_cancelled", name = name).into_owned(),
             None,
             None,
         ),

@@ -445,8 +445,9 @@ pub struct AppState {
     pub acp_registry: Revisioned<Option<Registry>>,
     pub acp_registry_loading: bool,
     pub acp_registry_error: Option<String>,
-    /// Registry ids currently downloading (their marketplace row shows a spinner).
-    pub acp_installing: std::collections::HashSet<String>,
+    /// Registry agents currently installing, by id (their marketplace row
+    /// shows a spinner).
+    pub(crate) acp_installing: HashMap<String, acp::AcpInstall>,
     /// Native plugin catalogs by profile and context, listed on demand.
     plugin_catalogs: Revisioned<HashMap<plugins::CatalogKey, plugins::PluginCatalog>>,
     mcp: McpWiring,
@@ -685,7 +686,7 @@ impl AppState {
             acp_registry: None.into(),
             acp_registry_loading: false,
             acp_registry_error: None,
-            acp_installing: std::collections::HashSet::new(),
+            acp_installing: HashMap::new(),
             plugin_catalogs: HashMap::new().into(),
             mcp: McpWiring::default(),
             control: control::ControlState::new(

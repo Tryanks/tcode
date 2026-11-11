@@ -776,6 +776,8 @@ providers:
     installing: "%{name} をインストール中…"
     installed_toast: "%{name} をインストールしました"
     install_failed: "%{name} をインストールできませんでした"
+    cancel_install: "キャンセル"
+    install_cancelled: "%{name} のインストールを中止しました"
     custom: "カスタムハーネス…"
     custom_help: "標準入出力で ACP 通信を行う任意のコマンドを使用できます。"
     add: "ハーネスを追加"

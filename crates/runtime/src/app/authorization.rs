@@ -495,6 +495,7 @@ impl AppState {
                 | Command::UpdateProviders { .. }
                 | Command::RefreshAcpRegistry
                 | Command::InstallAcpAgent { .. }
+                | Command::CancelAcpInstall { .. }
                 | Command::RemoveAcpAgent { .. }
                 | Command::AddCustomAcpAgent { .. }
                 | Command::UpdateAcpAgent { .. }

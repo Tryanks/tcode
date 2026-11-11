@@ -4180,6 +4180,9 @@ impl AppShell {
                 RuntimeToastAction::CancelPluginOperation(_) => {
                     crate::tr!("providers.plugins.toast.cancel")
                 }
+                RuntimeToastAction::CancelAcpInstall(_) => {
+                    crate::tr!("providers.acp.cancel_install")
+                }
             }
             .into_owned()
             .into();
@@ -4195,6 +4198,7 @@ impl AppShell {
                         RuntimeToastAction::CancelPluginOperation(profile_id) => {
                             store.cancel_plugin_operation(profile_id)
                         }
+                        RuntimeToastAction::CancelAcpInstall(id) => store.cancel_acp_install(id),
                     });
                 }),
             }

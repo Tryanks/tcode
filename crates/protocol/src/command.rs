@@ -223,6 +223,10 @@ pub enum Command {
     InstallAcpAgent {
         id: String,
     },
+    /// Stop the agent's install while it downloads.
+    CancelAcpInstall {
+        id: String,
+    },
     RemoveAcpAgent {
         id: String,
     },
