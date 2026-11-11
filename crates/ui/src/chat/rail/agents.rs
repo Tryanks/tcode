@@ -30,10 +30,15 @@ const ROWS: Duration = Duration::from_millis(200);
 const CHANGE: Duration = Duration::from_millis(200);
 
 /// The thread's agents while any is not settled: a settled agent stays
-/// only on the Agents view's Settled shelf.
+/// only on the Agents view's Settled shelf. A subagent's thread has none
+/// here: the agents it started stand over its foot.
 fn agents(rail: &RailView, cx: &App) -> Option<Agents> {
     let lead = rail.session_id.as_deref()?;
-    Some(Agents::of(rail.workspace_store.read(cx), lead, cx)).filter(|agents| agents.count() > 0)
+    let store = rail.workspace_store.read(cx);
+    if store.native_subagent_readonly_for(Some(lead), cx) {
+        return None;
+    }
+    Some(Agents::of(store, lead, cx)).filter(|agents| agents.count() > 0)
 }
 
 /// Whether the card has something to show for `rail`'s thread now.

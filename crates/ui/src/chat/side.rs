@@ -53,6 +53,20 @@ pub(crate) fn agent_host(
     }
 }
 
+impl ChatView {
+    /// The chat an agent opened from what this view draws over its own
+    /// timeline shows beside its thread: see [`agent_host`].
+    pub(super) fn agent_host(&self, cx: &mut Context<Self>) -> Option<Entity<ChatView>> {
+        agent_host(
+            &cx.entity().downgrade(),
+            self.side_of.as_ref().map(|of| &of.lead),
+            self.session_id.is_some(),
+            &self.window_state,
+            cx,
+        )
+    }
+}
+
 gpui::actions!(tcode_chat, [CloseSide]);
 
 /// The key context of an agent shown beside its lead, where Escape closes it.
