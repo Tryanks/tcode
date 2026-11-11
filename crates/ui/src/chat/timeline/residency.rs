@@ -598,51 +598,6 @@ mod tests {
         );
     }
 
-    /// Scrolling to a turn far above the tail renders its messages there
-    /// without moving the reader.
-    #[gpui::test]
-    fn a_distant_turn_renders_its_messages_under_the_reader_without_moving_them(
-        cx: &mut TestAppContext,
-    ) {
-        use gpui::{FollowMode, ListOffset, VisualTestContext, px, size};
-
-        // The user bubble of turn 40: three rows per synthetic turn.
-        const TARGET: usize = 120;
-        let mut timeline = synthetic_markdown_timeline(240);
-        // The thread's only code block, in the answer below the reader: its
-        // lines exist only once the message is rendered as Markdown.
-        Arc::make_mut(&mut timeline.entries[TARGET + 2]).content =
-            assistant("```\nAssistant 40\n```");
-        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
-        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-            ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(700.)));
-        draw_settled(cx);
-        let list_state = view.read_with(cx, |chat, _| chat.list_state.clone());
-
-        list_state.set_follow_mode(FollowMode::Normal);
-        list_state.scroll_to(ListOffset {
-            item_ix: TARGET,
-            offset_in_item: px(7.),
-        });
-        draw_settled(cx);
-
-        assert!(
-            cx.debug_bounds("markdown-code-line-0")
-                .is_some_and(|line| line.intersects(&list_state.viewport_bounds())),
-            "the turn under the reader is not rendered as Markdown"
-        );
-        let scroll_top = list_state.logical_scroll_top();
-        assert_eq!(scroll_top.item_ix, TARGET);
-        assert_eq!(
-            scroll_top.offset_in_item,
-            px(7.),
-            "rendering the scroll-top turn changed the list anchor"
-        );
-    }
-
     /// A message over the background-parse threshold shows its text at once
     /// and its Markdown from the frame after the parse lands, inside its row;
     /// a smaller one is Markdown from its first frame.

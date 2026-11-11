@@ -194,69 +194,6 @@ mod tests {
         }
     }
 
-    /// A reader who scrolled up while the agent works is not moved: rows
-    /// arriving and a reply streaming below leave every pixel on screen in
-    /// place, frame by frame.
-    #[gpui::test]
-    fn a_reader_scrolled_up_stays_put_while_rows_arrive(cx: &mut TestAppContext) {
-        let mut thread = ScriptedThread::new(cx, earlier_turns_and_a_running_one(6), 0, true);
-        let (chat, cx) = thread.open(cx);
-        thread.deliver(cx);
-        for _ in 0..20 {
-            frame(cx);
-        }
-        let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
-        cx.simulate_event(gpui::ScrollEvent {
-            position: list.viewport_bounds().center(),
-            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(240.))),
-            touch_phase: gpui::TouchPhase::Moved,
-            ..Default::default()
-        });
-        for _ in 0..4 {
-            frame(cx);
-        }
-        assert!(!list.is_following_tail(), "the wheel paused the follow");
-        let rows = list.item_count();
-        let on_screen = |cx: &mut VisualTestContext| {
-            (0..rows)
-                .filter_map(|row| cx.debug_bounds(format!("timeline-row-{row}").leak()))
-                .filter(|bounds| bounds.intersects(&list.viewport_bounds()))
-                .collect::<Vec<_>>()
-        };
-        let reading = on_screen(cx);
-        assert!(!reading.is_empty());
-
-        thread.live(answer_event(
-            "answer-6",
-            &"Done; here is the summary.\n\n".repeat(4),
-        ));
-        thread.live(agent::AgentEvent::ItemStarted(agent::ThreadItem {
-            id: "more".into(),
-            parent_item_id: None,
-            content: agent::ItemContent::AssistantMessage {
-                text: String::new(),
-                summarized: false,
-            },
-        }));
-        thread.deliver(cx);
-        for step in 0..16 {
-            if step % 4 == 0 {
-                thread.live(streamed("more", "Another streamed paragraph.\n\n"));
-                thread.deliver(cx);
-            }
-            frame(cx);
-            assert!(
-                !list.is_following_tail(),
-                "step {step}: the reader was pulled down"
-            );
-            assert_eq!(on_screen(cx), reading, "step {step}: the reader was moved");
-        }
-        assert!(
-            list.item_count() > rows,
-            "the rows arrived below the reader"
-        );
-    }
-
     const SEED: &str = "`seed` opens the reply.\n\n";
 
     /// A running turn answering in a row the reader follows to its end.

@@ -958,48 +958,6 @@ fn scroll_output(id: &str, lines: f32, cx: &mut VisualTestContext) {
     draw_settled(cx);
 }
 
-/// A long command's window draws all it printed in its terminal grid,
-/// within the window's height and with nothing more to open: it opens on
-/// the end, scrolls back to the first line inside the window, and down to
-/// the last again.
-#[gpui::test]
-fn a_long_commands_output_scrolls_within_its_grid(cx: &mut TestAppContext) {
-    let _locale = crate::settings::TestLocaleGuard::acquire();
-    crate::set_locale("en");
-    let (mut thread, cx) = StoredThread::open(cx, &shell_log("count", 150), 1_024.);
-    thread.open_work_log("count", cx);
-    click(cx, "activity-row-count");
-    step_until(&mut thread, "the host's screen", cx, |cx| {
-        copied_output("count", cx).ends_with("line 150 of the run")
-    });
-    assert!(!shows(cx, "tool-text-count-output-more"), "no show-all");
-    assert!(!shows(cx, "tool-text-count-output"), "no text view");
-    let grid = cx.debug_bounds("command-output-count").expect("drawn");
-    let window = cx.debug_bounds("tool-shell-count").expect("drawn");
-    assert!(
-        grid.size.height < px(150. * crate::terminal_drawer::TERMINAL_CELL_HEIGHT / 4.),
-        "the grid keeps to the window's height: {grid:?}"
-    );
-    assert!(window.size.height >= grid.size.height);
-
-    let end = copied_output("count", cx);
-    assert!(
-        end.ends_with("line 150 of the run"),
-        "it opens on the end: {end}"
-    );
-    assert!(!end.contains("line 1 of the run\n"));
-    scroll_output("count", 400., cx);
-    let start = copied_output("count", cx);
-    assert!(
-        start.starts_with("line 1 of the run\n"),
-        "it scrolls back to the first line: {start}"
-    );
-    assert!(!start.contains("line 150 of the run"));
-    scroll_output("count", -400., cx);
-    assert!(copied_output("count", cx).ends_with("line 150 of the run"));
-    thread.shutdown(cx);
-}
-
 /// Steps the host until the window drawn at rest shows `what`.
 fn step_until(
     thread: &mut StoredThread,

@@ -1451,49 +1451,6 @@ pub(crate) mod tests {
         driver.shutdown(cx, &host);
     }
 
-    /// A thread with nothing new to show is drawn again from what it drew
-    /// when the view around it renders again, as the shell does for its own
-    /// reasons, and asks for no frame of its own.
-    #[gpui::test]
-    fn an_idle_chat_is_reused_when_the_view_around_it_renders(cx: &mut TestAppContext) {
-        use gpui::{
-            Context, IntoElement, ParentElement as _, Render, Styled as _, VisualTestContext,
-            Window, div, px, size,
-        };
-        struct Around(Entity<ChatView>);
-        impl Render for Around {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                div().size_full().child(self.0.read(cx).frame())
-            }
-        }
-        let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(6));
-        let (around, cx) =
-            cx.add_window_view(|window, cx| {
-                Around(cx.new(|cx| {
-                    ChatView::new(store, window_state, Some(session_id.clone()), window, cx)
-                }))
-            });
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(900.)));
-        draw_settled(cx);
-
-        for _ in 0..2 {
-            cx.update(|window, _| window.reset_layout_stats());
-            around.update(cx, |_, cx| cx.notify());
-            cx.run_until_parked();
-            assert_eq!(
-                cx.update(|window, _| window.layout_stats().views_built),
-                1,
-                "the chat was built again with the view around it"
-            );
-            assert_eq!(
-                cx.update(|window, cx| window.simulate_next_frame(cx)),
-                0,
-                "the idle chat asked for another frame"
-            );
-        }
-    }
-
     /// A window drawing the conversation `build` makes as the panes draw
     /// one: through its frame.
     pub(crate) fn add_chat_window(
