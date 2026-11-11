@@ -351,6 +351,7 @@ pub use wire::{
 // gains speed and summary (a PermissionSummary of profile, sandbox, approval
 // and reviewer); Codex's current permissions carry a summary, not a
 // description.
+// SessionStatus gains goal_control and manual_compaction.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

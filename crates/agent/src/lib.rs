@@ -256,7 +256,7 @@ pub enum RewindPreviewKind {
 }
 
 /// What a harness lets a client do with its standing goal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalControl {
     /// The goal can be paused and resumed without clearing it.
     pub pause: bool,

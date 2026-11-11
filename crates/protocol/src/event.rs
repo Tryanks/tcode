@@ -845,6 +845,13 @@ pub struct SessionStatus {
     /// The harness's standing goal (Codex `thread/goal`, Claude Code `/goal`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<agent::Goal>,
+    /// What the harness lets a client do with that goal; none when it has
+    /// no goal a client sets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_control: Option<agent::GoalControl>,
+    /// The harness compacts its context when asked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub manual_compaction: bool,
     /// What a rewind does in this thread and whether one can start now; none
     /// when its harness, or this thread's session, has no rewind.
     #[serde(default, skip_serializing_if = "Option::is_none")]

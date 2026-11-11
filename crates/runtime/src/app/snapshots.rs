@@ -1363,6 +1363,8 @@ impl AppState {
             delivery_in_flight: session.delivery_in_flight,
             activity: activity.session_activity(meta, Some(session)),
             preparing_turn: session.preparing_turn(),
+            goal_control: meta.provider.caps().goals,
+            manual_compaction: meta.provider.caps().manual_compaction,
             stopping: session.interrupt_requested,
             stopping_since: session
                 .interrupt_requested_at

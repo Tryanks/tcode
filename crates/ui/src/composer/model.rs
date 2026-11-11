@@ -29,7 +29,7 @@ pub(super) enum GoalIntent {
 /// goal change is a turn of its own takes it only between turns; otherwise the
 /// text reaches the provider as typed.
 pub(super) fn goal_offered(state: &crate::store::ComposerState) -> Option<agent::GoalControl> {
-    let control = state.provider?.caps().goals?;
+    let control = state.goal_control?;
     (!state.conversation_read_only && (control.live || !state.turn_running && !state.stopping))
         .then_some(control)
 }
@@ -56,9 +56,7 @@ pub(super) fn compact_offered(state: &crate::store::ComposerState) -> bool {
     !state.conversation_read_only
         && !state.turn_running
         && !state.stopping
-        && state
-            .provider
-            .is_some_and(|provider| provider.caps().manual_compaction)
+        && state.manual_compaction
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

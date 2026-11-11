@@ -17175,6 +17175,8 @@ pub(crate) mod tests {
             stopping_since: None,
             turn_retry: None,
             goal: None,
+            goal_control: None,
+            manual_compaction: false,
             rewind: None,
             fork_at: None,
             queue_held: false,
