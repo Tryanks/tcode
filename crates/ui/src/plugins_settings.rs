@@ -2351,6 +2351,14 @@ impl PluginsSettingsPanel {
                 }
             }
         }
+        // A listing still running has not said which marketplaces there are.
+        let listing = names.is_empty()
+            && columns.iter().all(|account| {
+                account
+                    .user
+                    .as_ref()
+                    .is_none_or(|catalog| catalog.loading && catalog.marketplaces.is_empty())
+            });
         let success = cx.theme().success;
         let muted = cx.theme().muted_foreground;
         let mut rows: Vec<AnyElement> = names
@@ -2516,7 +2524,9 @@ impl PluginsSettingsPanel {
                     .into_any_element(),
             );
         }
-        let body = if rows.is_empty() {
+        let body = if listing {
+            note_card(crate::tr!("providers.plugins.listing").into_owned(), cx)
+        } else if rows.is_empty() {
             note_card(
                 crate::tr!("providers.plugins.no_marketplaces").into_owned(),
                 cx,
