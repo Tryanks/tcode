@@ -1207,15 +1207,15 @@ async fn handle_command<D: Dialect>(
                 Ok(config_options) => {
                     {
                         let mut state = state.lock_recover();
+                        // A config option's answer carries every option's
+                        // `currentValue`, the one set included; a mode's
+                        // carries nothing, and its success is the switch.
                         if let Some(options) = config_options.as_deref() {
                             state.options.ingest(None, Some(options));
-                        }
-                        if origin == OptionOrigin::Mode {
-                            if let Some(mode) = value.as_str() {
-                                state.select_mode(acp::SessionModeId::new(mode));
-                            }
-                        } else {
-                            state.options.select(&id, value);
+                        } else if origin == OptionOrigin::Mode
+                            && let Some(mode) = value.as_str()
+                        {
+                            state.select_mode(acp::SessionModeId::new(mode));
                         }
                     }
                     emit_provider_options(state, events, false).await;
