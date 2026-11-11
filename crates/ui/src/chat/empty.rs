@@ -189,9 +189,6 @@ impl ChatView {
 /// How many of its threads the new-thread page offers to pick up again.
 const RECENT_THREADS: usize = 3;
 
-/// The new-thread page's large project icon.
-const PAGE_ICON: f32 = 48.;
-
 impl ChatView {
     /// The project this view's thread is in: one of the host's projects, or
     /// the one its quick threads share.
@@ -228,9 +225,9 @@ impl ChatView {
         })
     }
 
-    /// A fresh draft's page: where it starts (the project's icon, a slogan
-    /// naming it and the host), the composer, and the place's latest threads
-    /// to pick up again, as one block in the middle of the body.
+    /// A fresh draft's page: a slogan with the chip of where the thread
+    /// starts, the composer, and the place's latest threads to pick up
+    /// again, as one block in the middle of the body.
     pub(super) fn render_new_thread_page(
         &mut self,
         composer: AnyElement,
@@ -239,143 +236,89 @@ impl ChatView {
     ) -> AnyElement {
         let seed = self.slogan_seed();
         let project = self.location(cx);
-        let named = project
-            .as_ref()
-            .filter(|project| !project.quick_chat)
-            .map(|project| project.name.clone());
-        let quick = named.is_none();
-        let store = self.workspace_store.read(cx);
-        let host = store.host_title();
-        let image_host = store.image_host();
-        let accent = cx.theme().primary;
+        let image_host = self.workspace_store.read(cx).image_host();
         let muted = cx.theme().muted_foreground;
-        let picker_label = crate::tr!("chat.choose_project");
-
-        let icon = match &project {
-            Some(project) => crate::project_icon::artwork(image_host, project, PAGE_ICON),
-            None => Icon::empty()
-                .path("icons/message-square.svg")
-                .size(px(PAGE_ICON))
-                .flex_none()
-                .into_any_element(),
-        };
-        let icon = crate::material::accessible_clickable(
+        let slogan = &cx.theme().tokens.typography.xl;
+        let words = |text: &str| {
             div()
-                .flex_none()
-                .p_1()
-                .rounded(crate::material::radius_overlay(cx))
-                .cursor_pointer()
-                .hover(|style| style.bg(cx.theme().foreground.opacity(0.06)))
-                .debug_selector(|| "new-thread-icon".into())
-                .child(icon),
-            "new-thread-icon",
-            Role::Button,
-            picker_label.clone(),
-            cx,
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.open_project_picker(cx)));
+                .text_token(slogan)
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(cx.theme().foreground)
+                .child(crate::widgets::fade_text(text.trim().to_owned()))
+        };
+        // Where the thread starts, as the chip that opens the picker.
+        let picker = |id: &'static str, lead: AnyElement, label: AnyElement| {
+            Button::new(id)
+                .motion(&self.motion)
+                .debug_selector(move || id.into())
+                .ghost()
+                .outline()
+                .chip()
+                .aria_label(crate::tr!("chat.choose_project"))
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .child(lead)
+                        .child(label)
+                        .child(Icon::new(IconName::ChevronDown).size_3().text_color(muted)),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.open_project_picker(cx)))
+        };
 
-        // The slogan, one of the place's kind; a project's names it where
-        // its language puts it, and the name opens the picker.
-        let title = div()
-            .text_token(&cx.theme().tokens.typography.xl)
-            .text_size(px(26.))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(cx.theme().foreground)
+        // The slogan, one of the place's kind; a project's has the chip
+        // where its language puts the name, a quick thread's under it.
+        let title = h_flex()
+            .flex_wrap()
+            .justify_center()
+            .items_center()
+            .gap_2()
             .debug_selector(|| "new-thread-title".into());
-        let title = match named {
-            None => title
-                .child(crate::tr!(crate::i18n::variant_key(
+        let hero = v_flex()
+            .w_full()
+            .items_center()
+            .gap_3()
+            .pb_5()
+            .px(px(CONTENT_MIN_PADDING))
+            .pr(px(CONTENT_MIN_PADDING) + shift);
+        let hero = match project.as_ref().filter(|project| !project.quick_chat) {
+            None => hero
+                .child(title.child(words(&crate::tr!(crate::i18n::variant_key(
                     "chat.slogan_quick",
                     seed
-                )))
-                .into_any_element(),
-            Some(name) => {
+                )))))
+                .child(picker(
+                    "new-thread-kind",
+                    Icon::empty()
+                        .path("icons/message-square.svg")
+                        .size_3p5()
+                        .text_color(muted)
+                        .into_any_element(),
+                    div()
+                        .text_body(false, cx)
+                        .child(crate::widgets::fade_text(crate::tr!("sidebar.quick_chat")))
+                        .into_any_element(),
+                )),
+            Some(project) => {
                 let sentence =
                     crate::tr!(crate::i18n::variant_key("chat.slogan_project", seed)).into_owned();
                 let (before, after) = sentence
                     .split_once("%{project}")
-                    .map(|(before, after)| (before.to_owned(), after.to_owned()))
-                    .unwrap_or((sentence.clone(), String::new()));
-                h_flex()
-                    .flex_wrap()
-                    .justify_center()
-                    .child(title.child(before.trim_end().to_owned()))
-                    .child(
-                        crate::material::accessible_clickable(
-                            div()
-                                .text_token(&cx.theme().tokens.typography.xl)
-                                .text_size(px(26.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(accent)
-                                .cursor_pointer()
-                                .when(!before.is_empty() && before.ends_with(' '), |name| {
-                                    name.ml(px(7.))
-                                })
-                                .when(!after.is_empty() && after.starts_with(' '), |name| {
-                                    name.mr(px(7.))
-                                })
-                                .debug_selector(|| "new-thread-project".into())
-                                .child(name),
+                    .unwrap_or((sentence.as_str(), ""));
+                hero.child(
+                    title
+                        .when(!before.trim().is_empty(), |title| {
+                            title.child(words(before))
+                        })
+                        .child(picker(
                             "new-thread-project",
-                            Role::Button,
-                            picker_label.clone(),
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.open_project_picker(cx))),
-                    )
-                    .child(
-                        div()
-                            .text_token(&cx.theme().tokens.typography.xl)
-                            .text_size(px(26.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().foreground)
-                            .child(after.trim_start().to_owned()),
-                    )
-                    .into_any_element()
+                            crate::project_icon::artwork(image_host, project, 18.),
+                            words(&project.name).into_any_element(),
+                        ))
+                        .when(!after.trim().is_empty(), |title| title.child(words(after))),
+                )
             }
         };
-
-        // The host, and for a quick thread what kind of place it is, which
-        // opens the picker too.
-        let meta = h_flex()
-            .gap_2()
-            .items_center()
-            .text_secondary(false, cx)
-            .text_color(muted)
-            .debug_selector(|| "new-thread-host".into())
-            .child(crate::widgets::fade_text(host))
-            .when(quick, |meta| {
-                meta.child("·").child(
-                    crate::material::accessible_clickable(
-                        div()
-                            .cursor_pointer()
-                            .border_b_1()
-                            .border_dashed()
-                            .border_color(muted.opacity(0.7))
-                            .text_color(cx.theme().foreground.opacity(0.8))
-                            .debug_selector(|| "new-thread-kind".into())
-                            .child(crate::widgets::fade_text(crate::tr!("sidebar.quick_chat"))),
-                        "new-thread-kind",
-                        Role::Button,
-                        picker_label.clone(),
-                        cx,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.open_project_picker(cx))),
-                )
-            });
-
-        let hero = v_flex()
-            .w_full()
-            .items_center()
-            .gap_2()
-            .pb_4()
-            .px(px(CONTENT_MIN_PADDING))
-            .pr(px(CONTENT_MIN_PADDING) + shift)
-            .child(icon)
-            .child(div().h_1())
-            .child(title)
-            .child(meta.mt_1());
 
         v_flex()
             .id("new-thread-page")
