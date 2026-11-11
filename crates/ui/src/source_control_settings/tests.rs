@@ -85,7 +85,7 @@ struct Remote {
 impl Remote {
     /// A client attached to another machine over the link, showing what the machine reports.
     fn attach(settings: tcode_core::settings::Settings, cx: &mut TestAppContext) -> Self {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         incoming

@@ -425,7 +425,7 @@ mod tests {
         reason: Option<String>,
         options: Vec<agent::ApprovalOption>,
     ) -> &mut VisualTestContext {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(crate::store::tests::scratch_root(
                 "approval-list-test",

@@ -789,7 +789,7 @@ mod tests {
         cx: &mut TestAppContext,
         delivery: agent::UserInputDelivery,
     ) -> impl FnMut(&'static str) -> ((bool, usize), bool, bool) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(crate::store::tests::scratch_root(
                 "question-test",

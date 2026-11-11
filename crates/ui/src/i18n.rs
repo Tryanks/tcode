@@ -423,7 +423,7 @@ mod tests {
         });
         cx.update(|cx| {
             cx.set_http_client(client);
-            crate::theme::init(cx);
+            crate::test_client::init(cx);
             set_locale_fonts(
                 vec![(LANGUAGE_JAPANESE, "https://host/ja.otf".to_owned())],
                 cx,

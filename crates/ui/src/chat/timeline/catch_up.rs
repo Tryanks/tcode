@@ -73,7 +73,7 @@ impl Workspace {
     /// a client attached to it whose messages are recorded on their way.
     fn new(cx: &mut TestAppContext) -> Self {
         use tcode_runtime::pipe::{HostServices, spawn_host};
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let root = crate::store::tests::scratch_root("catch-up");
         let disk = tcode_services::store::SessionStore::open_at(root).unwrap();

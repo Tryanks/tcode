@@ -3609,7 +3609,7 @@ mod tests {
         catalogs: Vec<ProviderPluginCatalog>,
         cx: &mut TestAppContext,
     ) -> (Host, &mut VisualTestContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         send(

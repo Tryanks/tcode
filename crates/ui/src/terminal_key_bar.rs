@@ -455,7 +455,7 @@ mod tests {
     fn bar_renders_only_for_a_focused_soft_keyboard_terminal(cx: &mut TestAppContext) {
         use gpui::Focusable as _;
         use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let root = crate::store::tests::scratch_root("terminal-keybar");
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(root.clone()).unwrap(),

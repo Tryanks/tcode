@@ -191,9 +191,7 @@ pub(crate) fn local_machine_name(cx: &App) -> Option<String> {
 /// Open a *client-local* path in the user's editor through whatever integration
 /// this client was given. `None` when it has none.
 pub(crate) fn open_in_editor(path: &std::path::Path, cx: &App) -> Option<Result<(), String>> {
-    cx.try_global::<ClientAttachment>()?
-        .host
-        .open_in_editor(path)
+    cx.global::<ClientAttachment>().host.open_in_editor(path)
 }
 
 /// The Open in Zed entry a host's paths get.
@@ -213,8 +211,10 @@ impl ZedEntry {
         let label = if !store.is_remote() {
             "chat.open_zed"
         } else if cx
-            .try_global::<ClientAttachment>()
-            .is_some_and(|attachment| attachment.host.machine_editor().is_some())
+            .global::<ClientAttachment>()
+            .host
+            .machine_editor()
+            .is_some()
         {
             "chat.open_zed_remote"
         } else {
@@ -276,10 +276,7 @@ pub(crate) fn open_host_path_in_zed(
         crate::widgets::menu::open_in_zed(path, window, cx);
         return;
     }
-    let Some(editor) = cx
-        .try_global::<ClientAttachment>()
-        .and_then(|attachment| attachment.host.machine_editor())
-    else {
+    let Some(editor) = cx.global::<ClientAttachment>().host.machine_editor() else {
         return;
     };
     let Some((machine, tunnels)) = store.read(cx).machine_tunnels() else {
@@ -621,9 +618,7 @@ impl RemotePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let fixed_machine = cx
-            .try_global::<ClientAttachment>()
-            .is_some_and(|attachment| attachment.host.fixed_machine());
+        let fixed_machine = cx.global::<ClientAttachment>().host.fixed_machine();
         let form = PairForm::new(window, cx);
         // A link that parses is the whole request, so it is sent as soon as
         // it lands in the field; Enter and the button only cover a retry.
@@ -712,18 +707,15 @@ impl RemotePanel {
         self.form.error = error;
     }
 
-    fn client(&self, cx: &App) -> Option<Rc<dyn ClientHost>> {
-        cx.try_global::<ClientAttachment>()
-            .map(ClientAttachment::host)
+    fn client(&self, cx: &App) -> Rc<dyn ClientHost> {
+        cx.global::<ClientAttachment>().host()
     }
 
     /// Read an invite off the camera and pair with it at once. The scanned
     /// link goes through the same parser a pasted one does; the page the
     /// user is on stays, and shows the attempt and its outcome.
     fn scan(&mut self, cx: &mut Context<Self>) {
-        let Some(host) = self.client(cx) else {
-            return;
-        };
+        let host = self.client(cx);
         self.form.error = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -751,9 +743,7 @@ impl RemotePanel {
     /// admitted this device, connect to it. One step: there is nothing to
     /// confirm that the link did not already say.
     fn submit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = self.client(cx) else {
-            return;
-        };
+        let client = self.client(cx);
         let Some((request, address, generation)) = self.form.begin_pair(cx) else {
             return;
         };
@@ -848,101 +838,91 @@ impl RemotePanel {
     /// host that did not start says why, and offers starting it again or
     /// quitting.
     fn local_row(&self, compact: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<Row> {
-        cx.try_global::<ClientAttachment>()
-            .is_some_and(ClientAttachment::can_attach_local)
-            .then(|| {
-                let current = self.store_of(&HostKey::Local, cx).is_some();
-                let failure = self.local_failure.clone();
-                let failed = failure.is_some();
-                let failure =
-                    crate::motion::shown("hosts-local-failure", failure, SHOW, window, cx).map(
-                        |shown| {
-                            shown.fold(
-                                div()
-                                    .debug_selector(|| "hosts-local-failure".into())
-                                    .text_secondary(compact, cx)
-                                    .text_color(cx.theme().danger_foreground)
-                                    .child(
-                                        crate::tr!(
-                                            "hosts.local.unavailable",
-                                            reason = shown.value.clone()
-                                        )
-                                        .into_owned(),
-                                    ),
-                            )
-                        },
-                    );
-                let current = crate::motion::shown(
-                    "hosts-local-current",
-                    current.then_some(()),
-                    SHOW,
-                    window,
-                    cx,
-                )
-                .map(|shown| shown.fade(Self::current_glyph(cx)));
-                let actions = crate::motion::shown(
-                    "hosts-local-actions",
-                    failed.then_some(()),
-                    SHOW,
-                    window,
-                    cx,
-                )
+        cx.global::<ClientAttachment>().can_attach_local().then(|| {
+            let current = self.store_of(&HostKey::Local, cx).is_some();
+            let failure = self.local_failure.clone();
+            let failed = failure.is_some();
+            let failure = crate::motion::shown("hosts-local-failure", failure, SHOW, window, cx)
                 .map(|shown| {
-                    shown.fade(
-                        h_flex()
-                            .gap_2()
+                    shown.fold(
+                        div()
+                            .debug_selector(|| "hosts-local-failure".into())
+                            .text_secondary(compact, cx)
+                            .text_color(cx.theme().danger_foreground)
                             .child(
-                                Button::new("hosts-local-retry")
-                                    .debug_selector(|| "hosts-local-retry".into())
-                                    .primary()
-                                    .compact()
-                                    .label(crate::tr!("hosts.local.retry"))
-                                    .on_click(|_, window, cx| {
-                                        let request = cx.global::<ClientAttachment>().requester();
-                                        request(
-                                            HostRequest::Open(AttachmentTarget::Local),
-                                            window,
-                                            cx,
-                                        );
-                                    }),
-                            )
-                            .child(
-                                Button::new("hosts-local-quit")
-                                    .compact()
-                                    .label(crate::tr!("quit.confirm"))
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(Box::new(crate::shell::Quit), cx);
-                                    }),
+                                crate::tr!("hosts.local.unavailable", reason = shown.value.clone())
+                                    .into_owned(),
                             ),
                     )
                 });
-                group_entry(
-                    "hosts-local",
-                    crate::tr!("hosts.this_computer").into_owned().into(),
-                    compact,
-                    cx,
-                )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap(cx.theme().tokens.spacing.xxs)
+            let current = crate::motion::shown(
+                "hosts-local-current",
+                current.then_some(()),
+                SHOW,
+                window,
+                cx,
+            )
+            .map(|shown| shown.fade(Self::current_glyph(cx)));
+            let actions = crate::motion::shown(
+                "hosts-local-actions",
+                failed.then_some(()),
+                SHOW,
+                window,
+                cx,
+            )
+            .map(|shown| {
+                shown.fade(
+                    h_flex()
+                        .gap_2()
                         .child(
-                            div().text_title(cx).overflow_hidden().child(
-                                crate::widgets::fade_text(crate::tr!("hosts.this_computer")),
-                            ),
+                            Button::new("hosts-local-retry")
+                                .debug_selector(|| "hosts-local-retry".into())
+                                .primary()
+                                .compact()
+                                .label(crate::tr!("hosts.local.retry"))
+                                .on_click(|_, window, cx| {
+                                    let request = cx.global::<ClientAttachment>().requester();
+                                    request(HostRequest::Open(AttachmentTarget::Local), window, cx);
+                                }),
                         )
-                        .children(failure),
+                        .child(
+                            Button::new("hosts-local-quit")
+                                .compact()
+                                .label(crate::tr!("quit.confirm"))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(crate::shell::Quit), cx);
+                                }),
+                        ),
                 )
-                .children(current)
-                .children(actions)
-                .when(!failed, |row| {
-                    row.on_click(|_, window, cx| {
-                        let request = cx.global::<ClientAttachment>().requester();
-                        request(HostRequest::Open(AttachmentTarget::Local), window, cx);
-                    })
+            });
+            group_entry(
+                "hosts-local",
+                crate::tr!("hosts.this_computer").into_owned().into(),
+                compact,
+                cx,
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(cx.theme().tokens.spacing.xxs)
+                    .child(
+                        div()
+                            .text_title(cx)
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(crate::tr!("hosts.this_computer"))),
+                    )
+                    .children(failure),
+            )
+            .children(current)
+            .children(actions)
+            .when(!failed, |row| {
+                row.on_click(|_, window, cx| {
+                    let request = cx.global::<ClientAttachment>().requester();
+                    request(HostRequest::Open(AttachmentTarget::Local), window, cx);
                 })
             })
+        })
     }
 
     /// Saved machines offer pairing again when authorization is rejected.
@@ -1130,10 +1110,9 @@ impl RemotePanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
-        let (hosts, unreadable) = match self.client(cx).map(|client| client.load_hosts()) {
-            Some(Ok(hosts)) => (hosts, None),
-            Some(Err(error)) => (Vec::new(), Some(error)),
-            None => (Vec::new(), None),
+        let (hosts, unreadable) = match self.client(cx).load_hosts() {
+            Ok(hosts) => (hosts, None),
+            Err(error) => (Vec::new(), Some(error)),
         };
         let mut column = v_flex().gap(section_gap(cx));
 
@@ -1380,7 +1359,7 @@ impl RemotePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let scannable = self.client(cx).is_some_and(|client| client.supports_qr());
+        let scannable = self.client(cx).supports_qr();
         let entry = |id: &'static str, title: SharedString, cx: &mut Context<Self>| {
             group_entry(id, title.clone(), compact, cx)
                 .debug_selector(move || id.into())
@@ -1592,7 +1571,7 @@ impl RemotePanel {
         let compact = self.window_state.read(cx).compact;
         let busy = self.form.busy;
         let ready = !busy && self.form.request(cx).is_some() && self.form.typed_address(cx).is_ok();
-        let scannable = self.client(cx).is_some_and(|client| client.supports_qr());
+        let scannable = self.client(cx).supports_qr();
         let action = Button::new("hosts-pair-submit")
             .primary()
             .loading(busy)
@@ -1758,13 +1737,9 @@ impl RemotePanel {
         let id = action.0.clone();
         let Some(name) = self
             .client(cx)
-            .and_then(|client| {
-                client
-                    .load_hosts()
-                    .ok()?
-                    .into_iter()
-                    .find(|host| host.host_id == id)
-            })
+            .load_hosts()
+            .ok()
+            .and_then(|hosts| hosts.into_iter().find(|host| host.host_id == id))
             .map(|host| host.name)
         else {
             return;
@@ -1986,7 +1961,7 @@ mod tests {
                 )
             }
         }
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(|cx| cx.set_global(ClientAttachment::new(Rc::new(Browser), false, |_, _, _| {})));
         let window = cx.open_window(gpui::size(px(393.), px(852.)), |window, cx| {
             let state = cx.new(|_| WindowState::default());
@@ -2025,7 +2000,7 @@ mod tests {
                 )
             }
         }
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(|cx| cx.set_global(ClientAttachment::new(client, false, |_, _, _| {})));
         let window = cx.open_window(gpui::size(px(1024.), px(768.)), |window, cx| {
             let state = cx.new(|_| WindowState::default());
@@ -2109,7 +2084,7 @@ mod tests {
             }
         }
         let phone = Rc::new(Phone::default());
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(|cx| cx.set_global(ClientAttachment::new(phone.clone(), false, |_, _, _| {})));
         let window = cx.open_window(gpui::size(px(393.), px(852.)), |window, cx| {
             let state = cx.new(|_| WindowState::default());
@@ -2202,7 +2177,7 @@ mod tests {
         let (_host_tx, from_host) = async_channel::unbounded::<String>();
         let (attachments, _attachment_rx) = async_channel::unbounded();
         let mux = HostMux::new(attachments, from_host.clone());
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(|cx| {
             cx.set_global(RemoteController::new(
                 mux.clone(),

@@ -642,7 +642,7 @@ mod tests {
     fn picker_returns_foreign_host_paths_unchanged(cx: &mut TestAppContext) {
         use tcode_client::HostLink;
         use tcode_protocol::{ClientPayload, Query, decode_client_line};
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, requests) = async_channel::unbounded();
         let (_replies, from_host) = async_channel::unbounded();
         let link = HostLink::new(to_host, from_host);
@@ -703,7 +703,7 @@ mod tests {
     ) {
         use tcode_client::HostLink;
         use tcode_protocol::{ClientPayload, HostMessage, Query, decode_client_line, encode_line};
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let root = PathBuf::from("/host/project");
         let folder = root.join("pictures");
         let project = Project::from_root(root.clone());

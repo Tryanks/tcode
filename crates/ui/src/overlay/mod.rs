@@ -564,7 +564,7 @@ mod tests {
 
     impl ProjectDialogHost {
         fn new(cx: &mut TestAppContext) -> Self {
-            cx.update(crate::theme::init);
+            cx.update(crate::test_client::init);
             let (to_host, outgoing) = async_channel::unbounded();
             let (incoming, from_host) = async_channel::unbounded();
             let link = tcode_client::HostLink::new(to_host, from_host);
@@ -789,7 +789,7 @@ mod tests {
         width: f32,
         cx: &mut TestAppContext,
     ) -> &mut VisualTestContext {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::window_seam::force_mobile_layout);
         let (_, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
@@ -870,7 +870,7 @@ mod tests {
     /// wide one shows the corner card.
     #[gpui::test]
     fn a_compact_toast_says_only_the_newest_and_a_wide_one_is_a_card(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::window_seam::force_mobile_layout);
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
@@ -902,7 +902,7 @@ mod tests {
     /// plays its exit and unmounts.
     #[gpui::test]
     fn a_card_that_stays_leaves_when_closed_later(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::window_seam::force_mobile_layout);
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);

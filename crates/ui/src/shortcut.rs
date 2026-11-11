@@ -232,7 +232,7 @@ mod tests {
 
     fn mount(cx: &mut TestAppContext) -> (Entity<Harness>, &mut VisualTestContext) {
         cx.update(|cx| {
-            crate::theme::init(cx);
+            crate::test_client::init(cx);
             super::init(cx);
         });
         let built = Rc::new(RefCell::new(None));

@@ -1007,7 +1007,7 @@ mod tests {
 
     #[gpui::test]
     fn streamed_appends_match_full_parse(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(super::super::init);
         let documents = [
             "plain paragraph\ncontinued line\n\n# atx heading\n\nSetext heading\n===\n",
@@ -1083,7 +1083,7 @@ mod tests {
         text: &str,
         cx: &'a mut TestAppContext,
     ) -> (Entity<SelectAllRoot>, &'a mut VisualTestContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(super::super::init);
         let text = text.to_string();
         let (view, cx) = cx.add_window_view(|_, cx| SelectAllRoot::new(&text, cx));

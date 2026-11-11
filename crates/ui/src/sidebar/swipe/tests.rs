@@ -40,7 +40,7 @@ fn phone<'a>(
     name: &str,
     threads: usize,
 ) -> (Phone, &'a mut VisualTestContext) {
-    cx.update(crate::theme::init);
+    cx.update(crate::test_client::init);
     let root = crate::store::tests::scratch_root(name);
     let host = spawn_host(
         SessionStore::open_at(root.clone()).unwrap(),

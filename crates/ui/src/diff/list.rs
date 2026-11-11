@@ -1682,7 +1682,7 @@ mod tests {
     fn the_row_the_reader_is_at_stays_put_when_a_card_opens_above_or_below(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let files = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"]
             .into_iter()
             .map(changed_file)
@@ -1728,7 +1728,7 @@ mod tests {
 
     #[gpui::test]
     fn wrapped_split_keeps_columns_visible_and_copies_original_text(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::shortcut::init);
         for (old, new, ignore_whitespace) in [
             ("let 名 = 1;\n", "let 名\t= 2;\n", false),

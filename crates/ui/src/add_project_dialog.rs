@@ -1453,7 +1453,7 @@ mod tests {
         /// home's listing asked for and the recents scan not yet answered.
         fn open(cx: &mut TestAppContext) -> (Self, &mut VisualTestContext) {
             cx.update(|cx| {
-                crate::theme::init(cx);
+                crate::test_client::init(cx);
                 crate::shortcut::init(cx);
                 init(cx);
                 // The list shows a spinner while the recents scan runs.
@@ -1856,7 +1856,7 @@ mod tests {
     #[gpui::test]
     fn a_remote_project_root_is_judged_by_the_host(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            crate::theme::init(cx);
+            crate::test_client::init(cx);
             crate::shortcut::init(cx);
             init(cx);
             // The list shows a spinner while the recents scan runs.

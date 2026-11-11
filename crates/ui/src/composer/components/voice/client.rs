@@ -176,8 +176,9 @@ impl SpeechState {
 pub(super) fn configure(mut state: SpeechState, locale: &'static str, cx: &App) -> SpeechState {
     state.locale = locale;
     let recognizer = cx
-        .try_global::<crate::remote::ClientAttachment>()
-        .and_then(|attachment| attachment.host().speech_recognizer());
+        .global::<crate::remote::ClientAttachment>()
+        .host()
+        .speech_recognizer();
     if let Some(recognizer) = recognizer {
         return state.recognizer(recognizer);
     }

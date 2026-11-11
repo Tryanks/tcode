@@ -1251,7 +1251,7 @@ mod tests {
         use tcode_core::project::Project;
         use tcode_protocol::{EventEnvelope, IndexSnapshot, ServerEvent, Topic};
 
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, requests) = async_channel::unbounded();
         let (replies, from_host) = async_channel::unbounded();
         let link = HostLink::new(to_host, from_host);
@@ -1393,7 +1393,7 @@ mod tests {
 
     #[gpui::test]
     fn markdown_images_draw_host_previews_and_open_host_originals(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let (to_host, requests) = async_channel::unbounded();
         let (replies, from_host) = async_channel::unbounded();

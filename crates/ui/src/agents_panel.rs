@@ -1820,7 +1820,7 @@ mod tests {
         use tcode_core::session::LatestActivity;
         use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
         use tcode_protocol::{AgentStatus, SessionActivity};
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, _requests) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
@@ -2047,7 +2047,7 @@ mod tests {
         use tcode_protocol::{
             AgentStatus, ClientPayload, Command, SessionActivity, decode_client_line,
         };
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
@@ -2156,7 +2156,7 @@ mod tests {
         use crate::test_frames::draw_settled;
 
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let root = crate::store::tests::scratch_root("settled-agents");
         let project = Project::from_root(root.clone());

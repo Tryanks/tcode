@@ -6819,7 +6819,7 @@ pub(crate) mod tests {
         Rc<ReturningClient>,
         &'a mut VisualTestContext,
     ) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let (states, state) = async_channel::unbounded();
@@ -7122,7 +7122,7 @@ pub(crate) mod tests {
         Rc<WorkspaceClient>,
         &mut VisualTestContext,
     ) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::window_seam::force_mobile_layout);
         let client = Rc::new(WorkspaceClient {
             saved: RefCell::new(saved.clone()),
@@ -8565,7 +8565,7 @@ pub(crate) mod tests {
                 Ok(())
             }
         }
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let (to_host, _outgoing) = async_channel::unbounded();
         let (_incoming, from_host) = async_channel::unbounded();
@@ -8934,7 +8934,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_reopened_window_is_where_the_closed_one_was(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let scripted = || {
             let (to_host, outgoing) = async_channel::unbounded();
             let (incoming, from_host) = async_channel::unbounded();
@@ -9617,7 +9617,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn keyboard_cover_changes_keep_editor_focus_until_explicit_dismissal(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::window_seam::force_mobile_layout);
         let (shell, host, _, cx) =
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 393., "plan");
@@ -9803,7 +9803,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_subagent_thread_composer_is_its_settings_read_only(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::window_seam::force_mobile_layout);
         let (shell, host, _, cx) =
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1200., "plan");
@@ -9901,7 +9901,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_subagent_thread_keeps_the_keyboard_in_its_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (shell, host, _, cx) =
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1200., "plan");
         restore_index(&shell, &host, true, cx);
@@ -13791,7 +13791,7 @@ pub(crate) mod tests {
     ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
         // As `run_shell` does before opening the window: the shell alone,
         // without the window root, initializes nothing of gpui-base itself.
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let (states, state) = async_channel::unbounded();
@@ -13949,7 +13949,7 @@ pub(crate) mod tests {
         }
 
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let busy = "another Tcode host is already using the data directory /tmp/demo";
         let (local_transport, local_incoming) = transport();
         // Answered from the back: busy on the first Retry, up on the second.
@@ -14328,7 +14328,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn model_picker_focuses_its_search_only_off_phone(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let root = crate::store::tests::scratch_root("model-picker-focus");
         let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
         let project = tcode_core::project::Project::from_root(root.join("project"));

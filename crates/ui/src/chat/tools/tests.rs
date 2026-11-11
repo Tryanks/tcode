@@ -33,7 +33,7 @@ impl StoredThread {
         use tcode_core::project::SessionMeta;
         use tcode_services::store::{Mutation, SessionStore};
 
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         // Motion settles at once, so a running call's spinner rests.
         cx.update(|cx| cx.set_reduce_motion(true));

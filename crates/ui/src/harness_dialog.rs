@@ -3242,7 +3242,7 @@ mod tests {
             sessions: Vec<tcode_core::project::SessionMeta>,
             cx: &mut TestAppContext,
         ) -> Self {
-            cx.update(crate::theme::init);
+            cx.update(crate::test_client::init);
             let (to_host, outgoing) = async_channel::unbounded();
             let (incoming, from_host) = async_channel::unbounded();
             let event = |topic, event| {

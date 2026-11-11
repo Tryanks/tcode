@@ -1619,13 +1619,10 @@ impl Composer {
         // subagent and offline states have nothing to add to.
         let attach_shown = !subagent
             && self.interactive(cx)
-            && (cfg!(feature = "native-dialogs")
-                || cx
-                    .try_global::<crate::remote::ClientAttachment>()
-                    .is_some_and(|client| {
-                        client.host().supports_image_picker()
-                            || client.host().supports_file_picker()
-                    }));
+            && (cfg!(feature = "native-dialogs") || {
+                let client = cx.global::<crate::remote::ClientAttachment>().host();
+                client.supports_image_picker() || client.supports_file_picker()
+            });
         // It narrows away when the host goes offline, and widens back.
         let attach_menu = self.motion.shown(
             self.motion_key("attach-menu"),
@@ -2274,7 +2271,7 @@ mod replica_tests {
         async_channel::Receiver<String>,
         SessionStatus,
     ) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let root = crate::store::tests::scratch_root("composer-replica");
         let host = tcode_runtime::pipe::spawn_host(
@@ -2904,7 +2901,7 @@ mod replica_tests {
         cx.update(|cx| cx.set_reduce_motion(true));
         use agent::ProviderKind;
 
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let root = crate::store::tests::scratch_root(name);
         let project = tcode_core::project::Project::from_root(root.clone());

@@ -1090,7 +1090,7 @@ mod tests {
         streaming: bool,
         cx: &'a mut TestAppContext,
     ) -> (Entity<MarkdownState>, &'a mut VisualTestContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let text = text.to_string();
         let (root, cx) = cx.add_window_view(|_, cx| Root {

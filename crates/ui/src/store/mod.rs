@@ -4854,7 +4854,7 @@ pub(crate) mod tests {
                 unreachable!("the store is handed its link")
             }
         }
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let saved = serde_json::json!("not this device's settings");
         let device = std::rc::Rc::new(Device(RefCell::new(ClientPreferences {
             navigation: Some(serde_json::json!({
@@ -4911,7 +4911,7 @@ pub(crate) mod tests {
     fn member_settings_are_saved_among_the_device_preferences(cx: &mut TestAppContext) {
         use tcode_client::host::ClientHost as _;
         use tcode_core::settings::SidebarLayout;
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let root = scratch_root("member-settings-saved");
         std::fs::create_dir_all(&root).unwrap();
         let device = std::rc::Rc::new(tcode_traverse::NativeClientHost::new(
@@ -4959,7 +4959,7 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
     ) {
         use tcode_core::settings::{EnvVar, ProviderProfile, ProviderSettings};
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let profile = |settings| ProviderProfile {
@@ -5046,7 +5046,7 @@ pub(crate) mod tests {
 
     #[gpui::test]
     fn member_scope_seeds_only_the_space_index_and_reseeds_on_reconnect(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(|cx| cx.set_reduce_motion(true));
         let mut host = ScriptedSpace::new();
         let workspace = host.store(cx);
@@ -5404,7 +5404,7 @@ pub(crate) mod tests {
     #[cfg(preview_backend)]
     #[gpui::test]
     fn preview_requests_for_an_unviewed_thread_reach_the_panel(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let (to_host, _requests) = async_channel::unbounded();
         let (_replies, from_host) = async_channel::unbounded();
@@ -5444,7 +5444,7 @@ pub(crate) mod tests {
 
     #[gpui::test]
     fn scripted_host_send_waits_for_ack_and_rejection_offers_retry(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let (to_host, requests) = async_channel::unbounded();
         let (replies, from_host) = async_channel::unbounded();
@@ -5897,7 +5897,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn threads_wait_for_baseline_before_rendering_empty(cx: &mut TestAppContext) {
         use gpui::{px, size};
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         for remote in [true, false] {
             let (to_host, _outgoing) = async_channel::unbounded();
             let (incoming, from_host) = async_channel::unbounded();

@@ -436,12 +436,7 @@ impl Composer {
 
     /// Open the platform's file picker and add what it returns.
     pub(in super::super) fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(host) = cx
-            .try_global::<crate::remote::ClientAttachment>()
-            .map(crate::remote::ClientAttachment::host)
-        else {
-            return;
-        };
+        let host = cx.global::<crate::remote::ClientAttachment>().host();
         cx.spawn_in(window, async move |this, cx| {
             let picked = host.pick_files().await;
             let _ = this.update_in(cx, |composer, window, cx| match picked {

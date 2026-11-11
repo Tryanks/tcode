@@ -2145,7 +2145,7 @@ mod tests {
             ClientPayload, HostMessage, ProtocolError, Query, QueryResponse, decode_client_line,
             encode_line,
         };
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, requests) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);

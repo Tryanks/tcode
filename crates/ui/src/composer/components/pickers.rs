@@ -602,12 +602,8 @@ impl Composer {
     pub(in super::super) fn render_attach_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let composer = cx.entity();
         let compact = self.compact;
-        let (photos, files) =
-            cx.try_global::<crate::remote::ClientAttachment>()
-                .map_or((false, false), |client| {
-                    let host = client.host();
-                    (host.supports_image_picker(), host.supports_file_picker())
-                });
+        let host = cx.global::<crate::remote::ClientAttachment>().host();
+        let (photos, files) = (host.supports_image_picker(), host.supports_file_picker());
         #[cfg(feature = "native-dialogs")]
         if !photos && !files {
             return crate::material::toolbar_icon_button(

@@ -972,7 +972,7 @@ mod tests {
     fn switching_language_relocalizes_the_address_placeholder(cx: &mut gpui::TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();

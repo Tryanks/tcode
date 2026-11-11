@@ -2648,7 +2648,7 @@ mod tests {
 
     /// A wide view showing octo/repo#7, its first reads asked for and unanswered.
     fn mount(cx: &mut TestAppContext) -> Mounted<'_> {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let (to_host, requests) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();

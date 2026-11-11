@@ -1344,7 +1344,7 @@ pub(crate) mod tests {
         });
         // Seed a catalog-backed model: the generic chat fixture has no model
         // options and therefore cannot detect a missing effort control.
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let data_root = crate::store::tests::scratch_root("effort-layout");
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(data_root).unwrap(),
@@ -1597,7 +1597,7 @@ pub(crate) mod tests {
         use tcode_runtime::pipe::{HostServices, spawn_host};
         use tcode_services::store::SessionStore;
 
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let data_root = crate::store::tests::scratch_root("chat-residency-test");
         let store = SessionStore::open_at(data_root).expect("test session store");
@@ -1910,7 +1910,7 @@ pub(crate) mod tests {
             use tcode_runtime::pipe::{HostServices, spawn_host};
             use tcode_services::store::SessionStore;
 
-            cx.update(crate::theme::init);
+            cx.update(crate::test_client::init);
             cx.update(crate::markdown::init);
             let data_root = crate::store::tests::scratch_root("chat-glide-test");
             let host = spawn_host(

@@ -502,7 +502,7 @@ mod tests {
         use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
 
         crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let agent = tcode_core::acp::InstalledAcpAgent {
             id: "agent".into(),
             name: "Agent".into(),

@@ -1851,16 +1851,12 @@ impl SessionsSidebar {
     }
 
     fn on_leave_host(&mut self, action: &LeaveHost, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(request) = cx
-            .try_global::<crate::remote::ClientAttachment>()
-            .map(crate::remote::ClientAttachment::requester)
-        {
-            request(
-                crate::remote::HostRequest::Leave(action.0.clone()),
-                window,
-                cx,
-            );
-        }
+        let request = cx.global::<crate::remote::ClientAttachment>().requester();
+        request(
+            crate::remote::HostRequest::Leave(action.0.clone()),
+            window,
+            cx,
+        );
     }
 
     fn on_host_settings(&mut self, action: &HostSettings, _: &mut Window, cx: &mut Context<Self>) {
@@ -6946,7 +6942,7 @@ mod tests {
         };
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let send = |topic, event| {
@@ -7173,7 +7169,7 @@ mod tests {
         TestHost,
         &'a mut VisualTestContext,
     ) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(|cx| DevicePreferences::set_sidebar_layout(layout, cx));
         let (a, b) = (
             TestHost::remote(cx, "host-a", a),
@@ -7191,7 +7187,7 @@ mod tests {
 
     #[gpui::test]
     fn canceling_inline_rename_on_the_phone_discards_the_unsaved_title(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::window_seam::force_mobile_layout);
         let root = crate::store::tests::scratch_root("sidebar-rename-test");
         let session_store = SessionStore::open_at(root.clone()).unwrap();
@@ -7338,7 +7334,7 @@ mod tests {
 
     #[gpui::test]
     fn thread_rows_carry_the_provider_mark_until_the_setting_is_off(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let root = crate::store::tests::scratch_root("provider-mark");
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
@@ -7443,7 +7439,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         use gpui::{PlatformInput, TouchEvent, TouchId, TouchPhase};
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let root = crate::store::tests::scratch_root("menu-selection");
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
@@ -7547,7 +7543,7 @@ mod tests {
         quick_chat: bool,
     ) -> bool {
         use tcode_client::host::ClientHost as _;
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let root = crate::store::tests::scratch_root(&format!("sidebar-{projects}-project"));
         let device = || tcode_traverse::NativeClientHost::new(root.join("device"), "phone");
         let client: std::rc::Rc<dyn tcode_client::host::ClientHost> = std::rc::Rc::new(device());
@@ -7718,7 +7714,7 @@ mod tests {
         };
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(|cx| DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx));
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
@@ -7873,7 +7869,7 @@ mod tests {
         use tcode_protocol::{
             EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
         };
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let send = |topic, event| {
@@ -8032,7 +8028,7 @@ mod tests {
         use tcode_protocol::{
             EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
         };
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let project = Project::from_root(PathBuf::from("/project"));
@@ -8115,7 +8111,7 @@ mod tests {
         };
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(|cx| cx.set_reduce_motion(true));
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
@@ -8286,7 +8282,7 @@ mod tests {
         };
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(|cx| cx.set_reduce_motion(true));
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
@@ -8456,7 +8452,7 @@ mod tests {
         };
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(|cx| cx.set_reduce_motion(true));
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
@@ -8740,7 +8736,7 @@ mod tests {
         };
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(|cx| cx.set_reduce_motion(true));
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
@@ -8963,7 +8959,7 @@ mod tests {
         };
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(|cx| cx.set_reduce_motion(true));
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();

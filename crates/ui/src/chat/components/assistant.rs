@@ -487,7 +487,7 @@ mod tests {
 
     #[gpui::test]
     fn plain_text_markdown_escapes_inline_and_block_syntax(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let cases = [
             "*not italic* _nor this_ **nor bold**",
@@ -526,7 +526,7 @@ mod tests {
     fn a_message_shows_its_latest_text_across_append_rewrite_shrink_and_clear(
         cx: &mut TestAppContext,
     ) {
-        cx.update(crate::theme::init);
+        cx.update(crate::test_client::init);
         cx.update(crate::markdown::init);
         let mut md = cx.update(|cx| MdState::new("", cx));
         for (text, expected) in [
