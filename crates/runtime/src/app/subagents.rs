@@ -101,10 +101,19 @@ impl AppState {
             } = &item.content
             {
                 // A grandchild whose transcript came first already has a
-                // placeholder: the spawn names it.
+                // placeholder, made under the lead while nothing said whose
+                // it was: the spawn names it, and says it is this subagent's.
                 let nested = match self.find_native_subagent_mirror(parent_session_id, &item.id, cx)
                 {
-                    Some(nested) => Some(nested),
+                    Some(nested) => {
+                        if let Some(mut meta) = self.find_meta(&nested)
+                            && meta.parent_session_id.as_deref() != Some(mirror_id.as_str())
+                        {
+                            meta.parent_session_id = Some(mirror_id.clone());
+                            self.persist_meta(&meta, cx);
+                        }
+                        Some(nested)
+                    }
                     None => self.ensure_native_subagent_mirror(
                         &mirror_id,
                         &item.id,
