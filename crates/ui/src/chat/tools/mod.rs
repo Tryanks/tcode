@@ -173,7 +173,7 @@ pub(in crate::chat) fn view<'a>(call: &Call<'a>) -> Box<dyn ToolView + 'a> {
 /// activities counts it as.
 pub(in crate::chat) enum Family {
     Command,
-    /// The files it edited.
+    /// The files it edited: none when the edit failed or was declined.
     Edit(Vec<String>),
     Read,
     Search,
@@ -192,9 +192,15 @@ pub(in crate::chat) fn family(entry: &TimelineEntry) -> Option<Family> {
     };
     Some(match item {
         ItemContent::CommandExecution { .. } => Family::Command,
-        ItemContent::FileChange { changes, .. } => {
-            Family::Edit(changes.iter().map(|change| change.path.clone()).collect())
-        }
+        ItemContent::FileChange {
+            changes, status, ..
+        } => Family::Edit(
+            if matches!(status, ItemStatus::Failed | ItemStatus::Declined) {
+                Vec::new()
+            } else {
+                changes.iter().map(|change| change.path.clone()).collect()
+            },
+        ),
         ItemContent::ToolCall { .. } => {
             let call = Call::of(entry)?;
             if read::tool_call(&call).is_some() {

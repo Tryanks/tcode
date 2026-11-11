@@ -120,6 +120,9 @@ pub(in crate::chat) struct Header {
     /// The call returned while the work it started goes on, which the
     /// header says in the verb's place.
     pub(in crate::chat) background: bool,
+    /// A failure leaves nothing done, so the verb reads as asked for, not
+    /// as done: an edit that did not apply.
+    pub(in crate::chat) undone_when_failed: bool,
     /// What the header offers at its end, before its chevron.
     pub(in crate::chat) actions: Vec<AnyElement>,
 }
@@ -141,6 +144,7 @@ impl Header {
             error: None,
             elapsed_ms: None,
             background: false,
+            undone_when_failed: false,
             actions: Vec::new(),
         }
     }
@@ -151,6 +155,11 @@ impl Header {
             verb: None,
             ..Self::new(icon, Verb("call"))
         }
+    }
+
+    pub(in crate::chat) fn undone_when_failed(mut self) -> Self {
+        self.undone_when_failed = true;
+        self
     }
 
     pub(in crate::chat) fn shimmer(mut self) -> Self {
@@ -191,6 +200,11 @@ impl Header {
         if self.background {
             return Some(crate::tr!("tools.status.background").into_owned().into());
         }
+        let status = if self.undone_when_failed && status == ItemStatus::Failed {
+            ItemStatus::Declined
+        } else {
+            status
+        };
         self.verb.map(|verb| verb.text(status))
     }
 

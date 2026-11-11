@@ -1602,7 +1602,7 @@ impl TimelineView {
                     None => tools::window::Detail::Shut,
                 }
             };
-            let header = tools::diff::file_header(file);
+            let header = tools::diff::file_header(file, edit.status);
             // The edit's time belongs to it, told once.
             let elapsed_ms = (file_index == 0)
                 .then(|| tools::window::elapsed(&header, entry))

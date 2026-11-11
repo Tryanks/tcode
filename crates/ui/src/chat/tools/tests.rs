@@ -399,7 +399,7 @@ impl StoredThread {
         edit.files
             .iter()
             .map(|file| {
-                let header = super::diff::file_header(file);
+                let header = super::diff::file_header(file, edit.status);
                 (
                     header.verb.expect("a verb").text(edit.status).to_string(),
                     header.argument.expect("a path").text,
