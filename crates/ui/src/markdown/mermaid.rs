@@ -1084,16 +1084,7 @@ mod tests {
     const FRAME: Duration = Duration::from_millis(16);
 
     const FLOWCHART: &str = "flowchart TD
-    A[User sends message] --> B{Provider configured?}
-    B -->|Yes| C[Start session]
-    B -->|No| D[Show setup dialog]
-    C --> E[Stream events]
-    E --> F{Turn complete?}
-    F -->|No| E
-    F -->|Yes| G[Persist transcript]
-    D --> H[User picks provider]
-    H --> C
-    G --> I((Done))
+    A[User sends message] --> B[Start session]
 ";
 
     struct Root {
@@ -1224,11 +1215,11 @@ mod tests {
             draw_settled(cx);
             block_height(cx)
         };
-        let closed_height = whole_height(&format!("```mermaid\n{FLOWCHART}```\n"), cx);
+        let closed_height = whole_height(&format!("```mermaid\n{statements}```\n"), cx);
         let open_height = whole_height(&format!("```mermaid\n{statements}{partial}"), cx);
 
         let (markdown, cx) = open("", true, cx);
-        push(&markdown, &format!("```mermaid\n{FLOWCHART}"), cx);
+        push(&markdown, &format!("```mermaid\n{statements}"), cx);
         frames(10, cx);
         push(&markdown, "```", cx);
         draw_settled(cx);
