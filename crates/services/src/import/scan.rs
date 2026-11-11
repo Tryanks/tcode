@@ -111,14 +111,10 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Ext
     }
 
     for root in &roots.codex_session_roots {
-        let files = collect_files(
-            root,
-            &|path| path.extension().is_some_and(|ext| ext == "jsonl"),
-            &mut unreadable,
-        );
+        let files = collect_files(root, &super::codex::is_read_rollout, &mut unreadable);
         for path in files {
-            let line = match File::open(&path)
-                .and_then(|file| BufReader::new(file).lines().next().transpose())
+            let line = match super::codex::open_rollout(&path)
+                .and_then(|lines| lines.lines().next().transpose())
             {
                 Ok(Some(line)) => line,
                 Ok(None) => continue,

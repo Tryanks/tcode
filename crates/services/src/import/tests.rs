@@ -127,6 +127,55 @@ const CODEX_ROLLOUT: &str = r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"s
 {"timestamp":"2026-01-02T03:04:20.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Keep the build"}]}}
 "#;
 
+/// A cold rollout Codex compressed is listed and imports as its plain file
+/// did; while the plain file is still there, Codex reads that one and the
+/// compressed copy is not listed again. Codex compresses a rollout to one
+/// zstd stream of its bytes, named after it with `.zst` (`compress_rollout_if_cold_blocking`
+/// and `should_skip_compressed_sibling`, `rollout/src/compression.rs` at
+/// `rust-v0.167.0`); the name is `rollout_file_name.rs`'s.
+#[test]
+fn a_rollout_codex_compressed_is_listed_and_imports_as_it_was_written() {
+    let home = std::env::temp_dir().join(format!("tcode-codex-{}", uuid::Uuid::new_v4()));
+    let day = home.join("sessions/2026/01/02");
+    std::fs::create_dir_all(&day).unwrap();
+    let cwd = home.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let rollout = CODEX_ROLLOUT.replace("/work/example", cwd.to_str().unwrap());
+    let name = "rollout-2026-01-02T03-04-05-00000000-0000-4000-8000-000000000001.jsonl";
+    let compressed = day.join(format!("{name}.zst"));
+    std::fs::write(
+        &compressed,
+        zstd::stream::encode_all(rollout.as_bytes(), 3).unwrap(),
+    )
+    .unwrap();
+    let roots = super::ExternalRoots {
+        claude_projects: None,
+        claude_desktop_meta: None,
+        codex_session_roots: vec![home.join("sessions"), home.join("archived_sessions")],
+    };
+    let listed = |roots: &super::ExternalRoots| {
+        let history = super::scan_recent_dirs(roots, &[]);
+        assert!(history.unreadable.is_empty(), "{:?}", history.unreadable);
+        history
+            .dirs
+            .into_iter()
+            .flat_map(|dir| dir.threads)
+            .map(|thread| thread.file)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(listed(&roots), std::slice::from_ref(&compressed));
+    let plain = Transcript::new(&rollout);
+    let from_plain = shown(codex::convert(&plain.0, "codex:example").unwrap());
+    assert_eq!(
+        shown(codex::convert(&compressed, "codex:example").unwrap()),
+        from_plain
+    );
+
+    std::fs::write(day.join(name), &rollout).unwrap();
+    assert_eq!(listed(&roots), [day.join(name)]);
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
 fn command(
     command: &str,
     output: &str,

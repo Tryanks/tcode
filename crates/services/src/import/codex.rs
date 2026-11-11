@@ -8,15 +8,62 @@ use serde_json::Value;
 
 use super::{ConvertedEntry, ConvertedThread, file_modified_ms, timestamp_ms};
 
+/// The suffix Codex gives a rollout it compressed: the whole `.jsonl` as one
+/// zstd stream, beside where the plain file was (`rollout/src/compression.rs`
+/// at `rust-v0.167.0`).
+const COMPRESSED: &str = ".zst";
+
+/// A rollout's records, read through its compression when Codex compressed it.
+pub(super) fn open_rollout(path: &Path) -> std::io::Result<Box<dyn BufRead>> {
+    let file = File::open(path)?;
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(COMPRESSED))
+    {
+        Ok(Box::new(BufReader::new(zstd::stream::read::Decoder::new(
+            file,
+        )?)))
+    } else {
+        Ok(Box::new(BufReader::new(file)))
+    }
+}
+
+/// The rollout's file names as Codex writes them (`rollout_file_name.rs`):
+/// `rollout-<YYYY-MM-DDTHH-MM-SS>-<thread id>.jsonl`, with `_<rollout id>`
+/// after the thread id for a rollout `thread/revert` wrote, and
+/// [`COMPRESSED`] after it once compressed. The timestamp, thread id and
+/// rollout id, which is the thread id when the name has no other.
+pub(super) fn rollout_name(path: &Path) -> Option<(&str, &str, &str)> {
+    let name = path.file_name()?.to_str()?;
+    let name = name.strip_suffix(COMPRESSED).unwrap_or(name);
+    let core = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
+    let timestamp = core.get(..19)?;
+    let ids = core.get(19..)?.strip_prefix('-')?;
+    let (thread, rollout) = ids.split_once('_').unwrap_or((ids, ids));
+    Some((timestamp, thread, rollout))
+}
+
+/// Whether Codex reads `path`: a rollout's compressed copy is passed over
+/// while its plain file is still there (`should_skip_compressed_sibling`).
+pub(super) fn is_read_rollout(path: &Path) -> bool {
+    if rollout_name(path).is_none() {
+        return false;
+    }
+    match path.to_str().and_then(|path| path.strip_suffix(COMPRESSED)) {
+        Some(plain) => !Path::new(plain).exists(),
+        None => true,
+    }
+}
+
 pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread, String> {
-    let file =
-        File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
     let fallback_ts = file_modified_ms(path);
-    let mut lines = BufReader::new(file).lines();
+    let read = |err: std::io::Error| format!("failed to read {}: {err}", path.display());
+    let mut lines = open_rollout(path).map_err(read)?.lines();
     let first = lines
         .next()
         .ok_or_else(|| format!("{} is empty", path.display()))?
-        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        .map_err(read)?;
     let meta: Value = serde_json::from_str(&first).map_err(|err| {
         format!(
             "invalid Codex session metadata in {}: {err}",
@@ -41,7 +88,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
     let mut next_id = 0_u64;
 
     for line in lines {
-        let line = line.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        let line = line.map_err(read)?;
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
