@@ -1141,6 +1141,7 @@ composer:
   voice_unavailable: "音声入力は利用できません"
   voice_preparing: "音声入力を準備中…"
   voice_stop: "音声入力を停止"
+  voice_stop_waiting: "文字起こしの待機を中止"
   voice_error: "音声入力に失敗しました：%{error}"
   voice_enable_dictation: "macOS から Siri または音声入力が無効になっていると報告されました。マイクへのアクセス許可だけでは使えません。「システム設定」→「キーボード」で「音声入力」をオンにしてから、もう一度音声入力をお試しください。"
   voice_open_dictation_settings: "音声入力の設定を開く"

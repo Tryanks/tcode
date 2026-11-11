@@ -66,11 +66,13 @@ impl SpeechState {
         self.dictation.level()
     }
 
+    /// Start, stop, or, while a stop waits for the recognizer's final
+    /// transcript, stop waiting.
     pub(super) fn toggle(&mut self, cx: &mut Context<Self>) {
-        if self.status().is_active() {
-            self.stop(cx);
-        } else {
-            self.start(cx);
+        match self.status() {
+            SpeechStatus::Stopping => self.cancel(cx),
+            status if status.is_active() => self.stop(cx),
+            _ => self.start(cx),
         }
     }
 
