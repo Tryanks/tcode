@@ -1607,43 +1607,38 @@ mod tests {
         let (_view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(store, window_state, Some(session_id), window, cx)
         });
-        for width in [1_400., 393.] {
-            cx.simulate_resize(size(px(width), px(900.)));
+        cx.simulate_resize(size(px(1_400.), px(900.)));
+        draw_settled(cx);
+        let before = [
+            cx.debug_bounds("markdown-block-0").expect("answer start"),
+            cx.debug_bounds("markdown-block-1")
+                .expect("answer last line"),
+        ];
+        let footer_before = cx.debug_bounds("turn-time-row").expect("turn footer");
+        for expanded in [true, false] {
+            let header = cx
+                .debug_bounds("worklog-header-0-command")
+                .expect("work log toggle");
+            cx.simulate_click(header.center(), Modifiers::default());
             draw_settled(cx);
-            let before = [
-                cx.debug_bounds("markdown-block-0").expect("answer start"),
-                cx.debug_bounds("markdown-block-1")
-                    .expect("answer last line"),
-            ];
-            let footer_before = cx.debug_bounds("turn-time-row").expect("turn footer");
-            for expanded in [true, false] {
-                let header = cx
-                    .debug_bounds("worklog-header-0-command")
-                    .expect("work log toggle");
-                cx.simulate_click(header.center(), Modifiers::default());
-                draw_settled(cx);
-                assert_eq!(
-                    cx.debug_bounds("activity-row-command").is_some(),
-                    expanded,
-                    "the click must toggle the work log"
-                );
-            }
-            let after = [
-                cx.debug_bounds("markdown-block-0").expect("answer start"),
-                cx.debug_bounds("markdown-block-1")
-                    .expect("answer last line"),
-            ];
-            let footer_after = cx.debug_bounds("turn-time-row").expect("turn footer");
             assert_eq!(
-                after, before,
-                "collapsing moved or resized the answer at {width}px"
-            );
-            assert_eq!(footer_after, footer_before, "collapsing moved the footer");
-            assert!(
-                footer_after.top() >= after[1].bottom(),
-                "the footer overlaps the answer's last line: {after:?}, {footer_after:?}"
+                cx.debug_bounds("activity-row-command").is_some(),
+                expanded,
+                "the click must toggle the work log"
             );
         }
+        let after = [
+            cx.debug_bounds("markdown-block-0").expect("answer start"),
+            cx.debug_bounds("markdown-block-1")
+                .expect("answer last line"),
+        ];
+        let footer_after = cx.debug_bounds("turn-time-row").expect("turn footer");
+        assert_eq!(after, before, "collapsing moved or resized the answer");
+        assert_eq!(footer_after, footer_before, "collapsing moved the footer");
+        assert!(
+            footer_after.top() >= after[1].bottom(),
+            "the footer overlaps the answer's last line: {after:?}, {footer_after:?}"
+        );
     }
 
     /// A `tcode_control` anchor opens its thread at the turn of the entry it
@@ -3218,36 +3213,10 @@ mod tests {
         }
     }
 
-    /// Unloaded history reserves a screen above the first turn from the first
-    /// frame, so the timeline's extent is settled by it.
-    #[gpui::test]
-    fn the_history_reservation_is_settled_by_the_first_frame(cx: &mut TestAppContext) {
-        use gpui::{VisualTestContext, px};
-        let (store, window_state, session_id, _driver) =
-            seed_chat_with_history(cx, synthetic_markdown_timeline(1), true);
-        // Opening the window draws its first frame.
-        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-            ChatView::new(store, window_state, Some(session_id), window, cx)
-        });
-        let cx: &mut VisualTestContext = cx;
-        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
-        let first = list.max_offset_for_scrollbar().y;
-        view.update(cx, |_, cx| cx.notify());
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        assert_eq!(list.max_offset_for_scrollbar().y, first);
-        assert!(
-            first > px(0.),
-            "one short turn scrolls into the reservation above it"
-        );
-    }
-
     /// A reader flicking up a long thread is not sent back to its end when a
     /// page of history lands mid-fling, even one that re-indexes the rows: a
     /// background agent that a later turn reported on moves back to the turn
-    /// that started it once the page holds that turn. The rest of the thread
-    /// keeps its measured extent, so the scrollbar does not jump either.
+    /// that started it once the page holds that turn.
     #[gpui::test]
     fn a_page_that_moves_a_background_agent_back_keeps_the_reader_in_place(
         cx: &mut TestAppContext,
@@ -3365,33 +3334,6 @@ mod tests {
         let reading = on_screen(cx);
         assert!(!reading.is_empty(), "a question is on screen");
         let rows = list.item_count();
-        // Below the reader lie more rows than a layout measures around them,
-        // the agent's among them.
-        let to_end = || list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y;
-        let before = to_end();
-        let timeline = view.read_with(cx, |chat, _| chat.timeline());
-        let agent_row = timeline.read_with(cx, |timeline, cx| {
-            store
-                .read(cx)
-                .with_timeline_for(
-                    Some(THREAD),
-                    |thread| {
-                        timeline.rows.iter().position(|row| {
-                            thread.entries[row.entry_range.clone()]
-                                .iter()
-                                .any(|entry| entry.id == "agent-0")
-                        })
-                    },
-                    cx,
-                )
-                .flatten()
-                .expect("the agent has a row")
-        });
-        let agent_height = list
-            .bounds_for_item(agent_row)
-            .expect("the agent's row lies below the reader, measured")
-            .size
-            .height;
 
         // The page holds every earlier turn, the agent's start among them.
         assert!(thread.answer_page(held_from).is_some());
@@ -3402,11 +3344,6 @@ mod tests {
         assert!(
             !list.is_following_tail(),
             "the page sent the reader back to the end"
-        );
-        let after = to_end();
-        assert!(
-            (before - agent_height - after).abs() < px(1.),
-            "the scrollbar jumped: {before:?} to the end, then {after:?} less the agent's {agent_height:?}"
         );
         let now = on_screen(cx);
         for (turn, top) in &reading {

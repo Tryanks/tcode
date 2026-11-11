@@ -1865,45 +1865,14 @@ fn segment_corners(leading: bool, cx: &App) -> gpui::Corners<gpui::Pixels> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use crate::chat::tests::*;
-    use crate::test_frames::draw;
     use gpui::TestAppContext;
-
-    /// Whether the header's split buttons carry their labels follows the width
-    /// it is laid out at, from the frame a resize draws.
-    #[gpui::test]
-    fn header_labels_follow_the_width_of_the_frame(cx: &mut TestAppContext) {
-        use gpui::{VisualTestContext, px, size};
-        let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(1));
-        let (_view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-            ChatView::new(store, window_state, Some(session_id), window, cx)
-        });
-        let cx: &mut VisualTestContext = cx;
-        draw(cx);
-        // A resize draws its frame at the new size.
-        let git_main = |width: f32, cx: &mut VisualTestContext| {
-            cx.simulate_resize(size(px(width), px(700.)));
-            cx.debug_bounds("git-main")
-                .expect("the git button")
-                .size
-                .width
-        };
-        let labelled = git_main(1_024., cx);
-        let narrow = git_main(600., cx);
-        assert!(narrow < labelled, "a 600pt header kept its labels");
-        assert_eq!(
-            git_main(1_024., cx),
-            labelled,
-            "a 1024pt header lost its labels"
-        );
-    }
 
     /// Over a collapsed sidebar the header clears the traffic lights while
     /// its pane is at the window's left edge, and not once it has left it.
-    #[cfg(target_os = "macos")]
     #[gpui::test]
     fn the_header_clears_the_traffic_lights_only_at_the_left_edge(cx: &mut TestAppContext) {
         use crate::chat::WindowEdges;

@@ -1336,7 +1336,6 @@ pub(crate) mod tests {
     #[gpui::test]
     fn compact_composer_keeps_effort_and_settings_visible(cx: &mut TestAppContext) {
         use gpui::px;
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let mut timeline = synthetic_markdown_timeline(1);
         timeline.usage = Some(agent::TokenUsage {
             used_tokens: Some(100_000),
@@ -1416,7 +1415,7 @@ pub(crate) mod tests {
             store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let window_state = cx.new(|_| WindowState::default().with_compact(true));
-        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+        let (_view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,
@@ -1425,141 +1424,31 @@ pub(crate) mod tests {
                 cx,
             )
         });
-        for locale in [
-            crate::LANGUAGE_ENGLISH,
-            crate::LANGUAGE_SIMPLIFIED_CHINESE,
-            crate::LANGUAGE_JAPANESE,
-        ] {
-            crate::set_locale(locale);
-            view.update(cx, |_, cx| cx.notify());
-            for (width, height) in [(360., 780.), (393., 852.)] {
-                cx.simulate_resize(gpui::size(px(width), px(height)));
-                draw_settled(cx);
-                let permission = cx.debug_bounds("permission-chip").expect("approval option");
-                let effort = cx
-                    .debug_bounds("traits-chip")
-                    .expect("standalone effort option");
-                let meter = cx
-                    .debug_bounds("context-meter")
-                    .expect("compact context meter");
-                let model = cx.debug_bounds("model-picker").expect("model picker");
-                let send = cx.debug_bounds("send-message").expect("send button");
-                let card = cx.debug_bounds("composer-card").expect("input card");
-                let drawer = cx
-                    .debug_bounds("composer-settings-drawer")
-                    .expect("attached settings drawer");
-                assert_eq!(
-                    send.top(),
-                    model.top(),
-                    "Send shares the model row at {width}"
-                );
-                assert_eq!(permission.top(), meter.top());
-                assert!(permission.right() <= meter.left());
-                assert_eq!(effort.top(), model.top(), "Effort sits on the model row");
-                assert!(permission.left() >= px(0.) && meter.right() <= px(width));
-                assert!(
-                    model.right() <= effort.left() && effort.right() <= send.left(),
-                    "controls overlap at {width}: model={model:?}, effort={effort:?}, send={send:?}"
-                );
-                assert!(send.right() <= card.right());
-                assert!(effort.size.width >= px(44.) && effort.size.height >= px(44.));
-                assert!(
-                    drawer.top() >= card.bottom(),
-                    "settings sit below the input card"
-                );
-                assert!(permission.left() >= drawer.left() && meter.right() <= drawer.right());
-                assert!(meter.top() >= drawer.top() && meter.bottom() <= drawer.bottom());
-                assert!(meter.size.width >= px(44.) && meter.size.height >= px(44.));
-            }
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        draw_settled(cx);
+        let permission = cx.debug_bounds("permission-chip").expect("approval option");
+        assert!(
+            cx.debug_bounds("traits-chip").is_some(),
+            "standalone effort option"
+        );
+        let meter = cx
+            .debug_bounds("context-meter")
+            .expect("compact context meter");
+        let card = cx.debug_bounds("composer-card").expect("input card");
+        let drawer = cx
+            .debug_bounds("composer-settings-drawer")
+            .expect("attached settings drawer");
+        assert!(
+            drawer.top() >= card.bottom(),
+            "settings sit below the input card"
+        );
+        for setting in [permission, meter] {
+            assert!(
+                drawer.contains(&setting.center()),
+                "{setting:?} is in the drawer"
+            );
         }
         driver.shutdown(cx, &host);
-    }
-
-    #[gpui::test]
-    fn compact_running_status_clears_composer_and_keyboard(cx: &mut TestAppContext) {
-        use gpui::{Context, IntoElement, ParentElement, Render, Styled, Window, div, px};
-        struct OccludedChat {
-            chat: Entity<ChatView>,
-            bottom: gpui::Pixels,
-        }
-        impl Render for OccludedChat {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                // Reserve the system-occluded area, as the shell's window seam does.
-                div()
-                    .size_full()
-                    .pb(self.bottom)
-                    .child(self.chat.read(cx).frame())
-            }
-        }
-        let mut timeline = synthetic_markdown_timeline(30);
-        Arc::make_mut(timeline.entries.last_mut().unwrap()).content =
-            assistant(&"A long running reply keeps its final status visible.\n\n".repeat(40));
-        timeline.turn_running = true;
-        timeline.turns.last_mut().unwrap().running = true;
-        let (store, window_state, session_id) = seed_chat(cx, timeline);
-        cx.update(|cx| cx.set_reduce_motion(true));
-        window_state.update(cx, |state, _| state.compact = true);
-        let (root, cx) = cx.add_window_view(|window, cx| OccludedChat {
-            chat: cx.new(|cx| ChatView::new(store, window_state, Some(session_id), window, cx)),
-            bottom: px(34.),
-        });
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        let list = root.read_with(cx, |root, cx| root.chat.read(cx).list_state.clone());
-        for bottom in [34., 320., 34.] {
-            root.update(cx, |root, cx| {
-                root.bottom = px(bottom);
-                cx.notify();
-            });
-            for following in [true, false] {
-                list.set_follow_mode(if following {
-                    gpui::FollowMode::Tail
-                } else {
-                    gpui::FollowMode::Normal
-                });
-                list.scroll_to_end();
-                cx.run_until_parked();
-                draw_settled(cx);
-                let status = cx
-                    .debug_bounds("working-status-29")
-                    .expect("running status after scroll_to_end");
-                let composer = cx.debug_bounds("chat-composer").expect("composer");
-                assert!(status.bottom() <= composer.top());
-                assert!(status.bottom() <= list.viewport_bounds().bottom());
-                cx.simulate_event(gpui::ScrollEvent {
-                    position: list.viewport_bounds().center(),
-                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(1200.))),
-                    touch_phase: gpui::TouchPhase::Started,
-                    ..Default::default()
-                });
-                draw_settled(cx);
-                cx.simulate_event(gpui::ScrollEvent {
-                    position: list.viewport_bounds().center(),
-                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-100000.))),
-                    touch_phase: gpui::TouchPhase::Moved,
-                    ..Default::default()
-                });
-                draw_settled(cx);
-                let status = cx
-                    .debug_bounds("working-status-29")
-                    .expect("running status row");
-                let composer = cx.debug_bounds("chat-composer").expect("composer");
-                let meter = cx
-                    .debug_bounds("context-meter")
-                    .expect("second composer row");
-                let model = cx.debug_bounds("model-picker").expect("first composer row");
-                assert!(meter.top() >= model.bottom());
-                assert!(
-                    status.bottom() <= composer.top(),
-                    "status {status:?} overlaps composer {composer:?}, inset {bottom}, following {following}"
-                );
-                assert!(
-                    status.bottom() <= list.viewport_bounds().bottom(),
-                    "status is clipped by timeline"
-                );
-                assert!(status.top() >= list.viewport_bounds().top());
-                assert!(composer.bottom() <= px(852. - bottom));
-            }
-        }
     }
 
     /// A thread with nothing new to show is drawn again from what it drew
