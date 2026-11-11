@@ -3,10 +3,7 @@
 //! base) in a scratch clone, and each moved branch is force-pushed only while it is still at
 //! the head that was reviewed. The project's checkout is never touched.
 
-use std::{
-    path::{Path, PathBuf},
-    process::Stdio,
-};
+use std::path::{Path, PathBuf};
 use tcode_core::pull_request::{StackRebaseFailure, StackRebaseGitStep, StackRebaseStep};
 
 /// What stops a rebase: it ends once every sender of its channel is dropped, killing the Git
@@ -64,7 +61,7 @@ fn git(dir: &Path, env: &[(String, String)], args: &[&str], stop: &Stop) -> Run 
     if stop.is_closed() {
         return Run::Stopped;
     }
-    let mut command = crate::process::async_command("git");
+    let mut command = crate::process::command("git");
     command
         .args(args)
         .current_dir(dir)
@@ -72,19 +69,12 @@ fn git(dir: &Path, env: &[(String, String)], args: &[&str], stop: &Stop) -> Run 
         // The lease refusal is recognised by Git's own words, which a host locale translates.
         .env("LC_ALL", "C")
         .env("LANGUAGE", "")
-        .envs(env.iter().map(|(key, value)| (key, value)))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // A command still running when the rebase is stopped is killed with its future.
-        .kill_on_drop(true);
-    let child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => return Run::Failed(error.to_string()),
-    };
+        .envs(env.iter().map(|(key, value)| (key, value)));
     smol::block_on(smol::future::or(
         async {
-            match child.output().await {
+            // A command still running when the rebase is stopped is killed with its future,
+            // and so is what it started (a remote helper, ssh).
+            match agent::tree_output(command).await {
                 Ok(output) => Run::Exited {
                     ok: output.status.success(),
                     stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
