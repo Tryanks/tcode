@@ -991,6 +991,9 @@ impl AppState {
             Ok(log) => log,
             Err(error) => {
                 log::error!("could not read the log of {session_id}: {error}");
+                if hydration.timeline.is_some() {
+                    self.timeline_loads.remove(&session_id);
+                }
                 let failure = ServerEvent::SessionHistoryError(tcode_protocol::ProtocolError {
                     code: "history_unavailable".into(),
                     message: format!("could not read the history of {session_id}: {error}"),

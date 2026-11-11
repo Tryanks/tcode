@@ -1261,12 +1261,36 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             mode,
             client_id,
         } => {
-            let at = crate::app::RewindAt {
-                turn,
-                steer: steer.as_deref(),
-                checkpoint: checkpoint_id.as_deref(),
+            // A thread just opened may still be folding its log, which holds
+            // the turns and restore points the rewind names: it waits for that.
+            let target = session_id.clone();
+            let rewind = move |app: &mut AppState, cx: &mut HostCx| {
+                let at = crate::app::RewindAt {
+                    turn,
+                    steer: steer.as_deref(),
+                    checkpoint: checkpoint_id.as_deref(),
+                };
+                app.rewind_turn(&session_id, at, mode, client_id, cx)
+                    .map(|_| CommandResponse::Unit)
+                    .ok_or_else(|| ProtocolError {
+                        code: "rewind_unavailable".into(),
+                        message: "This turn cannot be restored now.".into(),
+                    })
             };
-            app.rewind_turn(&session_id, at, mode, client_id, cx);
+            let Some(settled) = app.timeline_settled(&target) else {
+                return CommandOutcome::Immediate(rewind(app, cx));
+            };
+            let host_cx = cx.clone();
+            return CommandOutcome::Pending(cx.spawn_background(async move {
+                let _ = settled.recv().await;
+                host_cx
+                    .enqueue_and_wait(rewind)
+                    .await
+                    .map_err(|()| ProtocolError {
+                        code: "host_stopped".into(),
+                        message: "The host stopped before the rewind could start.".into(),
+                    })?
+            }));
         }
         Command::PreviewRewind {
             session_id,

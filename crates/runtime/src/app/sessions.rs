@@ -2316,6 +2316,7 @@ impl AppState {
         if matches!(target, TimelineLoadTarget::Active { .. }) {
             self.refresh_session_git_branch(session_id.clone(), cwd, cx);
         }
+        self.timeline_loads.entry(session_id.clone()).or_default();
         let load = TimelineLoad { generation, target };
         // A cached log is the whole conversation, including appends whose
         // writes are still queued, so the timeline derives from it and never
@@ -2330,6 +2331,18 @@ impl AppState {
                 self.hydrate_log(&session_id, Some(load), cx);
             }
         }
+    }
+
+    /// Settles once the timeline being folded for `session_id` has landed, or
+    /// its load has ended without one; `None` when no load runs.
+    pub(crate) fn timeline_settled(
+        &mut self,
+        session_id: &str,
+    ) -> Option<smol::channel::Receiver<()>> {
+        let waiters = self.timeline_loads.get_mut(session_id)?;
+        let (settled, settles) = smol::channel::bounded(1);
+        waiters.push(settled);
+        Some(settles)
     }
 
     /// Mark `fold`, the cached log's fold up to row `cursor`, idle as `load`
@@ -2365,7 +2378,11 @@ impl AppState {
                         state.residents.parked.contains_key(&session_id)
                     }
                 };
-                if !generation_matches || !target_matches {
+                if !generation_matches {
+                    return;
+                }
+                state.timeline_loads.remove(&session_id);
+                if !target_matches {
                     return;
                 }
                 let mut timeline = timeline;
