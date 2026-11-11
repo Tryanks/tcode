@@ -1078,6 +1078,8 @@ composer:
   new_worktree: "新建 worktree"
   workspace: "工作区"
   worktree_base: "基础分支"
+  branch_named: "分支 %{branch}"
+  worktree_base_named: "基础分支 %{branch}"
   preparing_worktree: "正在准备 worktree…"
   no_models: "未找到模型"
   add_favorite: "添加到收藏"

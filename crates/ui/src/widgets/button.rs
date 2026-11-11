@@ -240,9 +240,10 @@ impl Button {
         self.on_hover = Some(Rc::new(handler));
         self
     }
-    /// A press action for assistive technology that does what a click on the button does: its
-    /// own handler, then `then`. A disabled or loading button gets none. GPUI's default press
-    /// clicks the node's centre, which misses a button scrolled or clipped out of view.
+    /// What a press from assistive technology does after the button's own click handler, for a
+    /// button whose click alone is not all it does: one that opens a popover. Every button with
+    /// a click handler presses as it clicks; a disabled or loading one does not. GPUI's default
+    /// press clicks the node's centre, which misses a button scrolled or clipped out of view.
     pub(crate) fn press_action(mut self, then: super::popover::SheetToggle) -> Self {
         self.press_then = Some(then);
         self
@@ -426,18 +427,23 @@ impl RenderOnce for Button {
             Some(focus) => focus,
             None => crate::motion::focus_ring::handle(&self.id, window, cx),
         };
-        let press = self
-            .press_then
-            .filter(|_| !self.disabled && !self.loading)
-            .map(|then| {
-                let on_click = self.on_click.clone();
-                move |_: Option<&gpui::accesskit::ActionData>, window: &mut Window, cx: &mut App| {
-                    if let Some(on_click) = &on_click {
-                        on_click(&ClickEvent::default(), window, cx);
-                    }
+        // Every button that acts on a click acts on a press too, so a press
+        // never falls to GPUI's default of clicking where the node last was,
+        // which a button folding or gliding away has left to its neighbour.
+        let press = (!self.disabled
+            && !self.loading
+            && (self.on_click.is_some() || self.press_then.is_some()))
+        .then(|| {
+            let (on_click, then) = (self.on_click.clone(), self.press_then.clone());
+            move |_: Option<&gpui::accesskit::ActionData>, window: &mut Window, cx: &mut App| {
+                if let Some(on_click) = &on_click {
+                    on_click(&ClickEvent::default(), window, cx);
+                }
+                if let Some(then) = &then {
                     then(window, cx);
                 }
-            });
+            }
+        });
         // A new glyph (Copy becoming its check) cross-fades over the one it
         // replaces; the icon as given is the current one.
         let icon = self.icon.map(|icon| {

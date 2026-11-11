@@ -1085,6 +1085,8 @@ composer:
   new_worktree: "New worktree"
   workspace: "Workspace"
   worktree_base: "Base branch"
+  branch_named: "Branch %{branch}"
+  worktree_base_named: "Base branch %{branch}"
   preparing_worktree: "Preparing worktree…"
   no_models: "No models found"
   add_favorite: "Add to favorites"

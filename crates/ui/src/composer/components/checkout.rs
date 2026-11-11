@@ -21,6 +21,15 @@ impl Composer {
         // (its current value is the chosen base, defaulting to the live branch).
         let picker_current = worktree_base.clone().unwrap_or_else(|| branch.clone());
         let worktree_mode = worktree_base.is_some();
+        let picker_label = if worktree_mode {
+            crate::tr!(
+                "composer.worktree_base_named",
+                branch = picker_current.as_str()
+            )
+        } else {
+            crate::tr!("composer.branch_named", branch = picker_current.as_str())
+        }
+        .into_owned();
 
         let right: AnyElement = if checkout_blocked {
             Button::new("branch-picker")
@@ -28,6 +37,7 @@ impl Composer {
                 .outline()
                 .compact()
                 .disabled(true)
+                .aria_label(picker_label)
                 .tooltip(crate::tr!("composer.wait_turn"))
                 .child(
                     h_flex()
@@ -49,6 +59,7 @@ impl Composer {
                 .ghost()
                 .outline()
                 .compact()
+                .aria_label(picker_label)
                 .child(
                     h_flex()
                         .gap_1p5()

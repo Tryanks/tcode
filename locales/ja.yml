@@ -1085,6 +1085,8 @@ composer:
   new_worktree: "新しいワークツリー"
   workspace: "ワークスペース"
   worktree_base: "ベースブランチ"
+  branch_named: "ブランチ %{branch}"
+  worktree_base_named: "ベースブランチ %{branch}"
   preparing_worktree: "ワークツリーを準備中…"
   no_models: "モデルが見つかりません"
   add_favorite: "お気に入りに追加"
