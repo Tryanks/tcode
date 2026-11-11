@@ -87,19 +87,12 @@ impl HarnessId {
 
 /// The host's description of `harness`; before one arrives, what its
 /// adapter's facts say.
-pub(crate) fn describe(store: &WorkspaceStore, harness: &HarnessId) -> HarnessDescription {
+pub(crate) fn describe(store: &WorkspaceStore, harness: &HarnessId) -> Option<HarnessDescription> {
     store
         .harness_descriptions()
         .iter()
         .find(|description| HarnessId::of(description) == *harness)
         .cloned()
-        .unwrap_or_else(|| match harness {
-            HarnessId::Native(kind) => HarnessDescription::native(*kind),
-            HarnessId::Acp(id) => HarnessDescription {
-                acp_agent_id: Some(id.clone()),
-                ..HarnessDescription::native(ProviderKind::Acp)
-            },
-        })
 }
 
 /// A harness's profiles, its built-in one first.
@@ -287,7 +280,9 @@ impl HarnessDialog {
     /// the dialog opens: the CLI changes that file on its own.
     fn read_native_mcp(&mut self, cx: &mut Context<Self>) {
         let store = self.store.read(cx);
-        if !describe(store, &self.harness).native_mcp_config || !store.scope().is_full() {
+        if describe(store, &self.harness).is_none_or(|description| !description.native_mcp_config)
+            || !store.scope().is_full()
+        {
             return;
         }
         let profile = self.builtin_id().to_owned();
@@ -378,7 +373,7 @@ impl HarnessDialog {
 
     fn presets(&self, cx: &App) -> Vec<tcode_protocol::EndpointPresetDescription> {
         describe(self.store.read(cx), &self.harness)
-            .endpoint
+            .and_then(|description| description.endpoint)
             .map(|endpoint| endpoint.presets)
             .unwrap_or_default()
     }
@@ -472,7 +467,8 @@ impl HarnessDialog {
                 .display_name
                 .unwrap_or_default(),
             Field::BaseUrl | Field::Model => {
-                let endpoint = describe(store, &self.harness).endpoint;
+                let endpoint =
+                    describe(store, &self.harness).and_then(|description| description.endpoint);
                 let name = endpoint.and_then(|endpoint| match field {
                     Field::BaseUrl => Some(endpoint.base_url_env),
                     _ => endpoint.model_env,
@@ -599,7 +595,9 @@ impl HarnessDialog {
                 self.update_profile(profile, ProfileSettingsPatch::SetLaunchArgs(text), cx)
             }
             (Field::BaseUrl | Field::Model, _) => {
-                let Some(endpoint) = describe(self.store.read(cx), &self.harness).endpoint else {
+                let Some(endpoint) = describe(self.store.read(cx), &self.harness)
+                    .and_then(|description| description.endpoint)
+                else {
                     return;
                 };
                 let name = match field {
@@ -623,9 +621,11 @@ impl HarnessDialog {
                 }
             }
             (Field::ApiKey, _) => {
-                let (Some(key), Some(endpoint)) =
-                    (text, describe(self.store.read(cx), &self.harness).endpoint)
-                else {
+                let (Some(key), Some(endpoint)) = (
+                    text,
+                    describe(self.store.read(cx), &self.harness)
+                        .and_then(|description| description.endpoint),
+                ) else {
                     return;
                 };
                 let settings = self.store.read(cx).provider_profile_settings(&profile);
@@ -718,7 +718,9 @@ impl HarnessDialog {
     /// of their own.
     fn profile_env_value(&self, cx: &App) -> Vec<EnvVar> {
         let store = self.store.read(cx);
-        let endpoint_names = endpoint_names(&describe(store, &self.harness));
+        let endpoint_names = describe(store, &self.harness)
+            .map(|description| endpoint_names(&description))
+            .unwrap_or_default();
         store
             .provider_profile_settings(&self.shown_profile())
             .env
@@ -729,10 +731,9 @@ impl HarnessDialog {
 
     fn lists_accounts(&self, cx: &App) -> bool {
         let store = self.store.read(cx);
-        lists_accounts(
-            &describe(store, &self.harness),
-            harness_profiles(store, &self.harness).len(),
-        )
+        describe(store, &self.harness).is_some_and(|description| {
+            lists_accounts(&description, harness_profiles(store, &self.harness).len())
+        })
     }
 
     fn is_endpoint_profile(&self, cx: &App) -> bool {
@@ -789,7 +790,9 @@ impl HarnessDialog {
         let env = self.profile_env_value(cx);
         let stored = self.stored_secrets(&profile, cx);
         let store = self.store.clone();
-        let endpoint_names = endpoint_names(&describe(self.store.read(cx), &self.harness));
+        let endpoint_names = describe(self.store.read(cx), &self.harness)
+            .map(|description| endpoint_names(&description))
+            .unwrap_or_default();
         let keeps_endpoint = self.is_endpoint_profile(cx);
         let id = profile.clone();
         let commit: CommitEnv = std::rc::Rc::new(move |env, secrets, cx| {
@@ -1146,12 +1149,12 @@ impl HarnessDialog {
                 )
                 .into_any_element();
         }
-        self.render_header(&description, name, cx)
+        self.render_header(description.as_ref(), name, cx)
     }
 
     fn render_header(
         &self,
-        description: &HarnessDescription,
+        description: Option<&HarnessDescription>,
         name: String,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1172,8 +1175,8 @@ impl HarnessDialog {
                 .filter(|version| !version.is_empty()),
         };
         let checking = snapshot.as_ref().is_none_or(|snapshot| snapshot.checking)
-            && description.acp_agent_id.is_none();
-        let second = match &description.launch_summary {
+            && matches!(self.harness, HarnessId::Native(_));
+        let second = match description.and_then(|description| description.launch_summary.as_ref()) {
             Some(summary) => Some(summary.clone()),
             None => snapshot
                 .as_ref()
@@ -1201,7 +1204,7 @@ impl HarnessDialog {
                                     .text_meta_mono(false, cx)
                                     .child(format!("v{}", version.trim_start_matches('v')))
                             }))
-                            .when(description.acp_agent_id.is_some(), |row| {
+                            .when(matches!(self.harness, HarnessId::Acp(_)), |row| {
                                 row.child(crate::material::chip("ACP", cx))
                             }),
                     )
@@ -1600,7 +1603,10 @@ impl HarnessDialog {
 
     fn render_overview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let store = self.store.read(cx);
-        let description = describe(store, &self.harness);
+        let Some(description) = describe(store, &self.harness) else {
+            return crate::material::empty_row(crate::tr!("composer.loading"), cx)
+                .into_any_element();
+        };
         let snapshot = store.provider_profile_snapshot(self.builtin_id());
         let missing = description.acp_agent_id.is_none()
             && snapshot.as_ref().is_some_and(|snapshot| {
@@ -2704,7 +2710,10 @@ impl HarnessDialog {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let store = self.store.read(cx);
-        let description = describe(store, &self.harness);
+        let Some(description) = describe(store, &self.harness) else {
+            return crate::material::empty_row(crate::tr!("composer.loading"), cx)
+                .into_any_element();
+        };
         let builtin = profile_id == self.builtin_id();
         let endpoint = self.is_endpoint_profile(cx);
         let own = store.provider_profile_own_settings(&profile_id);

@@ -26,7 +26,6 @@ use gpui_base::{h_flex, v_flex};
 use agent::ProviderKind;
 use tcode_core::provider_status::{AuthStatus, ProviderProbeDiagnostic, ProviderStatusKind};
 use tcode_core::settings::{ResolvedProfile, builtin_provider_color};
-use tcode_protocol::HarnessDescription;
 
 /// What is wrong with a harness, as its row's chip says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,11 +39,11 @@ pub(crate) enum Trouble {
 /// A harness row's second line and its chip, from the host's description
 /// of the harness and what was probed of each of its profiles.
 pub(crate) fn row_summary(
-    description: &HarnessDescription,
+    harness: &HarnessId,
     profiles: &[(ResolvedProfile, Option<ProviderSnapshot>)],
     enabled: bool,
 ) -> (String, Option<Trouble>) {
-    if description.acp_agent_id.is_some() {
+    if matches!(harness, HarnessId::Acp(_)) {
         let line = if enabled {
             "ACP".to_owned()
         } else {
@@ -104,7 +103,6 @@ pub(crate) fn harness_row(
     cx: &App,
 ) -> AnyElement {
     let state = store.read(cx);
-    let description = describe(state, harness);
     let name = harness_name(state, harness);
     let profiles: Vec<(ResolvedProfile, Option<ProviderSnapshot>)> =
         harness_profiles(state, harness)
@@ -131,11 +129,12 @@ pub(crate) fn harness_row(
             (
                 agent.as_ref().is_some_and(|agent| agent.enabled),
                 agent.map(|agent| agent.version).filter(|v| !v.is_empty()),
-                description.registry_update.is_some(),
+                describe(state, harness)
+                    .is_some_and(|description| description.registry_update.is_some()),
             )
         }
     };
-    let (line, trouble) = row_summary(&description, &profiles, enabled);
+    let (line, trouble) = row_summary(harness, &profiles, enabled);
     let glyph = provider_glyph(harness.kind());
     let key = harness.key();
     let chip = trouble.map(|trouble| {
