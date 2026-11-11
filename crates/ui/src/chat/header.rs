@@ -447,13 +447,21 @@ impl ChatView {
                         )
                         .overflow_x_scroll_area();
                     // The pills take the row's start and scroll within what
-                    // the stop for all, held at its end, leaves them.
+                    // the stop for all, held at its end, leaves them. It
+                    // leaves them at least half the row, its label shrinking
+                    // to fit the half it may take.
                     let pills = h_flex()
                         .size_full()
                         .items_center()
                         .gap(gap)
                         .child(div().flex_1().min_w_0().h_full().child(pills))
-                        .children(stop_all.map(|stop| floating_backing(radius, cx).child(stop)));
+                        .children(stop_all.map(|stop| {
+                            floating_backing(radius, cx)
+                                .flex_shrink(1.)
+                                .min_w_0()
+                                .max_w(gpui::relative(0.5))
+                                .child(stop)
+                        }));
                     if compact {
                         pills
                             .px(px(crate::material::COMPACT_PAGE_INSET))

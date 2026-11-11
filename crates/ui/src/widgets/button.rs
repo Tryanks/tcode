@@ -88,6 +88,9 @@ pub struct Button {
     touch_in_row: bool,
     /// The composer's chip control: 28 tall at the chip radius.
     chip: bool,
+    /// How small the label may scale when the button is given less width
+    /// than it asks for ([`Button::shrink_label_to`]).
+    label_shrinks_to: Option<f32>,
     loading: bool,
     size: Size,
     tooltip: Option<SharedString>,
@@ -126,6 +129,7 @@ impl Button {
             touch: false,
             touch_in_row: false,
             chip: false,
+            label_shrinks_to: None,
             loading: false,
             size: Size::Medium,
             tooltip: None,
@@ -162,6 +166,13 @@ impl Button {
     pub fn chip(mut self) -> Self {
         self.chip = true;
         self.rounded = ButtonRounded::Chip;
+        self
+    }
+    /// Let a parent narrower than the button shrink it, the label scaling
+    /// down to `smallest` of its size to fit before its end fades
+    /// ([`super::FadeText::shrink_to`]).
+    pub fn shrink_label_to(mut self, smallest: f32) -> Self {
+        self.label_shrinks_to = Some(smallest);
         self
     }
     pub fn rounded(mut self, rounded: impl Into<Pixels>) -> Self {
@@ -468,6 +479,10 @@ impl RenderOnce for Button {
                 build,
             )
         });
+        let shrinks = self.label_shrinks_to.is_some();
+        let label = self
+            .label
+            .map(|label| super::fade_text(label).shrink_to(self.label_shrinks_to.unwrap_or(1.)));
         let content =
             gpui_base::h_flex()
                 .size_full()
@@ -496,10 +511,9 @@ impl RenderOnce for Button {
                         },
                     ))
                 })
-                .when_some(self.label, |this, label| {
-                    this.child(super::fade_text(label))
-                })
-                .children(self.children);
+                .when_some(label, |this, label| this.child(label))
+                .children(self.children)
+                .when(shrinks, |this| this.min_w_0());
         let button = self
             .base
             .track_focus(&focus)
@@ -510,7 +524,13 @@ impl RenderOnce for Button {
             })
             .opacity(dimmed)
             .flex()
-            .flex_shrink_0()
+            .map(|this| {
+                if shrinks {
+                    this.flex_shrink(1.).min_w_0()
+                } else {
+                    this.flex_shrink_0()
+                }
+            })
             .items_center()
             .justify_center()
             .rounded_tl(corners.top_left)

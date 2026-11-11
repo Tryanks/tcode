@@ -162,6 +162,10 @@ impl Place {
     }
 }
 
+/// How small the stop for all's label may scale, of its size, to fit the half
+/// of its row it may take; past that its end fades.
+const STOP_ALL_SMALLEST: f32 = 0.7;
+
 /// The stop for every piece at once, wherever the harness stops them: a chip
 /// at the end of the row over the composer, there whether or not the rail
 /// lists the work. More than one piece asks first: a stop takes a dev server
@@ -190,6 +194,7 @@ pub(in crate::chat) fn stop_all(
         .outline()
         .chip()
         .text_body(false, cx)
+        .shrink_label_to(STOP_ALL_SMALLEST)
         .label(crate::tr!("background.stop_all").into_owned())
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
