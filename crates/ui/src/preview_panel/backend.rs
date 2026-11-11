@@ -773,7 +773,7 @@ impl PreviewPanel {
         cx: &mut Context<Self>,
     ) {
         let key = self.routed_key(&session_id, cx);
-        log::info!("preview: handling op {op:?} for session {session_id}");
+        log::info!("preview: handling {} for session {session_id}", op.kind());
 
         // Gate on the Browser settings: a disabled browser rejects every op;
         // `allow_evaluate` gates only `preview_evaluate`.

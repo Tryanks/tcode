@@ -53,6 +53,27 @@ pub enum PreviewRequest {
     },
 }
 
+impl PreviewRequest {
+    /// Which call this is, without what it carries: a URL, text typed into a
+    /// field or a script can hold a secret, so this is what a log names.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Open { .. } => "open",
+            Self::Navigate { .. } => "navigate",
+            Self::Status => "status",
+            Self::Evaluate { .. } => "evaluate",
+            Self::Click { .. } => "click",
+            Self::Type { .. } => "type",
+            Self::Resize { .. } => "resize",
+            Self::Press { .. } => "press",
+            Self::Scroll { .. } => "scroll",
+            Self::WaitFor { .. } => "wait_for",
+            Self::Snapshot => "snapshot",
+            Self::Screenshot { .. } => "screenshot",
+        }
+    }
+}
+
 /// The UI's answer to a [`PreviewRequest`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PreviewResponse {
