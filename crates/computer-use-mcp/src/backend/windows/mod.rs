@@ -567,12 +567,27 @@ impl ElementNode {
         node
     }
 
-    fn element_at_path(&self, path: &[usize]) -> Option<&UIElement> {
+    fn element_at_path(&self, path: &[usize]) -> Result<&UIElement, BackendError> {
         let mut current = self;
         for &index in path {
-            current = current.children.get(index)?;
+            current = match current.children.get(index) {
+                Some(child) => child,
+                None => {
+                    return Err(backend_error(
+                        BackendErrorCode::OperationFailed,
+                        match &current.node.children_error {
+                            Some(error) => format!(
+                                "could not read the children along the target's UIAutomation path: {error}"
+                            ),
+                            None => {
+                                "the target's UIAutomation path moved; call observe_ui again".into()
+                            }
+                        },
+                    ));
+                }
+            };
         }
-        Some(&current.element)
+        Ok(&current.element)
     }
 }
 
@@ -654,7 +669,8 @@ fn walk_element(
     } else {
         0
     };
-    let (children, more) = raw_children(context.walker, element, maximum);
+    let (children, more, children_error) = raw_children(context.walker, element, maximum);
+    tree.node.children_error = children_error;
     let mut walked = 0;
     for child in &children {
         if context.count >= MAX_NODES {
@@ -672,33 +688,45 @@ fn walk_element(
     Some(tree)
 }
 
-/// Up to `maximum` of an element's children, and whether it has more.
+/// Up to `maximum` of an element's children, whether it has more, and why
+/// the rest could not be read. UIAutomation answers "no child" and "no next
+/// sibling" with a null element, which reaches here as error code 0; any
+/// other error is a failed read.
 fn raw_children(
     walker: &UITreeWalker,
     element: &UIElement,
     maximum: usize,
-) -> (Vec<UIElement>, bool) {
-    let Ok(mut child) = walker.get_first_child(element) else {
-        return (Vec::new(), false);
+) -> (Vec<UIElement>, bool, Option<String>) {
+    let mut child = match walker.get_first_child(element) {
+        Ok(child) => child,
+        Err(error) if error.code() == 0 => return (Vec::new(), false, None),
+        Err(error) => return (Vec::new(), false, Some(uia_error_text(&error))),
     };
     if maximum == 0 {
-        return (Vec::new(), true);
+        return (Vec::new(), true, None);
     }
     let mut children = Vec::with_capacity(maximum.min(32));
     loop {
         children.push(child.clone());
-        let Ok(sibling) = walker.get_next_sibling(&child) else {
-            return (children, false);
+        let sibling = match walker.get_next_sibling(&child) {
+            Ok(sibling) => sibling,
+            Err(error) if error.code() == 0 => return (children, false, None),
+            Err(error) => return (children, false, Some(uia_error_text(&error))),
         };
         if children.len() >= maximum {
-            return (children, true);
+            return (children, true, None);
         }
         child = sibling;
     }
 }
 
+fn uia_error_text(error: &uiautomation::Error) -> String {
+    format!("UIAutomation error {:#010x}: {error}", error.code())
+}
+
 fn is_invisible_leaf(tree: &ElementNode, root_frame: Frame) -> bool {
     tree.children.is_empty()
+        && tree.node.children_error.is_none()
         && !tree.node.children_omitted
         && !tree.node.is_interactive()
         && tree.node.title.is_empty()
@@ -988,12 +1016,7 @@ fn locate_target(
             "the target's UIAutomation tree disappeared; call observe_ui again",
         )
     })?;
-    let element = tree.element_at_path(path).cloned().ok_or_else(|| {
-        backend_error(
-            BackendErrorCode::OperationFailed,
-            "the target's UIAutomation path moved; call observe_ui again",
-        )
-    })?;
+    let element = tree.element_at_path(path)?.clone();
 
     if let Some(expected_role) = expected_role {
         let actual = element_role(&element);
