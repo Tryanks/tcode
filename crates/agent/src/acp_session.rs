@@ -2296,7 +2296,12 @@ fn tool_call_content(tool: &ToolState, status: ItemStatus, output: String) -> It
     ItemContent::ToolCall {
         image_reads,
         name: tool.name.clone().unwrap_or_else(|| tool.title.clone()),
-        input: tool.raw_input.clone().unwrap_or(Value::Null),
+        input: match tool.raw_input.as_ref() {
+            Some(raw_input) => cursor_mcp_call(raw_input)
+                .map_or(raw_input, |(_, args)| args)
+                .clone(),
+            None => Value::Null,
+        },
         output: (!output.is_empty()).then_some(output),
         status,
         family: tool_family(tool).map(Box::new),
@@ -2339,9 +2344,29 @@ fn tool_name(meta: Option<&acp::Meta>, raw_input: Option<&Value>) -> Option<Stri
             });
         }
         Some(name) => Some(name),
-        None => input("_toolName"),
+        None => {
+            if let Some((name, _)) = raw_input.and_then(cursor_mcp_call) {
+                return Some(name);
+            }
+            input("_toolName")
+        }
     };
     name.map(str::to_owned)
+}
+
+/// A Cursor call of an MCP server's tool: `rawInput {providerIdentifier,
+/// toolName, args}` (cursor-agent 2026.10.01's `3351.index.js`, see the
+/// cursor fixtures' PROVENANCE.md), named `server/tool` with `args` as its
+/// input.
+fn cursor_mcp_call(raw_input: &Value) -> Option<(String, &Value)> {
+    let field = |key: &str| {
+        raw_input
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+    };
+    let name = format!("{}/{}", field("providerIdentifier")?, field("toolName")?);
+    Some((name, raw_input.get("args").unwrap_or(&Value::Null)))
 }
 
 /// `diff` content blocks → canonical [`FileChange`]s (with a unified diff, so

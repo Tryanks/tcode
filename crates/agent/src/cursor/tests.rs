@@ -183,8 +183,18 @@ fn tool_results_are_judged_by_their_raw_output_and_cursors_failure_text_fails_th
         }
         other => panic!("{other:?}"),
     }
+    // An MCP call is the server's tool, its input the tool's arguments.
     match &last_item(&events, "call_mcp_1").content {
-        ItemContent::ToolCall { status, .. } => assert_eq!(*status, ItemStatus::Declined),
+        ItemContent::ToolCall {
+            name,
+            input,
+            status,
+            ..
+        } => {
+            assert_eq!(name, "github/create_issue");
+            assert_eq!(input, &json!({"title": "Build broke"}));
+            assert_eq!(*status, ItemStatus::Declined);
+        }
         other => panic!("{other:?}"),
     }
     match &last_item(&events, "call_grep_1").content {
