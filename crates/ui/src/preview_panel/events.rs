@@ -434,6 +434,9 @@ impl PageEvents {
         if self.navigating {
             return;
         }
+        // A caller that stopped waiting while the page loaded takes its
+        // script with it.
+        self.deferred.retain(|(_, reply)| !reply.is_closed());
         outcome.evaluations.append(&mut self.deferred);
         let waiting: Vec<u64> = self
             .calls
