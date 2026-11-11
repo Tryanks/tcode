@@ -252,8 +252,8 @@ impl ProviderCatalog {
     pub(super) fn status_snapshot(
         &self,
         acp_marketplace_items: Vec<AcpMarketplaceItem>,
-        acp_registry_loading: bool,
         acp_registry_error: Option<String>,
+        acp_registry_loaded: bool,
         acp_installing: HashSet<String>,
         plugins: Vec<tcode_protocol::ProviderPluginCatalog>,
     ) -> ProvidersStatus {
@@ -300,8 +300,8 @@ impl ProviderCatalog {
             provider_usage: self.provider_usage.clone(),
             usage_checking: self.usage_checking.clone(),
             acp_marketplace_items,
-            acp_registry_loading,
             acp_registry_error,
+            acp_registry_loaded,
             acp_installing,
             providers_checked_at: self
                 .provider_snapshots

@@ -3091,12 +3091,12 @@ impl WorkspaceStore {
             .map(|status| status.cwd.clone())
     }
 
-    pub fn acp_registry_loading(&self) -> bool {
-        self.providers_replica.acp_registry_loading
-    }
-
     pub fn acp_registry_error(&self) -> Option<String> {
         self.providers_replica.acp_registry_error.clone()
+    }
+
+    pub fn acp_registry_loaded(&self) -> bool {
+        self.providers_replica.acp_registry_loaded
     }
 
     pub fn acp_installing(&self, agent_id: &str) -> bool {

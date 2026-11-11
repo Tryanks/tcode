@@ -387,6 +387,7 @@ pub use wire::{
 // truncated, unreadable}; ListActiveWorkspace lists a thread that is not
 // running too, and answers unknown_session or git's or the file system's error
 // where it was an empty list.
+// ProvidersStatus gains acp_registry_loaded and loses acp_registry_loading.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

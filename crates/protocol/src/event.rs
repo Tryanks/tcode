@@ -376,8 +376,10 @@ pub struct ProvidersStatus {
     /// Profile ids with a usage fetch in flight.
     pub usage_checking: HashSet<String>,
     pub acp_marketplace_items: Vec<AcpMarketplaceItem>,
-    pub acp_registry_loading: bool,
     pub acp_registry_error: Option<String>,
+    /// Whether the host holds a registry index, fetched or cached. Until it
+    /// does, `acp_marketplace_items` is empty because nothing is known yet.
+    pub acp_registry_loaded: bool,
     pub acp_installing: HashSet<String>,
     pub providers_checked_at: Option<u64>,
     pub providers_checking: bool,
