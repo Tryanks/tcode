@@ -1913,7 +1913,7 @@ impl Composer {
             None => control_row.into_any_element(),
         };
 
-        let desired_placeholder = if self.compact && !self.interactive(cx) {
+        let desired_placeholder = if !self.interactive(cx) {
             crate::tr!("mobile.offline_message")
         } else if composer_state.pending_plan.is_some() {
             crate::tr!("composer.plan_feedback_placeholder")
