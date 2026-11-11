@@ -7160,13 +7160,12 @@ mod tests {
                     meta
                 })
                 .collect();
+            session_store.upsert_project(&project).unwrap();
+            for meta in &sessions {
+                session_store.upsert_meta(meta).unwrap();
+            }
             let host = spawn_host(session_store, HostServices::default())
                 .expect("spawn sidebar test host");
-            smol::block_on(host.update_state_for_test(move |state, _| {
-                state.projects = vec![project];
-                state.sessions = sessions.into();
-            }))
-            .expect("seed sidebar host");
             let mut driver = crate::store::tests::LocalHostDriver::new(&host);
             let store = cx.new(|cx| {
                 WorkspaceStore::new_attached(driver.link.clone(), attachment, None, None, cx)
@@ -7253,13 +7252,10 @@ mod tests {
         meta.project_id = Some(project.id.clone());
         meta.title = "Original title".into();
         meta.id = "rename-thread".into();
+        session_store.upsert_project(&project).unwrap();
+        session_store.upsert_meta(&meta).unwrap();
         let host =
             spawn_host(session_store, HostServices::default()).expect("spawn sidebar test host");
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.projects = vec![project];
-            state.sessions = vec![meta].into();
-        }))
-        .expect("seed sidebar host");
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -7393,22 +7389,18 @@ mod tests {
     fn thread_rows_carry_the_provider_mark_until_the_setting_is_off(cx: &mut TestAppContext) {
         cx.update(crate::test_client::init);
         let root = crate::store::tests::scratch_root("provider-mark");
-        let host = spawn_host(
-            SessionStore::open_at(root.clone()).unwrap(),
-            HostServices::default(),
-        )
-        .unwrap();
+        let disk = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(root.clone());
         let mut codex = session("codex-thread", None);
         codex.project_id = Some(project.id.clone());
         let mut claude = session("claude-thread", None);
         claude.provider = ProviderKind::ClaudeCode;
         claude.project_id = Some(project.id.clone());
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.projects = vec![project];
-            state.sessions = vec![codex, claude].into();
-        }))
-        .unwrap();
+        disk.upsert_project(&project).unwrap();
+        for meta in [&codex, &claude] {
+            disk.upsert_meta(meta).unwrap();
+        }
+        let host = spawn_host(disk, HostServices::default()).unwrap();
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -7498,11 +7490,7 @@ mod tests {
         use gpui::{PlatformInput, TouchEvent, TouchId, TouchPhase};
         cx.update(crate::test_client::init);
         let root = crate::store::tests::scratch_root("menu-selection");
-        let host = spawn_host(
-            SessionStore::open_at(root.clone()).unwrap(),
-            HostServices::default(),
-        )
-        .unwrap();
+        let disk = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(root.clone());
         let sessions: Vec<_> = (0..12)
             .map(|index| {
@@ -7513,11 +7501,11 @@ mod tests {
                 meta
             })
             .collect();
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.projects = vec![project];
-            state.sessions = sessions.into();
-        }))
-        .unwrap();
+        disk.upsert_project(&project).unwrap();
+        for meta in &sessions {
+            disk.upsert_meta(meta).unwrap();
+        }
+        let host = spawn_host(disk, HostServices::default()).unwrap();
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(

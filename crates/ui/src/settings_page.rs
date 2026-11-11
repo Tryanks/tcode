@@ -4149,15 +4149,17 @@ mod tests {
     #[gpui::test]
     fn editable_settings_wait_for_the_host_and_then_keep_the_user_edit(cx: &mut TestAppContext) {
         let root = crate::store::tests::scratch_root("settings-hydration");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut settings = tcode_core::settings::Settings::default();
+        settings.browser.home_url = Some("https://host.example".into());
+        tcode_services::settings::SettingsStore::new(root.clone())
+            .save(&settings)
+            .expect("seed host settings");
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
             HostServices::default(),
         )
         .expect("spawn settings test host");
-        smol::block_on(host.update_state_for_test(|state, _| {
-            state.settings.browser.home_url = Some("https://host.example".into());
-        }))
-        .expect("seed host settings");
 
         // No blocking seed: this is the portable client's timeline, where the
         // first snapshot lands after the page already exists.
