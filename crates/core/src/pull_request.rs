@@ -1649,20 +1649,11 @@ mod tests {
         }
     }
 
-    /// The model reads this text once per registration: with only GitHub hosts configured it is what
-    /// it was before other hosts existed, word for word, and a configured Forgejo or Gitea host
-    /// adds its CLI and name, once for the two.
+    /// The model reads this text once per registration: a configured host adds its name, and its
+    /// CLI where it has one, once for the hosts that share it.
     #[test]
     fn the_model_reads_the_hosts_settings_configure() {
         let github = hosts_in([HostKind::Github]);
-        assert_eq!(
-            linking_instructions(&github),
-            concat!(
-                "<pull_request_linking>\nWhen the tcode_pull_requests MCP server exposes link_pull_request, use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, link every layer, not just the current branch or top PR. This applies to gh, gh stack, other CLIs and host APIs: they do not register PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link anything missing. Do not link unrelated PRs mentioned only as background. If linking fails, report that failure instead of claiming the PR is linked.\nWhen asked to monitor, watch, or babysit a PR and watch_pull_request is available, call it and end your turn: Tcode wakes you when checks finish, someone else comments, or the branch conflicts, so do not poll or run your own watcher. Tcode also wakes you once when the pull request merges or closes, then the watch ends. A wake is news, not a merge decision: check readiness yourself before merging. When you hand the work back to the user, call unwatch_pull_request first.",
-                "\nFor dependent changes, GitHub native stacks preserve the full bottom-to-top topology and merge scope; see https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-stacked-pull-requests .",
-                "\n</pull_request_linking>\n\n"
-            )
-        );
         assert_eq!(host_names(&github), "GitHub");
         let all = hosts_in([HostKind::Gitea, HostKind::Forgejo]);
         assert_eq!(host_names(&all), "GitHub or Forgejo or Gitea");

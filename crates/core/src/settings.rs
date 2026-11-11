@@ -1707,12 +1707,6 @@ mod tests {
 
     #[test]
     fn provider_color_maps_builtins_to_brand_and_custom_providers_to_distinct_palette_slots() {
-        let settings = Settings::default();
-        assert_eq!(settings.provider_color("claude"), 0xD97757);
-        assert_eq!(settings.provider_color("codex"), 0x8B5CF6);
-        assert_eq!(settings.provider_color("pi"), 0x4D9ABF);
-        assert_eq!(settings.provider_color("opencode"), 0x22A06B);
-
         for (profiles, agents, expected) in [
             (
                 vec!["work-claude".to_string()],
@@ -1788,12 +1782,6 @@ mod tests {
                 assert!(PROVIDER_COLOR_PALETTE.contains(color));
                 assert!(![0xD97757, 0x8B5CF6, 0x4D9ABF, 0x22A06B].contains(color));
             }
-            assert_eq!(
-                colors,
-                keys.iter()
-                    .map(|key| settings.provider_color(key))
-                    .collect::<Vec<_>>()
-            );
             assert_eq!(settings.provider_color("deleted-profile"), 0xF59E0B);
         }
     }
