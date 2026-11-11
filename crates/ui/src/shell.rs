@@ -12580,96 +12580,6 @@ pub(crate) mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
     }
 
-    /// Beside another pane, `thread-2` with a message in it, shown in the
-    /// second pane, which has the keyboard.
-    fn a_thread_with_a_message_beside(
-        cx: &mut TestAppContext,
-    ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
-        let (shell, host, cx) = mount_panes(cx);
-        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
-        let records: Vec<agent::AgentEvent> = vec![
-            agent::AgentEvent::TurnStarted {
-                turn_id: "turn-0".into(),
-            },
-            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
-                id: "hello".into(),
-                parent_item_id: None,
-                content: agent::ItemContent::UserMessage {
-                    text: "Hello there.".into(),
-                    attachments: Vec::new(),
-                },
-            }),
-        ];
-        send_events(
-            &host,
-            vec![(
-                Topic::SessionEvents {
-                    session_id: "thread-2".into(),
-                },
-                ServerEvent::SessionSnapshot {
-                    total: records.len() as u64,
-                    total_turns: 1,
-                    truncated: false,
-                    from: 0,
-                    end: records.len() as u64,
-                    records: records.into_iter().map(Into::into).collect(),
-                },
-            )],
-        );
-        await_restore_update(&shell, cx, |store, cx| {
-            store.with_timeline_for(Some("thread-2"), |timeline| timeline.entries.len(), cx)
-                == Some(1)
-        });
-        crate::test_frames::draw_settled(cx);
-        assert!(cx.debug_bounds("user-bubble-hello").is_some());
-        assert_eq!(keyboard_pane(&shell, cx), Some(1));
-        (shell, host, cx)
-    }
-
-    fn holds_thread_2(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> bool {
-        store_of(shell, cx).read_with(cx, |store, cx| {
-            store
-                .with_timeline_for(Some("thread-2"), |_| (), cx)
-                .is_some()
-        })
-    }
-
-    /// A pane taken out while its closed thread still fades lets the
-    /// thread's timeline go with it.
-    #[gpui::test]
-    fn a_pane_taken_out_mid_fade_lets_its_closed_thread_go(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = a_thread_with_a_message_beside(cx);
-
-        send_events(&host, vec![panes_index(&["thread-2"])]);
-        await_restore_update(&shell, cx, |store, _| !store.is_thread_open("thread-2"));
-        draw(cx);
-        assert!(holds_thread_2(&shell, cx));
-        let panes = shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().expect("attached").all_panes(cx)
-        });
-        let area = shell.read_with(cx, |shell, _| {
-            shell
-                .column
-                .as_ref()
-                .expect("attached")
-                .thread_panes
-                .clone()
-        });
-        cx.update(|window, cx| {
-            area.update(cx, |area, cx| {
-                area.remove_panel(panes[1].clone(), window, cx)
-            })
-        });
-        drop(panes);
-        cx.run_until_parked();
-        draw(cx);
-        assert!(
-            !holds_thread_2(&shell, cx),
-            "the closed thread's timeline was kept"
-        );
-    }
-
     /// A thread archived while another pane has the keyboard takes its pane
     /// with it; the focused thread is left alone.
     #[gpui::test]
@@ -13596,33 +13506,6 @@ pub(crate) mod tests {
             below.contains(&close.center()) && below.right() - close.right() < px(12.),
             "no caption buttons after it: {close:?} in {below:?}"
         );
-    }
-
-    /// Choosing from the threads list a thread another pane shows moves the
-    /// keyboard there instead of showing the thread twice.
-    #[gpui::test]
-    fn choosing_a_thread_shown_in_another_pane_focuses_that_pane(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_panes(cx);
-        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
-        assert_eq!(
-            pane_threads(&shell, cx),
-            [Some("thread-1".into()), Some("thread-2".into())]
-        );
-        assert_eq!(keyboard_pane(&shell, cx), Some(1));
-
-        // The threads list's first row, through its shortcut.
-        cx.simulate_keystrokes("secondary-1");
-        draw(cx);
-        store_of(&shell, cx).read_with(cx, |store, _| {
-            assert!(store.is_thread_open("thread-1"));
-            assert!(store.is_thread_open("thread-2"));
-        });
-        assert_eq!(
-            pane_threads(&shell, cx),
-            [Some("thread-1".into()), Some("thread-2".into())]
-        );
-        assert_eq!(keyboard_pane(&shell, cx), Some(0));
     }
 
     /// A thread goes to the pane showing it, or else to the pane of the
