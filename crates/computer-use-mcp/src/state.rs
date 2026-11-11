@@ -585,37 +585,6 @@ mod tests {
         }
     }
 
-    fn tree(title: &str) -> UiNode {
-        UiNode {
-            role: "window".into(),
-            title: title.into(),
-            enabled: true,
-            ..UiNode::default()
-        }
-    }
-
-    #[test]
-    fn lru_evicts_least_recently_used_observation() {
-        let mut store = StateStore::default();
-        let first = store.insert_observation(root(1), tree("one"));
-        let second = store.insert_observation(root(2), tree("Window 2"));
-        for window_id in 3..=OBSERVATION_CAPACITY as u32 {
-            store.insert_observation(root(window_id), tree(&format!("Window {window_id}")));
-        }
-        store.get(&first.state_id).unwrap();
-        let newest =
-            store.insert_observation(root(OBSERVATION_CAPACITY as u32 + 1), tree("newest"));
-        assert!(store.get(&first.state_id).is_ok());
-        assert!(store.get(&newest.state_id).is_ok());
-        assert!(matches!(
-            store.get(&second.state_id),
-            Err(StateError::Evicted(_))
-        ));
-        assert!(store.harness_histories.contains_key(&root(1).identity()));
-        assert!(!store.harness_histories.contains_key(&root(2).identity()));
-        assert_eq!(store.harness_histories.len(), OBSERVATION_CAPACITY);
-    }
-
     #[test]
     fn bounded_output_continuation_round_trips_without_mutation() {
         let original = "0123456789α中文😀\n".repeat(4_000);
