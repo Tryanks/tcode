@@ -149,9 +149,7 @@ impl TurnIndexCache {
         continuity: TimelineContinuity,
     ) -> ListSync {
         let reset = continuity == TimelineContinuity::NewSession;
-        let turn_count = turns
-            .len()
-            .max(entries.last().map_or(0, |entry| entry.turn + 1));
+        let turn_count = turns.len();
         let entry_divergence = self
             .entries
             .iter()
@@ -227,9 +225,8 @@ impl TurnIndexCache {
 
 /// Build the segment rows and their fingerprints for every turn.
 ///
-/// Timeline entries are chronological, so all entries for a turn are adjacent.
-/// The max entry turn keeps a temporary orphan bucket renderable if a provider
-/// ever exposes an entry before its corresponding `TurnMeta`.
+/// Timeline entries are chronological, so all entries for a turn are adjacent,
+/// and the fold gives every entry a turn it holds.
 pub(crate) fn index_rows(
     turns: &[TurnMeta],
     entries: &[Arc<TimelineEntry>],
@@ -246,9 +243,7 @@ fn index_rows_from(
 ) -> Vec<TimelineRow> {
     debug_assert!(entries.windows(2).all(|pair| pair[0].turn <= pair[1].turn));
 
-    let turn_count = turns
-        .len()
-        .max(entries.last().map_or(0, |entry| entry.turn + 1));
+    let turn_count = turns.len();
     let first_entry = entries.partition_point(|entry| entry.turn < first_turn);
     let mut turn_ranges = vec![entries.len()..entries.len(); turn_count.saturating_sub(first_turn)];
     for (index, entry) in entries.iter().enumerate().skip(first_entry) {
