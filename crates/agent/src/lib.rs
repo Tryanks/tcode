@@ -108,7 +108,7 @@ pub enum BackgroundKind {
 }
 
 /// What a harness lets a client do with the background work it lists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundControl {
     pub stop: BackgroundStop,
     /// The harness moves a running command or agent call into the
@@ -118,7 +118,8 @@ pub struct BackgroundControl {
 
 /// Which of its background work a harness stops on request
 /// ([`SessionCommand::StopBackgroundTask`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BackgroundStop {
     None,
     /// One piece at a time; a stop for all of it is one stop for each.

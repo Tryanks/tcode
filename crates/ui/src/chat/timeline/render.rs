@@ -1672,9 +1672,7 @@ impl TimelineView {
         // background, as its own Ctrl+B does.
         let movable = thread.is_some_and(|status| {
             status
-                .provider
-                .caps()
-                .background
+                .background_control
                 .is_some_and(|control| control.move_running)
         }) && matches!(
             &entry.content,

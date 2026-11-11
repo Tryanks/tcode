@@ -63,9 +63,7 @@ impl Background {
         Some(Self {
             harness: store.harness_name_for(Some(session_id), cx),
             stop: status
-                .provider
-                .caps()
-                .background
+                .background_control
                 .map_or(BackgroundStop::None, |control| control.stop),
             rows: status.background_tasks.clone(),
             stops_seen: status
@@ -968,7 +966,8 @@ mod tests {
             }),
         ];
         let mut thread = ScriptedThread::new(cx, events, 0, true);
-        thread.status.provider = agent::ProviderKind::ClaudeCode;
+        // What the host sends for a Claude Code thread, and below for Codex's.
+        thread.status.background_control = agent::ProviderKind::ClaudeCode.caps().background;
         thread.set_running(true);
         let (_view, cx) = thread.open(cx);
         cx.update(|_, cx| cx.set_reduce_motion(true));
@@ -988,7 +987,7 @@ mod tests {
             .collect();
         assert_eq!(moved, ["call_2"]);
 
-        thread.status.provider = agent::ProviderKind::Codex;
+        thread.status.background_control = agent::ProviderKind::Codex.caps().background;
         thread.set_running(true);
         thread.deliver(cx);
         draw_settled(cx);

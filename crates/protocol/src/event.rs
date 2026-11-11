@@ -852,6 +852,10 @@ pub struct SessionStatus {
     /// The harness compacts its context when asked.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub manual_compaction: bool,
+    /// What the harness lets a client do with the background work it lists;
+    /// none when it lists none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_control: Option<agent::BackgroundControl>,
     /// What a rewind does in this thread and whether one can start now; none
     /// when its harness, or this thread's session, has no rewind.
     #[serde(default, skip_serializing_if = "Option::is_none")]

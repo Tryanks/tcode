@@ -203,7 +203,7 @@ impl Agents {
         };
         let status = store.session_status_for(Some(parent_id), cx);
         let stops = status
-            .and_then(|status| status.provider.caps().background)
+            .and_then(|status| status.background_control)
             .is_some_and(|control| control.stop.stops());
         let stop_task = |item: &str| {
             status?

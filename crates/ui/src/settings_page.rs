@@ -2960,10 +2960,14 @@ impl SettingsPage {
                     ))
                     .child(crate::material::group(cx).children(rows))
                     .children(
-                        agent::ProviderKind::NATIVE
+                        self.store
+                            .read(cx)
+                            .harness_descriptions()
+                            .iter()
+                            .filter(|description| description.native_computer_use)
+                            .map(|description| description.provider)
+                            .collect::<Vec<_>>()
                             .into_iter()
-                            .chain([agent::ProviderKind::Acp])
-                            .filter(|kind| kind.caps().native_computer_use)
                             .map(|kind| {
                                 div()
                                     .pt(cx.theme().tokens.spacing.sm)

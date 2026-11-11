@@ -1365,6 +1365,7 @@ impl AppState {
             preparing_turn: session.preparing_turn(),
             goal_control: meta.provider.caps().goals,
             manual_compaction: meta.provider.caps().manual_compaction,
+            background_control: meta.provider.caps().background,
             stopping: session.interrupt_requested,
             stopping_since: session
                 .interrupt_requested_at
