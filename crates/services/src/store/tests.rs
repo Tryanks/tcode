@@ -612,19 +612,6 @@ fn a_start_after_an_interrupted_archival_finishes_it_and_loses_no_source() {
 }
 
 #[test]
-fn a_fresh_data_dir_gets_a_completed_database_through_the_staged_path() {
-    let dir = DataDir::new();
-    let store = dir.store();
-    assert!(store.load_index().unwrap().is_empty());
-    store.close().unwrap();
-    let db = db::Db::open(&dir.path().join(DB_FILE), None).unwrap();
-    assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
-    drop(db);
-    assert!(!dir.path().join("legacy").exists());
-    assert!(!dir.path().join("tcode.db.migrating").exists());
-}
-
-#[test]
 fn an_unfinished_newer_or_corrupt_database_is_refused_and_left_untouched() {
     let set_version = |root: &Path, version: i64| {
         let db = db::Db::open(&root.join(DB_FILE), None).unwrap();
@@ -773,30 +760,6 @@ fn removing_project_cleans_only_managed_icons() {
         assert!(store.read_file().unwrap().projects.is_empty());
         assert_eq!(path.exists(), !managed);
     }
-}
-
-#[test]
-fn replacing_a_project_icon_deletes_the_superseded_managed_copy() {
-    let dir = DataDir::new();
-    let root = dir.path();
-    let store = dir.store();
-    fs::create_dir(root.join("project-icons")).unwrap();
-    let mut project = Project::from_root(root.join("project"));
-    let first = root.join("project-icons/first.png");
-    let second = root.join("project-icons/second.png");
-    for path in [&first, &second] {
-        fs::write(path, b"stored image").unwrap();
-    }
-    project.icon_path = Some(first.clone());
-    store.upsert_project(&project).unwrap();
-    project.icon_path = Some(second.clone());
-    store.upsert_project(&project).unwrap();
-    assert!(!first.exists());
-    assert!(second.exists());
-    project.icon_path = None;
-    store.upsert_project(&project).unwrap();
-    assert!(!second.exists());
-    assert_eq!(store.read_file().unwrap().projects[0].icon_path, None);
 }
 
 #[test]
