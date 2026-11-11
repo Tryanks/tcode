@@ -369,14 +369,8 @@ impl Composer {
                     options,
                     default_value,
                     ..
-                }) => option_selection_str(&composer.active_option_selections, id)
-                    .or(default_value.as_deref())
-                    .map(|value| {
-                        options
-                            .iter()
-                            .find(|option| option.value == value)
-                            .map_or_else(|| value.to_owned(), |option| option.label.clone())
-                    }),
+                }) => resolved_select_value(id, default_value, &composer.active_option_selections)
+                    .map(|value| select_value_label(options, &value)),
                 _ => None,
             }
             .unwrap_or_else(|| crate::tr!("composer.context_unknown").into_owned());
@@ -1060,7 +1054,7 @@ fn render_compact_model_footer(
             // Use the localized shared label instead of provider-specific copy.
             crate::tr!("composer.effort").into_owned(),
             options.clone(),
-            resolved_select_value(id, options, default_value, &selections),
+            resolved_select_value(id, default_value, &selections),
         )),
         _ => None,
     };
@@ -1611,12 +1605,7 @@ fn render_effort_slider(
             } => (
                 id.clone(),
                 options.clone(),
-                resolved_select_value(
-                    id,
-                    options,
-                    default_value,
-                    &composer_state.active_option_selections,
-                ),
+                resolved_select_value(id, default_value, &composer_state.active_option_selections),
             ),
             OptionDescriptor::Boolean { .. } => return None,
         };
@@ -1797,7 +1786,7 @@ fn render_traits_pane(
                     continue;
                 }
                 pane = pane.child(section_header(label, cx));
-                let resolved = resolved_select_value(id, options, default_value, selections);
+                let resolved = resolved_select_value(id, default_value, selections);
                 for (index, opt) in options.iter().enumerate() {
                     let is_default = default_value.as_deref() == Some(opt.value.as_str());
                     let is_selected = resolved.as_deref() == Some(opt.value.as_str());

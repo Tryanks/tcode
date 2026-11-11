@@ -293,18 +293,26 @@ pub(super) fn option_selection_bool(
         .and_then(|s| s.value.as_bool())
 }
 
-/// The resolved value of a select descriptor: an accepted persisted selection,
+/// The value a select descriptor runs with: the stored selection as the host
+/// passes it to the harness, even one the current options no longer list,
 /// else the descriptor default.
 pub(super) fn resolved_select_value(
     id: &str,
-    options: &[agent::SelectOption],
     default_value: &Option<String>,
     selections: &[agent::OptionSelection],
 ) -> Option<String> {
     option_selection_str(selections, id)
-        .filter(|v| options.iter().any(|o| &o.value == v))
         .map(str::to_string)
         .or_else(|| default_value.clone())
+}
+
+/// How a select value is named: its option's label, or the value itself when
+/// no option carries it.
+pub(super) fn select_value_label(options: &[agent::SelectOption], value: &str) -> String {
+    options
+        .iter()
+        .find(|option| option.value == value)
+        .map_or_else(|| value.to_owned(), |option| option.label.clone())
 }
 
 /// The traits chip label: every resolved descriptor label joined with " · "
@@ -327,9 +335,8 @@ pub(super) fn traits_chip_label(
                 default_value,
                 ..
             } => {
-                let part = resolved_select_value(id, options, default_value, selections)
-                    .and_then(|value| options.iter().find(|o| o.value == value))
-                    .map(|option| option.label.clone())
+                let part = resolved_select_value(id, default_value, selections)
+                    .map(|value| select_value_label(options, &value))
                     .unwrap_or_else(|| label.clone());
                 parts.push(part);
             }
