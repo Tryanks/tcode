@@ -3,13 +3,11 @@
 //! A window is chosen from what the item carries, never from the provider
 //! that produced it (Principle 4): first its `ItemContent` kind — a command
 //! and a file change are only ever those items — and then, for a
-//! `ToolCall`, by its tool name
-//! ([`agent::ToolName::parse`], so `mcp__s__t` and `s/t` name one tool)
-//! and the shape of its input. Each family view tries its names and
-//! deserializes the input into its own typed fields; a call no family
-//! accepts, or whose input is not the shape a family expects, gets the
-//! generic window. A provider that names a capability differently simply
-//! gets the generic window until a matcher accepts its name and shape.
+//! `ToolCall`, the family its adapter read it to be ([`agent::ToolFamily`]).
+//! A call of no family is a tool of an MCP server ([`agent::ToolName`], so
+//! `mcp__s__t` and `s/t` name one tool) whose window reads its input's
+//! shape, a call the adapter named for what it is (Codex's `sleep`,
+//! `image_generation`, `auto-reviewer`), or the generic window.
 
 pub(in crate::chat) mod desktop;
 pub(in crate::chat) mod diff;
