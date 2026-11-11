@@ -1384,7 +1384,17 @@ impl TimelineView {
                 capsule_label = crate::tr!("chat.work_log").into_owned();
             }
             let duration = activity_run_duration_ms(folded).map(format_elapsed);
-            let outcome = work_log_outcome(turn, is_last);
+            let mut outcome = work_log_outcome(turn, is_last);
+            // The turn was stopped, but what a call of this run started goes
+            // on in the background, as its row says: the run is not over.
+            if outcome == agent::TurnStatus::Interrupted
+                && folded.iter().any(|entry| {
+                    let status = tools::activity(entry, false, cwd).status;
+                    self.runs_in_background(entry, status, cx)
+                })
+            {
+                outcome = agent::TurnStatus::Completed;
+            }
             let rows = if expanded && !header_only {
                 self.compose_work_log_rows(folded, cwd, live_reasoning_id, false, window, cx)
             } else {
@@ -1665,6 +1675,29 @@ impl TimelineView {
         rows
     }
 
+    /// Whether the work `entry` started goes on in the background: the call
+    /// returned to the model and is still running, or its harness lists its
+    /// work as running there, whatever the call itself returned.
+    fn runs_in_background(
+        &self,
+        entry: &TimelineEntry,
+        status: agent::ItemStatus,
+        cx: &App,
+    ) -> bool {
+        entry.background
+            && (status == agent::ItemStatus::InProgress
+                || self
+                    .workspace_store
+                    .read(cx)
+                    .session_status_for(self.session_id.as_deref(), cx)
+                    .is_some_and(|status| {
+                        status
+                            .background_tasks
+                            .iter()
+                            .any(|task| task.task.item_id.as_deref() == Some(entry.id.as_str()))
+                    }))
+    }
+
     /// One Work Log activity as its window: a header in the shared grammar,
     /// and its body while it is open or folding shut.
     pub(in crate::chat) fn compose_activity_row(
@@ -1695,19 +1728,10 @@ impl TimelineView {
             path,
             ..
         } = activity;
-        // A call whose work its harness lists as running in the background
-        // goes on there, whatever the call itself returned; its window leads
-        // to that list.
         let thread = self
             .workspace_store
             .read(cx)
             .session_status_for(self.session_id.as_deref(), cx);
-        let listed = thread.is_some_and(|status| {
-            status
-                .background_tasks
-                .iter()
-                .any(|task| task.task.item_id.as_deref() == Some(entry.id.as_str()))
-        });
         // A running command or agent the harness can move into the
         // background, as its own Ctrl+B does.
         let movable = thread.is_some_and(|status| {
@@ -1718,7 +1742,7 @@ impl TimelineView {
             &entry.content,
             EntryContent::Item(ItemContent::CommandExecution { .. } | ItemContent::Subagent { .. })
         );
-        if entry.background && listed {
+        if self.runs_in_background(entry, status, cx) {
             status = agent::ItemStatus::InProgress;
             header.background = true;
         }
