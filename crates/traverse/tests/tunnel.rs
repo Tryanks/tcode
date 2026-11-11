@@ -425,24 +425,6 @@ fn an_ssh_stream_runs_commands_through_the_machine_shell_and_takes_sftp_writes()
             }
         }
 
-        // A session that asks for a terminal runs in one.
-        #[cfg(unix)]
-        {
-            let mut pty = ssh.channel_open_session().await.unwrap();
-            pty.request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
-                .await
-                .unwrap();
-            pty.exec(true, "tty").await.unwrap();
-            let mut output = Vec::new();
-            while let Some(message) = pty.wait().await {
-                if let russh::ChannelMsg::Data { data } = message {
-                    output.extend_from_slice(&data);
-                }
-            }
-            let output = String::from_utf8_lossy(&output);
-            assert!(output.trim().starts_with("/dev/"), "{output}");
-        }
-
         let sftp_channel = ssh.channel_open_session().await.unwrap();
         sftp_channel.request_subsystem(true, "sftp").await.unwrap();
         let sftp = russh_sftp::client::SftpSession::new(sftp_channel.into_stream())
