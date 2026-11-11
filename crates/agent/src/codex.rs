@@ -4110,9 +4110,32 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             path: string_field(item, "path"),
             image: None,
         },
-        "webSearch" => ItemContent::WebSearch {
-            query: string_field(item, "query"),
-        },
+        // `WebSearchThreadItem` (v2, 0.167.1) has no status: it runs from
+        // item/started to item/completed, as ChatGPT.app's web-search row
+        // streams until its item completes. Its `results` are opaque JSON.
+        "webSearch" => {
+            let query = string_field(item, "query");
+            let mut input = serde_json::Map::new();
+            input.insert("query".into(), query.clone().into());
+            if let Some(action) = item.get("action").filter(|action| !action.is_null()) {
+                input.insert("action".into(), action.clone());
+            }
+            ItemContent::ToolCall {
+                image_reads: Vec::new(),
+                name: provider_kind.into(),
+                input: Value::Object(input),
+                output: item
+                    .get("results")
+                    .filter(|results| {
+                        results
+                            .as_array()
+                            .is_some_and(|results| !results.is_empty())
+                    })
+                    .map(Value::to_string),
+                status: ItemStatus::InProgress,
+                family: Some(Box::new(ToolFamily::WebSearch { query, links: None })),
+            }
+        }
         // The display item of the `clock.sleep` call, which a rollout records
         // as that call with its arguments.
         "sleep" => ItemContent::ToolCall {
