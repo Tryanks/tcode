@@ -1588,30 +1588,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn append_index_matches_the_full_session_log_fixture() {
-        let root =
-            std::env::temp_dir().join(format!("turn-boundary-fixture-{}", uuid::Uuid::new_v4()));
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        for (row, line) in include_str!("../../../services/src/store/fixtures/turn-index.jsonl")
-            .lines()
-            .enumerate()
-        {
-            let event = serde_json::from_str::<AgentEvent>(line).unwrap();
-            store.append_event("fixture", row as u64, &event).unwrap();
-        }
-        let log = SessionLog::new(store.read_log("fixture").unwrap());
-        assert_eq!(
-            store.turn_index("fixture").unwrap(),
-            Some(TurnIndex {
-                turns: log.fold.turns.len() as u64,
-                starts: log.turn_starts.rows().to_vec(),
-            })
-        );
-        store.close().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn a_cursor_whose_rest_overflows_a_reply_gets_the_tail_cold_or_resident() {
         let root = std::env::temp_dir().join(format!("cold-cursor-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();

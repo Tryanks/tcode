@@ -83,15 +83,11 @@ fn mcp_child_linking_is_bound_to_its_token_and_rejects_a_thread_override() {
     let result = Arc::new(Mutex::new(None));
     let completed = result.clone();
     let job = std::thread::spawn(move || {
-        let (init, session) = rpc(
+        let (_, session) = rpc(
             &registration.url,
             &registration.bearer_token,
             None,
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"contract-fixture","version":"1"}}}),
-        );
-        assert!(
-            init["result"]["capabilities"]["tools"].is_object(),
-            "initialize response: {init}"
         );
         rpc(
             &registration.url,

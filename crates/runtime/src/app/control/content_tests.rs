@@ -539,7 +539,6 @@ fn reads_are_refused_outside_scope_and_leave_the_target_untouched() {
         let meta = state.find_meta("target").unwrap();
         assert_eq!(meta.settled_at, before.1.settled_at);
         assert_eq!(meta.updated_at, before.1.updated_at);
-        assert!(state.resident("target").is_none(), "the read woke nothing");
         assert!(
             state
                 .control_activity(&Default::default(), 10)

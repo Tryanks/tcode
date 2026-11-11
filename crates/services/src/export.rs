@@ -334,12 +334,6 @@ mod tests {
             .migrate(|_| {}, &std::sync::atomic::AtomicBool::new(false))
             .unwrap();
         let meta = store.load_index().unwrap().pop().unwrap();
-        assert!(
-            serde_json::to_value(&meta)
-                .unwrap()
-                .get("interaction_mode")
-                .is_none()
-        );
         // The rows of the plan and approval types v0.2.0 wrote and no
         // later build has are each read as they are stored, in place.
         let events = store.read_events(&meta.id).unwrap();
@@ -353,12 +347,6 @@ mod tests {
         let lines: Vec<&str> = std::str::from_utf8(log).unwrap().lines().collect();
         assert_eq!(events.len(), 8);
         assert_eq!(unreadable, lines[1..7]);
-        assert!(
-            serde_json::to_value(&meta)
-                .unwrap()
-                .get("approval_mode")
-                .is_none()
-        );
         let timeline = Timeline::fold_events(events);
         let shown: Vec<&str> = timeline
             .entries

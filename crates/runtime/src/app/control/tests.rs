@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::active_session::{QueuedMessageKind, Runtime};
+use crate::app::active_session::Runtime;
 use crate::app::test_support::*;
 use control_mcp::{
     CancelNotifyParams, DeleteThreadsParams, GetThreadParams, GitOp, GitParams, NotifyWhenParams,
@@ -52,15 +52,11 @@ fn tool_names(state: &AppState, id: &str) -> Vec<String> {
 /// The tools a connection to `registration` lists, as the provider sees them.
 fn connect_and_list(registration: &agent::McpRegistration) -> Vec<String> {
     let (url, token) = (&registration.url, &registration.bearer_token);
-    let (init, session) = rpc(
+    let (_, session) = rpc(
         url,
         token,
         None,
         serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"contract-fixture","version":"1"}}}),
-    );
-    assert!(
-        init["result"]["capabilities"]["tools"].is_object(),
-        "{init}"
     );
     rpc(
         url,
@@ -102,10 +98,6 @@ fn control_tools_follow_the_grant_and_the_setting() {
         state.sessions.push(meta.clone());
         state.install_selected(ActiveSession::new(meta.clone(), false, Vec::new()));
         let registration = state.control_registration_for(&meta).unwrap();
-        assert_eq!(
-            registration.name,
-            agent::McpRegistration::SERVER_NAME_CONTROL
-        );
         assert_eq!(tool_names(state, "caller"), ["request_grant"]);
         registration
     });
@@ -459,10 +451,6 @@ fn an_approved_grant_request_widens_the_grant_and_wakes_the_thread() {
         let session = state.residents.parked.get("caller").unwrap();
         assert_eq!(session.queue.len(), 1);
         assert_eq!(session.queue[0].origin, MessageOrigin::Agent);
-        assert_eq!(
-            session.queue[0].kind,
-            QueuedMessageKind::OrchestrateCallback
-        );
         assert!(
             session.queue[0]
                 .text

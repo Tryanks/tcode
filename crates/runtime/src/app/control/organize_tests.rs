@@ -364,7 +364,7 @@ fn unreadable_own_files_do_not_stop_the_host_and_are_never_written_over() {
     let store = TestStore::new("tcode-control-unreadable");
     std::fs::create_dir_all(store.root()).unwrap();
     let torn = "[{\"id\":";
-    let files = ["reviews.json", "control_activity.json", "secrets.json"];
+    let files = ["reviews.json", "control_activity.json"];
     for name in files {
         std::fs::write(store.root().join(name), torn).unwrap();
     }

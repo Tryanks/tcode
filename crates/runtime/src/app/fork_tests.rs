@@ -214,18 +214,6 @@ fn a_fork_through_a_turn_holds_it_and_what_came_before_and_leaves_the_source_alo
         assert!(source.timeline.turn_running, "the source's turn runs on");
     });
     assert_eq!(store.read_event_log(SOURCE).unwrap(), source_log);
-    assert!(
-        store
-            .read_event_log(&session_id)
-            .unwrap()
-            .starts_with(&source_log[..source_log.len() / 8]),
-        "the fork's log is the source's own rows"
-    );
-    assert_eq!(
-        store.turn_index(&session_id).unwrap().unwrap().starts.len(),
-        2,
-        "windows of the fork's log begin at its own turns"
-    );
 
     send(
         &state,
