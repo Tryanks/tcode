@@ -29,7 +29,11 @@ use crate::{
 pub fn home_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
     launch_env
         .child_path(ProviderKind::Grok, "GROK_HOME")
-        .or_else(|| dirs::home_dir().map(|home| home.join(".grok")))
+        .or_else(|| {
+            launch_env
+                .child_home(ProviderKind::Grok)
+                .map(|home| home.join(".grok"))
+        })
 }
 
 /// The non-interactive auth method: it validates `XAI_API_KEY` (or the key in

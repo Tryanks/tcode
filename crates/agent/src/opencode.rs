@@ -33,7 +33,11 @@ use crate::{
 pub fn data_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
     launch_env
         .child_path(ProviderKind::OpenCode, "XDG_DATA_HOME")
-        .or_else(|| dirs::home_dir().map(|home| home.join(".local/share")))
+        .or_else(|| {
+            launch_env
+                .child_home(ProviderKind::OpenCode)
+                .map(|home| home.join(".local/share"))
+        })
         .map(|data| data.join("opencode"))
 }
 

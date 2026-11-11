@@ -37,7 +37,11 @@ pub fn state_dirs(launch_env: &LaunchEnv) -> Vec<PathBuf> {
     for key in ["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"] {
         let dir = launch_env
             .child_path(ProviderKind::Cursor, key)
-            .or_else(|| dirs::home_dir().map(|home| home.join(".cursor")));
+            .or_else(|| {
+                launch_env
+                    .child_home(ProviderKind::Cursor)
+                    .map(|home| home.join(".cursor"))
+            });
         if let Some(dir) = dir.filter(|dir| !found.contains(dir)) {
             found.push(dir);
         }

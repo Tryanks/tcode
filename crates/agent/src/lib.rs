@@ -1278,6 +1278,15 @@ impl LaunchEnv {
             .map(|(_, value)| PathBuf::from(value))
             .or_else(|| std::env::var_os(key).map(PathBuf::from))
     }
+
+    /// The home directory a child of `provider` launched with this
+    /// environment resolves `~` against: the `HOME` (`USERPROFILE` on
+    /// Windows) it is given, else the account's, as the CLIs' own lookups
+    /// fall back to it.
+    pub fn child_home(&self, provider: ProviderKind) -> Option<PathBuf> {
+        let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        self.child_path(provider, key).or_else(dirs::home_dir)
+    }
 }
 
 /// Connection details for the tcode preview MCP server (a streamable-HTTP

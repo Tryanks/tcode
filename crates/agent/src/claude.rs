@@ -80,15 +80,22 @@ fn effective_permission_mode(internal: &str, extra_args: &[String]) -> String {
 /// The directory the CLI launched with `launch_env` keeps its settings,
 /// sign-in and transcripts in.
 pub fn config_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
-    let child_env = |key: &str| launch_env.child_path(ProviderKind::ClaudeCode, key);
-    child_env("CLAUDE_CONFIG_DIR").or_else(|| child_env("HOME").map(|home| home.join(".claude")))
+    launch_env
+        .child_path(ProviderKind::ClaudeCode, "CLAUDE_CONFIG_DIR")
+        .or_else(|| {
+            launch_env
+                .child_home(ProviderKind::ClaudeCode)
+                .map(|home| home.join(".claude"))
+        })
 }
 
 /// The CLI's account file, `.claude.json`: in `CLAUDE_CONFIG_DIR` when that
 /// is set, else in the home directory itself rather than in `~/.claude`.
 pub fn account_file(launch_env: &LaunchEnv) -> Option<PathBuf> {
-    let child_env = |key: &str| launch_env.child_path(ProviderKind::ClaudeCode, key);
-    account_file_in(child_env("CLAUDE_CONFIG_DIR"), child_env("HOME"))
+    account_file_in(
+        launch_env.child_path(ProviderKind::ClaudeCode, "CLAUDE_CONFIG_DIR"),
+        launch_env.child_home(ProviderKind::ClaudeCode),
+    )
 }
 
 fn account_file_in(config_dir: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {

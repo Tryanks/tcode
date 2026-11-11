@@ -28,7 +28,11 @@ use crate::{
 pub fn agent_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
     launch_env
         .child_path(ProviderKind::Pi, "PI_CODING_AGENT_DIR")
-        .or_else(|| dirs::home_dir().map(|home| home.join(".pi/agent")))
+        .or_else(|| {
+            launch_env
+                .child_home(ProviderKind::Pi)
+                .map(|home| home.join(".pi/agent"))
+        })
 }
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {

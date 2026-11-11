@@ -318,7 +318,11 @@ pub fn inherit_config(from: &Path, to: &Path) -> std::io::Result<()> {
 pub fn home_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
     launch_env
         .child_path(ProviderKind::Codex, "CODEX_HOME")
-        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+        .or_else(|| {
+            launch_env
+                .child_home(ProviderKind::Codex)
+                .map(|home| home.join(".codex"))
+        })
 }
 
 async fn collect_models(
@@ -2086,8 +2090,8 @@ impl Actor {
                 })
             })
             .collect();
-        self.background_terminal_read = (!tasks.is_empty())
-            .then(|| self.clock.now() + BACKGROUND_TERMINAL_READ_INTERVAL);
+        self.background_terminal_read =
+            (!tasks.is_empty()).then(|| self.clock.now() + BACKGROUND_TERMINAL_READ_INTERVAL);
         if tasks == self.background_terminals {
             return;
         }
