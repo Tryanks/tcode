@@ -1364,6 +1364,7 @@ export:
 errors:
   title_generation_failed: "无法重新生成线程标题，请重试。"
   title_generation_empty: "请先发送一条消息，再重新生成线程标题。"
+  title_attachment_unreadable: "无法读取 %{path}，生成新的线程标题时不参考这张图片：%{error}"
   terminal_start: "启动终端失败：%{error}"
   terminal_restart: "重新启动终端失败：%{error}"
   persist_project: "保存项目失败：%{error}"

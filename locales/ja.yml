@@ -1371,6 +1371,7 @@ export:
 errors:
   title_generation_failed: "スレッドのタイトルを再生成できませんでした。もう一度お試しください。"
   title_generation_empty: "スレッドのタイトルを再生成する前に、メッセージを送信してください。"
+  title_attachment_unreadable: "%{path} を読み込めなかったため、新しいスレッドのタイトルはこの画像なしで作成されます：%{error}"
   terminal_start: "ターミナルを起動できませんでした：%{error}"
   terminal_restart: "ターミナルを再起動できませんでした：%{error}"
   persist_project: "プロジェクトを保存できませんでした：%{error}"

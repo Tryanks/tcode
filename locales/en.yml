@@ -1371,6 +1371,7 @@ export:
 errors:
   title_generation_failed: "Could not regenerate the thread title. Try again."
   title_generation_empty: "Send a message before regenerating the thread title."
+  title_attachment_unreadable: "The new thread title is made without %{path}, which could not be read: %{error}"
   terminal_start: "Failed to start terminal: %{error}"
   terminal_restart: "Failed to restart terminal: %{error}"
   persist_project: "Failed to persist project: %{error}"

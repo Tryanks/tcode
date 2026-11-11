@@ -880,6 +880,7 @@ impl AppState {
                         return Ok((
                             title_generation_prompt(&source, None, !attachments.is_empty()),
                             attachments,
+                            Vec::new(),
                         ));
                     }
                     let records = match records {
@@ -893,26 +894,42 @@ impl AppState {
                     if source.is_empty() {
                         return Err(RuntimeError::TitleGenerationEmpty);
                     }
-                    let attachments: Vec<_> = paths
-                        .into_iter()
-                        .filter_map(|path| {
-                            let bytes = fs::read(&path).ok()?;
-                            Some(Attachment {
+                    let mut attachments = Vec::new();
+                    let mut unreadable = Vec::new();
+                    for path in paths {
+                        match fs::read(&path) {
+                            Ok(bytes) => attachments.push(Attachment {
                                 media_type: mime_from_path(&path),
                                 data_base64: base64::engine::general_purpose::STANDARD
                                     .encode(bytes),
                                 source_path: Some(path.to_string_lossy().into_owned()),
-                            })
-                        })
-                        .collect();
+                            }),
+                            Err(error) => {
+                                unreadable.push(RuntimeError::TitleAttachmentUnreadable {
+                                    path,
+                                    error: error.to_string(),
+                                })
+                            }
+                        }
+                    }
                     Ok((
                         title_generation_prompt(&source, Some(&old_title), !attachments.is_empty()),
                         attachments,
+                        unreadable,
                     ))
                 })
                 .await;
             let (prompt, attachments) = match input {
-                Ok(input) => input,
+                Ok((prompt, attachments, unreadable)) => {
+                    if !unreadable.is_empty() {
+                        host_cx.enqueue(move |state, cx| {
+                            for error in unreadable {
+                                state.report_error(error, cx);
+                            }
+                        });
+                    }
+                    (prompt, attachments)
+                }
                 Err(error) => {
                     host_cx.enqueue(move |state, cx| {
                         if state.title_generation_ended(&session_id, run) {

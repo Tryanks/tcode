@@ -367,6 +367,7 @@ pub use wire::{
 // web_search {query, links}, each link {title, url}; load_tools {query,
 // tools}; skill {name}.
 // The served_model event gains from, the model the harness named before it.
+// RuntimeError gains title_attachment_unreadable {path, error}.
 pub const PROTOCOL_VERSION: u32 = 27;
 
 #[cfg(test)]

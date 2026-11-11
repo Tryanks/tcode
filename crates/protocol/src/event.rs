@@ -1282,6 +1282,12 @@ pub enum RuntimeError {
     },
     TitleGenerationFailed,
     TitleGenerationEmpty,
+    /// An image of the conversation could not be read for a title being
+    /// regenerated, which is made without it.
+    TitleAttachmentUnreadable {
+        path: PathBuf,
+        error: String,
+    },
     ProcessGone,
     SteerUnsupported {
         agent: String,
