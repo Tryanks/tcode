@@ -36,20 +36,15 @@ struct HeaderPanels {
     pull_requests: Option<bool>,
 }
 
-/// Below this header width the git and Open split buttons drop their text and
-/// keep their icon and chevron. The header with its longest git label, five
-/// panel toggles and a title kept to a few words beside a "+10" pull request
-/// badge measures under 672pt in English, the widest shipped locale, and the
-/// pane menu adds 28pt. [`header_extra_width_for`] adds what a thread's header holds beyond
-/// that.
-const HEADER_LABELS_MIN_WIDTH: f32 = 700.;
-
-/// At 16pt padding the compact header fits: that title and badge, the git
-/// and Open split buttons as icon and chevron, and five panel toggles measure
-/// 531pt; the pane menu adds its 24pt button and 4pt gap. Below it the panel
-/// toggles, the pull request badge, the Open button and the pane menu fold
-/// into one overflow menu.
-pub(crate) const HEADER_COMPACT_MIN_WIDTH: f32 = 560.;
+/// The compact header fits from this width, measured in the running app: at
+/// 8pt padding a side, the sidebar toggle, the title's 168pt stretch, the git
+/// and Open split buttons as icon and chevron, the five panel toggles and the
+/// pane menu. It holds no text but the title, so it measures the same in every
+/// locale. Below it the panel toggles, the Open button and the pane menu fold
+/// into one overflow menu; above it by what the git and Open labels measure
+/// (`measure_labels`), the buttons take their labels.
+/// [`header_extra_width_for`] adds what a thread's header holds beyond that.
+pub(crate) const HEADER_COMPACT_MIN_WIDTH: f32 = 490.;
 
 /// At 8pt padding a side the overflow header fits: the sidebar toggle, the title's
 /// 168pt stretch, the git split button as icon and chevron, and the overflow
@@ -955,14 +950,27 @@ impl ChatView {
         } else {
             0.
         };
+        // The caption buttons, like the close button, are drawn in every tier.
+        let caption_width = if hosts_caption {
+            window_caption::RIGHT_PANEL_CAPTION_WIDTH
+        } else {
+            0.
+        };
         let labelled_extra = header_extra_width_for(
             self.workspace_store.read(cx),
             self.session_id.as_deref(),
             under_traffic_lights,
             window.is_fullscreen(),
             true,
-        ) + close_width;
-        let labelled = width - labelled_extra >= HEADER_LABELS_MIN_WIDTH;
+        ) + close_width
+            + caption_width;
+        // The labels are what the git and Open buttons measured wider with
+        // them than without on the frame before; until they have been
+        // measured the buttons go without.
+        let labelled = self
+            .header_label_width
+            .get()
+            .is_some_and(|labels| width - labelled_extra >= HEADER_COMPACT_MIN_WIDTH + labels);
         let compact_extra = header_extra_width_for(
             self.workspace_store.read(cx),
             self.session_id.as_deref(),
@@ -970,11 +978,7 @@ impl ChatView {
             window.is_fullscreen(),
             false,
         ) + close_width
-            + if hosts_caption {
-                window_caption::RIGHT_PANEL_CAPTION_WIDTH
-            } else {
-                0.
-            };
+            + caption_width;
         let overflow = width - compact_extra < HEADER_COMPACT_MIN_WIDTH;
         let traffic_lights = window_caption::traffic_light_inset(window);
         let motion = self.motion.clone();
@@ -1145,6 +1149,7 @@ impl ChatView {
         };
         let zed =
             crate::remote::ZedEntry::of(self.workspace_store.read(cx), cx).map(|entry| entry.label);
+        let label_width = show_actions.then(|| self.measure_labels(cwd.clone(), zed, cx));
         let title_menu = {
             let title = title.clone();
             let cwd = cwd.clone();
@@ -1420,7 +1425,8 @@ impl ChatView {
             }))
             // Last child, so the header's own actions keep their places to the
             // left of it.
-            .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)));
+            .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
+            .children(label_width);
         div()
             .id("chat-header-scroll")
             .debug_selector(|| "chat-header-scroll".into())
@@ -1436,8 +1442,53 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// A header control that drops its label when the header narrows past
-    /// [`HEADER_LABELS_MIN_WIDTH`], built by `build` with or without it:
+    /// What draws nothing and measures, as the header is laid out, how much
+    /// wider the git and Open buttons are with their labels than without,
+    /// for the next frame to decide whether the labels fit.
+    fn measure_labels(
+        &self,
+        cwd: Option<PathBuf>,
+        zed: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let host = self.workspace_store.read(cx).host_key();
+        let mut pairs: Vec<[Option<AnyElement>; 2]> =
+            vec![[true, false].map(|labelled| self.render_git_button(labelled, cx))];
+        if let Some((cwd, zed)) = cwd.zip(zed) {
+            pairs.push([true, false].map(|labelled| {
+                Some(self.render_open_button(cwd.clone(), zed, host.clone(), labelled, cx))
+            }));
+        }
+        let measured = self.header_label_width.clone();
+        let chat = cx.entity_id();
+        gpui::canvas(
+            move |_, window, cx| {
+                let mut width = |element: Option<AnyElement>| {
+                    element.map_or(0., |mut element| {
+                        let space = gpui::size(
+                            gpui::AvailableSpace::MaxContent,
+                            gpui::AvailableSpace::MaxContent,
+                        );
+                        f32::from(element.layout_as_root(space, window, cx).width)
+                    })
+                };
+                let labels = pairs
+                    .into_iter()
+                    .map(|[labelled, bare]| width(labelled) - width(bare))
+                    .sum::<f32>();
+                if measured.replace(Some(labels)) != Some(labels) {
+                    window.on_next_frame(move |_, cx| cx.notify(chat));
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0()
+        .into_any_element()
+    }
+
+    /// A header control that drops its label when the header has no room
+    /// for it, built by `build` with or without it:
     /// the one cross-fades into the other on the view's clock while its
     /// width glides, so the title and its neighbours move aside rather than
     /// jump.
