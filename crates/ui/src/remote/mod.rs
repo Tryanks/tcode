@@ -482,6 +482,33 @@ fn report<T: 'static>(
 
 /// A page's [`footnote`](crate::settings_rows::footnote) and the link to
 /// the `anchor` section of the remote guide, which says the rest.
+/// Keeps `ticker` repainting the view once a second exactly while an
+/// invitation counts down (`live`). Its last tick paints the expiry; a fresh
+/// invitation is painted by the visit that shows it.
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+fn sync_countdown<V: 'static>(
+    ticker: &mut Option<gpui::Task<()>>,
+    live: bool,
+    cx: &mut Context<V>,
+) {
+    match (live, ticker.is_some()) {
+        (true, false) => {
+            *ticker = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(1))
+                        .await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        return;
+                    }
+                }
+            }));
+        }
+        (false, true) => *ticker = None,
+        _ => {}
+    }
+}
+
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
 fn footnote_with_docs(
     text: impl Into<SharedString>,
@@ -1216,7 +1243,8 @@ impl RemotePanel {
             .try_global::<RemoteController>()
             .map(RemoteController::invitation_offer)
             .unwrap_or(InvitationOffer::NotHosting);
-        self.sync_invitation_ticker(matches!(offer, InvitationOffer::Live { .. }), cx);
+        let live = matches!(offer, InvitationOffer::Live { .. });
+        sync_countdown(&mut self.invitation_ticker, live, cx);
         // Each state of the offer folds into the next, so an expiring
         // invitation shrinks its card down to the row that replaces it.
         let live = match &offer {
@@ -1323,29 +1351,6 @@ impl RemotePanel {
                 cx,
             )
         })
-    }
-
-    /// Run the one-second repaint exactly while an invitation counts down.
-    /// Its last tick paints the expiry; a fresh invitation is painted by the
-    /// visit that shows it.
-    #[cfg(feature = "remote-hosting")]
-    fn sync_invitation_ticker(&mut self, live: bool, cx: &mut Context<Self>) {
-        match (live, self.invitation_ticker.is_some()) {
-            (true, false) => {
-                self.invitation_ticker = Some(cx.spawn(async move |this, cx| {
-                    loop {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_secs(1))
-                            .await;
-                        if this.update(cx, |_, cx| cx.notify()).is_err() {
-                            return;
-                        }
-                    }
-                }));
-            }
-            (false, true) => self.invitation_ticker = None,
-            _ => {}
-        }
     }
 
     /// The ways in: the camera where there is one, and the invitation field
