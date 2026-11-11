@@ -1160,8 +1160,11 @@ fn listed_file(row: &Value) -> Option<PullRequestFile> {
 }
 
 pub(crate) fn diff_files(diff: &str) -> Option<Vec<PullRequestFile>> {
-    agent::file_changes_from_unified_diff(diff)
-        .ok()?
+    let read = agent::file_changes_from_unified_diff(diff);
+    if !read.unread.is_empty() {
+        return None;
+    }
+    read.changes
         .into_iter()
         .map(|change| {
             let section = change.diff.unwrap_or_default();

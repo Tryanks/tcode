@@ -2845,24 +2845,30 @@ impl Actor {
                     .get("diff")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                match file_changes_from_unified_diff(diff) {
-                    Ok(changes) => {
-                        self.events
-                            .emit(AgentEvent::TurnChangesUpdated {
-                                turn_id,
-                                changes,
-                                completeness: ChangeCompleteness::Exact,
-                            })
-                            .await;
-                    }
-                    Err(err) => {
-                        self.events
-                            .emit(AgentEvent::Warning {
-                                message: format!("Codex supplied an invalid turn diff: {err}"),
-                            })
-                            .await;
-                    }
+                let read = file_changes_from_unified_diff(diff);
+                // What Tcode could not read as a file's section reaches the
+                // user as Codex wrote it, and the snapshot no longer claims
+                // to be the turn's whole change.
+                for unread in &read.unread {
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: format!(
+                                "Codex sent part of the turn's diff that names no file:\n{unread}"
+                            ),
+                        })
+                        .await;
                 }
+                self.events
+                    .emit(AgentEvent::TurnChangesUpdated {
+                        turn_id,
+                        changes: read.changes,
+                        completeness: if read.unread.is_empty() {
+                            ChangeCompleteness::Exact
+                        } else {
+                            ChangeCompleteness::Partial
+                        },
+                    })
+                    .await;
             }
             "item/started" | "item/updated" | "item/completed" => {
                 let item_value = params.get("item");

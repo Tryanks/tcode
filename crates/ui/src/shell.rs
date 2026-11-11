@@ -10956,7 +10956,7 @@ pub(crate) mod tests {
                     "diff --git a/{file} b/{file}\n--- a/{file}\n+++ b/{file}\n\
                      @@ -1 +1 @@\n-fn old() {{}}\n+fn new() {{}}\n",
                 ))
-                .expect("one file section"),
+                .changes,
                 completeness: agent::ChangeCompleteness::Exact,
             },
             agent::AgentEvent::TurnCompleted {
@@ -12010,7 +12010,7 @@ pub(crate) mod tests {
                              --- a/src/lib.rs\n+++ b/src/lib.rs\n\
                              @@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n",
                         )
-                        .expect("one file section"),
+                        .changes,
                         completeness: agent::ChangeCompleteness::Exact,
                     },
                     agent::AgentEvent::TurnCompleted {
@@ -15316,8 +15316,7 @@ pub(crate) mod tests {
                         },
                         agent::AgentEvent::TurnChangesUpdated {
                             turn_id: "turn-1".into(),
-                            changes: agent::file_changes_from_unified_diff(&diff)
-                                .expect("one file section"),
+                            changes: agent::file_changes_from_unified_diff(&diff).changes,
                             completeness: agent::ChangeCompleteness::Exact,
                         },
                     ]

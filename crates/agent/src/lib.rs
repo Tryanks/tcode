@@ -3221,89 +3221,94 @@ pub enum FileChangeKind {
     Rename,
 }
 
+/// A provider-supplied, multi-file Git-style unified diff, split into the
+/// files it changes.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct UnifiedDiff {
+    /// One change per `diff --git` section whose file could be read, each
+    /// keeping its whole section for rendering.
+    pub changes: Vec<FileChange>,
+    /// What could not be read as a file's section, exactly as the provider
+    /// wrote it: text before the first section, or a section naming no file.
+    pub unread: Vec<String>,
+}
+
 /// Split a provider-supplied, multi-file Git-style unified diff into canonical
 /// file changes. This parses only file boundaries and operation kinds; each
-/// returned change retains its complete diff section for rendering.
-pub fn file_changes_from_unified_diff(diff: &str) -> Result<Vec<FileChange>, String> {
-    if diff.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-
+/// change retains its complete diff section, and what is not a readable
+/// section is kept as written.
+pub fn file_changes_from_unified_diff(diff: &str) -> UnifiedDiff {
     let mut sections = Vec::new();
     let mut current = String::new();
-    for line in diff.lines() {
+    for line in diff.split_inclusive('\n') {
         if line.starts_with("diff --git ") && !current.is_empty() {
             sections.push(std::mem::take(&mut current));
         }
-        if !current.is_empty() || line.starts_with("diff --git ") {
-            current.push_str(line);
-            current.push('\n');
-        }
+        current.push_str(line);
     }
     if !current.is_empty() {
         sections.push(current);
     }
-    if sections.is_empty() {
-        return Err("turn diff contains no `diff --git` file sections".into());
-    }
-
-    sections
-        .into_iter()
-        .map(|section| {
-            let mut old_path = None;
-            let mut new_path = None;
-            for line in section.lines() {
-                if let Some(path) = line.strip_prefix("rename from ") {
-                    old_path = Some(path.to_string());
-                } else if let Some(path) = line.strip_prefix("rename to ") {
-                    new_path = Some(path.to_string());
-                } else if let Some(path) = line.strip_prefix("--- a/") {
-                    old_path.get_or_insert_with(|| path.to_string());
-                } else if let Some(path) = line.strip_prefix("+++ b/") {
-                    new_path.get_or_insert_with(|| path.to_string());
-                }
-            }
-            if old_path.is_none() || new_path.is_none() {
-                let header = section
-                    .lines()
-                    .next()
-                    .and_then(|line| line.strip_prefix("diff --git a/"))
-                    .ok_or_else(|| "turn diff section has no valid header".to_string())?;
-                if let Some((old, new)) = header.rsplit_once(" b/") {
-                    old_path.get_or_insert_with(|| old.to_string());
-                    new_path.get_or_insert_with(|| new.to_string());
-                }
-            }
-
-            let creates = section
-                .lines()
-                .any(|line| line.starts_with("new file mode ") || line == "--- /dev/null");
-            let deletes = section
-                .lines()
-                .any(|line| line.starts_with("deleted file mode ") || line == "+++ /dev/null");
-            let kind = if creates {
-                FileChangeKind::Create
-            } else if deletes {
-                FileChangeKind::Delete
-            } else if old_path != new_path {
-                FileChangeKind::Rename
-            } else {
-                FileChangeKind::Modify
-            };
-            let path = match kind {
-                FileChangeKind::Delete => old_path,
-                _ => new_path.or(old_path),
-            }
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| "turn diff section has no file path".to_string())?;
-
-            Ok(FileChange {
+    let mut read = UnifiedDiff::default();
+    for section in sections {
+        if section.trim().is_empty() {
+            continue;
+        }
+        match diff_section(&section) {
+            Some((path, kind)) => read.changes.push(FileChange {
                 path,
                 kind,
                 diff: Some(section),
-            })
-        })
-        .collect()
+            }),
+            None => read.unread.push(section),
+        }
+    }
+    read
+}
+
+/// The file a `diff --git` section changes, and how.
+fn diff_section(section: &str) -> Option<(String, FileChangeKind)> {
+    let header = section.lines().next()?.strip_prefix("diff --git a/")?;
+    let mut old_path = None;
+    let mut new_path = None;
+    for line in section.lines() {
+        if let Some(path) = line.strip_prefix("rename from ") {
+            old_path = Some(path.to_string());
+        } else if let Some(path) = line.strip_prefix("rename to ") {
+            new_path = Some(path.to_string());
+        } else if let Some(path) = line.strip_prefix("--- a/") {
+            old_path.get_or_insert_with(|| path.to_string());
+        } else if let Some(path) = line.strip_prefix("+++ b/") {
+            new_path.get_or_insert_with(|| path.to_string());
+        }
+    }
+    if (old_path.is_none() || new_path.is_none())
+        && let Some((old, new)) = header.rsplit_once(" b/")
+    {
+        old_path.get_or_insert_with(|| old.to_string());
+        new_path.get_or_insert_with(|| new.to_string());
+    }
+    let creates = section
+        .lines()
+        .any(|line| line.starts_with("new file mode ") || line == "--- /dev/null");
+    let deletes = section
+        .lines()
+        .any(|line| line.starts_with("deleted file mode ") || line == "+++ /dev/null");
+    let kind = if creates {
+        FileChangeKind::Create
+    } else if deletes {
+        FileChangeKind::Delete
+    } else if old_path != new_path {
+        FileChangeKind::Rename
+    } else {
+        FileChangeKind::Modify
+    };
+    let path = match kind {
+        FileChangeKind::Delete => old_path,
+        _ => new_path.or(old_path),
+    }
+    .filter(|path| !path.is_empty())?;
+    Some((path, kind))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3740,7 +3745,8 @@ mod turn_diff_tests {
             "rename to after.rs\n",
         );
 
-        let changes = file_changes_from_unified_diff(diff).unwrap();
+        let UnifiedDiff { changes, unread } = file_changes_from_unified_diff(diff);
+        assert!(unread.is_empty());
         assert_eq!(changes.len(), 4);
         assert_eq!(changes[0].path, "src/lib.rs");
         assert_eq!(changes[0].kind, FileChangeKind::Modify);
@@ -3755,9 +3761,15 @@ mod turn_diff_tests {
     }
 
     #[test]
-    fn empty_diff_is_an_exact_empty_snapshot_but_malformed_diff_is_rejected() {
-        assert!(file_changes_from_unified_diff("\n").unwrap().is_empty());
-        assert!(file_changes_from_unified_diff("--- a/file\n+++ b/file\n").is_err());
+    fn an_empty_diff_changes_nothing_and_what_is_no_files_section_is_kept_as_written() {
+        assert_eq!(file_changes_from_unified_diff("\n"), UnifiedDiff::default());
+        let read = file_changes_from_unified_diff(concat!(
+            "--- a/file\n+++ b/file\n",
+            "diff --git a/kept.rs b/kept.rs\n--- a/kept.rs\n+++ b/kept.rs\n",
+        ));
+        assert_eq!(read.unread, ["--- a/file\n+++ b/file\n"]);
+        assert_eq!(read.changes.len(), 1);
+        assert_eq!(read.changes[0].path, "kept.rs");
     }
 }
 

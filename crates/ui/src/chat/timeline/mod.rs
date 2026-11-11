@@ -2738,8 +2738,7 @@ mod tests {
                 ),
                 agent::AgentEvent::TurnChangesUpdated {
                     turn_id: turn.to_string(),
-                    changes: agent::file_changes_from_unified_diff(&changed(turn))
-                        .expect("file sections"),
+                    changes: agent::file_changes_from_unified_diff(&changed(turn)).changes,
                     completeness: agent::ChangeCompleteness::Exact,
                 },
                 agent::AgentEvent::TurnCompleted {

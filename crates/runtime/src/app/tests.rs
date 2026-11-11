@@ -10893,7 +10893,7 @@ fn superseded_turn_changes_cross_without_diffs() {
         agent::file_changes_from_unified_diff(&format!(
             "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-{diff}\n+{diff}!\n"
         ))
-        .unwrap()
+        .changes
     };
     let update = |diff: &str| StoredEvent {
         origin: None,
