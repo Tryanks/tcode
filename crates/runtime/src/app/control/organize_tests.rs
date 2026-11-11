@@ -482,3 +482,53 @@ fn a_recorded_review_changes_no_thread_and_is_read_back_after_a_restart() {
     assert_eq!(records[0].thread_id, "caller");
     assert_eq!(records[0].items[0].group, "can_settle");
 }
+
+/// A call whose caller has gone, its call cancelled or its harness stopped, takes the work
+/// still waiting on its answer with it: a change that waited for the store's log ends is not
+/// made. The same call, still waited on, is.
+#[test]
+fn a_change_whose_caller_has_gone_is_not_made() {
+    let store = TestStore::new("tcode-control-caller-gone");
+    for id in ["caller", "target"] {
+        store.upsert_meta(&thread(id, store.root())).unwrap();
+    }
+    store
+        .append_event(
+            "target",
+            1,
+            &AgentEvent::TurnStarted {
+                turn_id: "read".into(),
+            },
+        )
+        .unwrap();
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let rename = |title: &str| {
+        update(
+            vec![change(
+                "target",
+                ThreadOp::Rename {
+                    title: title.into(),
+                },
+                Some(Expect {
+                    max_position: Some(0),
+                    ..Default::default()
+                }),
+            )],
+            false,
+        )
+    };
+    let title = |state: &TestEntity| state.read(|state| state.find_meta("target").unwrap().title);
+
+    let (reply, answer) = smol::channel::bounded(1);
+    drop(answer);
+    state.update(cx, |state, cx| {
+        state.handle_control_op("caller".into(), rename("Gone"), reply, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(title(&state), "Thread target");
+
+    let applied = call(&state, cx, "caller", rename("Kept")).unwrap();
+    assert_eq!(results(&applied)[0].outcome, Outcome::Applied);
+    assert_eq!(title(&state), "Kept");
+}
