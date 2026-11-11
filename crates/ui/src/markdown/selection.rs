@@ -12,14 +12,14 @@
 //! is heard in the capture phase, and the ends are positions in the
 //! document's text, which order the way it reads.
 
-use std::{cell::RefCell, ops::RangeInclusive, rc::Rc, time::Duration};
+use std::{cell::RefCell, ops::RangeInclusive, rc::Rc};
 
 use gpui::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, ClipboardItem, Context, Entity,
-    EntityId, Half as _, Hitbox, HitboxBehavior, InteractiveElement as _, IntoElement,
-    LongPressEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, PlatformInput, Point, RenderOnce, ScrollDelta, ScrollEvent,
-    Styled as _, Task, TextLayout, TouchPhase, WeakEntity, Window, canvas, div, point, px,
+    AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, Entity, EntityId, Half as _,
+    Hitbox, HitboxBehavior, InteractiveElement as _, IntoElement, LongPressEvent, Modifiers,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels,
+    PlatformInput, Point, RenderOnce, ScrollDelta, ScrollEvent, Styled as _, TextLayout,
+    TouchPhase, WeakEntity, Window, canvas, div, point, px,
 };
 use gpui_base::{GlobalState, SelectionEdge};
 
@@ -125,13 +125,13 @@ pub struct SelectionDocument {
     entries: EntryNodes,
     frame: Rc<RefCell<Frame>>,
     touch: Touch,
-    auto_scroll: Option<Task<()>>,
+    /// Scrolls the document while a drag holds near an edge of its viewport.
+    auto_scroll: gpui_base::AutoScroll,
 }
 
 /// What the document painted last frame, which presses and drags hit-test.
 #[derive(Default)]
 struct Frame {
-    window: Option<AnyWindowHandle>,
     viewport: Option<Bounds<Pixels>>,
     participants: Vec<Participant>,
     /// The carets at the selection's two ends, when they were painted.
@@ -156,7 +156,7 @@ impl SelectionDocument {
             entries,
             frame: Rc::default(),
             touch: Touch::default(),
-            auto_scroll: None,
+            auto_scroll: Default::default(),
         }
     }
 
@@ -485,13 +485,15 @@ impl SelectionDocument {
     /// place, which a shift-click extends from.
     fn release(&mut self, cx: &mut Context<Self>) {
         self.set_gesture(None, cx);
-        self.auto_scroll = None;
     }
 
     /// Hold the pointer's gesture from `gesture`, or end it.
     fn set_gesture(&mut self, gesture: Option<DocPoint>, cx: &mut Context<Self>) {
         let (held, was_held) = (gesture.is_some(), self.gesture.is_some());
         self.gesture = gesture;
+        if !held {
+            self.auto_scroll.stop();
+        }
         if held != was_held {
             cx.emit(if held {
                 SelectionGesture::Began
@@ -584,12 +586,11 @@ impl SelectionDocument {
         });
     }
 
-    fn begin_frame(&self, viewport: Bounds<Pixels>, window: AnyWindowHandle) {
+    fn begin_frame(&self, viewport: Bounds<Pixels>) {
         let mut frame = self.frame.borrow_mut();
         frame.participants.clear();
         frame.edges = (None, None);
         frame.viewport = Some(viewport);
-        frame.window = Some(window);
     }
 
     fn touch_drag(
@@ -753,9 +754,7 @@ impl RenderOnce for SelectionArea {
                     // The clip the text scrolls under: a standalone view's own
                     // bounds are one message, not the page that scrolls it.
                     let viewport = window.content_mask().bounds;
-                    prepaint_document
-                        .read(cx)
-                        .begin_frame(viewport, window.window_handle());
+                    prepaint_document.read(cx).begin_frame(viewport);
                     window.insert_hitbox(bounds, HitboxBehavior::Normal)
                 },
                 move |_, hitbox, window, _| listen(&document, hitbox, window),
@@ -990,64 +989,43 @@ fn follow(
     if let Some(point) = document.read(cx).point_at(position, cx) {
         document.update(cx, |document, cx| document.drag(point, cx));
     }
-    let viewport = document.read(cx).frame.borrow().viewport;
-    let scrolling = viewport
-        .and_then(|viewport| gpui_base::AutoScroll::compute_delta(position.y, viewport))
-        .is_some();
-    let running = document.read(cx).auto_scroll.is_some();
-    if scrolling && !running {
-        let task = auto_scroll(document.downgrade(), window, cx);
-        document.update(cx, |document, _| document.auto_scroll = Some(task));
-    }
-}
-
-fn auto_scroll(document: WeakEntity<SelectionDocument>, _: &Window, cx: &mut App) -> Task<()> {
-    cx.spawn(async move |cx| {
-        loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(16))
-                .await;
-            let frame = document
-                .read_with(cx, |document, _| {
-                    let frame = document.frame.borrow();
-                    Some((frame.window?, frame.viewport?, document.gesture.is_some()))
-                })
-                .ok()
-                .flatten();
-            let Some((handle, viewport, true)) = frame else {
-                break;
-            };
-            let document = document.clone();
-            let stopped = cx
-                .update_window(handle, |_, window, cx| {
-                    let pointer = window.mouse_position();
-                    let Some(delta) = gpui_base::AutoScroll::compute_delta(pointer.y, viewport)
-                    else {
-                        return true;
-                    };
-                    window.dispatch_event(
-                        PlatformInput::Scroll(ScrollEvent {
-                            position: clamp_into(pointer, viewport),
-                            delta: ScrollDelta::Pixels(point(px(0.), -delta)),
-                            modifiers: Modifiers::default(),
-                            ..Default::default()
-                        }),
-                        cx,
-                    );
-                    if let Some(document) = document.upgrade()
-                        && let Some(point) = document.read(cx).point_at(pointer, cx)
-                    {
-                        document.update(cx, |document, cx| document.drag(point, cx));
-                    }
-                    false
-                })
-                .unwrap_or(true);
-            if stopped {
-                let _ = document.update(cx, |document, _| document.auto_scroll = None);
-                break;
-            }
-        }
-    })
+    let handle = window.window_handle();
+    document.update(cx, |document, cx| {
+        let delta = document
+            .frame
+            .borrow()
+            .viewport
+            .and_then(|viewport| gpui_base::AutoScroll::compute_delta(position.y, viewport));
+        document
+            .auto_scroll
+            .set(delta, cx, move |delta, document, cx| {
+                let Some(viewport) = document.frame.borrow().viewport else {
+                    return;
+                };
+                let document = cx.weak_entity();
+                // The wheel event and the hit test need the window, which a
+                // tick is not given.
+                cx.defer(move |cx| {
+                    _ = handle.update(cx, |_, window, cx| {
+                        let pointer = window.mouse_position();
+                        window.dispatch_event(
+                            PlatformInput::Scroll(ScrollEvent {
+                                position: clamp_into(pointer, viewport),
+                                delta: ScrollDelta::Pixels(point(px(0.), -delta)),
+                                modifiers: Modifiers::default(),
+                                ..Default::default()
+                            }),
+                            cx,
+                        );
+                        if let Some(document) = document.upgrade()
+                            && let Some(point) = document.read(cx).point_at(pointer, cx)
+                        {
+                            document.update(cx, |document, cx| document.drag(point, cx));
+                        }
+                    });
+                });
+            });
+    });
 }
 
 fn clamp_into(pointer: Point<Pixels>, bounds: Bounds<Pixels>) -> Point<Pixels> {
