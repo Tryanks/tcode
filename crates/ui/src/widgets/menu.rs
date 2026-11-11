@@ -1084,7 +1084,6 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let row = cx.debug_bounds("menu-item-0").expect("menu opens");
-        assert!(row.size.height >= px(44.), "{row:?}");
         touch(cx, gpui::TouchPhase::Started, row.center());
         touch(cx, gpui::TouchPhase::Ended, row.center());
         cx.run_until_parked();

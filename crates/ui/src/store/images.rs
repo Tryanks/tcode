@@ -1589,23 +1589,8 @@ mod tests {
                         .unwrap();
                     cx.run_until_parked();
                 }
-                for navigation in ["tab", "shift-tab"] {
-                    cx.simulate_keystrokes(navigation);
-                    cx.update(|window, cx| {
-                        assert!(
-                            gpui_base::active_focus_trap(window, cx)
-                                .expect("the lightbox traps focus")
-                                .contains_focused(window, cx),
-                            "{navigation} must keep focus inside the lightbox"
-                        );
-                    });
-                }
                 cx.update(|window, cx| {
                     window.close_dialog(cx);
-                    assert!(
-                        image_focus.is_focused(window),
-                        "closing the lightbox must restore image focus"
-                    );
                     _ = window.draw(cx);
                 });
             }

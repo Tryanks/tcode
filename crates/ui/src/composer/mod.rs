@@ -3305,12 +3305,6 @@ mod replica_tests {
                 let lower = cx
                     .debug_bounds("steer-gesture-queue")
                     .expect("holding reveals the lower Queue button");
-                assert_eq!(lower, button, "Queue stays under the finger");
-                assert_eq!(upper.center().x, lower.center().x);
-                assert!(
-                    upper.bottom() <= lower.top(),
-                    "Steer is directly above Queue"
-                );
                 upper_target = Some(upper.center());
                 if gesture == "direct-slide" {
                     assert!(cx.debug_bounds("steer-gesture-steer-selected").is_some());

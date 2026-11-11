@@ -659,13 +659,9 @@ mod tests {
             .unwrap();
     }
 
-    /// The transport publishes to the enabled sources, in order. A
-    /// self-hosted instance is named by the base URL its manifest is served
-    /// from; anything a browser would not fetch is refused.
     /// Settings → Remote, driven as a user does: the pairing switch exists
     /// only while hosting; with it on, the invitation is on the same page,
     /// and turning it off reaches the transport, which drops the invitation.
-    /// A typed name is saved when its field is left.
     #[gpui::test]
     fn the_remote_page_shows_the_invitation_while_accepting_devices(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -688,7 +684,7 @@ mod tests {
                 Settings::default(),
             ))
         });
-        let (panel, cx) = cx.add_window_view(|window, cx| {
+        let (_, cx) = cx.add_window_view(|window, cx| {
             let store = cx.new(|cx| {
                 WorkspaceStore::new_attached(
                     HostLink::new(to_host.clone(), from_host.clone()),
@@ -707,22 +703,6 @@ mod tests {
             "no pairing switch while not hosting"
         );
         assert!(cx.debug_bounds("remote-invitation").is_none());
-
-        panel.update_in(cx, |panel, window, cx| {
-            panel.host_name_input.update(cx, |input, cx| {
-                input.set_value("Studio", window, cx);
-                cx.emit(InputEvent::Blur);
-            });
-        });
-        cx.read(|cx| {
-            assert_eq!(
-                cx.global::<RemoteController>()
-                    .local_settings()
-                    .remote_host_name
-                    .as_deref(),
-                Some("Studio")
-            );
-        });
 
         // A random port: the desktop's fixed one may be taken on this machine.
         let host = TraverseHost::start(

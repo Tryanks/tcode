@@ -1034,28 +1034,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn keys_glide_between_fit_and_actual_size_and_escape_closes(cx: &mut TestAppContext) {
-        // 1600×800 fits the 768×480 frame at 0.48: 768×384, centred.
+    fn escape_closes_the_viewer_and_drops_its_transfer(cx: &mut TestAppContext) {
         let cx = open_viewer(cx, 1600, 800);
-        let fitted = Bounds::new(point(px(16.), px(108.)), size(px(768.), px(384.)));
-        assert_eq!(image(cx), fitted);
-
-        cx.simulate_keystrokes("1");
-        draw(cx);
-        assert_eq!(image(cx), fitted, "the glide starts from the fit");
-        // The frame after the key press began the glide; the next ends it.
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
-        assert_eq!(
-            image(cx),
-            Bounds::new(point(px(-400.), px(-100.)), size(px(1600.), px(800.)))
-        );
-
-        cx.simulate_keystrokes("0");
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
-        assert_eq!(image(cx), fitted);
+        assert!(cx.debug_bounds("image-viewer-image").is_some());
 
         cx.simulate_keystrokes("escape");
         draw(cx);

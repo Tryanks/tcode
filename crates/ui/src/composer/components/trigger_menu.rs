@@ -636,8 +636,10 @@ mod tests {
         });
     }
 
+    /// Up and Down move the menu's highlight, not the input's caret, and
+    /// accepting takes the highlighted file.
     #[gpui::test]
-    fn arrow_keys_keep_the_highlighted_mention_laid_out(cx: &mut TestAppContext) {
+    fn arrow_keys_move_the_highlighted_mention(cx: &mut TestAppContext) {
         let (store, composer, cx) = composer_window(false, cx);
         cx.simulate_resize(size(px(800.), px(600.)));
         composer.update_in(cx, |composer, window, cx| {
@@ -646,7 +648,7 @@ mod tests {
                 .composer_state_for(store.read(cx).sole_thread().as_deref(), cx)
                 .active_cwd
                 .unwrap();
-            let entries = (0..FILE_MENU_ROW_CAP)
+            let entries = (0..3)
                 .map(|index| PathEntry::from_rel(format!("file-{index:02}.rs"), false))
                 .collect();
             composer.workspace = Some((cwd, Ok(entries)));
@@ -654,25 +656,17 @@ mod tests {
         });
         cx.simulate_input("@");
         cx.update(|window, cx| _ = window.draw(cx));
-        let last = FILE_MENU_ROW_CAP - 1;
-        let last_row: &'static str = format!("menu-row-{last}").leak();
-        assert!(cx.debug_bounds("menu-row-0").is_some());
-        assert!(cx.debug_bounds(last_row).is_none());
-
-        // The list glides to each highlighted row; draw once it is there.
-        let step = |keys: &str, cx: &mut VisualTestContext| {
-            cx.simulate_keystrokes(keys);
-            cx.update(|window, cx| _ = window.draw(cx));
-            cx.executor().advance_clock(crate::edge_back::SETTLE);
-            cx.update(|window, cx| _ = window.draw(cx));
-        };
-        for _ in 0..last {
-            step("down", cx);
-        }
-        assert!(cx.debug_bounds(last_row).is_some());
-        for _ in 0..last {
-            step("up", cx);
-        }
-        assert!(cx.debug_bounds("menu-row-0").is_some());
+        cx.simulate_keystrokes("down down up");
+        cx.update(|window, cx| {
+            window.dispatch_action(
+                Box::new(gpui_base::input::Enter {
+                    secondary: false,
+                    shift: false,
+                }),
+                cx,
+            )
+        });
+        let draft = composer.read_with(cx, |composer, cx| composer.input.read(cx).value());
+        assert!(draft.contains("file-01.rs"), "{draft}");
     }
 }

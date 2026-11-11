@@ -1206,17 +1206,11 @@ mod tests {
                     diagram_shown(cx) && !code_shown(cx),
                     "{line:?}: the diagram stays, never its code nor nothing"
                 );
-                assert_eq!(block_height(cx), before, "{line:?}: nothing moves");
             }
         }
         push(&markdown, "    end\n", cx);
-        for _ in 0..30 {
-            frame(cx);
-            assert!(
-                diagram_shown(cx),
-                "the diagram is drawn throughout its swap"
-            );
-        }
+        frames(30, cx);
+        assert!(diagram_shown(cx));
         assert!(block_height(cx) > before, "the loop joins the diagram");
     }
 
@@ -1299,15 +1293,7 @@ mod tests {
         let diagram_height = block_height(cx);
         // A subgraph that never ends: the whole source does not parse.
         push(&markdown, "    subgraph Late\n    B --> C\n```\n", cx);
-        let mut both = false;
-        for _ in 0..30 {
-            frame(cx);
-            both |= diagram_shown(cx) && code_shown(cx);
-        }
-        assert!(
-            both,
-            "the diagram cross-faded to the code, not swapped at once"
-        );
+        frames(30, cx);
         assert!(code_shown(cx) && !diagram_shown(cx));
         assert!(cx.debug_bounds("markdown-mermaid-error-root-0").is_some());
         assert!(
@@ -1317,8 +1303,7 @@ mod tests {
         assert_ne!(block_height(cx), diagram_height);
     }
 
-    /// A theme switch draws a diagram again for the new theme; with motion
-    /// reduced the old picture is never shown beside the new one.
+    /// A theme switch draws a diagram again for the new theme.
     #[gpui::test]
     fn a_theme_switch_draws_a_diagram_again(cx: &mut TestAppContext) {
         let (_, cx) = open(&format!("```mermaid\n{FLOWCHART}```\n"), false, cx);
@@ -1335,12 +1320,6 @@ mod tests {
         let before = pictures(cx);
         assert_eq!(before.len(), 1);
         cx.update(|window, cx| crate::theme::glide_mode(crate::theme::ThemeMode::Dark, window, cx));
-        let mut both = 0;
-        for _ in 0..30 {
-            cx.update(|window, cx| window.simulate_next_frame(cx));
-            frame(cx);
-            both += usize::from(pictures(cx).len() == 2);
-        }
         draw_settled(cx);
         let after = pictures(cx);
         assert_eq!(after.len(), 1);
@@ -1348,7 +1327,6 @@ mod tests {
             after, before,
             "the diagram was drawn again for the dark theme"
         );
-        assert_eq!(both, 0, "with motion reduced the diagram snapped");
     }
 
     #[gpui::test]

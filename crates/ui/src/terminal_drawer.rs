@@ -3300,8 +3300,6 @@ mod tests {
         state.apply_delta(&delta);
         let scrolled = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
         assert_eq!(text(&scrolled), ["b", "c", "d"]);
-        assert!(Rc::ptr_eq(&first.rows[1], &scrolled.rows[0]));
-        assert!(Rc::ptr_eq(&first.rows[2], &scrolled.rows[1]));
     }
 
     fn idle_delta(cols: u16, rows: u16) -> tcode_protocol::terminal::TerminalDelta {

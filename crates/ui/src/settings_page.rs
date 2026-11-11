@@ -3987,14 +3987,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// A client that renders before its host answers must not present its own
-    /// defaults as the host's configuration, must adopt the host's values the
-    /// moment they arrive, and must never overwrite what the user has since
-    /// typed — no matter how many snapshots follow.
-    /// Settings → Control gathers the grant requests of every thread, so
-    /// one waiting in a thread the user has not opened can be answered here:
-    /// approving one widens that thread's own grant on the host and leaves
-    /// the other waiting; a thread's own grant is listed and revoked here.
     /// "Show more" asks for a longer newest-first list, and a new filter asks
     /// for the first page of what it matches: the two the host answers.
     #[gpui::test]
@@ -4099,6 +4091,10 @@ mod tests {
         assert_eq!(filter.thread_id.as_deref(), Some("target"));
     }
 
+    /// A client that renders before its host answers must not present its own
+    /// defaults as the host's configuration, must adopt the host's values the
+    /// moment they arrive, and must never overwrite what the user has since
+    /// typed — no matter how many snapshots follow.
     #[gpui::test]
     fn editable_settings_wait_for_the_host_and_then_keep_the_user_edit(cx: &mut TestAppContext) {
         let root = crate::store::tests::scratch_root("settings-hydration");

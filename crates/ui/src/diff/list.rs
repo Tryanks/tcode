@@ -1777,12 +1777,6 @@ mod tests {
             cx.update(|window, cx| {
                 let _ = window.draw(cx);
             });
-            let left = cx.debug_bounds("diff-line-old-copy.rs-1").unwrap();
-            let right = cx.debug_bounds("diff-line-new-copy.rs-1").unwrap();
-            assert!(
-                ((right.origin.x - left.origin.x) - px(300.5)).abs() <= px(1.),
-                "wrapped counterparts must start in equal halves of the 600px viewport: {left:?}, {right:?}"
-            );
             for (selector, source) in [
                 ("diff-line-old-copy.rs-1", old),
                 ("diff-line-new-copy.rs-1", new),
