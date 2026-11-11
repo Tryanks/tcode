@@ -367,6 +367,7 @@ impl ComputerUseTools {
             "focused": node.focused,
             "child_count": node.children.len(),
             "children_error": node.children_error,
+            "children_omitted": node.children_omitted,
         });
         let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
         bounded_success(&self.states, Some(&observation.state_id), text, Vec::new())

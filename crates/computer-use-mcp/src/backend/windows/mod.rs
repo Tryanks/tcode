@@ -644,50 +644,57 @@ fn walk_element(
             focused: element.has_keyboard_focus().unwrap_or(false),
             children: Vec::new(),
             children_error: None,
+            children_omitted: false,
         },
         children: Vec::new(),
     };
 
-    if depth < MAX_DEPTH && context.count < MAX_NODES {
-        let remaining = MAX_NODES - context.count;
-        for child in raw_children(
-            context.walker,
-            element,
-            remaining.min(MAX_CHILDREN_PER_NODE),
-        ) {
-            let Some(child) = walk_element(&child, depth + 1, context) else {
-                continue;
-            };
-            if !is_invisible_leaf(&child, context.root_frame) {
-                tree.children.push(child);
-            }
-            if context.count >= MAX_NODES {
-                break;
-            }
+    let maximum = if depth < MAX_DEPTH {
+        (MAX_NODES - context.count).min(MAX_CHILDREN_PER_NODE)
+    } else {
+        0
+    };
+    let (children, more) = raw_children(context.walker, element, maximum);
+    let mut walked = 0;
+    for child in &children {
+        if context.count >= MAX_NODES {
+            break;
+        }
+        walked += 1;
+        let Some(child) = walk_element(child, depth + 1, context) else {
+            continue;
+        };
+        if !is_invisible_leaf(&child, context.root_frame) {
+            tree.children.push(child);
         }
     }
+    tree.node.children_omitted = more || walked < children.len();
     Some(tree)
 }
 
-fn raw_children(walker: &UITreeWalker, element: &UIElement, maximum: usize) -> Vec<UIElement> {
-    if maximum == 0 {
-        return Vec::new();
-    }
+/// Up to `maximum` of an element's children, and whether it has more.
+fn raw_children(
+    walker: &UITreeWalker,
+    element: &UIElement,
+    maximum: usize,
+) -> (Vec<UIElement>, bool) {
     let Ok(mut child) = walker.get_first_child(element) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
+    if maximum == 0 {
+        return (Vec::new(), true);
+    }
     let mut children = Vec::with_capacity(maximum.min(32));
     loop {
         children.push(child.clone());
-        if children.len() >= maximum {
-            break;
-        }
         let Ok(sibling) = walker.get_next_sibling(&child) else {
-            break;
+            return (children, false);
         };
+        if children.len() >= maximum {
+            return (children, true);
+        }
         child = sibling;
     }
-    children
 }
 
 fn is_invisible_leaf(tree: &ElementNode, root_frame: Frame) -> bool {

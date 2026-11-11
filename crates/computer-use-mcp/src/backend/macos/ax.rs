@@ -531,15 +531,16 @@ pub(super) fn locate_target(
 ) -> Result<Target, BackendError> {
     let (application, mut element) = locate_window(root)?;
     for &index in path {
-        let children = copy_children(element.as_ax(), index.saturating_add(1)).map_err(|code| {
-            BackendError::new(
-                BackendErrorCode::OperationFailed,
-                format!(
-                    "could not read the children along the target's accessibility path: {}",
-                    ax_error_text(code)
-                ),
-            )
-        })?;
+        let (children, _) =
+            copy_children(element.as_ax(), index.saturating_add(1)).map_err(|code| {
+                BackendError::new(
+                    BackendErrorCode::OperationFailed,
+                    format!(
+                        "could not read the children along the target's accessibility path: {}",
+                        ax_error_text(code)
+                    ),
+                )
+            })?;
         let Some(child) = children.into_iter().nth(index) else {
             return Err(BackendError::new(
                 BackendErrorCode::OperationFailed,
@@ -609,7 +610,7 @@ fn locate_window_in_application(
             ),
         ));
     }
-    let windows = try_copy_attribute_elements(application, "AXWindows", 200).map_err(|code| {
+    let (windows, _) = try_copy_attribute_elements(application, "AXWindows", 200).map_err(|code| {
         let message = if code == AX_ERROR_API_DISABLED {
             format!(
                 "the system refused Accessibility access for this Tcode process while listing the windows of root {} (AX error {code}); the grant is not in effect for this process even if System Settings lists it, which happens after Tcode's executable changed on disk, so restart Tcode",
@@ -697,10 +698,11 @@ impl VisitedElements {
 fn walk_tree(root: AXUIElementRef, context: &mut WalkContext) -> Option<UiNode> {
     let mut stack = vec![read_element(root, context)?];
     loop {
-        let (_, children) = stack.last_mut()?;
+        let (node, children) = stack.last_mut()?;
         let child = if context.count < MAX_NODES {
             children.next()
         } else {
+            node.children_omitted |= children.len() > 0;
             None
         };
         if let Some(child) = child {
@@ -750,11 +752,11 @@ fn read_element(
     let enabled = attribute_bool(element, "AXEnabled").unwrap_or(true);
     let focused = attribute_bool(element, "AXFocused").unwrap_or(false);
     let remaining = MAX_NODES - context.count;
-    let (children, children_error) =
-        match copy_children(element, remaining.min(MAX_CHILDREN_PER_NODE)) {
-            Ok(children) => (children, None),
-            Err(code) => (Vec::new(), Some(ax_error_text(code))),
-        };
+    let maximum = remaining.min(MAX_CHILDREN_PER_NODE);
+    let (children, children_omitted, children_error) = match copy_children(element, maximum) {
+        Ok((children, total)) => (children, total > maximum, None),
+        Err(code) => (Vec::new(), false, Some(ax_error_text(code))),
+    };
     let node = UiNode {
         ref_id: String::new(),
         role: canonical_role(&role),
@@ -767,27 +769,30 @@ fn read_element(
         focused,
         children: Vec::new(),
         children_error,
+        children_omitted,
     };
     Some((node, children.into_iter()))
 }
 
-/// An element that has no children attribute, or no value for it, has none.
-fn copy_children(element: AXUIElementRef, maximum: usize) -> Result<Vec<OwnedCf>, AXError> {
+/// Up to `maximum` of an element's children, and how many it has. An element
+/// that has no children attribute, or no value for it, has none.
+fn copy_children(
+    element: AXUIElementRef,
+    maximum: usize,
+) -> Result<(Vec<OwnedCf>, usize), AXError> {
     match try_copy_attribute_elements(element, "AXChildren", maximum) {
-        Err(AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE) => Ok(Vec::new()),
+        Err(AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE) => Ok((Vec::new(), 0)),
         result => result,
     }
 }
 
-/// The elements of an attribute, or the AX error code of a failed copy.
+/// Up to `maximum` elements of an attribute and how many it has, or the AX
+/// error code of a failed copy.
 fn try_copy_attribute_elements(
     element: AXUIElementRef,
     attribute_name: &str,
     maximum: usize,
-) -> Result<Vec<OwnedCf>, AXError> {
-    if maximum == 0 {
-        return Ok(Vec::new());
-    }
+) -> Result<(Vec<OwnedCf>, usize), AXError> {
     let attribute = CFString::new(attribute_name);
     let mut count = 0_isize;
     let count_code = unsafe {
@@ -796,10 +801,11 @@ fn try_copy_attribute_elements(
     if count_code != AX_SUCCESS {
         return Err(count_code);
     }
-    if count <= 0 {
-        return Ok(Vec::new());
+    let total = usize::try_from(count).unwrap_or(0);
+    let count = total.min(maximum);
+    if count == 0 {
+        return Ok((Vec::new(), total));
     }
-    let count = usize::try_from(count).unwrap_or(0).min(maximum);
     let mut array: CFArrayRef = ptr::null();
     let code = unsafe {
         AXUIElementCopyAttributeValues(
@@ -814,11 +820,11 @@ fn try_copy_attribute_elements(
         return Err(code);
     }
     if array.is_null() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), total));
     }
     // SAFETY: CopyAttributeValues returns a create-rule CFArray.
     let Some(array_owner) = (unsafe { OwnedCf::from_create(array as CFTypeRef) }) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), total));
     };
     let actual_count = unsafe { CFArrayGetCount(array) }.max(0) as usize;
     let mut values = Vec::with_capacity(actual_count);
@@ -833,7 +839,7 @@ fn try_copy_attribute_elements(
         }
     }
     drop(array_owner);
-    Ok(values)
+    Ok((values, total))
 }
 
 fn copy_attribute(element: AXUIElementRef, attribute_name: &str) -> Option<OwnedCf> {

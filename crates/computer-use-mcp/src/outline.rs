@@ -58,6 +58,10 @@ pub struct UiNode {
     /// tree then lacks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub children_error: Option<String>,
+    /// The walk stopped before reading all of this element's children: an
+    /// observation reads a bounded number of nodes, and of children per node.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub children_omitted: bool,
 }
 
 impl UiNode {
@@ -337,6 +341,9 @@ pub fn render_line(node: &UiNode, depth: usize) -> String {
             " children_unreadable=\"{}\"",
             display_string(error, 240)
         ));
+    }
+    if node.children_omitted {
+        line.push_str(" children_omitted");
     }
     line
 }
