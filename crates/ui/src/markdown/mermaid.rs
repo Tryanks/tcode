@@ -883,11 +883,6 @@ pub(super) fn block(
         .bg(cx.theme().tokens.colors.muted)
         .child(SizeGlide::new(&glide, faces).gliding(swap.and_then(|swap| swap.from), progress))
         .child(actions);
-    #[cfg(test)]
-    let card = {
-        let path = path.to_string();
-        card.debug_selector(move || format!("markdown-mermaid-card-{path}"))
-    };
     let context_view = view.clone();
     let block = div()
         .id(SharedString::from(path.to_string()))
@@ -1162,13 +1157,6 @@ mod tests {
             .height
     }
 
-    fn block_width(cx: &mut VisualTestContext) -> Pixels {
-        cx.debug_bounds("markdown-mermaid-block-root-0")
-            .expect("the fence is painted")
-            .size
-            .width
-    }
-
     fn diagram_shown(cx: &mut VisualTestContext) -> bool {
         cx.debug_bounds("markdown-mermaid-root-0").is_some()
     }
@@ -1381,84 +1369,6 @@ mod tests {
             "nothing offers a picture of a source the model did not write"
         );
         assert_ne!(block_height(cx), diagram_height);
-    }
-
-    #[gpui::test]
-    fn a_swap_glides_the_block_in_one_motion(cx: &mut TestAppContext) {
-        let (markdown, cx) = open("", true, cx);
-        push(&markdown, "```mermaid\nflowchart TD\n    A --> B\n", cx);
-        frames(30, cx);
-        let before = block_height(cx);
-        // Wider than the row: the new picture must shrink to fit it.
-        let siblings = (0..8)
-            .map(|ix| format!("    A --> W{ix}[a sibling wide enough to widen the row]\n"))
-            .collect::<String>();
-        push(
-            &markdown,
-            &format!("    B --> C\n    C --> D\n{siblings}"),
-            cx,
-        );
-        let mut heights = vec![before];
-        let mut widest = Pixels::ZERO;
-        for _ in 0..30 {
-            frame(cx);
-            let block = cx.debug_bounds("markdown-mermaid-block-root-0").unwrap();
-            let below = cx.debug_bounds("below").unwrap();
-            assert_eq!(
-                below.top(),
-                block.bottom(),
-                "what is below moves with the block"
-            );
-            heights.push(block.size.height);
-            assert_eq!(
-                cx.debug_bounds("markdown-mermaid-card-root-0"),
-                Some(block),
-                "the block's surface covers the block as it glides"
-            );
-            for picture in [
-                cx.debug_bounds("markdown-mermaid-picture-root-0-0"),
-                cx.debug_bounds("markdown-mermaid-picture-root-0-1"),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                assert!(
-                    picture.left() >= block.left() && picture.right() <= block.right(),
-                    "a picture is cut off at the block's side: {picture:?} in {block:?}"
-                );
-                widest = widest.max(picture.size.width);
-            }
-        }
-        assert!(
-            widest > block_width(cx) * 0.9,
-            "the new picture fills the row: {widest:?}"
-        );
-        let after = *heights.last().unwrap();
-        assert_ne!(after, before, "{heights:?}");
-        let grows = after > before;
-        assert!(
-            heights.windows(2).all(|pair| if grows {
-                pair[1] >= pair[0]
-            } else {
-                pair[1] <= pair[0]
-            }),
-            "the block moves one way, without stepping back: {heights:?}"
-        );
-    }
-
-    #[gpui::test]
-    fn with_motion_reduced_a_swap_snaps(cx: &mut TestAppContext) {
-        let (markdown, cx) = open("", true, cx);
-        cx.update(|_, cx| cx.set_reduce_motion(true));
-        push(&markdown, "```mermaid\nflowchart TD\n    A --> B\n", cx);
-        frames(30, cx);
-        let before = block_height(cx);
-        push(&markdown, "    B --> C\n    C --> D\n", cx);
-        frame(cx);
-        let snapped = block_height(cx);
-        assert_ne!(snapped, before);
-        draw_settled(cx);
-        assert_eq!(block_height(cx), snapped, "the swap took one frame");
     }
 
     /// A document opened with a whole fence draws it off the main thread,

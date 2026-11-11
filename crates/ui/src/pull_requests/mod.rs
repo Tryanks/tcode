@@ -2174,8 +2174,7 @@ impl PullRequestsPanel {
             ROWS,
             window,
             cx,
-            |key, entry, window, cx| {
-                let selector = format!("pr-entry-{key}");
+            |_, entry, window, cx| {
                 let entry = match entry {
                     ListEntry::Notice {
                         host,
@@ -2228,7 +2227,6 @@ impl PullRequestsPanel {
                     ),
                 };
                 div()
-                    .debug_selector(move || selector)
                     .w_full()
                     .min_w_0()
                     .pt_1()

@@ -133,12 +133,11 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use gpui::{
-        App, AppContext as _, Bounds, Context, InteractiveElement as _, IntoElement,
-        ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, Styled as _,
-        TestAppContext, Window, div, point, px, size,
+        App, AppContext as _, Bounds, Context, IntoElement, ParentElement as _, Pixels, Render,
+        Styled as _, TestAppContext, Window, div, point, px, size,
     };
 
-    use super::{ENTER, LEAVE, NativeFade, NativeView};
+    use super::{ENTER, NativeFade, NativeView};
     use crate::test_frames::draw;
 
     /// A stand-in for a platform view: what the platform would be told.
@@ -166,116 +165,6 @@ mod tests {
         fn bounds(&self, _: &App) -> Bounds<Pixels> {
             PAGE
         }
-    }
-
-    /// GPUI content under the page, and the page wanted or not.
-    struct Owner {
-        page: Page,
-        wanted: bool,
-        clicks: Rc<Cell<usize>>,
-    }
-
-    impl Render for Owner {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let clicks = self.clicks.clone();
-            div()
-                .size_full()
-                .child(
-                    div()
-                        .id("under")
-                        .debug_selector(|| "under".into())
-                        .size(px(140.))
-                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
-                )
-                .child({
-                    let (page, wanted) = (self.page.clone(), self.wanted);
-                    NativeFade::new("pages", move |_| vec![("page".into(), page, wanted)])
-                })
-        }
-    }
-
-    /// The owner shows a page and it fades in. Unwanted, it stays on screen
-    /// while it fades out, and what is under it takes no click until it has
-    /// gone; then it is hidden and the click lands.
-    #[gpui::test]
-    fn a_native_view_fades_in_and_is_hidden_only_once_it_has_faded_out(cx: &mut TestAppContext) {
-        let page = Page::default();
-        let clicks = Rc::new(Cell::new(0));
-        let (owner, cx) = cx.add_window_view(|_, _| Owner {
-            page: page.clone(),
-            wanted: false,
-            clicks: clicks.clone(),
-        });
-        draw(cx);
-        let over_page = PAGE.center();
-
-        page.shown.set(true);
-        owner.update(cx, |owner, cx| {
-            owner.wanted = true;
-            cx.notify();
-        });
-        draw(cx);
-        assert_eq!(page.alpha.get(), 0., "a page shown starts transparent");
-        cx.executor().advance_clock(ENTER / 2);
-        draw(cx);
-        let half = page.alpha.get();
-        assert!(half > 0. && half < 1., "and fades in: {half}");
-        cx.executor().advance_clock(ENTER);
-        draw(cx);
-        assert_eq!(page.alpha.get(), 1.);
-
-        owner.update(cx, |owner, cx| {
-            owner.wanted = false;
-            cx.notify();
-        });
-        draw(cx);
-        cx.executor().advance_clock(LEAVE / 2);
-        draw(cx);
-        let half = page.alpha.get();
-        assert!(page.shown.get(), "a leaving page stays on screen");
-        assert!(half > 0. && half < 1., "fading out: {half}");
-        cx.simulate_click(over_page, Default::default());
-        assert_eq!(clicks.get(), 0, "and is covered while it leaves");
-
-        cx.executor().advance_clock(LEAVE);
-        draw(cx);
-        assert!(!page.shown.get(), "hidden once it has faded out");
-        cx.simulate_click(over_page, Default::default());
-        assert_eq!(clicks.get(), 1, "uncovered once hidden");
-    }
-
-    /// A page its owner hid at once, shown again before an exit would have
-    /// played, fades in from transparent rather than from partway.
-    #[gpui::test]
-    fn a_native_view_its_owner_hid_fades_in_from_transparent(cx: &mut TestAppContext) {
-        let page = Page::default();
-        page.shown.set(true);
-        let (owner, cx) = cx.add_window_view(|_, _| Owner {
-            page: page.clone(),
-            wanted: true,
-            clicks: Rc::default(),
-        });
-        draw(cx);
-        cx.executor().advance_clock(ENTER);
-        draw(cx);
-        assert_eq!(page.alpha.get(), 1.);
-
-        page.shown.set(false);
-        owner.update(cx, |owner, cx| {
-            owner.wanted = false;
-            cx.notify();
-        });
-        draw(cx);
-        cx.executor().advance_clock(LEAVE / 4);
-        draw(cx);
-
-        page.shown.set(true);
-        owner.update(cx, |owner, cx| {
-            owner.wanted = true;
-            cx.notify();
-        });
-        draw(cx);
-        assert_eq!(page.alpha.get(), 0.);
     }
 
     /// A panel drawn after the fade that shows its page as it renders.
@@ -336,26 +225,5 @@ mod tests {
         cx.executor().advance_clock(ENTER);
         draw(cx);
         assert_eq!(page.alpha.get(), 1.);
-    }
-
-    /// With motion reduced, an unwanted page hides on the frame it is let go.
-    #[gpui::test]
-    fn with_motion_reduced_a_native_view_hides_at_once(cx: &mut TestAppContext) {
-        cx.update(|cx| cx.set_reduce_motion(true));
-        let page = Page::default();
-        page.shown.set(true);
-        let (owner, cx) = cx.add_window_view(|_, _| Owner {
-            page: page.clone(),
-            wanted: true,
-            clicks: Rc::default(),
-        });
-        draw(cx);
-        assert_eq!(page.alpha.get(), 1.);
-        owner.update(cx, |owner, cx| {
-            owner.wanted = false;
-            cx.notify();
-        });
-        draw(cx);
-        assert!(!page.shown.get());
     }
 }

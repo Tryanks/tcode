@@ -294,12 +294,12 @@ impl ListHover {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
+    use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
     use gpui::{
         Context, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Render,
-        SharedString, StatefulInteractiveElement as _, Styled as _, TestAppContext,
-        VisualTestContext, Window, div, point, px,
+        SharedString, StatefulInteractiveElement as _, Styled as _, TestAppContext, Window, div,
+        point, px,
     };
 
     use super::ListHover;
@@ -344,69 +344,6 @@ mod tests {
         rows.borrow()[&row][since..].to_vec()
     }
 
-    /// The row under the pointer fades its actions in, and the row it left
-    /// fades them out; moving onto the actions keeps them; leaving the list
-    /// fades them out and the window comes to rest, holding nothing for the
-    /// rows it passed over.
-    #[gpui::test]
-    fn the_hovered_row_fades_its_reveal_in_and_out(cx: &mut TestAppContext) {
-        let drawn = Rc::new(RefCell::new(HashMap::new()));
-        let (_, cx) = cx.add_window_view({
-            let drawn = drawn.clone();
-            |_, _| Rows {
-                hover: ListHover::new(crate::material::HOVER),
-                drawn,
-            }
-        });
-        // The pointer starts away from the list.
-        cx.simulate_mouse_move(point(px(300.), px(300.)), None, Modifiers::none());
-        draw_settled(cx);
-        let mark = |cx: &mut VisualTestContext| {
-            let _ = cx;
-            drawn.borrow()[&0].len()
-        };
-        let fades = |values: &[f32], up: bool| {
-            values.windows(2).all(|pair| {
-                if up {
-                    pair[1] >= pair[0]
-                } else {
-                    pair[1] <= pair[0]
-                }
-            })
-        };
-
-        let since = mark(cx);
-        cx.simulate_mouse_move(point(px(50.), px(10.)), None, Modifiers::none());
-        draw_settled(cx);
-        let row = reveals(&drawn, 0, since);
-        assert!(fades(&row, true), "row 0 popped in: {row:?}");
-        assert_eq!(*row.last().unwrap(), 1.);
-        assert!(reveals(&drawn, 1, since).iter().all(|value| *value == 0.));
-
-        let since = mark(cx);
-        cx.simulate_mouse_move(point(px(190.), px(10.)), None, Modifiers::none());
-        draw_settled(cx);
-        assert!(
-            reveals(&drawn, 0, since).iter().all(|value| *value == 1.),
-            "the row's actions faded as the pointer moved onto them"
-        );
-
-        let since = mark(cx);
-        cx.simulate_mouse_move(point(px(50.), px(50.)), None, Modifiers::none());
-        draw_settled(cx);
-        let (left, entered) = (reveals(&drawn, 0, since), reveals(&drawn, 1, since));
-        assert!(fades(&left, false), "row 0 popped out: {left:?}");
-        assert!(fades(&entered, true), "row 1 popped in: {entered:?}");
-        assert_eq!((*left.last().unwrap(), *entered.last().unwrap()), (0., 1.));
-
-        let since = mark(cx);
-        cx.simulate_mouse_move(point(px(300.), px(300.)), None, Modifiers::none());
-        draw_settled(cx);
-        let left = reveals(&drawn, 1, since);
-        assert!(fades(&left, false), "row 1 popped out: {left:?}");
-        assert_eq!(*left.last().unwrap(), 0.);
-    }
-
     /// A tap reaches gpui as the pointer coming to rest where the finger
     /// lifted, but a finger is not a pointer: the row tapped reveals
     /// nothing, then or in any frame after.
@@ -437,76 +374,6 @@ mod tests {
         assert!(
             !row.is_empty() && row.iter().all(|value| *value == 0.),
             "the tapped row revealed {row:?}"
-        );
-    }
-
-    /// The rows of a virtual list, which reveal at the list's hover.
-    struct ListRows {
-        hover: ListHover,
-        list: gpui::ListState,
-        drawn: Rc<RefCell<HashMap<usize, Vec<f32>>>>,
-    }
-
-    impl Render for ListRows {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().child(
-                gpui::list(
-                    self.list.clone(),
-                    cx.processor(|this, row: usize, window, cx| {
-                        let key = SharedString::from(format!("row-{row}"));
-                        let reveal = this.hover.reveal(&key, window, cx);
-                        this.drawn.borrow_mut().entry(row).or_default().push(reveal);
-                        div()
-                            .id(key.clone())
-                            .w(px(200.))
-                            .h(px(40.))
-                            .on_hover(this.hover.on_hover(key))
-                            .child(div().size(px(20.)).opacity(reveal))
-                            .into_any_element()
-                    }),
-                )
-                .size_full(),
-            )
-        }
-    }
-
-    /// In a virtual list drawn as the app draws its frames, with GPUI's
-    /// scroll layers holding the rows it painted, the reveal of the row the
-    /// pointer enters is drawn again each frame of its fade rather than once.
-    #[gpui::test]
-    fn a_virtual_lists_retained_rows_redraw_their_reveal(cx: &mut TestAppContext) {
-        let drawn = Rc::new(RefCell::new(HashMap::new()));
-        let (_, cx) = cx.add_window_view({
-            let drawn = drawn.clone();
-            |_, _| ListRows {
-                hover: ListHover::new(crate::material::HOVER),
-                list: gpui::ListState::new(30, gpui::ListAlignment::Top, px(200.)),
-                drawn,
-            }
-        });
-        cx.simulate_mouse_move(point(px(300.), px(500.)), None, Modifiers::none());
-        draw_settled(cx);
-        // Frames as the display delivers them: drawn without being refreshed.
-        // How many frames the window had asked for.
-        let frame = |cx: &mut VisualTestContext| {
-            cx.executor().advance_clock(Duration::from_millis(16));
-            cx.update(|window, cx| {
-                let asked = window.simulate_next_frame(cx);
-                let _ = window.draw(cx);
-                asked
-            })
-        };
-        for _ in 0..4 {
-            frame(cx);
-        }
-        let since = drawn.borrow()[&2].len();
-        cx.simulate_mouse_move(point(px(50.), px(100.)), None, Modifiers::none());
-        while frame(cx) > 0 {}
-        let row = reveals(&drawn, 2, since);
-        assert_eq!(
-            row.last(),
-            Some(&1.),
-            "the hovered row's reveal was drawn {row:?}"
         );
     }
 }

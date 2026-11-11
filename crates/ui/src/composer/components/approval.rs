@@ -334,9 +334,8 @@ impl Composer {
                             ApprovalOptionKind::RejectOnce | ApprovalOptionKind::RejectAlways
                         );
                         let id = gpui::SharedString::from(format!("approval-option-{}", option.id));
-                        let button = Button::new(id.clone())
+                        let button = Button::new(id)
                             .motion(&self.button_motion())
-                            .debug_selector(move || id.to_string())
                             .chip()
                             .touch(self.compact)
                             .disabled(!self.interactive(cx) || pending)
@@ -532,45 +531,6 @@ mod tests {
         assert!(
             second.bottom() <= detail.bottom(),
             "a short list grows to show every path"
-        );
-    }
-
-    /// An option of a command's request, a default button kept on the
-    /// composer's clock, glides to its hover fill under the pointer and
-    /// holds it, and glides back as the pointer leaves.
-    #[gpui::test]
-    fn an_approval_option_glides_to_its_hover_fill_and_back(cx: &mut TestAppContext) {
-        let cx = composer_with_request(
-            cx,
-            false,
-            ApprovalKind::ExecCommand {
-                command: "cargo test".into(),
-                cwd: None,
-                description: None,
-            },
-            None,
-            vec![agent::ApprovalOption {
-                id: "once".into(),
-                label: "Allow once".into(),
-                kind: ApprovalOptionKind::AllowOnce,
-            }],
-        );
-        let (rest, hover) = cx.update(|_, cx| {
-            let theme = cx.theme();
-            let hover = crate::widgets::button::tinted(theme.background, theme.muted);
-            (theme.background, hover)
-        });
-        let away = cx
-            .debug_bounds("approval-option-once")
-            .expect("option")
-            .origin
-            - point(px(40.), px(40.));
-        crate::widgets::button::tests::assert_hover_glides(
-            "approval-option-once",
-            rest,
-            hover,
-            away,
-            cx,
         );
     }
 

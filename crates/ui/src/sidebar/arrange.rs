@@ -1336,8 +1336,7 @@ impl SessionsSidebar {
                     return div().into_any_element();
                 };
                 let row =
-                    crate::material::empty_row(crate::tr!("sidebar.arrange_pinned_empty"), cx)
-                        .debug_selector(|| "arrange-pinned-empty".into());
+                    crate::material::empty_row(crate::tr!("sidebar.arrange_pinned_empty"), cx);
                 self.drop_zone(
                     div().w_full().child(shown.fold(row)),
                     DropZone::Start(ThreadSection::Pinned),
@@ -1466,7 +1465,6 @@ impl SessionsSidebar {
             meta.title.clone().into(),
             cx,
         )
-        .debug_selector(move || format!("arrange-row-{name}"))
         // The 44pt grip must reach the page edge; `list_row`'s trailing inset
         // would push it in.
         .pr(cx.theme().tokens.spacing.xs)

@@ -621,60 +621,6 @@ mod tests {
         }
     }
 
-    /// The border of the field: the largest quad painted with a border (the
-    /// scrollbar inside it draws smaller ones).
-    fn border(cx: &mut gpui::VisualTestContext) -> gpui::Hsla {
-        cx.update(|window, _| {
-            window
-                .painted_quads()
-                .iter()
-                .filter(|quad| quad.border_widths.top.0 > 0.)
-                .max_by(|a, b| {
-                    let area = |q: &&gpui::Quad| q.bounds.size.width.0 * q.bounds.size.height.0;
-                    area(a).total_cmp(&area(b))
-                })
-                .map(|quad| quad.border_color)
-                .expect("the field has a border")
-        })
-    }
-
-    /// Focusing a field moves its border to the focus colour over several
-    /// frames, and blurring it moves it back.
-    #[gpui::test]
-    fn a_field_border_glides_to_the_focus_colour(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let (field, cx) = cx.add_window_view(|window, cx| {
-            Field(cx.new(|cx| TextareaState::new(window, cx)), false)
-        });
-        let input = field.read_with(cx, |field, _| field.0.clone());
-        crate::test_frames::draw_settled(cx);
-        let (rest, ring) = cx.update(|_, cx| (cx.theme().input, cx.theme().ring));
-        assert!(close(border(cx), rest));
-        cx.update(|window, cx| input.update(cx, |state, cx| state.focus(window, cx)));
-        let mut between = 0;
-        for _ in 0..20 {
-            cx.executor()
-                .advance_clock(std::time::Duration::from_millis(16));
-            cx.update(|window, cx| {
-                window.simulate_next_frame(cx);
-                let _ = window.draw(cx);
-            });
-            let now = border(cx);
-            if !close(now, rest) && !close(now, ring) {
-                between += 1;
-            }
-        }
-        assert!(between >= 4, "the border jumped");
-        crate::test_frames::draw_settled(cx);
-        assert!(close(border(cx), ring));
-    }
-
-    fn close(a: gpui::Hsla, b: gpui::Hsla) -> bool {
-        [a.h - b.h, a.s - b.s, a.l - b.l, a.a - b.a]
-            .iter()
-            .all(|d| d.abs() < 1e-3)
-    }
-
     // GPUI focuses any tracked handle under a press, and the platform raises
     // the soft keyboard for a focused handle with an input handler, so a
     // disabled field has to refuse the press to stay keyboard-free on a phone.

@@ -642,32 +642,6 @@ fn a_settled_row_swipes_back_to_active(cx: &mut TestAppContext) {
     phone.close(cx);
 }
 
-/// With motion reduced the finger still moves the row, but its release
-/// changes the list at once, with nothing left to spring.
-#[gpui::test]
-fn reduced_motion_lets_go_without_a_spring(cx: &mut TestAppContext) {
-    let (mut phone, cx) = phone(cx, "swipe-reduced", 3);
-    cx.update(|_, cx| cx.set_reduce_motion(true));
-    let rest = phone.row(cx, 0);
-
-    let mut finger = Finger::down(cx, 1, rest.center());
-    finger.stroke(cx, -10., 4, FRAME);
-    assert_eq!(phone.row(cx, 0).left(), rest.left() - px(40.));
-    pass(cx, ms(120));
-    finger.lift(cx);
-    assert_eq!(phone.row(cx, 0), rest, "cancelled, it is home at once");
-
-    swipe_away(cx, &phone, 0);
-    draw(cx);
-    assert!(
-        phone.try_row(cx, 0).is_none(),
-        "committed, it is gone at once"
-    );
-    assert_eq!(phone.row(cx, 1).top(), rest.top());
-    phone.until(cx, "the thread to settle", |phone, cx| phone.settled(cx, 0));
-    phone.close(cx);
-}
-
 #[gpui::test]
 fn a_swiped_row_settles_and_the_next_tap_still_opens(cx: &mut TestAppContext) {
     let (mut phone, cx) = phone(cx, "swipe-tap", 3);

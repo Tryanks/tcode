@@ -1920,12 +1920,7 @@ impl PullRequestView {
             }
         };
         let compact = self.compact(cx);
-        let name = match &item {
-            Item::Comment(_) | Item::Thread(_) | Item::Event(..) => None,
-            other => Some(format!("pr-conversation-{other:?}")),
-        };
         div()
-            .when_some(name, |row, name| row.debug_selector(move || name.clone()))
             .px(if compact {
                 px(material::COMPACT_PAGE_INSET)
             } else {
