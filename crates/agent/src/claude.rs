@@ -4047,7 +4047,6 @@ impl Mapper {
             ClaudeRequestType::ExecCommand => ApprovalKind::ExecCommand {
                 command: input
                     .get("command")
-                    .or_else(|| input.get("cmd"))
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
@@ -4814,11 +4813,7 @@ fn classify_claude_tool(name: &str) -> ClaudeRequestType {
 
 /// Summarize a command, subagent brief, or tool input for its approval prompt.
 fn approval_detail(tool_name: &str, input: &Value) -> String {
-    if let Some(cmd) = input
-        .get("command")
-        .or_else(|| input.get("cmd"))
-        .and_then(Value::as_str)
-    {
+    if let Some(cmd) = input.get("command").and_then(Value::as_str) {
         let clipped: String = cmd.trim().chars().take(400).collect();
         return format!("{tool_name}: {clipped}");
     }
