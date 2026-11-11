@@ -1393,18 +1393,21 @@ impl PermissionControl {
             }
             OptionDescriptor::Boolean { .. } => return None,
         };
+        let stored = composer
+            .requested_option_selections
+            .iter()
+            .find(|selection| selection.id == id)
+            .map(|selection| selection.value.clone());
+        // While the harness runs, the host gives only what it confirmed; a
+        // stored value it has not confirmed leaves the running one unknown,
+        // never the default. With nothing stored, the default is what runs.
         let current = composer
             .active_option_selections
             .iter()
             .find(|selection| selection.id == id)
             .map(|selection| selection.value.clone())
-            .or(default);
-        let requested = composer
-            .requested_option_selections
-            .iter()
-            .find(|selection| selection.id == id)
-            .map(|selection| selection.value.clone())
-            .filter(|value| Some(value) != current.as_ref());
+            .or_else(|| stored.is_none().then_some(default).flatten());
+        let requested = stored.filter(|value| Some(value) != current.as_ref());
         Some(Self {
             label: crate::i18n::translate_english(&format!("permission.controls.{id}"), &label)
                 .into_owned(),
