@@ -3305,6 +3305,7 @@ impl WorkspaceStore {
         cx.spawn(async move |_| {
             let failed = |reason: String| SessionContentHits {
                 hits: Vec::new(),
+                truncated: false,
                 unreadable: vec![reason],
             };
             match host

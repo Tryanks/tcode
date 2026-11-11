@@ -1044,6 +1044,7 @@ palette:
   messages: "メッセージ"
   messages_on: "%{host} のメッセージ"
   messages_unreadable: "検索できなかったスレッドがあります：%{reason}"
+  more_messages: "さらにメッセージを表示"
   no_matches: "一致する項目はありません"
   navigate: "↑↓ 移動"
   select: "Enter 選択"

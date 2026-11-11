@@ -8070,6 +8070,7 @@ pub(crate) mod tests {
                             turn: 0,
                             snippet: "a zebra".into(),
                         }],
+                        truncated: false,
                         unreadable: Vec::new(),
                     },
                 )),

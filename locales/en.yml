@@ -1044,6 +1044,7 @@ palette:
   messages: "Messages"
   messages_on: "Messages on %{host}"
   messages_unreadable: "Some threads could not be searched: %{reason}"
+  more_messages: "Show more messages"
   no_matches: "No matches"
   navigate: "↑↓ Navigate"
   select: "Enter Select"

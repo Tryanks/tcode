@@ -917,7 +917,7 @@ impl AppState {
         limit: u32,
         executor: &HostCx,
     ) -> HostTask<SessionContentHits> {
-        let limit = usize::try_from(limit).unwrap_or(usize::MAX).min(50);
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
         let sessions = self
             .sessions
             .iter()

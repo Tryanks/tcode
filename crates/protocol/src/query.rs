@@ -289,6 +289,9 @@ pub enum QueryResponse {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionContentHits {
     pub hits: Vec<SessionSearchHit>,
+    /// More sessions' messages matched than `limit` asked for; a larger
+    /// `limit` lists them.
+    pub truncated: bool,
     /// A session that could not be searched, and why, one per entry.
     pub unreadable: Vec<String>,
 }

@@ -114,9 +114,9 @@ impl SessionSearch {
         }
     }
 
-    /// Search sessions in the supplied order, returning at most `limit` hits
-    /// and every thread that could not be searched. Empty and
-    /// whitespace-only queries intentionally return no content hits.
+    /// Search sessions in the supplied order, returning at most `limit` hits,
+    /// whether more matched, and every thread that could not be searched.
+    /// Empty and whitespace-only queries intentionally return no content hits.
     pub fn search(
         &self,
         sessions: &[SessionMeta],
@@ -130,6 +130,7 @@ impl SessionSearch {
         }
         let folded = query.to_lowercase();
         let hits = &mut answer.hits;
+        // One hit past `limit` says that more matched; it is not returned.
         for meta in sessions {
             if let Err(error) = self.refresh(&meta.id) {
                 answer.unreadable.push(unreadable_session(meta, &error));
@@ -141,15 +142,17 @@ impl SessionSearch {
                     if let Some(snippet) = match_snippet(matched.text, query, 140) {
                         hits.push(protocol_hit(meta, &matched, snippet));
                     }
-                    hits.len() < limit
+                    hits.len() <= limit
                 });
             if let Err(error) = visited {
                 answer.unreadable.push(unreadable_session(meta, &error));
             }
-            if hits.len() == limit {
+            if hits.len() > limit {
                 break;
             }
         }
+        answer.truncated = answer.hits.len() > limit;
+        answer.hits.truncate(limit);
         answer
     }
 
@@ -875,7 +878,10 @@ mod tests {
         assert_eq!((page.total, page.truncated), (6, true));
         let last = search.search_filtered(&sessions, "auth.rs", &all(10, 5));
         assert_eq!((last.hits.len(), last.truncated), (1, false));
-        assert_eq!(search.search(&sessions, "auth.rs", 50).hits.len(), 6);
+        let whole = search.search(&sessions, "auth.rs", 6);
+        assert_eq!((whole.hits.len(), whole.truncated), (6, false));
+        let cut = search.search(&sessions, "auth.rs", 5);
+        assert_eq!((cut.hits.len(), cut.truncated), (5, true));
         let _ = std::fs::remove_dir_all(root);
     }
 }
