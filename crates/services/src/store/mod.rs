@@ -60,7 +60,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use agent::{AgentEvent, ModelSpec, ProviderCommand, ProviderKind};
 use serde::{Deserialize, Serialize};
@@ -1270,36 +1270,33 @@ fn acquire_ownership(root: &Path) -> io::Result<File> {
         .create(true)
         .truncate(false)
         .open(&path)?;
-    let mut deadline = None;
-    let mut delay = Duration::from_millis(20);
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Ok(file),
-            Err(fs::TryLockError::Error(error)) => return Err(error),
-            Err(fs::TryLockError::WouldBlock) => {
-                let deadline = *deadline.get_or_insert_with(|| {
-                    // Peek only: the marker is consumed by the host after it
-                    // owns the data dir.
-                    crate::relaunch::pending(root).then(|| Instant::now() + RELAUNCH_WAIT)
-                });
-                match deadline {
-                    Some(deadline) if Instant::now() < deadline => {
-                        std::thread::sleep(delay);
-                        delay = (delay * 2).min(Duration::from_millis(250));
-                    }
-                    _ => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::ResourceBusy,
-                            format!(
-                                "another Tcode host is already using the data directory {}; \
-                                 quit it first, or set TCODE_DATA_DIR to use another directory",
-                                root.display()
-                            ),
-                        ));
-                    }
-                }
+    let busy = || {
+        io::Error::new(
+            io::ErrorKind::ResourceBusy,
+            format!(
+                "another Tcode host is already using the data directory {}; \
+                 quit it first, or set TCODE_DATA_DIR to use another directory",
+                root.display()
+            ),
+        )
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::Error(error)) => Err(error),
+        // Peek only: the marker is consumed by the host after it owns the data dir.
+        Err(fs::TryLockError::WouldBlock) if crate::relaunch::pending(root) => {
+            // The lock is taken on a thread of its own so the wait can end; the
+            // start has no cancel entry yet, so the deadline stays.
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = sender.send(file.lock().map(|()| file));
+            });
+            match receiver.recv_timeout(RELAUNCH_WAIT) {
+                Ok(owned) => owned,
+                Err(_) => Err(busy()),
             }
         }
+        Err(fs::TryLockError::WouldBlock) => Err(busy()),
     }
 }
 
