@@ -1501,6 +1501,7 @@ preview:
   back: "戻る"
   forward: "進む"
   reload: "再読み込み"
+  stop: "読み込みを停止"
   dev_servers: "ホスト上の開発サーバー"
   no_dev_servers: "ホストで実行中の開発サーバーはありません。"
   open_external: "システムのブラウザーで開く"

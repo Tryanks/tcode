@@ -421,9 +421,43 @@ impl PreviewPanel {
         });
     }
 
-    pub(super) fn history_controls(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn history_controls(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         use crate::material::toolbar_icon_button;
         let compact = self.window_state.read(cx).compact;
+        // While a page loads, Reload is Stop and a spinner turns beside the
+        // address, as in a browser.
+        let loading = self
+            .identity(cx)
+            .is_some_and(|(_, key)| self.lifecycle().read(cx).page_loading(&key));
+        let reload = if loading {
+            toolbar_icon_button(
+                "preview-stop",
+                IconName::Close,
+                crate::tr!("preview.stop"),
+                compact,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
+        } else {
+            toolbar_icon_button(
+                "preview-reload",
+                IconName::Replace,
+                crate::tr!("preview.reload"),
+                compact,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.reload(cx)))
+        };
+        let spinner =
+            crate::motion::shown("preview-loading", loading.then_some(()), SHOW, window, cx).map(
+                |shown| {
+                    shown
+                        .fade(crate::widgets::Spinner::new().color(cx.theme().muted_foreground))
+                        .into_any_element()
+                },
+            );
         vec![
             toolbar_icon_button(
                 "preview-back",
@@ -441,15 +475,19 @@ impl PreviewPanel {
             )
             .on_click(cx.listener(|this, _, _, cx| this.go_forward(cx)))
             .into_any_element(),
-            toolbar_icon_button(
-                "preview-reload",
-                IconName::Replace,
-                crate::tr!("preview.reload"),
-                compact,
-            )
-            .on_click(cx.listener(|this, _, _, cx| this.reload(cx)))
-            .into_any_element(),
+            reload.into_any_element(),
         ]
+        .into_iter()
+        .chain(spinner)
+        .collect()
+    }
+
+    fn stop(&mut self, cx: &mut Context<Self>) {
+        self.user_acted(cx);
+        if let Some(id) = self.active_key(cx) {
+            self.lifecycle()
+                .update(cx, |lifecycle, cx| lifecycle.stop(&id, cx));
+        }
     }
 
     fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {

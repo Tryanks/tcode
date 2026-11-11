@@ -751,7 +751,7 @@ impl PreviewPanel {
             // with the page on another client, they are absent rather than
             // present-but-dead.
             .children(
-                here.then(|| self.history_controls(cx))
+                here.then(|| self.history_controls(window, cx))
                     .into_iter()
                     .flatten(),
             )
@@ -924,7 +924,11 @@ mod portable {
             }
         }
 
-        pub(super) fn history_controls(&self, _cx: &mut Context<Self>) -> Vec<AnyElement> {
+        pub(super) fn history_controls(
+            &self,
+            _window: &mut Window,
+            _cx: &mut Context<Self>,
+        ) -> Vec<AnyElement> {
             Vec::new()
         }
 

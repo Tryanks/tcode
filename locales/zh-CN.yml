@@ -1494,6 +1494,7 @@ preview:
   back: "后退"
   forward: "前进"
   reload: "重新加载"
+  stop: "停止加载"
   dev_servers: "主机上的开发服务器"
   no_dev_servers: "主机上没有正在运行的开发服务器。"
   open_external: "在系统浏览器中打开"

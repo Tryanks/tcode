@@ -1501,6 +1501,7 @@ preview:
   back: "Back"
   forward: "Forward"
   reload: "Reload"
+  stop: "Stop loading"
   dev_servers: "Dev servers on the machine"
   no_dev_servers: "No dev servers are running on the machine."
   open_external: "Open in system browser"
