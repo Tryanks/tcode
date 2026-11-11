@@ -3076,7 +3076,6 @@ impl Actor {
                 (
                     input
                         .get("agent_type")
-                        .or_else(|| input.get("subagent_type"))
                         .and_then(Value::as_str)
                         .unwrap_or_else(|| path.rsplit('/').next().unwrap_or("subagent"))
                         .to_owned(),
@@ -4526,17 +4525,11 @@ fn map_file_change(change: &Value) -> Option<FileChange> {
     let kind_type = kind_value
         .get("type")
         .and_then(Value::as_str)
-        .or_else(|| kind_value.as_str())
         .unwrap_or("update");
     let kind = match kind_type {
-        "add" | "create" => FileChangeKind::Create,
+        "add" => FileChangeKind::Create,
         "delete" => FileChangeKind::Delete,
-        "update"
-            if kind_value
-                .get("move_path")
-                .or_else(|| kind_value.get("movePath"))
-                .is_some_and(|v| !v.is_null()) =>
-        {
+        "update" if kind_value.get("move_path").is_some_and(|v| !v.is_null()) => {
             FileChangeKind::Rename
         }
         _ => FileChangeKind::Modify,
@@ -4597,11 +4590,7 @@ fn map_usage(value: &Value) -> Option<TokenUsage> {
 
 /// `ModelReroutedNotification` (app-server protocol v2, codex-cli 0.167.1).
 fn model_reroute(params: &Value) -> Option<AgentEvent> {
-    let to = params
-        .get("toModel")
-        .or_else(|| params.get("to_model"))
-        .and_then(Value::as_str)?
-        .to_owned();
+    let to = params.get("toModel").and_then(Value::as_str)?.to_owned();
     let field = |name| params.get(name).and_then(Value::as_str).map(str::to_owned);
     Some(AgentEvent::ServedModel {
         model: to,
