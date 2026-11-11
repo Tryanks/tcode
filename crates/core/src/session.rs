@@ -215,6 +215,18 @@ impl StoredEvent {
             _ => None,
         }
     }
+
+    /// What a connection whose line cannot carry this record, `bytes` long
+    /// on the wire, is sent in its place.
+    pub fn withheld(&self, bytes: u64) -> Self {
+        StoredEvent {
+            origin: self.origin,
+            author: self.author.clone(),
+            ts: self.ts,
+            event: AgentEvent::RecordWithheld { bytes },
+            elided: None,
+        }
+    }
 }
 
 impl From<AgentEvent> for StoredEvent {

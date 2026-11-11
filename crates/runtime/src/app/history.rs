@@ -286,7 +286,7 @@ fn wire_window(
         // Separator; also leaves room for an empty array.
         let mut size = wire_len(&wire_record(&records[index])) + 1;
         if line_limit.is_some_and(|line_limit| overhead + size > line_limit) {
-            let placeholder = withheld_record(&records[index], size as u64 - 1);
+            let placeholder = records[index].withheld(size as u64 - 1);
             size = wire_len(&placeholder) + 1;
             withheld.insert(index, placeholder);
         }
@@ -346,18 +346,6 @@ fn wire_window(
     Window {
         range,
         records: merged,
-    }
-}
-
-/// What a client too far away to carry `record` (`bytes` long) is sent in
-/// its place.
-fn withheld_record(record: &StoredEvent, bytes: u64) -> StoredEvent {
-    StoredEvent {
-        origin: record.origin,
-        author: record.author.clone(),
-        ts: record.ts,
-        event: AgentEvent::RecordWithheld { bytes },
-        elided: None,
     }
 }
 

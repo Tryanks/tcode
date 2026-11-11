@@ -412,6 +412,7 @@ async fn pump(
                                 })
                                 .map(|kind| format!("{kind}:{topic}"));
                             let mut envelope = None;
+                            let mut withheld = None;
                             for (id, sender) in &clients {
                                 if subscriptions
                                     .get(id)
@@ -430,6 +431,16 @@ async fn pump(
                                             let _ =
                                                 sender.outbox.try_send_terminal(envelope.clone());
                                         }
+                                    } else if sender
+                                        .policy
+                                        .line_limit()
+                                        .is_some_and(|limit| line.len() > limit)
+                                        && let Some(withheld) =
+                                            withheld.get_or_insert_with(|| withhold(&line))
+                                    {
+                                        let _ = sender
+                                            .outbox
+                                            .try_send(withheld.clone(), replace.clone());
                                     } else {
                                         let _ =
                                             sender.outbox.try_send(line.clone(), replace.clone());
@@ -487,6 +498,24 @@ async fn pump(
             }
         }
     }
+}
+
+/// What a connection whose line `line` exceeds is sent for a thread's record:
+/// the record's size in its place, as a history window sends it, so the
+/// connection stays open and the records after it arrive as they are.
+/// `None` for any other event.
+fn withhold(line: &str) -> Option<String> {
+    let Ok(tcode_protocol::HostMessage::Event(mut envelope)) =
+        tcode_protocol::decode_host_line(line)
+    else {
+        return None;
+    };
+    let tcode_protocol::ServerEvent::SessionEvent(record) = &envelope.event else {
+        return None;
+    };
+    let bytes = serde_json::to_vec(record).ok()?.len() as u64;
+    envelope.event = tcode_protocol::ServerEvent::SessionEvent(record.withheld(bytes));
+    encode_line(&tcode_protocol::HostMessage::Event(envelope)).ok()
 }
 
 /// What the mux routes a host line on. Deserializing only this skips the

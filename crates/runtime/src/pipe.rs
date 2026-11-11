@@ -3,9 +3,7 @@
 use std::sync::{Arc, OnceLock};
 
 use tcode_client::HostLink;
-use tcode_client::attachment::{
-    AttachmentMessage, AttachmentPolicy, AttachmentSender, QueuePolicy,
-};
+use tcode_client::attachment::{AttachmentMessage, AttachmentPolicy, AttachmentSender};
 use tcode_core::thread_sort::ThreadSection;
 use tcode_protocol::{
     ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, Principal, ProtocolError,
@@ -395,15 +393,6 @@ pub(crate) fn after_input(state: &mut AppState, domain_diff: &mut DomainDiff, cx
     domain_diff.emit_changes(state, cx);
 }
 
-/// The longest line `policy`'s connection carries: a network connection
-/// closes on a longer one; an in-process connection has no limit.
-fn line_limit(policy: &AttachmentPolicy) -> Option<usize> {
-    match policy.queue {
-        QueuePolicy::Disconnect { max_line_bytes, .. } => Some(max_line_bytes),
-        QueuePolicy::Unbounded => None,
-    }
-}
-
 fn malformed_message_id(line: &str) -> Option<u64> {
     serde_json::from_str::<serde_json::Value>(line.trim_end())
         .ok()?
@@ -528,7 +517,7 @@ pub(crate) fn handle_client_message(
         }
         ClientPayload::Subscribe(subscription) => {
             state.subscribe(&subscription, cx);
-            state.reply_to_subscription(Some(id), subscription, line_limit(&policy), cx);
+            state.reply_to_subscription(Some(id), subscription, policy.line_limit(), cx);
         }
         ClientPayload::Unsubscribe(subscription) => {
             state.unsubscribe(&subscription, cx);
@@ -1312,7 +1301,7 @@ fn dispatch_query(
             session_id,
             before,
             limit,
-        } => app.session_history_page(&session_id, before, limit, line_limit(&policy), cx),
+        } => app.session_history_page(&session_id, before, limit, policy.line_limit(), cx),
         Query::Hosting { .. } => cx.spawn_background(async {
             Err(ProtocolError {
                 code: "unsupported".into(),
@@ -1521,7 +1510,7 @@ fn dispatch_query(
         Query::ReadItemOutput {
             session_id,
             item_id,
-        } => app.item_output(&session_id, item_id, line_limit(&policy), cx),
+        } => app.item_output(&session_id, item_id, policy.line_limit(), cx),
         Query::ThreadAnchorTurn {
             session_id,
             position,

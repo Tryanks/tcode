@@ -351,7 +351,8 @@ pub use wire::{
 // or deny: rows of them are unreadable_record.
 // The agent event stream gains record_withheld {bytes}: a history window or
 // page sends it for a record longer than the client's line, where the whole
-// reply was the history_record_too_large error.
+// reply was the history_record_too_large error, and a live session_event
+// carries it for such a record, where the connection closed.
 // OptionRole gains effort, context_window, speed and thinking. SelectOption
 // gains speed and summary (a PermissionSummary of profile, sandbox, approval
 // and reviewer); Codex's current permissions carry a summary, not a
