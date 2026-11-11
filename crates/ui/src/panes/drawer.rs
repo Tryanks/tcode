@@ -594,12 +594,19 @@ impl Drawer {
                 window,
                 cx,
             );
+            // Docked and still, the panel is its slot, so a drag of the seam
+            // lays it out at every step as it does the conversation: the
+            // width it is drawn at otherwise comes from the preference,
+            // which the drag writes only once it ends.
+            let fills_slot = glide.size(1).is_none() && cover == 0. && expand == 0.;
             div()
                 .absolute()
                 .top_0()
-                .right(px(0.) - away)
                 .h_full()
-                .w(panel_width)
+                .map(|this| match fills_slot {
+                    true => this.left_0().right_0(),
+                    false => this.right(px(0.) - away).w(panel_width),
+                })
                 .child(panel)
         });
         let slot = panel.map(|panel| {
