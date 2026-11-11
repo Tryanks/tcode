@@ -14832,16 +14832,28 @@ pub(crate) mod tests {
         std::fs::write(device.join("mobile.json"), preferences).unwrap();
         std::fs::write(device.join("hosts.json"), machines).unwrap();
         let client = tcode_traverse::NativeClientHost::new(device.clone(), "phone");
+        use tcode_client::host::ClientHost as _;
+        // The window says each failure in the language it starts in, before
+        // it adopts the host's.
+        let said = [
+            ("mobile.json", client.load_preferences().unwrap_err()),
+            ("hosts.json", client.load_hosts().unwrap_err()),
+        ]
+        .map(|(file, failure)| {
+            let failure = failure.to_string();
+            assert!(failure.contains(file), "{file} is named: {failure}");
+            crate::tr!("errors.file_unreadable", error = failure).into_owned()
+        });
         let (shell, store, host, mut driver, cx) = mount_on_host(cx, disk, Some(Rc::new(client)));
-        driver.wait_until(cx, &store, "the host's settings", |cx| {
+        driver.wait_until(cx, "the host's settings", |cx| {
             store.read_with(cx, |store, _| store.settings_hydrated())
         });
         draw(cx);
-        let said = cx.update(crate::overlay::notifications_said);
-        for file in ["mobile.json", "hosts.json"] {
+        for said in said {
             assert!(
-                said.iter().any(|said| said.contains(file)),
-                "{file} is named: {said:?}"
+                cx.debug_bounds(format!("toast-says-{said}").leak())
+                    .is_some(),
+                "the window says {said}"
             );
         }
         cx.update(|window, cx| DevicePreferences::set_theme(ThemeMode::Light, window, cx));
@@ -14852,7 +14864,7 @@ pub(crate) mod tests {
             preferences
         );
         assert_eq!(std::fs::read(device.join("hosts.json")).unwrap(), machines);
-        driver.shutdown(cx, &store, &host);
+        driver.shutdown(cx, &host);
         drop(shell);
         let _ = std::fs::remove_dir_all(root);
     }

@@ -4925,11 +4925,9 @@ pub(crate) mod tests {
                 cx,
             )
         });
-        space
-            .driver
-            .wait_until(cx, &workspace, "space baseline", |cx| {
-                workspace.read_with(cx, |store, _| store.baseline_ready())
-            });
+        space.driver.wait_until(cx, "space baseline", |cx| {
+            workspace.read_with(cx, |store, _| store.baseline_ready())
+        });
         workspace.update(cx, |store, cx| store.cycle_project_sort(cx));
         cx.run_until_parked();
         cx.update(|cx| {
