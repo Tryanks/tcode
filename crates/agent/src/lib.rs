@@ -1286,6 +1286,7 @@ impl LaunchEnv {
     /// environment resolves `~` against: the `HOME` (`USERPROFILE` on
     /// Windows) it is given, else the account's, as the CLIs' own lookups
     /// fall back to it.
+    #[cfg(feature = "process")]
     pub fn child_home(&self, provider: ProviderKind) -> Option<PathBuf> {
         let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
         self.child_path(provider, key).or_else(dirs::home_dir)
