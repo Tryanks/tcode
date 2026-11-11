@@ -914,30 +914,3 @@ fn shortened_command(command: &str, cols: u16) -> String {
     kept.push('…');
     kept
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn rows(command: &str, cols: u16, shorten: bool) -> usize {
-        command_model(command, cols, shorten, None).1
-    }
-
-    #[test]
-    fn a_command_over_five_rows_shows_four_and_any_other_is_whole() {
-        let lines = |count: usize| vec!["echo one"; count].join("\n");
-        assert_eq!(rows(&lines(5), 80, true), 5);
-        assert_eq!(rows(&lines(6), 80, true), 4);
-        // Rows the grid wraps count as rows a line break makes.
-        assert_eq!(rows(&"x".repeat(50), 10, true), 5);
-        assert_eq!(rows(&"x".repeat(51), 10, true), 4);
-        // The last row kept ends in the ellipsis, on its own row's last cell
-        // when the row was full.
-        let (model, _) = command_model(&"x".repeat(51), 10, true, None);
-        assert_eq!(model.cell(3, 9).unwrap().text, "…");
-        let (model, _) = command_model(&lines(6), 80, true, None);
-        assert_eq!(model.cell(3, 8).unwrap().text, "…");
-        // With the setting off a command is whole however long it is.
-        assert_eq!(rows(&lines(12), 80, false), 12);
-    }
-}

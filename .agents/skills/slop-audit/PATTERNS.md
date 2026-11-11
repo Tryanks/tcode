@@ -510,6 +510,15 @@ On a thread that followed a shell's `cd`:
 > The model went there to look something up and did not come back, that is
 > all. Why would the conversation move? — the maintainer
 
+On a test added for a display rule the maintainer had just stated (a command
+over five rows shows four):
+
+> What is there to add? What is the reason to test a fixed behaviour like
+> this? — the maintainer
+
+A constant applied in one place is not a decision that needs proving: the
+code that states it is the proof, and a test of it only repeats the number.
+
 On whether the audit may build as well as delete:
 
 > Building is not a problem in my eyes. Everything that benefits this
