@@ -296,7 +296,7 @@ mod tests;
 pub use active_session::{ActiveSession, QueuedMessage};
 use active_session::{
     PendingRelay, PendingSteer, ReportHandover, Runtime, SendRouting, attachment_paths,
-    conversation_destination, wire_text_with_placeholder,
+    conversation_destination,
 };
 use orchestrate::McpWiring;
 pub use providers::NewEndpointProfile;
