@@ -889,6 +889,7 @@ fn a_restarted_machine_rejoins_and_delivers_writes_buffered_while_it_was_down() 
 
     // The rejoin is the replayed subscription's snapshot and the buffered
     // command's ack, both arriving over the new connection.
+    client.to_host.wake(Wake::Reconnect);
     wait_state(&client, |state| {
         link.set_connection_state(state.clone());
         connected_directly(state)
