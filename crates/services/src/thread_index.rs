@@ -433,14 +433,14 @@ impl Activity {
                 }
                 ItemContent::ToolCall {
                     name,
-                    input,
                     output,
                     status,
+                    family,
                     ..
                 } => {
                     self.count_tool(name);
-                    for path in input_paths(input) {
-                        push_unique(&mut self.files, path);
+                    if let Some(agent::ToolFamily::Read { path, .. }) = family.as_deref() {
+                        push_unique(&mut self.files, path.clone());
                     }
                     if *status == ItemStatus::Failed {
                         self.errors.push(format!("{name} failed"));
@@ -749,24 +749,6 @@ fn headings(text: &str) -> Vec<String> {
         }
     }
     found
-}
-
-fn input_paths(input: &serde_json::Value) -> Vec<String> {
-    const KEYS: [&str; 5] = [
-        "path",
-        "file_path",
-        "filePath",
-        "notebook_path",
-        "target_file",
-    ];
-    let Some(object) = input.as_object() else {
-        return Vec::new();
-    };
-    KEYS.iter()
-        .filter_map(|key| object.get(*key).and_then(serde_json::Value::as_str))
-        .filter(|path| !path.is_empty())
-        .map(str::to_owned)
-        .collect()
 }
 
 const TOKEN_EDGES: &[char] = &[
@@ -1734,7 +1716,11 @@ mod tests {
             } else {
                 ItemStatus::InProgress
             },
-            family: None,
+            family: Some(Box::new(agent::ToolFamily::Read {
+                path: "src/lib.rs".into(),
+                first_line: None,
+                note: None,
+            })),
         }
     }
 
