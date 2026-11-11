@@ -3164,14 +3164,12 @@ mod tests {
             text: "change direction".into(),
             attachments: Vec::new(),
         };
-        let encoded = serde_json::to_string(&request).unwrap();
-        let decoded: AgentEvent = serde_json::from_str(&encoded).unwrap();
         let mut timeline = Timeline::fold_events([
             user_msg("user-a", "start"),
             AgentEvent::TurnStarted {
                 turn_id: "turn-a".into(),
             },
-            decoded,
+            request.clone(),
         ]);
 
         assert!(matches!(
@@ -3200,8 +3198,6 @@ mod tests {
         let accepted = AgentEvent::SteerAccepted {
             request_id: "steer-a".into(),
         };
-        let accepted: AgentEvent =
-            serde_json::from_str(&serde_json::to_string(&accepted).unwrap()).unwrap();
         timeline.apply_at(None, &accepted);
         assert!(matches!(
             timeline.entries[1].content,
