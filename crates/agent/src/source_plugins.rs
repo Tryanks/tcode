@@ -159,35 +159,66 @@ fn pi_source_is_local(source: &str) -> bool {
 /// resolves the source given to `pi remove` or `pi update` against the
 /// working directory, so a local package goes by the path pi resolved it to.
 /// A package whose settings entry filters its resources is marked
-/// ` (filtered)`, which is not part of its source.
-fn parse_pi_list(stdout: &str) -> Vec<(String, PluginScope, Option<PathBuf>)> {
-    let mut packages = Vec::new();
+/// ` (filtered)`, which is not part of its source. The lines laid out
+/// otherwise (1.5.2's `dist/package-manager-cli.js`, `list`) come back as
+/// written.
+fn parse_pi_list(stdout: &str) -> Listed<'_, (String, PluginScope, Option<PathBuf>)> {
+    let mut listed = Listed::default();
     let mut scope = None;
     for line in stdout.lines() {
         let indent = line.len() - line.trim_start().len();
         let text = line.trim();
         match (indent, text) {
             (_, "") => {}
+            (0, "No packages installed.") => {}
             (0, "User packages:") => scope = Some(PluginScope::User),
             (0, "Project packages:") => scope = Some(PluginScope::Project),
-            (0, _) => scope = None,
-            (2, source) => {
-                if let Some(scope) = scope {
-                    let source = source.strip_suffix(" (filtered)").unwrap_or(source);
-                    packages.push((source.to_string(), scope, None));
-                }
+            (2, source) if let Some(scope) = scope => {
+                let source = source.strip_suffix(" (filtered)").unwrap_or(source);
+                listed.rows.push((source.to_string(), scope, None));
             }
-            (_, path) => {
-                if let Some(package) = packages.last_mut().filter(|package| package.2.is_none()) {
-                    if pi_source_is_local(&package.0) {
-                        package.0 = path.to_string();
-                    }
-                    package.2 = Some(PathBuf::from(path));
+            (4, path)
+                if let Some(package) =
+                    listed.rows.last_mut().filter(|package| package.2.is_none()) =>
+            {
+                if pi_source_is_local(&package.0) {
+                    package.0 = path.to_string();
                 }
+                package.2 = Some(PathBuf::from(path));
             }
+            _ => listed.unread.push(line),
         }
     }
-    packages
+    listed
+}
+
+/// What a CLI's listing held: the rows read from it, and the lines laid out
+/// in no way its reader knows, as the CLI printed them.
+struct Listed<'a, T> {
+    rows: Vec<T>,
+    unread: Vec<&'a str>,
+}
+
+impl<T> Default for Listed<'_, T> {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            unread: Vec::new(),
+        }
+    }
+}
+
+impl<T> Listed<'_, T> {
+    /// The rows, with what could not be read told in `errors` as printed.
+    fn rows(self, command: &str, errors: &mut Vec<String>) -> Vec<T> {
+        if !self.unread.is_empty() {
+            errors.push(format!(
+                "`{command}` printed lines Tcode could not read:\n{}",
+                self.unread.join("\n")
+            ));
+        }
+        self.rows
+    }
 }
 
 pub(crate) async fn list_pi(context: &PluginContext) -> Result<PluginListing, AgentError> {
@@ -203,17 +234,18 @@ pub(crate) async fn list_pi(context: &PluginContext) -> Result<PluginListing, Ag
         Some(LIST_TIMEOUT),
     )
     .await?;
+    let mut errors = Vec::new();
     Ok(PluginListing {
-        entries: pi_entries(&stdout, context.project),
+        entries: pi_entries(&stdout, context.project, &mut errors),
         marketplaces: Vec::new(),
         marketplace_actions: Vec::new(),
-        errors: Vec::new(),
+        errors,
     })
 }
 
-fn pi_entries(stdout: &str, project: bool) -> Vec<ProviderPluginEntry> {
+fn pi_entries(stdout: &str, project: bool, errors: &mut Vec<String>) -> Vec<ProviderPluginEntry> {
     let mut entries: Vec<ProviderPluginEntry> = Vec::new();
-    for (source, scope, location) in parse_pi_list(stdout) {
+    for (source, scope, location) in parse_pi_list(stdout).rows("pi list", errors) {
         // A listing away from a project addresses no project package.
         if scope == PluginScope::Project && !project {
             continue;
@@ -329,37 +361,70 @@ fn configured_plugins(documents: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// `(id, version, source)` per row of `opencode plugin list`'s table.
-fn parse_opencode_list(stdout: &str) -> Vec<(String, Option<String>, String)> {
-    stdout
-        .lines()
-        .skip_while(|line| !line.starts_with("ID"))
-        .skip(1)
-        .filter_map(|line| {
-            let mut columns = line.split_whitespace();
-            let (id, version, source) = (columns.next()?, columns.next()?, columns.next()?);
-            Some((
-                id.to_string(),
-                (version != "-").then(|| version.to_string()),
-                source.to_string(),
-            ))
-        })
-        .collect()
+/// `(id, version, source)` per row of `opencode plugin list`'s table:
+/// `ID  VERSION  SOURCE`, each column padded to its widest cell, the source
+/// last and whole, or `No plugins found` (`cli.plugin.list` at v2.2.7).
+fn parse_opencode_list(stdout: &str) -> Listed<'_, (String, Option<String>, String)> {
+    let mut listed = Listed::default();
+    let mut columns = None;
+    for line in stdout.lines() {
+        if line.trim().is_empty() || (columns.is_none() && line == "No plugins found") {
+            continue;
+        }
+        let Some((version_at, source_at)) = columns else {
+            match (line.find("  VERSION  "), line.find("  SOURCE")) {
+                (Some(version), Some(source)) if line.starts_with("ID ") => {
+                    columns = Some((version + 2, source + 2));
+                }
+                _ => listed.unread.push(line),
+            }
+            continue;
+        };
+        let cell = |range: std::ops::Range<usize>| line.get(range).map(str::trim_end);
+        match (
+            cell(0..version_at),
+            cell(version_at..source_at),
+            line.get(source_at..),
+        ) {
+            (Some(id), Some(version), Some(source))
+                if !id.is_empty() && !version.is_empty() && !source.is_empty() =>
+            {
+                listed.rows.push((
+                    id.to_string(),
+                    (version != "-").then(|| version.to_string()),
+                    source.to_string(),
+                ));
+            }
+            _ => listed.unread.push(line),
+        }
+    }
+    listed
 }
 
 /// `(name, state)` per line of `opencode plugin check`, indented under a
-/// section heading: `  name [version] (state)`.
-fn parse_opencode_check(stdout: &str) -> Vec<(String, String)> {
-    stdout
-        .lines()
-        .filter(|line| line.starts_with(' '))
-        .filter_map(|line| {
-            let line = line.trim();
-            let (head, state) = line.strip_suffix(')')?.rsplit_once(" (")?;
-            let name = head.split_whitespace().next()?;
-            Some((name.to_string(), state.to_string()))
-        })
-        .collect()
+/// section heading: `  name [version] (state)`, or `No package plugins
+/// found` (`cli.plugin.check` at v2.2.7).
+fn parse_opencode_check(stdout: &str) -> Listed<'_, (String, String)> {
+    let mut listed = Listed::default();
+    for line in stdout.lines() {
+        if line.trim().is_empty() || line == "No package plugins found" {
+            continue;
+        }
+        if !line.starts_with(' ') {
+            // A section's heading.
+            continue;
+        }
+        let read = line
+            .trim()
+            .strip_suffix(')')
+            .and_then(|line| line.rsplit_once(" ("))
+            .and_then(|(head, state)| Some((head.split_whitespace().next()?, state)));
+        match read {
+            Some((name, state)) => listed.rows.push((name.to_string(), state.to_string())),
+            None => listed.unread.push(line),
+        }
+    }
+    listed
 }
 
 /// `opencode plugin check` prints its report and then exits 1 when any
@@ -399,20 +464,20 @@ pub(crate) async fn list_opencode(context: &PluginContext) -> Result<PluginListi
     let (loaded, checked) =
         smol::future::zip(run(&["plugin", "list"]), run(&["plugin", "check"])).await;
     let mut errors = Vec::new();
-    let loaded = loaded
-        .and_then(cli_stdout)
-        .map(|out| parse_opencode_list(&out))
-        .unwrap_or_else(|error| {
+    let loaded = match loaded.and_then(cli_stdout) {
+        Ok(out) => parse_opencode_list(&out).rows("opencode plugin list", &mut errors),
+        Err(error) => {
             errors.push(format!("opencode plugin list: {error}"));
             Vec::new()
-        });
-    let checked = checked
-        .and_then(opencode_check_report)
-        .map(|out| parse_opencode_check(&out))
-        .unwrap_or_else(|error| {
+        }
+    };
+    let checked = match checked.and_then(opencode_check_report) {
+        Ok(out) => parse_opencode_check(&out).rows("opencode plugin check", &mut errors),
+        Err(error) => {
             errors.push(format!("opencode plugin check: {error}"));
             Vec::new()
-        });
+        }
+    };
     let entries = configured
         .iter()
         .map(|source| {
@@ -485,6 +550,7 @@ mod tests {
         let listed = pi_entries(
             "User packages:\n  npm:pi-extmgr (filtered)\n    /home/me/.pi/agent/npm/node_modules/pi-extmgr\n  ../tools/my-ext\n    /home/me/.pi/tools/my-ext\n\nProject packages:\n  npm:pi-extmgr\n    /work/proj/.pi/npm/node_modules/pi-extmgr\n",
             true,
+            &mut Vec::new(),
         );
         assert_eq!(
             listed
@@ -514,6 +580,21 @@ mod tests {
                     vec![PluginScope::User]
                 ),
             ]
+        );
+    }
+
+    /// A listing laid out in a way Tcode does not know is told as pi printed
+    /// it, not passed over.
+    #[test]
+    fn a_pi_listing_tcode_cannot_read_is_told_as_printed() {
+        let mut errors = Vec::new();
+        let listed = pi_entries("Packages:\n  npm:pi-extmgr\n", true, &mut errors);
+        assert!(listed.is_empty());
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.ends_with("\nPackages:\n  npm:pi-extmgr")),
+            "{errors:?}"
         );
     }
 
@@ -552,7 +633,8 @@ mod tests {
         assert_eq!(
             parse_opencode_list(
                 "ID                 VERSION  SOURCE\nopencode.wakatime  1.4.0    opencode-wakatime\n-                  -        broken@1.3.0\n"
-            ),
+            )
+            .rows,
             [
                 (
                     "opencode.wakatime".to_string(),
@@ -565,7 +647,8 @@ mod tests {
         assert_eq!(
             parse_opencode_check(
                 "Server\n  opencode.wakatime 1.4.0 (current)\n  broken@1.3.0 (check failed)\n"
-            ),
+            )
+            .rows,
             [
                 ("opencode.wakatime".to_string(), "current".to_string()),
                 ("broken@1.3.0".to_string(), "check failed".to_string()),
@@ -598,7 +681,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            parse_opencode_check(&report),
+            parse_opencode_check(&report).rows,
             [
                 ("opencode.wakatime".to_string(), "current".to_string()),
                 ("broken@1.3.0".to_string(), "check failed".to_string()),
