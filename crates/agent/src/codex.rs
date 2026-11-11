@@ -824,6 +824,8 @@ struct Actor {
     /// Subagents a completed turn left running, reported as backgrounded.
     backgrounded_subagents: HashSet<String>,
     background_terminals: Vec<crate::BackgroundTask>,
+    /// The commands whose background terminals the user stopped.
+    stopped_commands: HashSet<String>,
     /// When to read the list again, while any terminal runs.
     background_terminal_read: Option<std::time::Instant>,
     /// Stable parent capsule for each provider-native child thread. Codex 0.150
@@ -934,6 +936,7 @@ async fn run_actor(
         subagents: HashMap::new(),
         backgrounded_subagents: HashSet::new(),
         background_terminals: Vec::new(),
+        stopped_commands: HashSet::new(),
         background_terminal_read: None,
         subagent_parent_by_thread: HashMap::new(),
         seen_subagent_activities: HashSet::new(),
@@ -1264,6 +1267,12 @@ impl SessionActor for Actor {
                 Ok(())
             }
             SessionCommand::StopBackgroundTask { task_id } => {
+                let stopped = self
+                    .background_terminals
+                    .iter()
+                    .filter(|task| task_id.as_ref().is_none_or(|id| *id == task.id))
+                    .filter_map(|task| task.item_id.clone());
+                self.stopped_commands.extend(stopped);
                 let thread_id = self.thread_id.clone();
                 let (method, params) = match task_id {
                     Some(process_id) => (
@@ -2951,6 +2960,23 @@ impl Actor {
                 }
                 if let Some(mut item) = item_value.and_then(|value| lifecycle_item(method, value)) {
                     self.capture_read_image(&mut item).await;
+                    // A command the user stopped ends as Codex reports a
+                    // killed process: failed, with exit code -1, its
+                    // `unwrap_or(-1)` for a process that left no code
+                    // (`core/src/unified_exec/async_watcher.rs`). It was
+                    // stopped, not failed, and it gave no code.
+                    if method == "item/completed"
+                        && self.stopped_commands.remove(&item.id)
+                        && let ItemContent::CommandExecution {
+                            exit_code, status, ..
+                        } = &mut item.content
+                        && *status == ItemStatus::Failed
+                    {
+                        *status = ItemStatus::Interrupted;
+                        if *exit_code == Some(-1) {
+                            *exit_code = None;
+                        }
+                    }
                     if let Some(subagent) = self.subagents.get(&item.id) {
                         let status = if method == "item/completed" {
                             item_status(&item.content)
@@ -5401,6 +5427,7 @@ mod tests {
                 subagents: HashMap::new(),
                 backgrounded_subagents: HashSet::new(),
                 background_terminals: Vec::new(),
+                stopped_commands: HashSet::new(),
                 background_terminal_read: None,
                 subagent_parent_by_thread: HashMap::new(),
                 seen_subagent_activities: HashSet::new(),
