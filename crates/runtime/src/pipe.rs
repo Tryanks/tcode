@@ -1918,7 +1918,7 @@ mod tests {
         );
         meta.id = "pictured".into();
         store.upsert_meta(&meta).expect("write meta");
-        let bytes = include_bytes!("../../../assets/icons/app/tcode.png").to_vec();
+        let bytes = include_bytes!("../../../docs/images/acp-marketplace.png").to_vec();
         store
             .append_event(
                 &meta.id,
@@ -1957,7 +1957,7 @@ mod tests {
         ))
         .expect("open the original");
         assert_eq!(source.metadata.len, bytes.len() as u64);
-        assert_eq!(source.metadata.dimensions, Some((1024, 1024)));
+        assert_eq!(source.metadata.dimensions, Some((1968, 1360)));
         let mut received = Vec::new();
         let mut block_lens = Vec::new();
         loop {
