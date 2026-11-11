@@ -3090,6 +3090,14 @@ impl WorkspaceStore {
     }
 
     /// Why the host's saved secrets could not be read.
+    /// What of `provider`'s model catalog could not be read.
+    pub fn model_problems(&self, provider: agent::ProviderKind) -> &[String] {
+        self.providers_replica
+            .model_problems
+            .get(&provider)
+            .map_or(&[], Vec::as_slice)
+    }
+
     pub fn login_shell_unread(&self) -> Option<&str> {
         self.providers_replica.login_shell_unread.as_deref()
     }

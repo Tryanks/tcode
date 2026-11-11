@@ -945,6 +945,7 @@ providers:
     trust_project_extensions: "信任项目扩展"
     trust_project_extensions_help: "以 --approve 启动 pi，加载项目 .pi 目录中的扩展、设置与技能。"
   harness:
+    catalog_problems: "模型目录中 Tcode 读不了的部分已略去："
     unnamed: "Harness"
     default_permission: "默认权限"
     default_permission_help: "项目未指定时，新线程无需询问即可执行的操作。"

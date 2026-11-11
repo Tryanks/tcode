@@ -57,6 +57,9 @@ const LIVE_USAGE_TIMEOUT: Duration = Duration::from_secs(20);
 pub struct ProviderCatalog {
     pub model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
     model_refreshes: HashMap<ProviderKind, ModelRefresh>,
+    /// What of each provider's catalog in `model_catalogs` could not be
+    /// read and was left out.
+    model_problems: HashMap<ProviderKind, Vec<String>>,
     pub provider_versions: HashMap<ProviderKind, ProviderVersionState>,
     version_rounds: HashMap<u64, VersionCheckRound>,
     next_version_round: u64,
@@ -94,6 +97,7 @@ impl ProviderCatalog {
         Self {
             model_catalogs,
             model_refreshes: HashMap::new(),
+            model_problems: HashMap::new(),
             provider_versions: HashMap::new(),
             version_rounds: HashMap::new(),
             next_version_round: 0,
@@ -274,6 +278,7 @@ impl ProviderCatalog {
                 .iter()
                 .filter_map(|(provider, refresh)| Some((*provider, refresh.failure.clone()?)))
                 .collect(),
+            model_problems: self.model_problems.clone(),
             provider_versions: self
                 .provider_versions
                 .iter()
@@ -400,11 +405,22 @@ impl AppState {
                         return;
                     }
                     match result {
-                        Ok(models) => {
-                            if let Err(err) = store.save_models(provider, &models) {
+                        Ok(listing) => {
+                            if let Err(err) = store.save_models(provider, &listing.models) {
                                 log::warn!("failed to persist {provider:?} model catalog: {err}");
                             }
-                            state.providers.model_catalogs.insert(provider, models);
+                            state
+                                .providers
+                                .model_catalogs
+                                .insert(provider, listing.models);
+                            if listing.problems.is_empty() {
+                                state.providers.model_problems.remove(&provider);
+                            } else {
+                                state
+                                    .providers
+                                    .model_problems
+                                    .insert(provider, listing.problems);
+                            }
                         }
                         Err(err) => log::warn!("failed to list {provider:?} models: {err}"),
                     }

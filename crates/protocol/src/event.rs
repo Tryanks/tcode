@@ -378,6 +378,10 @@ pub struct ProvidersStatus {
     /// or the process said; its catalog is the one listed before, if any.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub model_errors: HashMap<ProviderKind, String>,
+    /// What of a provider's catalog could not be read and was left out of
+    /// its models, one line each.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_problems: HashMap<ProviderKind, Vec<String>>,
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
     pub update_run: Option<ProviderUpdateRun>,
     pub tcode_update: TcodeUpdateStatus,
