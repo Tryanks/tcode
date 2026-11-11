@@ -187,11 +187,6 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo nextest run --workspace --locked   # or: cargo test --workspace --locked
 ```
 
-Clippy on one platform does not compile the code another platform's `cfg`
-selects, and that is where CI's Clippy most often fails. `.github/clippy/all.sh`
-runs it for all three from one machine: natively, for the Windows target with
-`cargo-xwin`, and for Linux in a container.
-
 Clippy also enforces the process boundaries in [`clippy.toml`](clippy.toml):
 child processes go through the `process` helpers in `services` and `agent`,
 and blocking work goes through `Host::unblock`. A new approved site carries an
