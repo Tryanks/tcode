@@ -354,6 +354,112 @@ fn a_reverted_codex_thread_shows_the_history_it_kept_and_what_followed() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// A fork attached to its parent and made while the parent's turn ran shows
+/// what Codex shows of it: its own conversation, without the parent's
+/// history it continues or the records it opens with, the interrupted-turn
+/// guidance and the parent turn's abort. Shapes from `rust-v0.167.0`: the
+/// fork's `session_meta` carries `forked_from_id`, `attached_thread`,
+/// `forked_from_ordinal_exclusive` and `history_base` (`SessionMeta`,
+/// `protocol/src/protocol.rs`); a mid-turn fork opens with
+/// `thread_settings_applied`, the `<turn_aborted>` guidance as a user
+/// message (`core/src/context/turn_aborted.rs`) and `turn_aborted`
+/// (`append_interrupted_boundary`, `core/src/thread_manager.rs`), and
+/// Codex's history page starts after it (`attached_history_start`,
+/// thread-store `local/rollout_lineage.rs`). Settings fields Tcode does not
+/// read are left out; content invented.
+#[test]
+fn an_attached_mid_turn_fork_shows_its_own_conversation() {
+    let home = std::env::temp_dir().join(format!("tcode-codex-{}", uuid::Uuid::new_v4()));
+    let day = home.join("sessions").join("2026").join("01").join("02");
+    std::fs::create_dir_all(&day).unwrap();
+    let parent = "00000000-0000-7000-8000-000000000041";
+    let fork = "00000000-0000-7000-8000-000000000042";
+    let record = |ordinal: u64, time: &str, kind: &str, payload: &str| {
+        format!(
+            r#"{{"timestamp":"2026-01-02T03:{time}.000Z","ordinal":{ordinal},"type":"{kind}","payload":{payload}}}"#
+        )
+    };
+    let meta = |ordinal: u64, time: &str, id: &str, fork_of: &str| {
+        record(
+            ordinal,
+            time,
+            "session_meta",
+            &format!(
+                r#"{{"id":"{id}","timestamp":"2026-01-02T03:{time}.000Z","cwd":"/work/example","originator":"codex_cli_rs","cli_version":"0.167.0","history_mode":"paginated"{fork_of}}}"#
+            ),
+        )
+    };
+    let message = |ordinal: u64, time: &str, role: &str, kind: &str, text: &str| {
+        record(
+            ordinal,
+            time,
+            "response_item",
+            &format!(
+                r#"{{"type":"message","role":"{role}","content":[{{"type":"{kind}","text":"{text}"}}]}}"#
+            ),
+        )
+    };
+    let taken = [
+        meta(0, "04:05", parent, ""),
+        message(1, "04:06", "user", "input_text", "Plan the change"),
+        message(2, "04:07", "assistant", "output_text", "Planning it."),
+    ]
+    .map(|line| line + "\n")
+    .concat();
+    std::fs::write(
+        day.join(format!("rollout-2026-01-02T03-04-05-{parent}.jsonl")),
+        taken.clone() + &message(3, "04:08", "assistant", "output_text", "Still planning.") + "\n",
+    )
+    .unwrap();
+    let fork_of = format!(
+        r#","forked_from_id":"{parent}","attached_thread":true,"forked_from_ordinal_exclusive":3,"history_base":{{"thread_id":"{parent}","end_ordinal_exclusive":3,"end_byte_offset":{}}}"#,
+        taken.len()
+    );
+    let forked = day.join(format!("rollout-2026-01-02T03-05-00-{fork}.jsonl"));
+    std::fs::write(
+        &forked,
+        [
+            meta(3, "05:00", fork, &fork_of),
+            record(
+                4,
+                "05:00",
+                "event_msg",
+                r#"{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.5","model_provider_id":"openai","cwd":"/work/example"}}"#,
+            ),
+            message(
+                5,
+                "05:00",
+                "user",
+                "input_text",
+                "<turn_aborted>\\nThe user interrupted the previous turn on purpose.\\n</turn_aborted>",
+            ),
+            record(
+                6,
+                "05:00",
+                "event_msg",
+                r#"{"type":"turn_aborted","turn_id":"turn-1","reason":"interrupted"}"#,
+            ),
+            message(7, "05:01", "user", "input_text", "Only the tests"),
+            message(8, "05:02", "assistant", "output_text", "Tests only."),
+        ]
+        .map(|line| line + "\n")
+        .concat(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        shown(codex::convert(&forked, "codex:example").unwrap()),
+        [
+            user("Only the tests"),
+            Some(ItemContent::AssistantMessage {
+                text: "Tests only.".into(),
+                summarized: false,
+            }),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 fn command(
     command: &str,
     output: &str,

@@ -62,9 +62,13 @@ pub(super) fn is_read_rollout(path: &Path) -> bool {
 /// `thread/revert` or a fork wrote names in its `session_meta.history_base`
 /// (`HistoryPosition`, `protocol/src/protocol.rs`) the rollout it continues
 /// and the byte offset just past the last record it takes from it; that
-/// rollout may continue another in turn.
+/// rollout may continue another in turn. A history stops at an attached
+/// fork made at its parent's bookmark ([`at_parent`]).
 fn inherited(path: &Path, meta: &Value, seen: &mut HashSet<String>) -> Result<Vec<String>, String> {
-    let Some(base) = meta.pointer("/payload/history_base") else {
+    let Some(base) = meta
+        .pointer("/payload/history_base")
+        .filter(|_| !at_parent(path, meta))
+    else {
         return Ok(Vec::new());
     };
     let malformed = || format!("{} has an unreadable history_base", path.display());
@@ -99,14 +103,81 @@ fn inherited(path: &Path, meta: &Value, seen: &mut HashSet<String>) -> Result<Ve
     }
     let text = String::from_utf8(bytes)
         .map_err(|err| format!("failed to read {}: {err}", base_path.display()))?;
-    let own: Vec<String> = text.lines().map(str::to_owned).collect();
+    let mut own: Vec<String> = text.lines().map(str::to_owned).collect();
     let base_meta = own
         .first()
         .and_then(|line| serde_json::from_str::<Value>(line).ok())
         .unwrap_or(Value::Null);
     let mut lines = inherited(&base_path, &base_meta, seen)?;
+    if at_parent(&base_path, &base_meta) && !own.is_empty() {
+        let opening = fork_opening(&own[1..]);
+        own.drain(1..=opening);
+    }
     lines.extend(own);
     Ok(lines)
+}
+
+/// Whether the rollout at `path` is a fork attached to its parent and made
+/// at the parent's bookmark, which Codex shows from its own records alone:
+/// none of the parent's, and none of the records it opens with
+/// ([`fork_opening`]). A revert of such a fork may continue its earlier
+/// records instead, and that history goes on to the fork's own start
+/// (`at_parent` in `resolve_rollout_lineage_with_mode`, thread-store
+/// `local/rollout_lineage.rs` at `rust-v0.167.0`, as it reads a history
+/// page; `attached_thread` and `history_base` of `SessionMeta`,
+/// `protocol/src/protocol.rs`).
+fn at_parent(path: &Path, meta: &Value) -> bool {
+    let meta = meta.get("payload").unwrap_or(&Value::Null);
+    meta.get("attached_thread").and_then(Value::as_bool) == Some(true)
+        && meta
+            .pointer("/history_base/end_ordinal_exclusive")
+            .and_then(Value::as_u64)
+            .zip(fork_bookmark(path, meta))
+            .is_some_and(|(end, bookmark)| end <= bookmark)
+}
+
+/// The first record of a fork's parent its history does not take: the
+/// fork's `forked_from_ordinal_exclusive`, else the end of its
+/// `history_base` when that is the parent or the rollout is the thread's
+/// first (`forked_from_ordinal_exclusive`, `rollout/src/metadata.rs` at
+/// `rust-v0.167.0`).
+fn fork_bookmark(path: &Path, meta: &Value) -> Option<u64> {
+    let parent = meta.get("forked_from_id")?.as_str()?;
+    if let Some(bookmark) = meta
+        .get("forked_from_ordinal_exclusive")
+        .and_then(Value::as_u64)
+    {
+        return Some(bookmark);
+    }
+    let base = meta.get("history_base")?;
+    let first = rollout_name(path)
+        .is_some_and(|(_, _, rollout)| meta.get("id").and_then(Value::as_str) == Some(rollout));
+    (base.get("thread_id").and_then(Value::as_str) == Some(parent) || first)
+        .then(|| base.get("end_ordinal_exclusive")?.as_u64())
+        .flatten()
+}
+
+/// How many of the records after a mid-turn fork's `session_meta` open it:
+/// past settings and response items (the interrupted-turn guidance), up to
+/// and including the `turn_aborted` its parent's turn ended with, when that
+/// is among the first three; none otherwise (`attached_history_start`,
+/// `local/rollout_lineage.rs` at `rust-v0.167.0`).
+fn fork_opening(records: &[String]) -> usize {
+    for (index, record) in records.iter().take(3).enumerate() {
+        let Ok(record) = serde_json::from_str::<Value>(record) else {
+            break;
+        };
+        match (
+            record.get("type").and_then(Value::as_str),
+            record.pointer("/payload/type").and_then(Value::as_str),
+        ) {
+            (Some("session_meta" | "response_item"), _)
+            | (Some("event_msg"), Some("thread_settings_applied")) => {}
+            (Some("event_msg"), Some("turn_aborted")) => return index + 1,
+            _ => break,
+        }
+    }
+    0
 }
 
 /// The rollout whose file name carries `rollout` as its rollout id, in the
@@ -169,6 +240,18 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
     }
 
     let inherited = inherited(path, &meta, &mut HashSet::new())?;
+    // A mid-turn fork's own history starts after the records it opens with.
+    let mut opening = Vec::new();
+    if at_parent(path, &meta) {
+        for _ in 0..3 {
+            match lines.next() {
+                Some(line) => opening.push(line.map_err(read)?),
+                None => break,
+            }
+        }
+        let skip = fork_opening(&opening);
+        opening.drain(..skip);
+    }
     let first_meta_ts = inherited
         .first()
         .and_then(|line| serde_json::from_str::<Value>(line).ok())
@@ -188,6 +271,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<ConvertedThread,
 
     for line in inherited
         .into_iter()
+        .chain(opening)
         .map(Ok)
         .chain(lines.map(|line| line.map_err(read)))
     {
