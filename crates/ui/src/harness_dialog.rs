@@ -85,8 +85,7 @@ impl HarnessId {
     }
 }
 
-/// The host's description of `harness`; before one arrives, what its
-/// adapter's facts say.
+/// The host's description of `harness`, once the host has sent one.
 pub(crate) fn describe(store: &WorkspaceStore, harness: &HarnessId) -> Option<HarnessDescription> {
     store
         .harness_descriptions()
