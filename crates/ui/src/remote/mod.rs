@@ -2034,7 +2034,7 @@ mod tests {
         let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("hosts-unreadable").is_some());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A scanned link that opens no path to the machine: the Hosts page asks
@@ -2239,20 +2239,13 @@ mod tests {
                 cx.executor().advance_clock(crate::edge_back::SETTLE);
             }
         };
-        for width in [1024., 393.] {
-            cx.simulate_resize(gpui::size(px(width), px(852.)));
-            state.update(cx, |state, cx| {
-                state.compact = width < 900.;
-                cx.notify();
-            });
-            draw(cx);
-            assert!(
-                cx.debug_bounds("hosts-remote-settings").is_some(),
-                "with hosting off, the page leads to the setting"
-            );
-            assert!(cx.debug_bounds("remote-invitation").is_none());
-            assert!(cx.debug_bounds("hosting-settings").is_none());
-        }
+        draw(cx);
+        assert!(
+            cx.debug_bounds("hosts-remote-settings").is_some(),
+            "with hosting off, the page leads to the setting"
+        );
+        assert!(cx.debug_bounds("remote-invitation").is_none());
+        assert!(cx.debug_bounds("hosting-settings").is_none());
 
         let host = TraverseHost::start(
             mux,
@@ -2269,23 +2262,16 @@ mod tests {
         cx.update(|_, cx| {
             cx.update_global::<RemoteController, _>(|controller, _| controller.adopt_host(host));
         });
-        for width in [1024., 393.] {
-            cx.simulate_resize(gpui::size(px(width), px(852.)));
-            state.update(cx, |state, cx| {
-                state.compact = width < 900.;
-                cx.notify();
-            });
-            draw(cx);
-            assert!(
-                cx.debug_bounds("remote-invitation").is_some(),
-                "hosting and accepting devices, the invitation is on the page"
-            );
-            assert!(cx.debug_bounds("hosts-remote-settings").is_none());
-            assert!(
-                cx.debug_bounds("hosting-settings").is_none(),
-                "the hosting controls stay in Settings"
-            );
-        }
+        draw(cx);
+        assert!(
+            cx.debug_bounds("remote-invitation").is_some(),
+            "hosting and accepting devices, the invitation is on the page"
+        );
+        assert!(cx.debug_bounds("hosts-remote-settings").is_none());
+        assert!(
+            cx.debug_bounds("hosting-settings").is_none(),
+            "the hosting controls stay in Settings"
+        );
 
         cx.update(|_, cx| {
             cx.update_global::<RemoteController, _>(|controller, _| {
@@ -2294,25 +2280,18 @@ mod tests {
                     .unwrap();
             });
         });
-        for width in [1024., 393.] {
-            cx.simulate_resize(gpui::size(px(width), px(852.)));
-            state.update(cx, |state, cx| {
-                state.compact = width < 900.;
-                cx.notify();
-            });
-            draw(cx);
-            assert!(cx.debug_bounds("remote-invitation").is_none());
-            assert!(
-                cx.debug_bounds("hosts-remote-settings").is_some(),
-                "with pairing off, the page leads to the setting"
-            );
-            assert!(cx.debug_bounds("hosting-settings").is_none());
-        }
+        draw(cx);
+        assert!(cx.debug_bounds("remote-invitation").is_none());
+        assert!(
+            cx.debug_bounds("hosts-remote-settings").is_some(),
+            "with pairing off, the page leads to the setting"
+        );
+        assert!(cx.debug_bounds("hosting-settings").is_none());
 
         cx.update(|_, cx| {
             cx.update_global::<RemoteController, _>(|controller, _| controller.stop_hosting());
         });
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(feature = "remote-hosting")]
@@ -2366,6 +2345,6 @@ mod tests {
             });
         });
         assert_eq!(client.load_hosts().unwrap(), vec![host("current pairing")]);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

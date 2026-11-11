@@ -187,6 +187,6 @@ mod tests {
                 "{target}"
             );
         }
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

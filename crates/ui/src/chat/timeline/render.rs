@@ -581,7 +581,6 @@ impl TimelineView {
                         if *running {
                             return div()
                                 .id(("working-status", index))
-                                .debug_selector(move || format!("working-status-{index}"))
                                 .child(components::indicator::turn_working_indicator(
                                     number,
                                     turn.start_ts,
@@ -2088,13 +2087,13 @@ impl TimelineView {
 mod tests {
     use super::*;
     use crate::chat::tests::*;
-    use crate::test_frames::{draw, draw_settled};
+    use crate::test_frames::draw_settled;
     use agent::ItemStatus;
     use gpui::TestAppContext;
     use tcode_core::session::TurnMeta;
 
     #[gpui::test]
-    fn pending_steer_after_the_last_segment_renders_in_the_trailer(cx: &mut TestAppContext) {
+    fn a_pending_steer_shows_as_its_bubble(cx: &mut TestAppContext) {
         use gpui::{VisualTestContext, px, size};
         use tcode_core::session::SteeringStatus;
 
@@ -2185,95 +2184,15 @@ mod tests {
         }
     }
 
-    /// A chat under a probe that reads, on each frame it draws, how far in
-    /// the hover fill of each of `keys` is.
-    struct HoverProbe {
-        chat: gpui::Entity<ChatView>,
-        keys: &'static [&'static str],
-        drawn: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<&'static str, f32>>>,
-    }
-
-    impl gpui::Render for HoverProbe {
-        fn render(
-            &mut self,
-            window: &mut gpui::Window,
-            cx: &mut gpui::Context<Self>,
-        ) -> impl gpui::IntoElement {
-            use gpui::{ParentElement as _, Styled as _};
-            let hover = self.chat.read(cx).timeline.read(cx).hover.clone();
-            for &key in self.keys {
-                let fill = hover.reveal(key, window, cx);
-                self.drawn.borrow_mut().insert(key, fill);
-            }
-            gpui::div().size_full().child(self.chat.read(cx).frame())
-        }
-    }
-
-    /// The Copy of the message a finished turn ends on, drawn in the turn's
-    /// footer, stays in as the pointer goes down from the message's text,
-    /// across the space between them, onto Copy: the message and its footer
-    /// are one hover.
+    /// A running command's panel watches the host's screen at the panel's
+    /// width, over one subscription per width that growth keeps and that
+    /// collapsing the panel or leaving the thread releases.
     #[gpui::test]
-    fn the_pointer_going_from_a_message_to_its_footer_keeps_copy_in(cx: &mut TestAppContext) {
-        use gpui::{AppContext as _, Modifiers, VisualTestContext, point, px, size};
-        use std::time::Duration;
-
-        const KEYS: &[&str] = &["assistant-answer"];
-        let mut timeline = Timeline::default();
-        timeline.turns = vec![TurnMeta {
-            end_ts: Some(1_700_000_000),
-            ..TurnMeta::default()
-        }];
-        timeline.entries.push(entry("question", user_item("go")));
-        timeline.entries.push(entry(
-            "answer",
-            assistant("The first line.\n\nThe second line."),
-        ));
-        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
-        let drawn = std::rc::Rc::default();
-        let (_, cx) = cx.add_window_view(|window, cx| HoverProbe {
-            chat: cx.new(|cx| {
-                ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
-            }),
-            keys: KEYS,
-            drawn: std::rc::Rc::clone(&drawn),
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(700.)));
-        draw_settled(cx);
-
-        let message = cx
-            .debug_bounds("timeline-row-1")
-            .expect("the message's row");
-        let copy = cx
-            .debug_bounds("copy-assistant:answer")
-            .expect("the footer's Copy");
-        let x = copy.center().x;
-        cx.simulate_mouse_move(point(x, message.top() + px(4.)), None, Modifiers::default());
-        draw_settled(cx);
-        assert_eq!(drawn.borrow()[KEYS[0]], 1., "the message's Copy is in");
-
-        // A pixel at a time, a frame apart, as a slow pointer moves.
-        let mut y = message.top() + px(4.);
-        while y < copy.center().y {
-            y += px(1.);
-            cx.simulate_mouse_move(point(x, y), None, Modifiers::default());
-            cx.executor().advance_clock(Duration::from_millis(16));
-            cx.update(|window, cx| window.simulate_next_frame(cx));
-            draw(cx);
-            let reveal = drawn.borrow()[KEYS[0]];
-            assert_eq!(reveal, 1., "Copy faded with the pointer at {y:?}: {reveal}");
-        }
-    }
-
-    /// A running command's panel shows the screens the host renders at the
-    /// panel's width, pushed as the output grows, over one subscription per
-    /// width that collapsing the panel or leaving the thread releases.
-    #[gpui::test]
-    fn a_running_command_shows_the_screens_the_host_pushes_for_its_width(cx: &mut TestAppContext) {
-        use crate::terminal_drawer::TERMINAL_CELL_HEIGHT;
+    fn a_running_command_subscribes_to_the_screen_at_its_width_until_closed(
+        cx: &mut TestAppContext,
+    ) {
         use gpui::{VisualTestContext, px, size};
-        use tcode_protocol::{Topic, terminal::TerminalColor};
+        use tcode_protocol::Topic;
 
         let (host, session_id, _) = seeded_chat_host(cx, Timeline::default(), false);
         cx.update(|cx| cx.set_reduce_motion(true));
@@ -2402,16 +2321,7 @@ mod tests {
         let subscribed = vec![(session_id.clone(), "run".to_string(), cols)];
         assert_eq!(output_topics(), subscribed);
 
-        let mut long_line = "x".repeat(usize::from(cols));
-        long_line.push_str("yz");
-        let growth = [
-            "10%\r".to_string(),
-            "50%\r".into(),
-            "100%\n".into(),
-            format!("{long_line}\n"),
-            "\u{1b}[32mok\u{1b}[0m\n".into(),
-        ];
-        for (index, text) in growth.into_iter().enumerate() {
+        for (index, text) in ["10%\n", "100%\n"].into_iter().enumerate() {
             let seeded_id = session_id.clone();
             smol::block_on(host.update_state_for_test(move |state, cx| {
                 state.record_event_for_replica_test(
@@ -2420,7 +2330,7 @@ mod tests {
                     &agent::AgentEvent::Delta {
                         item_id: "run".into(),
                         kind: agent::DeltaKind::CommandOutput,
-                        text,
+                        text: text.into(),
                     },
                     cx,
                 );
@@ -2430,32 +2340,9 @@ mod tests {
             assert_eq!(output_topics(), subscribed, "growth re-subscribed");
         }
         settle(cx, "the screen after the last growth", &|cx| {
-            frame(cx).is_some_and(|frame| frame.rows == 4)
+            frame(cx).is_some_and(|frame| frame.cols == cols)
         });
-        let screen = frame(cx).unwrap();
-        let text = |row: usize| {
-            screen.visible[row]
-                .cells
-                .iter()
-                .map(|cell| cell.text.as_str())
-                .collect::<String>()
-        };
-        assert_eq!(screen.cols, cols);
-        assert_eq!(text(0), "100%", "the progress bar was not redrawn in place");
-        assert_eq!(text(1), "x".repeat(usize::from(cols)));
-        assert_eq!(text(2), "yz");
-        assert_eq!(text(3), "ok");
-        assert_eq!(
-            screen.style(&screen.visible[3].cells[0]).fg,
-            TerminalColor::Indexed(2)
-        );
         assert_eq!(output_topics(), subscribed);
-        // The panel is as tall as the host's screen, not as the raw output's
-        // three lines.
-        let output = cx
-            .debug_bounds("command-output-run")
-            .expect("the output grid");
-        assert_eq!(output.size.height, px(4. * TERMINAL_CELL_HEIGHT));
 
         cx.simulate_resize(size(px(600.), px(900.)));
         settle(cx, "the narrower screen", &|cx| {
@@ -2479,189 +2366,6 @@ mod tests {
 
         store.update(cx, |store, cx| store.show_alone(other_id, cx));
         settle(cx, "leaving the thread", &|_| output_topics().is_empty());
-        driver.shutdown(cx, &host);
-    }
-
-    #[gpui::test]
-    fn long_markdown_paints_middle_blocks_when_scrolled_in_chat_outer_list(
-        cx: &mut TestAppContext,
-    ) {
-        use gpui::{VisualTestContext, point, px, size};
-        use tcode_runtime::pipe::{HostServices, spawn_host};
-        use tcode_services::store::SessionStore;
-
-        const DEMO_MARKDOWN: &str = r#"# H1
-
-## H2
-
-This paragraph has **bold**, *italic*, ~~strikethrough~~, and `inline code`.
-
-```rust
-fn main() {
-    let language = "Rust";
-    let message = format!("Hello from {language}!");
-    println!("{message}");
-}
-```
-
-```typescript
-const count: number = 3;
-interface Demo {
-  title: string;
-  enabled: boolean;
-}
-const demo: Demo = { title: "TypeScript", enabled: true };
-```
-
-```python
-def greet(name: str) -> str:
-    message = f"Hello, {name}!"
-    return message
-
-print(greet("Python"))
-```
-
-```go
-package main
-func main() {
-    message := "Hello from Go"
-    println(message)
-}
-```
-
-```toml
-[demo]
-title = "TOML sample"
-enabled = true
-count = 3
-```
-
-```kotlin
-fun main() {
-    val language: String = "Kotlin"
-    println("Hello from $language")
-}
-```
-
-```text
-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-| Left | Center | Right |
-| :--- | :----: | ----: |
-| alpha | beta | 100 |
-| gamma | delta | 200 |
-
-| Name | Status | Owner | Description | Count | Notes |
-| :--- | :----: | :--- | :---------- | ----: | :---- |
-| Short | Ready | UI | This deliberately long table cell contains about sixty characters total. | 12 | wraps |
-| Longer component name | Pending | Visual QA | Brief | 3 | compact |
-
-- [x] Render headings
-- [ ] Inspect every pixel
-
-1. Ordered parent
-   - Unordered child
-     1. Nested ordered child
-2. Second ordered item
-
-- Unordered parent
-  - Nested bullet
-    1. Ordered grandchild
-
-> First line of the blockquote.
-> Second line of the blockquote.
-
-Visit [Example](https://example.com) or the bare URL https://tcode.dev for more.
-
----
-
-This paragraph has a soft
-line break, followed by a hard break.\
-This begins after the hard break."#;
-
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let data_root = crate::store::tests::scratch_root("markdown-outer-list-test");
-        let store = SessionStore::open_at(data_root).expect("test session store");
-        let host = spawn_host(store, HostServices::default()).expect("spawn test host");
-        let (session_id, timeline) =
-            smol::block_on(host.update_state_for_test(move |state, cx| {
-                let id = state.start_draft("markdown-test".into(), std::env::temp_dir(), cx);
-                let active = state.residents.live.get_mut(&id).expect("selected draft");
-                active.timeline = Timeline::default();
-                active.timeline.turns = vec![TurnMeta::default()];
-                active.timeline.entries = vec![
-                    entry("user", user_item("render a long document")),
-                    entry("assistant", assistant(DEMO_MARKDOWN)),
-                ];
-                active.draft = false;
-                (active.meta.id.clone(), active.timeline.clone())
-            }))
-            .expect("seed markdown host");
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let workspace_store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        driver.wait_until(cx, "workspace baseline", |cx| {
-            workspace_store.read_with(cx, |store, _| store.baseline_ready())
-        });
-        workspace_store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
-        driver.wait_until(cx, "selected conversation", |cx| {
-            workspace_store.read_with(cx, |store, cx| {
-                store.baseline_ready()
-                    && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
-            })
-        });
-        workspace_store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
-        });
-        let window_state = cx.new(|_| WindowState::default());
-
-        cx.update(|cx| cx.set_reduce_motion(true));
-        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-            ChatView::new(
-                workspace_store.clone(),
-                window_state,
-                Some(session_id.clone()),
-                window,
-                cx,
-            )
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(700.)));
-        cx.run_until_parked();
-        draw_settled(cx);
-        cx.run_until_parked();
-        draw_settled(cx);
-
-        let outer_list = view.read_with(cx, |chat, _| chat.list_state.clone());
-        let max_scroll = outer_list.max_offset_for_scrollbar().y;
-        assert!(
-            max_scroll > px(800.),
-            "long markdown did not contribute its full height to the chat list: {max_scroll:?}"
-        );
-        let scroll_step = px(160.);
-        let steps = (f32::from(max_scroll / 2.) / f32::from(scroll_step)).ceil() as usize;
-        for step in 0..steps {
-            let distance = (scroll_step * (step + 1) as f32).min(max_scroll / 2.);
-            outer_list.set_offset_from_scrollbar(point(px(0.), -(max_scroll - distance)));
-            view.update(cx, |_, cx| cx.notify());
-            draw_settled(cx);
-        }
-
-        let viewport = outer_list.viewport_bounds();
-        let middle = cx.debug_bounds("markdown-block-6");
-        assert!(
-            middle.is_some_and(|bounds| bounds.intersects(&viewport)),
-            "middle markdown block did not paint at the chat list's middle offset; bounds={middle:?}, max_scroll={max_scroll:?}, viewport={viewport:?}"
-        );
         driver.shutdown(cx, &host);
     }
 

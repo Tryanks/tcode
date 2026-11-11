@@ -41,7 +41,7 @@ fn a_codex_rollout_without_its_session_meta_is_reported() {
         },
         &[],
     );
-    std::fs::remove_dir_all(&home).unwrap();
+    let _ = std::fs::remove_dir_all(&home);
     assert!(history.dirs.is_empty());
     let [unreadable] = &history.unreadable[..] else {
         panic!("{:?}", history.unreadable);
@@ -212,7 +212,7 @@ fn a_rollout_codex_compressed_is_listed_and_imports_as_it_was_written() {
 
     std::fs::write(day.join(name), &rollout).unwrap();
     assert_eq!(listed(&roots), [day.join(name)]);
-    std::fs::remove_dir_all(&home).unwrap();
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 /// A thread `thread/revert` rewound is listed once, by the rollout Codex now
@@ -351,7 +351,7 @@ fn a_reverted_codex_thread_shows_the_history_it_kept_and_what_followed() {
             assistant("Built smaller."),
         ]
     );
-    std::fs::remove_dir_all(&home).unwrap();
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 fn command(

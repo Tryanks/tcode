@@ -1225,7 +1225,7 @@ mod tests {
             let mut state = fresh_state();
             state.load_cache(&path);
             assert_eq!(model_ids(&state)[0], "test-wide");
-            std::fs::remove_dir_all(&dir).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }

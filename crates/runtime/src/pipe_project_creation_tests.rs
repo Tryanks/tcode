@@ -315,5 +315,5 @@ fn uploads_land_in_the_scratch_directory_and_leave_with_their_thread() {
     );
     assert!(today.is_dir(), "quick threads work in the day's folder");
     host.shutdown_blocking().unwrap();
-    std::fs::remove_dir_all(root).unwrap();
+    let _ = std::fs::remove_dir_all(root);
 }

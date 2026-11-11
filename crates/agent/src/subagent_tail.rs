@@ -532,7 +532,7 @@ mod tests {
             read_subagent_spawn(&claude_dir, "session-1", "a1"),
             Some(ThreadItem { id, .. }) if id == "toolu_wf"
         ));
-        std::fs::remove_dir_all(claude_dir).unwrap();
+        let _ = std::fs::remove_dir_all(claude_dir);
     }
 
     /// Claude's Read of an image yields the image block and then a synthetic

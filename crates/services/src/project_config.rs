@@ -76,6 +76,6 @@ mod tests {
             read(&root).unwrap().icon_path.as_deref(),
             Some("legacy.png")
         );
-        fs::remove_dir_all(root).unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 }

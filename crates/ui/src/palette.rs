@@ -1168,7 +1168,6 @@ impl CommandPalette {
                     this.child(
                         div()
                             .flex_none()
-                            .debug_selector(move || format!("palette-row-{index}-key"))
                             .text_secondary(compact, cx)
                             .child(key.appearance(false)),
                     )
@@ -1383,7 +1382,6 @@ impl Render for CommandPalette {
                 &self.list_state,
                 div()
                     .id("palette-list")
-                    .debug_selector(|| "palette-list".into())
                     .role(Role::ListBox)
                     .aria_label(if picker {
                         crate::tr!("palette.projects_results")

@@ -450,7 +450,7 @@ mod tests {
             image::load_from_memory(&next).unwrap().dimensions(),
             (120, 90)
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Camera-resolution sources are previewed rather than handed to the client in full.

@@ -342,6 +342,6 @@ mod tests {
                 .kind(),
             io::ErrorKind::NotFound,
         );
-        std::fs::remove_dir_all(home).unwrap();
+        let _ = std::fs::remove_dir_all(home);
     }
 }

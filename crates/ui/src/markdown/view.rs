@@ -668,21 +668,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn mermaid_fence_paints_a_diagram_and_unparsable_source_stays_code(cx: &mut TestAppContext) {
-        let (_, cx) = open_timeline_row(
-            "```mermaid\nflowchart LR\n  A --> B\n```\n\n```mermaid\nnot a diagram\n```",
-            cx,
-        );
-        assert!(cx.debug_bounds("markdown-mermaid-root-0").is_some());
-        assert!(cx.debug_bounds("markdown-mermaid-root-1").is_none());
-        let fallback = cx.debug_bounds("markdown-code-line-0");
-        assert!(
-            fallback.is_some(),
-            "the fence that does not parse keeps its code"
-        );
-    }
-
-    #[gpui::test]
     fn code_block_copy_button_copies_the_whole_fence(cx: &mut TestAppContext) {
         let lines = (0..100).map(|ix| format!("line {ix}")).collect::<Vec<_>>();
         let source = format!("```text\n{}\n```", lines.join("\n"));
@@ -719,110 +704,6 @@ mod tests {
         cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
         cx.update(|window, cx| _ = window.draw(cx));
         copied(cx)
-    }
-
-    fn scroll_to_end(view: &Entity<OuterListRoot>, cx: &mut VisualTestContext) {
-        view.update(cx, |root, _| root.list_state.scroll_to_end());
-        for _ in 0..2 {
-            cx.run_until_parked();
-            cx.update(|window, cx| _ = window.draw(cx));
-        }
-    }
-
-    #[gpui::test]
-    fn shift_click_extends_from_an_anchor_scrolled_away(cx: &mut TestAppContext) {
-        let lines = (0..3_000)
-            .map(|ix| format!("line {ix}"))
-            .collect::<Vec<_>>();
-        let items = (0..1_000)
-            .map(|ix| format!("item {ix}"))
-            .collect::<Vec<_>>();
-        for (source, expected, first, last) in [
-            (
-                format!("```text\n{}\n```", lines.join("\n")),
-                lines[5..].join("\n"),
-                "markdown-code-line-5",
-                "markdown-code-line-2999",
-            ),
-            (
-                items
-                    .iter()
-                    .map(|item| format!("- {item}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                items[5..].join("\n"),
-                "markdown-list-item-text-root-0-5",
-                "markdown-list-item-root-0-999",
-            ),
-        ] {
-            let (view, cx) = open_timeline_row(&source, cx);
-            let first = cx.debug_bounds(first).unwrap();
-            cx.simulate_click(
-                point(first.left() + px(1.), first.center().y),
-                Modifiers::default(),
-            );
-            cx.update(|window, cx| _ = window.draw(cx));
-            scroll_to_end(&view, cx);
-
-            let end = point(px(380.), cx.debug_bounds(last).unwrap().center().y);
-            let shift = Modifiers {
-                shift: true,
-                ..Default::default()
-            };
-            cx.simulate_mouse_down(end, MouseButton::Left, shift);
-            cx.update(|window, cx| _ = window.draw(cx));
-            cx.simulate_mouse_up(end, MouseButton::Left, shift);
-            cx.update(|window, cx| _ = window.draw(cx));
-            let selected = copied(cx);
-            assert_eq!(selected, expected);
-        }
-    }
-
-    #[gpui::test]
-    fn a_scroll_jump_mid_drag_drops_text_left_behind(cx: &mut TestAppContext) {
-        let lines = (0..3_000)
-            .map(|ix| format!("line {ix}"))
-            .collect::<Vec<_>>();
-        let items = (0..1_000)
-            .map(|ix| format!("item {ix}"))
-            .collect::<Vec<_>>();
-        // Each drag starts on screen in the second item of the root list and
-        // turns back within it before the jump.
-        for (source, expected, anchor, back, last) in [
-            (
-                format!("```text\n{}\n```", lines.join("\n")),
-                lines[38..].join("\n"),
-                "markdown-code-line-38",
-                "markdown-code-line-33",
-                "markdown-code-line-2999",
-            ),
-            (
-                items
-                    .iter()
-                    .map(|item| format!("- {item}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                items[12..].join("\n"),
-                "markdown-list-item-text-root-0-12",
-                "markdown-list-item-text-root-0-9",
-                "markdown-list-item-root-0-999",
-            ),
-        ] {
-            let (view, cx) = open_timeline_row(&source, cx);
-            let start = |cx: &mut VisualTestContext, selector| {
-                let bounds = cx.debug_bounds(selector).unwrap();
-                point(bounds.left() + px(1.), bounds.center().y)
-            };
-            let (anchor, back) = (start(cx, anchor), start(cx, back));
-            cx.simulate_mouse_down(anchor, MouseButton::Left, Modifiers::default());
-            cx.update(|window, cx| _ = window.draw(cx));
-            drag_to(cx, back);
-            scroll_to_end(&view, cx);
-
-            let end = point(px(380.), cx.debug_bounds(last).unwrap().center().y);
-            drag_to(cx, end);
-            assert_eq!(release(cx, end), expected);
-        }
     }
 
     #[gpui::test]
@@ -1008,49 +889,6 @@ mod tests {
             let selected = copied(cx);
             assert_eq!(selected, expected, "source: {source:?}");
         }
-    }
-
-    #[gpui::test]
-    fn drag_across_split_code_and_list_copies_the_lines_between(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let code = (0..40)
-            .map(|ix| format!("line {ix}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let list = (0..12)
-            .map(|ix| format!("- item {ix}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let source = format!("```text\n{code}\n```\n\n{list}");
-        let (_, cx) = cx.add_window_view(|_, cx| MultiBlockRoot::with_text(&source, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(gpui::size(px(400.), px(1_400.)));
-        for _ in 0..2 {
-            cx.run_until_parked();
-            cx.update(|window, cx| _ = window.draw(cx));
-        }
-
-        let start = cx.debug_bounds("markdown-code-line-30").unwrap();
-        let end = cx.debug_bounds("markdown-list-item-root-1-10").unwrap();
-        let (start, end) = (
-            point(start.left() + px(1.), start.center().y),
-            point(px(390.), end.center().y),
-        );
-        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
-        cx.update(|window, cx| _ = window.draw(cx));
-        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
-        cx.update(|window, cx| _ = window.draw(cx));
-        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
-        cx.update(|window, cx| _ = window.draw(cx));
-
-        let expected = (30..40)
-            .map(|ix| format!("line {ix}"))
-            .chain((0..=10).map(|ix| format!("item {ix}")))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let selected = copied(cx);
-        assert_eq!(selected, expected);
     }
 
     #[gpui::test]

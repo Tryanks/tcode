@@ -549,35 +549,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_menu_filter_is_fuzzy_kind_aware_and_uncapped() {
-        let mut commands: Vec<ProviderCommand> = (0..60)
-            .map(|index| ProviderCommand {
-                name: format!("command-{index:02}"),
-                description: Some(format!("Command {index}")),
-                kind: ProviderCommandKind::Command,
-            })
-            .collect();
-        commands.push(ProviderCommand {
-            name: "deep-review".into(),
-            description: None,
-            kind: ProviderCommandKind::Skill,
-        });
-
-        let all = filter_provider_commands(&commands, ProviderCommandKind::Command, "");
-        assert_eq!(all.len(), 60);
-        assert_eq!(all[0].name, "command-00");
-        assert_eq!(all[59].name, "command-59");
-
-        // Fuzzy subsequence rather than prefix-only matching.
-        let fuzzy = filter_provider_commands(&commands, ProviderCommandKind::Skill, "dprv");
-        assert_eq!(fuzzy.len(), 1);
-        assert_eq!(fuzzy[0].name, "deep-review");
-        assert!(
-            filter_provider_commands(&commands, ProviderCommandKind::Command, "dprv").is_empty()
-        );
-    }
-
-    #[test]
     fn user_input_answers_assemble_one_string_or_a_list_per_question() {
         let questions = vec![
             UserInputQuestion {

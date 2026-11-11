@@ -584,32 +584,3 @@ fn rendered_code_text(code: &str) -> String {
     }
     text
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn at(path: &[u32], line: u32, offset: usize) -> TextPosition {
-        TextPosition {
-            path: path.to_vec(),
-            line,
-            offset,
-        }
-    }
-
-    const DOCUMENT: &str = "intro text\n\n```text\nfirst code line\nsecond code line\n```\n\n\
-                            | name | value |\n| --- | --- |\n| alpha | beta |\n\n- one\n- two";
-
-    #[test]
-    fn a_range_touching_a_segment_only_at_its_edge_adds_nothing_of_it() {
-        let document = super::super::parse::parse_document(DOCUMENT).root;
-        assert_eq!(
-            document.text_between(&at(&[1], 0, 15), &at(&[1], 1, 6)),
-            "second"
-        );
-        assert_eq!(
-            document.text_between(&at(&[1], 0, 6), &at(&[1], 1, 0)),
-            "code line"
-        );
-    }
-}

@@ -2723,7 +2723,7 @@ mod tests {
                 controller.stop_hosting()
             })
         });
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Removing a member from Settings → Remote unpairs the device and, with

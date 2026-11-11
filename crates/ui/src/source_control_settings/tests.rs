@@ -167,23 +167,8 @@ fn open_panel<'a>(
         });
         gpui_base::Root::new(panel, window, cx)
     });
-    draw(cx);
+    crate::test_frames::draw_settled(cx);
     cx
-}
-
-/// Lets what the machine sent land and what it started play out, as frames do in the app.
-fn draw(cx: &mut VisualTestContext) {
-    cx.run_until_parked();
-    cx.update(|window, cx| {
-        window.refresh();
-        _ = window.draw(cx);
-    });
-    cx.executor()
-        .advance_clock(std::time::Duration::from_millis(400));
-    cx.update(|window, cx| {
-        window.simulate_next_frame(cx);
-        _ = window.draw(cx);
-    });
 }
 
 /// Whether the element `selector` names was drawn; the test context keeps selectors for good.
@@ -197,7 +182,7 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
         .debug_bounds(selector)
         .unwrap_or_else(|| panic!("{selector} is drawn"));
     cx.simulate_click(bounds.center(), gpui::Modifiers::default());
-    draw(cx);
+    crate::test_frames::draw_settled(cx);
 }
 
 /// Each platform's row says where it stands from what the machine reports, and offers one
@@ -255,7 +240,7 @@ fn connecting_verifies_the_token_before_the_machine_saves_it(cx: &mut TestAppCon
         "the glab sign-in is offered beside the token"
     );
     cx.simulate_input("glpat-typed");
-    draw(cx);
+    crate::test_frames::draw_settled(cx);
     let verify = |remote: &Remote, cx: &mut VisualTestContext, answer: TokenCheck| {
         click("source-control-verify", cx);
         let sent = remote.commands();
@@ -271,7 +256,7 @@ fn connecting_verifies_the_token_before_the_machine_saves_it(cx: &mut TestAppCon
             }
         );
         remote.answer(*id, CommandResponse::TokenCheck(answer));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
     };
     verify(&remote, cx, TokenCheck::Rejected { status: 401 });
     assert!(cx.debug_bounds("source-control-check-rejected").is_some());
@@ -301,7 +286,7 @@ fn connecting_verifies_the_token_before_the_machine_saves_it(cx: &mut TestAppCon
 
     click("source-control-connect-gitlab.com", cx);
     cx.simulate_input("glpat-typed");
-    draw(cx);
+    crate::test_frames::draw_settled(cx);
     verify(
         &remote,
         cx,
@@ -356,7 +341,7 @@ fn managing_chooses_an_account_and_disconnects_after_confirming(cx: &mut TestApp
             cx,
         )
     });
-    draw(cx);
+    crate::test_frames::draw_settled(cx);
     assert_eq!(
         remote
             .commands()

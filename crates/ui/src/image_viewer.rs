@@ -1039,9 +1039,7 @@ mod tests {
         assert!(cx.debug_bounds("image-viewer-image").is_some());
 
         cx.simulate_keystrokes("escape");
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("image-viewer-image").is_none());
 
         // Contract: Escape cancels an in-flight original even while a dialog

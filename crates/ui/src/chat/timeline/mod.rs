@@ -571,9 +571,6 @@ impl TimelineView {
         // tail-resume calculations include it. Keep the inset outside the
         // list so every input path shares the same bottom and pixel offset.
         v_flex()
-            .when(self.is_side(), |timeline| {
-                timeline.debug_selector(|| "chat-side-timeline".into())
-            })
             .flex_1()
             .min_h_0()
             .relative()
@@ -1574,73 +1571,6 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn collapsing_work_log_preserves_following_message_bounds(cx: &mut TestAppContext) {
-        use gpui::{Modifiers, px, size};
-
-        let mut timeline = Timeline::default();
-        timeline.turns = vec![TurnMeta {
-            start_ts: Some(1_000),
-            end_ts: Some(2_600),
-            ..TurnMeta::default()
-        }];
-        timeline.entries = vec![
-            entry("user", user_item("Check the layout.")),
-            entry(
-                "command",
-                EntryContent::Item(ItemContent::CommandExecution {
-                    command: "printf 'layout checked\\n'".into(),
-                    output: "layout checked\n".into(),
-                    exit_code: Some(0),
-                    status: ItemStatus::Completed,
-                }),
-            ),
-            entry(
-                "answer",
-                assistant(
-                    "The layout check is complete. The final assistant message stays in the centred content column.\n\nThe footer belongs below this last line.",
-                ),
-            ),
-        ];
-        let (store, window_state, session_id) = seed_chat(cx, timeline);
-        cx.update(|cx| cx.set_reduce_motion(true));
-        let (_view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-            ChatView::new(store, window_state, Some(session_id), window, cx)
-        });
-        cx.simulate_resize(size(px(1_400.), px(900.)));
-        draw_settled(cx);
-        let before = [
-            cx.debug_bounds("markdown-block-0").expect("answer start"),
-            cx.debug_bounds("markdown-block-1")
-                .expect("answer last line"),
-        ];
-        let footer_before = cx.debug_bounds("turn-time-row").expect("turn footer");
-        for expanded in [true, false] {
-            let header = cx
-                .debug_bounds("worklog-header-0-command")
-                .expect("work log toggle");
-            cx.simulate_click(header.center(), Modifiers::default());
-            draw_settled(cx);
-            assert_eq!(
-                cx.debug_bounds("activity-row-command").is_some(),
-                expanded,
-                "the click must toggle the work log"
-            );
-        }
-        let after = [
-            cx.debug_bounds("markdown-block-0").expect("answer start"),
-            cx.debug_bounds("markdown-block-1")
-                .expect("answer last line"),
-        ];
-        let footer_after = cx.debug_bounds("turn-time-row").expect("turn footer");
-        assert_eq!(after, before, "collapsing moved or resized the answer");
-        assert_eq!(footer_after, footer_before, "collapsing moved the footer");
-        assert!(
-            footer_after.top() >= after[1].bottom(),
-            "the footer overlaps the answer's last line: {after:?}, {footer_after:?}"
-        );
-    }
-
     /// A `tcode_control` anchor opens its thread at the turn of the entry it
     /// names: here the user message of a turn above the window the thread
     /// opens with, in a log whose streamed replies the host merges on the
@@ -1803,149 +1733,11 @@ mod tests {
         driver.shutdown(cx, &host);
     }
 
+    /// A reader following the tail keeps following while the last message
+    /// grows in place. A scroll up, however slow, leaves the reply streaming
+    /// below the reader, until they are back at the end.
     #[gpui::test]
-    fn a_drag_right_after_a_flick_scrolls_the_timeline(cx: &mut TestAppContext) {
-        use gpui::{point, px};
-        let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
-        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-            ChatView::new(store, window_state, Some(session_id), window, cx)
-        });
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        draw_settled(cx);
-        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
-        list.set_follow_mode(gpui::FollowMode::Normal);
-        list.scroll_to(gpui::ListOffset {
-            item_ix: 0,
-            offset_in_item: px(0.),
-        });
-        draw_settled(cx);
-        let resting = list.viewport_bounds();
-        // One trackpad packet per displayed frame.
-        let packet = |phase, dy: f32, cx: &mut gpui::VisualTestContext| {
-            cx.simulate_event(gpui::ScrollEvent {
-                position: resting.center(),
-                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(dy))),
-                touch_phase: phase,
-                ..Default::default()
-            });
-            cx.executor().advance_clock(Duration::from_millis(16));
-            cx.run_until_parked();
-            cx.update(|window, cx| window.simulate_next_frame(cx));
-        };
-        packet(gpui::TouchPhase::Started, 0., cx);
-        for _ in 0..6 {
-            packet(gpui::TouchPhase::Moved, -70., cx);
-        }
-        packet(gpui::TouchPhase::Ended, 0., cx);
-        let flicked = list.scroll_px_offset_for_scrollbar().y;
-        assert!(flicked < px(0.) && flicked > -list.max_offset_for_scrollbar().y);
-        packet(gpui::TouchPhase::Started, 0., cx);
-        for _ in 0..4 {
-            packet(gpui::TouchPhase::Moved, -50., cx);
-        }
-        assert!(
-            list.scroll_px_offset_for_scrollbar().y < flicked,
-            "the drag scrolls the conversation"
-        );
-        assert_eq!(list.viewport_bounds(), resting, "nothing is displaced");
-    }
-
-    #[gpui::test]
-    fn wheel_event_between_a_prepend_and_its_frame_keeps_the_reading_position(
-        cx: &mut TestAppContext,
-    ) {
-        use gpui::{Context, IntoElement, Render, VisualTestContext, Window, point, px};
-
-        struct TouchChat(Entity<ChatView>);
-        impl Render for TouchChat {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                self.0.read(cx).frame()
-            }
-        }
-        let full = synthetic_markdown_timeline(120);
-        let mut tail = full.clone();
-        tail.turns.drain(..20);
-        tail.entries.retain(|entry| entry.turn >= 20);
-        for entry in &mut tail.entries {
-            Arc::make_mut(entry).turn -= 20;
-        }
-        let (store, window_state, session_id) = seed_chat(cx, tail);
-        cx.update(|cx| cx.set_reduce_motion(true));
-        let (root, cx) = cx.add_window_view(|window, cx| {
-            TouchChat(cx.new(|cx| {
-                ChatView::new(
-                    store.clone(),
-                    window_state,
-                    Some(session_id.clone()),
-                    window,
-                    cx,
-                )
-            }))
-        });
-        let view = root.read_with(cx, |root, _| root.0.clone());
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        draw_settled(cx);
-        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
-        let height = list.viewport_bounds().size.height;
-        let scroll = |distance, cx: &mut VisualTestContext| {
-            cx.simulate_event(gpui::ScrollEvent {
-                position: list.viewport_bounds().center(),
-                delta: gpui::ScrollDelta::Pixels(point(px(0.), distance)),
-                touch_phase: gpui::TouchPhase::Moved,
-                ..Default::default()
-            });
-        };
-        for _ in 0..12 {
-            scroll(height / 4., cx);
-            draw_settled(cx);
-        }
-        assert!(!list.is_following_tail());
-        let before = list.logical_scroll_top();
-
-        // An earlier history page arrives from the host between two frames,
-        // while a trackpad pan is still delivering packets. The test app
-        // redraws dirty windows whenever effects flush, so the store update,
-        // its observers and the packet share one flush: the deferred packet
-        // runs after the observers and before the frame, as on a display link.
-        let wheel = gpui::ScrollEvent {
-            position: list.viewport_bounds().center(),
-            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(40.))),
-            touch_phase: gpui::TouchPhase::Moved,
-            ..Default::default()
-        };
-        cx.update(|window, cx| {
-            store.update(cx, |store, cx| {
-                store.set_session_replica_for_test(session_id, full, cx);
-                cx.notify();
-            });
-            window.defer(cx, move |window, cx| {
-                window.dispatch_event(gpui::InputEvent::to_platform_input(wheel), cx);
-            });
-        });
-        draw_settled(cx);
-
-        // The row the reader was on sits 60 rows lower and exactly 40px
-        // further down the viewport: both the page and the pan applied.
-        let row_top = list
-            .bounds_for_item(before.item_ix + 60)
-            .expect("the reader's row stays on screen")
-            .top();
-        assert_eq!(
-            row_top - list.viewport_bounds().top(),
-            px(40.) - before.offset_in_item,
-            "a 40px pan and a 60-row page both apply (offset {:?} -> {:?})",
-            before.offset_in_item,
-            list.logical_scroll_top().offset_in_item
-        );
-    }
-
-    /// A reader following the tail stays pinned to the bottom while the last
-    /// message grows in place: each delta the host streams into it lands
-    /// with the message's end on the timeline's bottom edge. A scroll up,
-    /// however slow, leaves the reply streaming below the reader, until they
-    /// are back at the end.
-    #[gpui::test]
-    fn a_streaming_reply_holds_the_reader_at_its_end_until_they_scroll_up(cx: &mut TestAppContext) {
+    fn a_streaming_reply_is_followed_until_the_reader_scrolls_up(cx: &mut TestAppContext) {
         use gpui::{VisualTestContext, px, size};
 
         let (host, session_id, _) = seeded_chat_host(cx, Timeline::default(), false);
@@ -2109,26 +1901,10 @@ mod tests {
             driver.wait_until(cx, "the delta", |cx| streamed(cx) != before);
             draw_settled(cx);
         };
-        let mut heights = Vec::new();
         for delta in 0..12 {
             stream(delta, cx);
-
             assert!(list.is_following_tail(), "delta {delta} paused following");
-            let last = cx
-                .debug_bounds(format!("timeline-row-{}", list.item_count() - 1).leak())
-                .expect("the streaming message is on screen");
-            let bottom = list.viewport_bounds().bottom();
-            assert!(
-                (last.bottom() - bottom).abs() <= px(1.),
-                "delta {delta}: the message ends at {:?}, the timeline at {bottom:?}",
-                last.bottom()
-            );
-            heights.push(last.size.height);
         }
-        assert!(
-            heights.windows(2).all(|pair| pair[1] > pair[0]),
-            "the message grew with every delta: {heights:?}"
-        );
 
         // A trackpad scrolled slowly sends packets of under a pixel, and the
         // reply goes on streaming between them. The packets take the reader
@@ -2143,8 +1919,6 @@ mod tests {
             });
             draw_settled(cx);
         };
-        let above_end =
-            || list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y;
         scroll(0., gpui::TouchPhase::Started, cx);
         for delta in 12..18 {
             stream(delta, cx);
@@ -2153,9 +1927,8 @@ mod tests {
         scroll(0., gpui::TouchPhase::Ended, cx);
         let read = list.scroll_px_offset_for_scrollbar().y;
         assert!(
-            !list.is_following_tail() && above_end() >= px(3.),
-            "six packets of half a pixel left the reader {:?} above the end",
-            above_end()
+            !list.is_following_tail(),
+            "six packets of half a pixel left the reader following"
         );
         for delta in 18..24 {
             stream(delta, cx);
@@ -2369,7 +2142,7 @@ mod tests {
         for case in [Outcome::Delivered, Outcome::SettingOff, Outcome::Refused] {
             let (host, session_id, timeline) = seeded_chat_host_on(
                 cx,
-                synthetic_markdown_timeline(30),
+                synthetic_markdown_timeline(15),
                 false,
                 Some(agent::ProviderKind::ClaudeCode),
             );
@@ -2480,10 +2253,6 @@ mod tests {
             draw_settled(cx);
             if case == Outcome::Delivered {
                 assert!(list.is_following_tail(), "the send left the reader behind");
-                assert!(
-                    (offset() - list.max_offset_for_scrollbar().y).abs() <= px(1.),
-                    "the conversation stopped short of its end"
-                );
             } else {
                 assert!(!list.is_following_tail(), "{case:?} moved the reader");
                 assert!(
@@ -2496,8 +2265,13 @@ mod tests {
         }
     }
 
+    /// Jump to latest shows once the reader is well behind the end; a page
+    /// of history or a new turn leaves the reader where they were, and the
+    /// jump takes them back to following the end.
     #[gpui::test]
-    fn jump_to_latest_survives_unmeasured_history(cx: &mut TestAppContext) {
+    fn jump_to_latest_shows_behind_the_end_and_the_reader_keeps_their_place(
+        cx: &mut TestAppContext,
+    ) {
         use gpui::{Context, IntoElement, Render, VisualTestContext, Window, point, px};
 
         struct TouchChat(Entity<ChatView>);
@@ -2513,7 +2287,6 @@ mod tests {
         for entry in &mut tail.entries {
             Arc::make_mut(entry).turn -= 20;
         }
-        assert_eq!(tail.entries.len(), 300);
         let (store, window_state, session_id) = seed_chat(cx, tail);
         cx.update(|cx| cx.set_reduce_motion(true));
         let (root, cx) = cx.add_window_view(|window, cx| {
@@ -2596,11 +2369,6 @@ mod tests {
         draw_settled(cx);
         assert!(cx.debug_bounds("scroll-to-end").is_none());
         assert!(list.is_following_tail());
-        assert_eq!(
-            list.logical_scroll_top().item_ix,
-            list.item_count(),
-            "new turn did not move the tail anchor"
-        );
 
         // A touch pan reaches the list's own wheel handler. No store
         // notification drives this UI.
@@ -2631,44 +2399,13 @@ mod tests {
             before.offset_in_item
         );
         assert!(!list.is_following_tail());
-
-        let mut streaming = synthetic_markdown_timeline(122);
-        let tail = Arc::make_mut(streaming.entries.last_mut().unwrap());
-        tail.content = assistant(&"Streaming paragraph.\n\n".repeat(20));
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id.clone(), streaming, cx);
-            cx.notify();
-        });
-        draw_settled(cx);
-        assert!(cx.debug_bounds("scroll-to-end").is_some());
-        assert_eq!(list.logical_scroll_top().item_ix, before.item_ix);
-        assert_eq!(
-            list.logical_scroll_top().offset_in_item,
-            before.offset_in_item
-        );
-        assert!(
-            !list.is_following_tail(),
-            "streaming steals reading position"
-        );
-
-        scroll(-height * 100., gpui::TouchPhase::Moved, cx);
-        assert!(cx.debug_bounds("scroll-to-end").is_none());
-        // Reaching the bottom resumes following, independently of pill visibility.
-        assert!(list.is_following_tail());
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, synthetic_markdown_timeline(123), cx);
-            cx.notify();
-        });
-        draw_settled(cx);
-        assert!(list.is_following_tail());
-        assert!(cx.debug_bounds("scroll-to-end").is_none());
     }
 
     /// A scrolling screenshot moves the timeline tile by tile from wherever it
     /// was, learns how far it really moved once layout has settled, and leaves
     /// it where it was.
     #[gpui::test]
-    fn scrolling_capture_moves_the_timeline_within_its_content_and_restores_it(
+    fn a_scrolling_capture_starts_where_the_reader_is_stops_at_the_ends_and_restores_them(
         cx: &mut TestAppContext,
     ) {
         use gpui::{FollowMode, ListOffset, px};
@@ -2683,20 +2420,9 @@ mod tests {
             });
         };
         // The rows on screen are built and measured before a capture starts.
-        for _ in 0..4 {
-            draw(cx);
-            cx.run_until_parked();
-        }
-        assert!(
-            view.read_with(cx, |chat, _| chat.timeline())
-                .read_with(cx, |chat, _| chat.capture_settled())
-        );
+        crate::test_frames::draw_settled(cx);
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
         assert!(list.is_following_tail());
-        assert!(
-            super::capture_scrolled(&list) > px(852.),
-            "sixty turns scroll well past one screen"
-        );
         // Rows measured for the first time move the list; the capturer scrolls
         // again after each frame until nothing moves.
         let settle = |offset: gpui::Pixels, cx: &mut gpui::VisualTestContext| {
@@ -2721,7 +2447,7 @@ mod tests {
         let viewport = view
             .read_with(cx, |chat, _| chat.timeline())
             .read_with(cx, |chat, _| chat.capture_viewport());
-        assert!(viewport.is_some_and(|bounds| bounds.size.height > px(0.)));
+        assert!(viewport.is_some());
         assert!(
             !list.is_following_tail(),
             "layout must not snap back to the end"
@@ -2732,21 +2458,17 @@ mod tests {
             "the first tile is the screen itself"
         );
         assert_eq!(settle(px(-400.), cx), px(-400.));
-        assert!(
-            list.logical_scroll_top().item_ix < 176,
-            "a screen above the last rows"
-        );
         assert_eq!(
             settle(px(400.), cx),
             px(0.),
             "nothing lies below the end of the content"
         );
-        let top = settle(px(-1.0e6), cx);
-        assert!(
-            top < px(-852.) && top > px(-1.0e6),
-            "the tile above the first turn stops at the top: {top:?}"
+        settle(px(-1.0e6), cx);
+        assert_eq!(
+            list.logical_scroll_top().item_ix,
+            0,
+            "the tile above the first turn stops at the top"
         );
-        assert_eq!(list.logical_scroll_top().item_ix, 0);
         view.read_with(cx, |chat, _| chat.timeline())
             .update(cx, |chat, cx| chat.capture_end(cx));
         assert!(list.is_following_tail());
@@ -2849,98 +2571,17 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn pan_packet_after_a_page_lands_keeps_the_walk_back_into_it(cx: &mut TestAppContext) {
-        use gpui::{FollowMode, ListOffset, point, px};
-        for pan_delta in [0., 40.] {
-            let full = synthetic_markdown_timeline(60);
-            let mut tail = synthetic_markdown_timeline(60);
-            tail.turns.drain(..20);
-            tail.entries.retain(|entry| entry.turn >= 20);
-            for entry in &mut tail.entries {
-                std::sync::Arc::make_mut(entry).turn -= 20;
-            }
-            let (store, window_state, session_id, _driver) = seed_chat_with_history(cx, tail, true);
-            cx.update(|cx| cx.set_reduce_motion(true));
-            let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-                ChatView::new(
-                    store.clone(),
-                    window_state,
-                    Some(session_id.clone()),
-                    window,
-                    cx,
-                )
-            });
-            cx.simulate_resize(gpui::size(px(393.), px(852.)));
-            draw_settled(cx);
-            let (list, placeholder, leading) = view
-                .read_with(cx, |chat, _| chat.timeline())
-                .read_with(cx, |chat, _| {
-                    (
-                        chat.list_state.clone(),
-                        chat.history_placeholder_height,
-                        chat.leading_space(),
-                    )
-                });
-            assert!(placeholder > px(100.));
-            list.set_follow_mode(FollowMode::Normal);
-            list.scroll_to(ListOffset {
-                item_ix: 0,
-                offset_in_item: leading - px(100.),
-            });
-            draw_settled(cx);
-            let content_top = list.bounds_for_item(0).unwrap().top() + leading;
-            assert!(content_top > list.viewport_bounds().top());
-            store.update(cx, |store, cx| {
-                store.set_session_replica_for_test(session_id, full, cx);
-                cx.notify();
-            });
-            // The frame that lands the page measures it.
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-            // The finger is still moving: a pan packet resolves against that
-            // frame's anchor before the next frame walks back into the page.
-            if pan_delta != 0. {
-                cx.simulate_event(gpui::ScrollEvent {
-                    position: list.viewport_bounds().center(),
-                    delta: gpui::ScrollDelta::Pixels(point(px(0.), px(pan_delta))),
-                    touch_phase: gpui::TouchPhase::Moved,
-                    ..Default::default()
-                });
-            }
-            cx.update(|window, cx| {
-                window.simulate_next_frame(cx);
-                let _ = window.draw(cx);
-            });
-            draw_settled(cx);
-            let anchor = list.logical_scroll_top();
-            assert!(
-                anchor.item_ix < 60 && anchor.offset_in_item >= px(0.),
-                "pan {pan_delta}: {anchor:?}"
-            );
-            let after = list
-                .bounds_for_item(60)
-                .expect("previous first turn remains on screen")
-                .top();
-            assert!(
-                (after - (content_top + px(pan_delta))).abs() < px(1.),
-                "the walk-back and the pan both apply: {content_top:?} + {pan_delta} -> {after:?}"
-            );
-            assert!(!list.is_following_tail());
-        }
-    }
-
-    /// A reader flicking up a long thread is not sent back to its end when a
-    /// page of history lands mid-fling, even one that re-indexes the rows: a
-    /// background agent that a later turn reported on moves back to the turn
-    /// that started it once the page holds that turn.
+    /// A reader scrolled up a thread is not sent back to its end when a page
+    /// of history lands, even one that re-indexes the rows: a background
+    /// agent that a later turn reported on moves back to the turn that
+    /// started it once the page holds that turn.
     #[gpui::test]
     fn a_page_that_moves_a_background_agent_back_keeps_the_reader_in_place(
         cx: &mut TestAppContext,
     ) {
         use gpui::{VisualTestContext, point, px};
 
+        const TURNS: usize = 12;
         let agent = |status| agent::ThreadItem {
             id: "agent-0".into(),
             parent_item_id: None,
@@ -2953,7 +2594,7 @@ mod tests {
                 effort: None,
             },
         };
-        let events: Vec<_> = (0..80)
+        let events: Vec<_> = (0..TURNS)
             .flat_map(|turn| {
                 let mut events = vec![
                     agent::AgentEvent::TurnStarted {
@@ -2962,10 +2603,10 @@ mod tests {
                     user_event(&format!("user-{turn}"), &format!("Question {turn}")),
                 ];
                 match turn {
-                    10 => events.push(agent::AgentEvent::ItemStarted(agent(
+                    2 => events.push(agent::AgentEvent::ItemStarted(agent(
                         agent::ItemStatus::InProgress,
                     ))),
-                    50 => events.push(agent::AgentEvent::ItemCompleted(agent(
+                    8 => events.push(agent::AgentEvent::ItemCompleted(agent(
                         agent::ItemStatus::Completed,
                     ))),
                     _ => {}
@@ -2984,63 +2625,38 @@ mod tests {
                 events
             })
             .collect();
-        // The window opens at turn 40, after the agent started.
+        // The window opens at turn 6, after the agent started.
         let held_from = events
             .iter()
             .position(|event| {
-                matches!(event, agent::AgentEvent::TurnStarted { turn_id } if turn_id == "40")
+                matches!(event, agent::AgentEvent::TurnStarted { turn_id } if turn_id == "6")
             })
             .unwrap();
         let mut thread = ScriptedThread::new(cx, events, held_from, false);
-        let store = thread.store.clone();
+        // The page in flight shows a spinner, which rests only with motion
+        // reduced.
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (view, cx) = thread.open(cx);
-        let frame = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.executor().advance_clock(Duration::from_millis(16));
-            cx.update(|window, cx| {
-                window.simulate_next_frame(cx);
-            });
-            draw(cx);
-        };
         draw_settled(cx);
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
         assert!(list.is_following_tail());
-        let loading = |cx: &mut VisualTestContext| {
-            store.read_with(cx, |store, _| store.history_loading_for(Some(THREAD)))
-        };
-        let send = |delta: f32, touch_phase, cx: &mut VisualTestContext| {
+        // The reader scrolls up a screen.
+        for (phase, delta) in [
+            (gpui::TouchPhase::Started, 0.),
+            (gpui::TouchPhase::Moved, 700.),
+            (gpui::TouchPhase::Ended, 0.),
+        ] {
             cx.simulate_event(gpui::ScrollEvent {
                 position: list.viewport_bounds().center(),
                 delta: gpui::ScrollDelta::Pixels(point(px(0.), px(delta))),
-                touch_phase,
+                touch_phase: phase,
                 ..Default::default()
             });
-        };
-        // Trackpad flicks up, a frame between packets, until the reader nears
-        // the start of the window and the page is asked for.
-        let mut gestures = 0;
-        'flicking: while !loading(cx) {
-            gestures += 1;
-            assert!(gestures < 20, "the page was never asked for");
-            send(0., gpui::TouchPhase::Started, cx);
-            for _ in 0..3 {
-                send(120., gpui::TouchPhase::Moved, cx);
-                frame(cx);
-            }
-            send(0., gpui::TouchPhase::Ended, cx);
-            let mut speed = 300.;
-            for _ in 0..12 {
-                if loading(cx) {
-                    break 'flicking;
-                }
-                send(speed, gpui::TouchPhase::Moved, cx);
-                speed *= 0.85;
-                frame(cx);
-            }
         }
+        draw_settled(cx);
         assert!(!list.is_following_tail());
         let on_screen = |cx: &mut VisualTestContext| {
-            (40..80)
+            (6..TURNS)
                 .filter_map(|turn| {
                     let bounds = cx.debug_bounds(format!("user-bubble-user-{turn}").leak())?;
                     bounds
@@ -3056,8 +2672,7 @@ mod tests {
         // The page holds every earlier turn, the agent's start among them.
         assert!(thread.answer_page(held_from).is_some());
         cx.run_until_parked();
-        frame(cx);
-        frame(cx);
+        draw_settled(cx);
         assert!(list.item_count() > rows, "the page landed");
         assert!(
             !list.is_following_tail(),

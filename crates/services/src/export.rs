@@ -364,7 +364,7 @@ mod tests {
             export.split_at(export.iter().position(|byte| *byte == b'\n').unwrap() + 1);
         assert_eq!(exported_log, log);
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

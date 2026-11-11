@@ -135,7 +135,7 @@ mod tests {
                     .all(|pixel| pixel[0] >= 254 && pixel[1] == 0 && pixel[2] == 0)
             );
         }
-        fs::remove_dir_all(root).unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -190,7 +190,7 @@ mod tests {
             fs::write(root.join("tcode.json"), config).unwrap();
             assert!(read_project_icon(&project, 16).is_err(), "{config}");
         }
-        fs::remove_dir_all(root).unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -219,7 +219,7 @@ mod tests {
         for entry in entries {
             assert_eq!(entry.path, directory.join(&entry.name));
         }
-        fs::remove_dir_all(root).unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

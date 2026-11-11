@@ -1078,19 +1078,17 @@ impl ChatView {
         frame
     }
 
-    /// The agent's surface, the card's or the sheet's, named `selector`:
+    /// The agent's surface, the card's or the sheet's:
     /// `content` on its frame, on its way as `morph` says, recording where
     /// it is drawn while it holds the agent (`live`).
     fn side_surface(
         &self,
-        selector: &'static str,
         content: AnyElement,
         morph: Option<Morphing>,
         live: bool,
         cx: &App,
     ) -> crate::motion::expand::Morph {
         let surface = crate::material::card_raised(cx)
-            .debug_selector(move || selector.into())
             // The agent's timeline takes the wheel over its surface, not the
             // lead's under it. gpui-base's page viewport gives a wheel to
             // the innermost one under the pointer, but the lead's does not
@@ -1169,7 +1167,7 @@ impl ChatView {
                     )),
                 )
         });
-        let card = self.side_surface("chat-side-card", content, morph, live, cx);
+        let card = self.side_surface(content, morph, live, cx);
         super::rail::slot(self.side.width, fade.map_or(presence, |_| 1.))
             .when_some(fade, |slot, fade| slot.opacity(fade))
             .on_drag_move(
@@ -1209,7 +1207,7 @@ impl ChatView {
             .left(px(SHEET_INSET))
             .right(px(SHEET_INSET))
             .bottom_0()
-            .child(self.side_surface("chat-side-sheet", content, morph, live, cx))
+            .child(self.side_surface(content, morph, live, cx))
             .into_any_element()
     }
 
@@ -1445,14 +1443,7 @@ fn side_grip(
         .ml(px(-GRIP_WIDTH / 2.))
         .flex()
         .items_center()
-        .child(
-            div()
-                .debug_selector(|| "chat-side-grip".into())
-                .w_full()
-                .h(px(GRIP_LENGTH))
-                .rounded_full()
-                .bg(fill.0),
-        )
+        .child(div().w_full().h(px(GRIP_LENGTH)).rounded_full().bg(fill.0))
         .into_any_element()
 }
 

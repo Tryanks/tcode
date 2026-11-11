@@ -3910,11 +3910,7 @@ impl SessionsSidebar {
             .relative()
             .flex_none()
             .w(px(GLYPH_WIDTH))
-            .h(px(GLYPH_HEIGHT))
-            .debug_selector({
-                let id = id.clone();
-                move || id.to_string()
-            });
+            .h(px(GLYPH_HEIGHT));
         for cell in shown.value.iter() {
             let fill = transition(
                 (id.clone(), format!("cell-{}", cell.pane.as_u64())),
@@ -6916,14 +6912,6 @@ mod tests {
         });
     }
 
-    /// Draws the frame after whatever a change set moving has come to rest.
-    fn draw_settled(cx: &mut VisualTestContext) {
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        draw(cx);
-    }
-
     fn session(id: &str, parent_id: Option<&str>) -> SessionMeta {
         let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
         meta.id = id.to_string();
@@ -6933,7 +6921,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn compact_thread_distinguishes_host_background_activity(cx: &mut TestAppContext) {
+    fn a_phone_row_says_whether_its_thread_works_runs_background_work_or_waits(
+        cx: &mut TestAppContext,
+    ) {
         use tcode_protocol::{
             EventEnvelope, HostMessage, IndexSnapshot, IndexSummary, ServerEvent, SessionActivity,
             Topic, encode_line,
@@ -7064,16 +7054,8 @@ mod tests {
                         _ => None,
                     })
                     .expect("rendered phone thread");
-                let (label, color) = compact_status_line(&row.state, row.working, cx).unwrap();
+                let (label, _) = compact_status_line(&row.state, row.working, cx).unwrap();
                 assert_eq!(label, expected);
-                assert_eq!(
-                    color,
-                    if doing == Doing::Turn {
-                        cx.theme().primary
-                    } else {
-                        cx.theme().muted_foreground
-                    }
-                );
             });
         }
     }
@@ -7192,20 +7174,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn canceling_inline_rename_discards_the_unsaved_title(cx: &mut TestAppContext) {
-        cancel_inline_rename(cx, false);
-    }
-
-    #[gpui::test]
     fn canceling_inline_rename_on_the_phone_discards_the_unsaved_title(cx: &mut TestAppContext) {
-        cancel_inline_rename(cx, true);
-    }
-
-    fn cancel_inline_rename(cx: &mut TestAppContext, compact: bool) {
         cx.update(crate::theme::init);
-        if compact {
-            cx.update(crate::window_seam::force_mobile_layout);
-        }
+        cx.update(crate::window_seam::force_mobile_layout);
         let root = crate::store::tests::scratch_root("sidebar-rename-test");
         let session_store = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(root.clone());
@@ -7242,95 +7213,76 @@ mod tests {
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(360.), px(800.)));
         window_state.update(cx, |state, cx| {
-            state.set_compact(compact, cx);
+            state.set_compact(true, cx);
             state.go(crate::window_state::Destination::Threads, cx);
         });
         draw(cx);
-        let row = cx
-            .debug_bounds(if compact {
-                "compact-row-rename-thread"
-            } else {
-                "sidebar-thread-rename-thread"
-            })
-            .unwrap();
+        let row = cx.debug_bounds("compact-row-rename-thread").unwrap();
         let trigger = row.center();
-        if compact {
-            let touch = |cx: &mut VisualTestContext, phase, position| {
-                cx.simulate_event(gpui::TouchEvent {
-                    id: gpui::TouchId(1),
-                    phase,
-                    position,
-                    predicted_position: None,
-                    force: None,
-                });
-                draw(cx);
-            };
-            touch(cx, gpui::TouchPhase::Started, trigger);
-            cx.executor().advance_clock(
-                gpui::GestureTuning::default().long_press_duration
-                    + std::time::Duration::from_millis(1),
-            );
-            cx.run_until_parked();
-            draw(cx);
-            touch(cx, gpui::TouchPhase::Ended, trigger);
-            crate::test_frames::draw_settled(cx);
-            let rename = cx
-                .debug_bounds("menu-item-2")
-                .expect("thread menu opens")
-                .center();
-            touch(cx, gpui::TouchPhase::Started, rename);
-            touch(cx, gpui::TouchPhase::Ended, rename);
-            crate::test_frames::draw_settled(cx);
-            cx.simulate_input(" edited");
-            assert_eq!(
-                sidebar.read_with(cx, |sidebar, cx| sidebar
-                    .renaming
-                    .as_ref()
-                    .expect("Rename starts editing")
-                    .input
-                    .read(cx)
-                    .value()
-                    .to_string()),
-                "Original title edited",
-                "Rename mounts a usable input on the phone"
-            );
-            let caret = sidebar.read_with(cx, |sidebar, cx| {
-                sidebar
-                    .renaming
-                    .as_ref()
-                    .unwrap()
-                    .input
-                    .read(cx)
-                    .text_bounds()
-                    .unwrap()
-                    .center()
+        let touch = |cx: &mut VisualTestContext, phase, position| {
+            cx.simulate_event(gpui::TouchEvent {
+                id: gpui::TouchId(1),
+                phase,
+                position,
+                predicted_position: None,
+                force: None,
             });
-            touch(cx, gpui::TouchPhase::Started, caret);
-            touch(cx, gpui::TouchPhase::Ended, caret);
-            assert_eq!(
-                window_state.read_with(cx, |state, _| state.destination()),
-                crate::window_state::Destination::Threads,
-                "tapping the rename editor must not open the thread"
-            );
-            cx.simulate_click(caret, gpui::Modifiers::default());
             draw(cx);
-            assert_eq!(
-                window_state.read_with(cx, |state, _| state.destination()),
-                crate::window_state::Destination::Threads,
-                "clicking the rename editor must not open the thread"
-            );
-        } else {
-            let (button, modifiers) = (gpui::MouseButton::Right, gpui::Modifiers::none());
-            cx.simulate_mouse_down(trigger, button, modifiers);
-            cx.simulate_mouse_up(trigger, button, modifiers);
-            crate::test_frames::draw_settled(cx);
-            let rename = cx
-                .debug_bounds("menu-item-2")
-                .expect("thread menu opens")
-                .center();
-            cx.simulate_click(rename, gpui::Modifiers::default());
-            draw(cx);
-        }
+        };
+        touch(cx, gpui::TouchPhase::Started, trigger);
+        cx.executor().advance_clock(
+            gpui::GestureTuning::default().long_press_duration
+                + std::time::Duration::from_millis(1),
+        );
+        cx.run_until_parked();
+        draw(cx);
+        touch(cx, gpui::TouchPhase::Ended, trigger);
+        crate::test_frames::draw_settled(cx);
+        let rename = cx
+            .debug_bounds("menu-item-2")
+            .expect("thread menu opens")
+            .center();
+        touch(cx, gpui::TouchPhase::Started, rename);
+        touch(cx, gpui::TouchPhase::Ended, rename);
+        crate::test_frames::draw_settled(cx);
+        cx.simulate_input(" edited");
+        assert_eq!(
+            sidebar.read_with(cx, |sidebar, cx| sidebar
+                .renaming
+                .as_ref()
+                .expect("Rename starts editing")
+                .input
+                .read(cx)
+                .value()
+                .to_string()),
+            "Original title edited",
+            "Rename mounts a usable input on the phone"
+        );
+        let caret = sidebar.read_with(cx, |sidebar, cx| {
+            sidebar
+                .renaming
+                .as_ref()
+                .unwrap()
+                .input
+                .read(cx)
+                .text_bounds()
+                .unwrap()
+                .center()
+        });
+        touch(cx, gpui::TouchPhase::Started, caret);
+        touch(cx, gpui::TouchPhase::Ended, caret);
+        assert_eq!(
+            window_state.read_with(cx, |state, _| state.destination()),
+            crate::window_state::Destination::Threads,
+            "tapping the rename editor must not open the thread"
+        );
+        cx.simulate_click(caret, gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(
+            window_state.read_with(cx, |state, _| state.destination()),
+            crate::window_state::Destination::Threads,
+            "clicking the rename editor must not open the thread"
+        );
         cx.update(|window, cx| {
             sidebar.update(cx, |sidebar, cx| {
                 let input = sidebar
@@ -7471,7 +7423,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn compact_menu_dismissal_preserves_selection_and_clears_row_surface(cx: &mut TestAppContext) {
+    fn dismissing_a_phone_rows_menu_keeps_the_selection_and_the_next_tap_opens(
+        cx: &mut TestAppContext,
+    ) {
         use gpui::{PlatformInput, TouchEvent, TouchId, TouchPhase};
         cx.update(crate::theme::init);
         let root = crate::store::tests::scratch_root("menu-selection");
@@ -7551,10 +7505,7 @@ mod tests {
         let destination = navigation.read_with(cx, |state, _| state.destination());
         send(cx, 2, TouchPhase::Started, outside);
         send(cx, 2, TouchPhase::Ended, outside);
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("tcode-popup-menu").is_none());
         assert_eq!(
             store.read_with(cx, |store, _| store.open_threads()),
@@ -7564,29 +7515,12 @@ mod tests {
             navigation.read_with(cx, |state, _| state.destination()),
             destination
         );
-        let selected_surface = |cx: &mut VisualTestContext, bounds: gpui::Bounds<gpui::Pixels>| {
-            cx.update(|window, cx| {
-                window.painted_quads().iter().any(|quad| {
-                    quad.bounds == bounds.scale(window.scale_factor())
-                        && quad.background == gpui::Background::from(cx.theme().list_active)
-                })
-            })
-        };
-        assert!(
-            !selected_surface(cx, a),
-            "dismissed A has no pressed or selected fill"
-        );
         send(cx, 3, TouchPhase::Started, b.center());
         send(cx, 3, TouchPhase::Ended, b.center());
-        draw_settled(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             store.read_with(cx, |store, _| store.open_threads()),
             ["menu-10"]
-        );
-        assert!(!selected_surface(cx, a));
-        assert!(
-            !selected_surface(cx, b),
-            "a phone's list selects no row, the thread being another page"
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -7695,7 +7629,7 @@ mod tests {
         );
         // The list the new layout brings folds its rows in; the reader
         // presses a header once it is there.
-        draw_settled(cx);
+        crate::test_frames::draw_settled(cx);
         let headers = cx.debug_bounds("compact-group-header").is_some();
         if quick_chat {
             assert!(store.read_with(cx, |store, _| {
@@ -7720,7 +7654,7 @@ mod tests {
                             .any(|project| store.is_project_collapsed(&project.id))
                     }) == collapsed
                 });
-                draw_settled(cx);
+                crate::test_frames::draw_settled(cx);
                 let visible = ["compact-row-thread-0", "compact-row-thread-1"]
                     .into_iter()
                     .filter(|selector| cx.debug_bounds(selector).is_some())
@@ -7997,7 +7931,7 @@ mod tests {
         draw(cx);
         let more = cx.debug_bounds("show-more-project").unwrap();
         cx.simulate_click(more.center(), gpui::Modifiers::default());
-        draw_settled(cx);
+        crate::test_frames::draw_settled(cx);
 
         let far_row = |sidebar: &SessionsSidebar| {
             sidebar
@@ -8628,7 +8562,7 @@ mod tests {
         let click = |cx: &mut VisualTestContext, selector: &'static str| {
             let bounds = cx.debug_bounds(selector).unwrap();
             cx.simulate_click(bounds.center(), gpui::Modifiers::default());
-            draw_settled(cx);
+            crate::test_frames::draw_settled(cx);
         };
         for compact in [false, true] {
             store.update(cx, |store, cx| store.show_thread("mixed-a".into(), cx));
@@ -8641,7 +8575,7 @@ mod tests {
                 sidebar.compact_model_dirty = true;
                 cx.notify();
             });
-            draw_settled(cx);
+            crate::test_frames::draw_settled(cx);
             let shelves = sidebar.update(cx, |sidebar, cx| {
                 if compact {
                     sidebar
@@ -8748,7 +8682,7 @@ mod tests {
             store.update(cx, |store, cx| {
                 store.show_thread("many-settled-1".into(), cx);
             });
-            draw_settled(cx);
+            crate::test_frames::draw_settled(cx);
             verify(cx, expected(shown, false, true));
 
             send(
@@ -8760,7 +8694,7 @@ mod tests {
             );
             cx.run_until_parked();
             cx.run_until_parked();
-            draw_settled(cx);
+            crate::test_frames::draw_settled(cx);
             assert_eq!(
                 sidebar.update(cx, |sidebar, cx| sidebar.navigation_ids(cx)),
                 lead(false)

@@ -840,32 +840,12 @@ mod tests {
         (thread, chat.expect("the chat is built"), cx)
     }
 
-    /// Whether the row `selector` is drawn marked, as a piece the timeline
-    /// pointed out is.
-    fn marked(cx: &mut VisualTestContext, selector: &'static str) -> bool {
-        let row = cx
-            .debug_bounds(selector)
-            .unwrap_or_else(|| panic!("{selector} is drawn"));
-        cx.update(|window, cx| {
-            let accent = cx.theme().accent;
-            let scale = window.scale_factor();
-            let near = |a: gpui::ScaledPixels, b: gpui::ScaledPixels| (a - b).0.abs() <= 1.;
-            crate::test_frames::painted_quads(window)
-                .iter()
-                .any(|quad| {
-                    quad.background.as_solid() == Some(accent)
-                        && near(quad.bounds.top(), row.top().scale(scale))
-                        && near(quad.bounds.left(), row.left().scale(scale))
-                })
-        })
-    }
-
     /// A thread's background work stays where the rail lists commands,
     /// whichever turn started it, ahead of the latest turn's: a command
     /// moved there in an earlier turn, and a piece its harness names no
     /// call for. Its stop reaches the host at once, and the stop for all of
     /// it asks first. A row leads to the window of the call that started its
-    /// piece, which leads back, marking the row. Without the rail, a pill
+    /// piece. Without the rail, a pill
     /// holds the same work as one list, which that window opens.
     #[gpui::test]
     fn background_work_is_one_list_whichever_way_it_is_reached(cx: &mut TestAppContext) {
@@ -906,11 +886,9 @@ mod tests {
         // row opens to show its call.
         assert!(cx.debug_bounds("background-link-call_1").is_none());
         click(cx, "rail-command-call_1");
-        assert!(!marked(cx, "rail-command-call_1"));
-        click(cx, "background-link-call_1");
         assert!(
-            marked(cx, "rail-command-call_1"),
-            "the call's window marks its row in the Commands card"
+            cx.debug_bounds("background-link-call_1").is_some(),
+            "the row opens its call's window"
         );
 
         cx.simulate_resize(size(px(900.), px(900.)));

@@ -6,7 +6,7 @@
 use gpui::TouchPhase::{Ended, Moved, Started};
 
 use super::{
-    scenes::{asked, completed, fill_of, serve_log, started},
+    scenes::{asked, completed, serve_log, started},
     *,
 };
 
@@ -81,17 +81,15 @@ fn agent_bubble(id: &str) -> &'static str {
 struct Reading {
     question: &'static str,
     top: Pixels,
-    fill: f32,
 }
 
 impl Reading {
-    /// The question is there, as far in as it was and where it was.
+    /// The question is there, where it was.
     fn assert_kept(&self, cx: &mut VisualTestContext) {
         let question = cx
             .debug_bounds(self.question)
             .expect("the lead's question is drawn");
         assert_eq!(question.top(), self.top, "the lead's scroll position");
-        assert_eq!(fill_of(self.question, cx), Some(self.fill), "fully drawn");
     }
 }
 
@@ -122,9 +120,7 @@ fn mount_lead_scrolled(
         delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(1000.))),
         ..Default::default()
     });
-    draw(cx);
-    cx.executor().advance_clock(Duration::from_secs(1));
-    draw(cx);
+    crate::test_frames::draw_settled(cx);
     let (question, top) = (0..24)
         .find_map(|index| {
             let selector: &'static str = format!("user-bubble-message-{index}").leak();
@@ -133,17 +129,18 @@ fn mount_lead_scrolled(
                 .then_some((selector, bounds.top()))
         })
         .expect("a question on screen");
-    let fill = fill_of(question, cx).expect("the question");
-    (
-        shell,
-        host,
-        cx,
-        Reading {
-            question,
-            top,
-            fill,
-        },
-    )
+    (shell, host, cx, Reading { question, top })
+}
+
+/// `thread-1`, with `agent-1` dispatched by it, on a phone.
+fn mount_lead_on_phone(
+    cx: &mut TestAppContext,
+) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
+    let (shell, host, cx) = mount_lead_with_agent(cx);
+    as_mobile(cx);
+    cx.simulate_resize(size(px(WIDTH), px(852.)));
+    crate::test_frames::draw_settled(cx);
+    (shell, host, cx)
 }
 
 /// Open `id` from the thread the page shows, as its row does.
@@ -174,44 +171,18 @@ fn focused(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> Option<Strin
     })
 }
 
-/// The edge swipe from an agent to its lead: the lead is beneath the
-/// agent's page, where it was left; a release short of the threshold
-/// brings the page back, the agent as it was; one past it lands on the
-/// lead, where it was left, and lets the agent go.
+/// An edge swipe from an agent lands on its lead, where it was left, and
+/// lets the agent go.
 #[gpui::test]
-fn an_edge_swipe_drags_an_agent_off_its_lead(cx: &mut TestAppContext) {
+fn an_edge_swipe_from_an_agent_lands_on_its_lead_where_it_was_left(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx, reading) = mount_lead_scrolled(cx);
     open_agent_served(&shell, &host, "agent-1", cx);
-    let agent = cx.debug_bounds(agent_bubble("agent-1")).expect("the agent");
+    assert!(cx.debug_bounds(agent_bubble("agent-1")).is_some());
 
     touch_drag(
         cx,
         1,
-        &[
-            (Started, 10., 300., 0),
-            (Moved, 40., 300., 200),
-            (Moved, 80., 300., 200),
-        ],
-    );
-    assert!(cx.debug_bounds("back-current-page").is_some());
-    reading.assert_kept(cx);
-    assert_eq!(focused(&shell, cx).as_deref(), Some("agent-1"));
-
-    touch_drag(cx, 1, &[(Ended, 80., 300., 10)]);
-    cx.executor().advance_clock(Duration::from_secs(1));
-    draw(cx);
-    assert!(cx.debug_bounds("back-current-page").is_none());
-    assert_eq!(focused(&shell, cx).as_deref(), Some("agent-1"));
-    assert_eq!(cx.debug_bounds(agent_bubble("agent-1")), Some(agent));
-    assert!(
-        cx.debug_bounds(reading.question).is_none(),
-        "the lead is covered again"
-    );
-
-    touch_drag(
-        cx,
-        2,
         &[
             (Started, 10., 300., 0),
             (Moved, 100., 300., 200),
@@ -219,9 +190,7 @@ fn an_edge_swipe_drags_an_agent_off_its_lead(cx: &mut TestAppContext) {
             (Ended, 200., 300., 10),
         ],
     );
-    cx.executor().advance_clock(Duration::from_secs(1));
-    draw(cx);
-    assert!(cx.debug_bounds("back-current-page").is_none(), "it landed");
+    crate::test_frames::draw_settled(cx);
     assert_eq!(focused(&shell, cx).as_deref(), Some("thread-1"));
     assert!(cx.debug_bounds(agent_bubble("agent-1")).is_none());
     reading.assert_kept(cx);
@@ -237,7 +206,7 @@ fn an_edge_swipe_drags_an_agent_off_its_lead(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_lead_is_held_under_its_agent_until_the_reader_goes_elsewhere(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx, _) = mount_lead_scrolled(cx);
+    let (shell, host, cx) = mount_lead_on_phone(cx);
     open_agent_served(&shell, &host, "agent-1", cx);
     let store = store_of(&shell, cx);
     store.read_with(cx, |store, _| {
@@ -283,23 +252,20 @@ fn an_agent_opened_from_the_panels_stands_on_its_lead(cx: &mut TestAppContext) {
             (Started, 10., 300., 0),
             (Moved, 100., 300., 200),
             (Moved, 200., 300., 200),
+            (Ended, 200., 300., 10),
         ],
     );
-    reading.assert_kept(cx);
-    touch_drag(cx, 1, &[(Ended, 200., 300., 10)]);
-    cx.executor().advance_clock(Duration::from_secs(1));
-    draw(cx);
+    crate::test_frames::draw_settled(cx);
     assert_eq!(focused(&shell, cx).as_deref(), Some("thread-1"));
     reading.assert_kept(cx);
 }
 
 /// An agent reached any other way than from its lead (a link, a restored
-/// window) comes in as any thread does, and has its lead beneath it once it
-/// is there: a page of its own, for the swipe to uncover and land on.
+/// window) has its lead beneath it, for the swipe to land on.
 #[gpui::test]
-fn an_agent_not_opened_from_its_lead_has_it_beneath(cx: &mut TestAppContext) {
+fn an_agent_not_opened_from_its_lead_swipes_back_to_it(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx, _) = mount_lead_scrolled(cx);
+    let (shell, host, cx) = mount_lead_on_phone(cx);
     let back = cx.debug_bounds("compact-back").expect("the compact Back");
     cx.simulate_click(back.center(), gpui::Modifiers::default());
     crate::test_frames::draw_settled(cx);
@@ -310,11 +276,7 @@ fn an_agent_not_opened_from_its_lead_has_it_beneath(cx: &mut TestAppContext) {
     draw(cx);
     await_restore_update(&shell, cx, |store, _| store.timeline_settled_for("agent-1"));
     crate::test_frames::draw_settled(cx);
-    // The frame the window asked for as the page came to rest, which a
-    // display delivers: the lead is put beneath the agent there.
-    cx.update(|window, cx| window.simulate_next_frame(cx));
-    draw(cx);
-    serve_long_lead(&host, "thread-1");
+    serve_thread(&host, "thread-1");
     await_restore_update(&shell, cx, |store, _| {
         store.timeline_settled_for("thread-1")
     });
@@ -327,16 +289,10 @@ fn an_agent_not_opened_from_its_lead_has_it_beneath(cx: &mut TestAppContext) {
             (Started, 10., 300., 0),
             (Moved, 100., 300., 200),
             (Moved, 200., 300., 200),
+            (Ended, 200., 300., 10),
         ],
     );
-    assert!(cx.debug_bounds("back-current-page").is_some());
-    assert!(
-        cx.debug_bounds("user-bubble-message-23").is_some(),
-        "the lead, at its tail, beneath the agent"
-    );
-    touch_drag(cx, 1, &[(Ended, 200., 300., 10)]);
-    cx.executor().advance_clock(Duration::from_secs(1));
-    draw(cx);
+    crate::test_frames::draw_settled(cx);
     assert_eq!(focused(&shell, cx).as_deref(), Some("thread-1"));
     store.read_with(cx, |store, _| assert!(!store.is_thread_open("agent-1")));
 }

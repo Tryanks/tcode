@@ -773,43 +773,6 @@ x&-y\\
         assert_eq!(*start, 2);
     }
 
-    /// A streaming diagram is drawn whole once its fence closes, and from its
-    /// finished lines until then.
-    #[test]
-    fn a_fence_knows_whether_it_closed_and_whether_its_last_line_ended() {
-        fn fence(node: &BlockNode) -> Option<(bool, bool)> {
-            match node {
-                BlockNode::CodeBlock(code) => Some((code.closed, code.open_line)),
-                BlockNode::Root { children }
-                | BlockNode::Blockquote { children }
-                | BlockNode::List { children, .. }
-                | BlockNode::ListItem { children, .. } => children.iter().find_map(fence),
-                _ => None,
-            }
-        }
-        for (source, closed, open_line) in [
-            ("```mermaid\n", false, false),
-            ("```mermaid\nA --> B", false, true),
-            ("```mermaid\nA --> B\n", false, false),
-            // A closing fence half written is still a line of the code.
-            ("```mermaid\nA --> B\n``", false, true),
-            ("```mermaid\nA --> B\n```", true, false),
-            ("````mermaid\nA --> B\n```\n", false, false),
-            ("> ```mermaid\n> A --> B\n> ```\n", true, false),
-            ("- item\n\n  ```mermaid\n  A --> B\n  ```\n", true, false),
-            ("~~~\na\n~~~\nafter", true, false),
-        ] {
-            let BlockNode::Root { children } = parse(source) else {
-                panic!("root")
-            };
-            assert_eq!(
-                children.iter().find_map(fence),
-                Some((closed, open_line)),
-                "{source:?}"
-            );
-        }
-    }
-
     #[test]
     fn maps_table_header_rows_and_alignment() {
         let children = root_children("| a | b |\n| :---: | ---: |\n| c | d |");

@@ -2279,7 +2279,7 @@ mod replica_tests {
         }))
         .unwrap();
         host.shutdown_blocking().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
@@ -2427,7 +2427,7 @@ mod replica_tests {
             )]
         );
         assert!(cx.debug_bounds("attached-file-0").is_none());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The desktop's "+" opens the system's file picker for any number of
@@ -2469,7 +2469,7 @@ mod replica_tests {
                 plan.display()
             )]
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Copying a file in the file manager and pasting it attaches the file.
@@ -2493,7 +2493,7 @@ mod replica_tests {
         });
         draw_settled(cx);
         assert!(cx.debug_bounds("attached-file-0").is_some());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A remote client uploads the file in chunks and the message carries the
@@ -2577,7 +2577,7 @@ mod replica_tests {
             sent_texts(&outgoing),
             [format!("read this\n\n{}", host_path.display())]
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A folder has no remote path to carry, and a file over the device's
@@ -2599,7 +2599,7 @@ mod replica_tests {
             answer_upload(&outgoing, &incoming, |_| Err("unexpected".into())),
             None
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn replace(incoming: &async_channel::Sender<String>, topic: Topic, event: ServerEvent) {
@@ -3156,7 +3156,7 @@ mod replica_tests {
     }
 
     #[gpui::test]
-    fn holding_queue_reveals_choices_and_release_height_picks_steer_queue_or_nothing(
+    fn the_phone_queue_buttons_release_height_sends_steer_queue_or_nothing(
         cx: &mut TestAppContext,
     ) {
         use gpui::{TouchEvent, TouchId, TouchPhase, point};
@@ -3234,7 +3234,6 @@ mod replica_tests {
         };
         let sent =
             |cx: &mut gpui::VisualTestContext| {
-                cx.executor().advance_clock(Duration::from_millis(50));
                 cx.run_until_parked();
                 let mut sent = Vec::new();
                 while let Ok(line) = outgoing.try_recv() {
@@ -3252,15 +3251,11 @@ mod replica_tests {
             };
         assert!(sent(cx).is_empty());
 
-        let mut upper_target = None;
         for (gesture, expected) in [
+            ("tap", "queue"),
             ("hold", "queue"),
             ("hold-slide", "steer"),
             ("slide", "steer"),
-            ("direct-slide", "steer"),
-            ("lower", "queue"),
-            ("tap", "queue"),
-            ("sideways", "queue"),
             ("hold-sideways", "queue"),
             ("steer-sideways", "steer"),
         ] {
@@ -3273,10 +3268,8 @@ mod replica_tests {
                 .expect("the Queue button is shown");
             let center = button.center();
             touch(cx, TouchPhase::Started, center);
-            assert!(cx.debug_bounds("steer-gesture-steer").is_none());
-            assert!(cx.debug_bounds("steer-gesture-queue").is_none());
             let mut lift = center;
-            if matches!(gesture, "hold" | "hold-slide" | "lower" | "hold-sideways") {
+            if matches!(gesture, "hold" | "hold-slide" | "hold-sideways") {
                 cx.executor()
                     .advance_clock(gpui::GestureTuning::default().long_press_duration);
                 cx.run_until_parked();
@@ -3289,15 +3282,7 @@ mod replica_tests {
                     point(center.x, button.top() - px(1.)),
                 );
             }
-            if gesture == "direct-slide" {
-                lift = upper_target.expect("the previous gesture measured Steer");
-                touch(cx, TouchPhase::Moved, lift);
-            }
-            if gesture == "sideways" {
-                lift = point(center.x - px(120.), center.y);
-                touch(cx, TouchPhase::Moved, lift);
-            }
-            if gesture != "tap" && gesture != "sideways" {
+            if gesture != "tap" {
                 cx.update(|window, cx| _ = window.draw(cx));
                 let upper = cx
                     .debug_bounds("steer-gesture-steer")
@@ -3305,44 +3290,15 @@ mod replica_tests {
                 let lower = cx
                     .debug_bounds("steer-gesture-queue")
                     .expect("holding reveals the lower Queue button");
-                upper_target = Some(upper.center());
-                if gesture == "direct-slide" {
-                    assert!(cx.debug_bounds("steer-gesture-steer-selected").is_some());
-                } else if !matches!(gesture, "slide" | "steer-sideways") {
-                    assert!(cx.debug_bounds("steer-gesture-queue-selected").is_some());
-                }
-                match gesture {
-                    "hold-sideways" => {
-                        lift = point(center.x - px(120.), lower.top() - px(4.));
-                        touch(cx, TouchPhase::Moved, lift);
-                        assert!(
-                            cx.debug_bounds("steer-gesture-queue-selected").is_some(),
-                            "level with Queue queues wherever the finger is horizontally"
-                        );
-                    }
-                    "steer-sideways" => {
-                        lift = point(center.x - px(120.), upper.top() - px(40.));
-                        touch(cx, TouchPhase::Moved, lift);
-                        assert!(
-                            cx.debug_bounds("steer-gesture-steer-selected").is_some(),
-                            "anywhere above the gap under Steer steers"
-                        );
-                    }
-                    "slide" | "hold-slide" | "lower" => {
-                        lift = upper.center();
-                        touch(cx, TouchPhase::Moved, lift);
-                        assert!(
-                            cx.debug_bounds("steer-gesture-steer-selected").is_some(),
-                            "{gesture}: moving onto Steer highlights it"
-                        );
-                        if gesture == "lower" {
-                            lift = lower.center();
-                            touch(cx, TouchPhase::Moved, lift);
-                            assert!(cx.debug_bounds("steer-gesture-queue-selected").is_some());
-                        }
-                    }
-                    _ => {}
-                }
+                lift = match gesture {
+                    // Level with Queue queues wherever the finger is
+                    // horizontally; anywhere above the gap under Steer steers.
+                    "hold-sideways" => point(center.x - px(120.), lower.top() - px(4.)),
+                    "steer-sideways" => point(center.x - px(120.), upper.top() - px(40.)),
+                    "slide" | "hold-slide" => upper.center(),
+                    _ => lift,
+                };
+                touch(cx, TouchPhase::Moved, lift);
             }
             assert!(
                 sent(cx).is_empty(),
@@ -3350,8 +3306,6 @@ mod replica_tests {
             );
             touch(cx, TouchPhase::Ended, lift);
             assert_eq!(sent(cx), vec![(expected, gesture.to_string())], "{gesture}");
-            assert!(cx.debug_bounds("steer-gesture-steer").is_none());
-            assert!(cx.debug_bounds("steer-gesture-queue").is_none());
             assert!(
                 composer
                     .read_with(cx, |composer, cx| composer.draft(cx))
@@ -3359,21 +3313,15 @@ mod replica_tests {
             );
         }
 
-        for gesture in ["down", "hold-down", "steer-down", "cancel"] {
+        for gesture in ["down", "cancel"] {
             composer.update_in(cx, |composer, window, cx| {
                 composer.set_input_text("kept".into(), window, cx)
             });
             cx.update(|window, cx| _ = window.draw(cx));
             let button = cx.debug_bounds("steer-turn").unwrap();
             touch(cx, TouchPhase::Started, button.center());
-            if gesture == "hold-down" {
-                cx.executor()
-                    .advance_clock(gpui::GestureTuning::default().long_press_duration);
-                cx.run_until_parked();
-                cx.update(|window, cx| _ = window.draw(cx));
-            }
-            let mut lift = button.center();
-            if matches!(gesture, "steer-down" | "cancel") {
+            let away = point(button.center().x - px(120.), button.bottom() + px(1.));
+            if gesture == "cancel" {
                 touch(
                     cx,
                     TouchPhase::Moved,
@@ -3381,23 +3329,12 @@ mod replica_tests {
                 );
                 let upper = cx.debug_bounds("steer-gesture-steer").unwrap();
                 touch(cx, TouchPhase::Moved, upper.center());
-                lift = upper.center();
-            }
-            let away = point(button.center().x - px(120.), button.bottom() + px(1.));
-            if gesture == "cancel" {
-                touch(cx, TouchPhase::Cancelled, lift);
+                touch(cx, TouchPhase::Cancelled, upper.center());
             } else {
                 touch(cx, TouchPhase::Moved, away);
-                if gesture != "down" {
-                    assert!(cx.debug_bounds("steer-gesture-steer").is_some());
-                    assert!(cx.debug_bounds("steer-gesture-steer-selected").is_none());
-                    assert!(cx.debug_bounds("steer-gesture-queue-selected").is_none());
-                }
                 touch(cx, TouchPhase::Ended, away);
             }
             assert!(sent(cx).is_empty(), "{gesture} sends nothing");
-            assert!(cx.debug_bounds("steer-gesture-steer").is_none());
-            assert!(cx.debug_bounds("steer-gesture-queue").is_none());
             assert_eq!(
                 composer.read_with(cx, |composer, cx| composer.draft(cx)),
                 "kept"

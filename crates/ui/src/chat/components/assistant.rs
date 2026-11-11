@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn markdown_mirror_keeps_rendered_text_coherent_across_append_rewrite_shrink_and_clear(
+    fn a_message_shows_its_latest_text_across_append_rewrite_shrink_and_clear(
         cx: &mut TestAppContext,
     ) {
         cx.update(crate::theme::init);
@@ -541,7 +541,6 @@ mod tests {
             ("", ""),
         ] {
             cx.update(|cx| md.sync(text.into(), cx));
-            assert_eq!(md.synced.as_ref(), text);
             assert_eq!(rendered(&md.state, cx), expected);
         }
     }

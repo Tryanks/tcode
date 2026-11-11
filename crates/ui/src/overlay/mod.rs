@@ -923,9 +923,7 @@ mod tests {
         assert!(cx.debug_bounds("wide-toast").is_some());
 
         cx.update(|window, cx| window.remove_notification::<Stays>(cx));
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("wide-toast").is_none());
     }
 }

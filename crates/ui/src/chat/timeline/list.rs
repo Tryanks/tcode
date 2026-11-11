@@ -773,14 +773,19 @@ mod tests {
     fn the_mark_stays_on_its_turn_as_history_is_read_in_above(cx: &mut TestAppContext) {
         use crate::test_frames::draw;
 
-        let events = (0..100)
+        // Answers of several paragraphs: the window fills its screens with
+        // a few turns, and pages of two turns are left to read in above.
+        let events = (0..20)
             .flat_map(|turn| {
                 [
                     agent::AgentEvent::TurnStarted {
                         turn_id: turn.to_string(),
                     },
                     user_event(&format!("user-{turn}"), &format!("Question {turn}")),
-                    answer_event(&format!("answer-{turn}"), &format!("Answer {turn}.")),
+                    answer_event(
+                        &format!("answer-{turn}"),
+                        &format!("Answer {turn}, one paragraph of several.\n\n").repeat(8),
+                    ),
                     agent::AgentEvent::TurnCompleted {
                         turn_id: turn.to_string(),
                         status: agent::TurnStatus::Completed,
@@ -789,7 +794,7 @@ mod tests {
                 ]
             })
             .collect();
-        let mut thread = ScriptedThread::new(cx, events, 4 * 90, false);
+        let mut thread = ScriptedThread::new(cx, events, 4 * 16, false);
         let store = thread.store.clone();
         let (view, cx) = thread.open(cx);
         // A frame as the display draws it, then the page it asked for.

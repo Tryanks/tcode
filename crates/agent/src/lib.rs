@@ -2437,6 +2437,12 @@ pub enum AgentEvent {
     /// from the model selected when the session started.
     ServedModel {
         model: String,
+        /// The model the harness named before this one in the same session:
+        /// what it says it rerouted from, or the last it reported serving.
+        /// `None` when it has named none; records from before it was kept
+        /// carry `None` too.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
         reason: Option<String>,
     },
     TurnStarted {
@@ -3635,7 +3641,7 @@ mod resolve_binary_tests {
             )),
             None
         );
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The resolved file name, lowercased: the extension comes from `PATHEXT`

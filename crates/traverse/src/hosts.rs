@@ -236,6 +236,6 @@ mod tests {
         assert_eq!(saved[0].host_id, MACHINE_ID);
         let written = fs::read_to_string(dir.join("hosts.json")).unwrap();
         assert!(!written.contains("0000beef"), "{written}");
-        fs::remove_dir_all(dir).unwrap();
+        let _ = fs::remove_dir_all(dir);
     }
 }

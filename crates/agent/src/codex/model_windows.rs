@@ -77,7 +77,7 @@ mod tests {
         )
         .unwrap();
         let windows = read(&dir);
-        std::fs::remove_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             windows.get("gpt-6-astra"),
             Some(&ModelWindows {

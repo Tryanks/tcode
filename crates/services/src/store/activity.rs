@@ -333,7 +333,7 @@ mod tests {
             store.remove_session(&fork.id).unwrap();
         }
         store.close().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -406,6 +406,6 @@ mod tests {
             );
         }
         store.close().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

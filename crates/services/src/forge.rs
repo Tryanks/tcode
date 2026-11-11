@@ -762,7 +762,7 @@ mod tests {
         }
         git(&["remote", "remove", "origin"]);
         assert!(repository().is_none());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A host is served by the kind settings give it; otherwise its name decides, and a host

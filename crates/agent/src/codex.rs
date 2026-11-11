@@ -2960,10 +2960,8 @@ impl Actor {
                 }
             }
             "model/rerouted" => {
-                if let Some((model, reason)) = model_reroute(params) {
-                    self.events
-                        .emit(AgentEvent::ServedModel { model, reason })
-                        .await;
+                if let Some(event) = model_reroute(params) {
+                    self.events.emit(event).await;
                 }
             }
             "error" => {
@@ -4569,17 +4567,19 @@ fn map_usage(value: &Value) -> Option<TokenUsage> {
     })
 }
 
-fn model_reroute(params: &Value) -> Option<(String, Option<String>)> {
+/// `ModelReroutedNotification` (app-server protocol v2, codex-cli 0.167.1).
+fn model_reroute(params: &Value) -> Option<AgentEvent> {
     let to = params
         .get("toModel")
         .or_else(|| params.get("to_model"))
         .and_then(Value::as_str)?
         .to_owned();
-    let reason = params
-        .get("reason")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    Some((to, reason))
+    let field = |name| params.get(name).and_then(Value::as_str).map(str::to_owned);
+    Some(AgentEvent::ServedModel {
+        model: to,
+        from: field("fromModel"),
+        reason: field("reason"),
+    })
 }
 
 #[cfg(test)]
@@ -6539,8 +6539,10 @@ mod tests {
                 .await;
             assert!(matches!(
                 events.try_recv().unwrap(),
-                AgentEvent::ServedModel { model, reason }
-                    if model == "gpt-5.4" && reason.as_deref() == Some("highRiskCyberActivity")
+                AgentEvent::ServedModel { model, from, reason }
+                    if model == "gpt-5.4"
+                        && from.as_deref() == Some("gpt-5.5")
+                        && reason.as_deref() == Some("highRiskCyberActivity")
             ));
             let _ = actor.child.kill();
             let _ = actor.child.wait();

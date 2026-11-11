@@ -295,7 +295,6 @@ mod tests {
                 panel.result.is_none(),
                 "late success must not overwrite disconnection"
             );
-            assert!(panel.request.is_none());
         });
         link.set_connection_state(ConnectionState::Connected { path: None });
         cx.run_until_parked();

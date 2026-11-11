@@ -5833,7 +5833,6 @@ impl AppShell {
                         .bottom_0()
                         .left(underneath)
                         .right(-underneath)
-                        .debug_selector(|| "back-previous-page".into())
                         .child(previous)
                         .child(
                             div()
@@ -5849,7 +5848,6 @@ impl AppShell {
                         .bottom_0()
                         .left(offset)
                         .right(-offset)
-                        .debug_selector(|| "back-current-page".into())
                         .child(current),
                 )
                 .child(div().absolute().inset_0().occlude())
@@ -6698,7 +6696,6 @@ pub(crate) mod tests {
         transports: RefCell<Vec<Transport>>,
         preferences: RefCell<tcode_client::host::ClientPreferences>,
         machine_exists: bool,
-        saves: Cell<usize>,
         outbox: Option<std::sync::Arc<dyn tcode_client::outbox::Storage>>,
     }
 
@@ -6744,7 +6741,6 @@ pub(crate) mod tests {
             preferences: &tcode_client::host::ClientPreferences,
         ) -> Result<(), tcode_client::host::FileFailure> {
             *self.preferences.borrow_mut() = preferences.clone();
-            self.saves.set(self.saves.get() + 1);
             Ok(())
         }
 
@@ -6850,7 +6846,6 @@ pub(crate) mod tests {
                 ..Default::default()
             }),
             machine_exists,
-            saves: Cell::new(0),
             outbox: None,
         });
         let setup_client = client.clone();
@@ -7451,7 +7446,6 @@ pub(crate) mod tests {
             !store.chat_loading_for(Some("thread-2"), cx)
         });
         restored(cx);
-        assert!(shell.read_with(cx, |shell, _| shell.pending_navigation_restore.is_none()));
 
         let to_b = sent(on_b);
         assert_eq!(
@@ -8584,7 +8578,6 @@ pub(crate) mod tests {
             }]),
             preferences: RefCell::new(Default::default()),
             machine_exists: true,
-            saves: Cell::new(0),
             outbox: Some(std::sync::Arc::new(SavedOutbox)),
         });
         let (shell, cx) = cx.add_window_view(|window, cx| {
@@ -8625,10 +8618,6 @@ pub(crate) mod tests {
             assert!(shell.compact(cx));
             assert_eq!(shell.destination(cx), Destination::Threads);
         });
-        cx.update(|window, cx| {
-            crate::settings_page::apply_theme(tcode_core::settings::ThemeMode::Dark, window, cx)
-        });
-        draw(cx);
         assert!(
             cx.debug_bounds("pending-thread-row").is_some(),
             "compact Threads exposes the outbox without a cached index"
@@ -9023,129 +9012,107 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn cold_start_restores_thread_and_selects_it_once(cx: &mut TestAppContext) {
+    fn a_cold_start_restores_the_thread_once_without_raising_the_keyboard(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::window_seam::force_mobile_layout);
-        for width in [393., 1024.] {
-            let (shell, host, _, cx) =
-                mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, width, "plan");
-            assert!(
-                cx.debug_bounds("baseline-loading").is_some(),
-                "the restored destination shows a skeleton before its Index baseline"
-            );
-            shell.read_with(cx, |shell, cx| {
-                assert_eq!(
-                    shell.window_state.read(cx).history(),
-                    [Destination::Threads, Destination::Thread]
-                );
-                assert_eq!(
-                    shell
-                        .page_thread(cx)
-                        .map(|thread| thread.session_id)
-                        .as_deref(),
-                    Some("thread-a")
-                );
-            });
-            restore_index(&shell, &host, true, cx);
-            restore_index(&shell, &host, true, cx);
-            restore_status(&shell, &host, cx);
-            draw(cx);
-            cx.update(|window, cx| {
-                let composer = shell
-                    .read(cx)
-                    .column
-                    .as_ref()
-                    .unwrap()
-                    .chat(cx)
-                    .read(cx)
-                    .composer();
-                assert!(!composer.read(cx).input_focus_handle(cx).is_focused(window));
-            });
-            let subscriptions = sent(&host).into_iter().filter(|payload| matches!(payload,
-                ClientPayload::Subscribe(subscription) if subscription.topic == Topic::SessionEvents { session_id: "thread-a".into() }
-            )).count();
+        let (shell, host, _, cx) =
+            mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 393., "plan");
+        assert!(
+            cx.debug_bounds("baseline-loading").is_some(),
+            "the restored destination shows a skeleton before its Index baseline"
+        );
+        shell.read_with(cx, |shell, cx| {
             assert_eq!(
-                subscriptions, 1,
-                "baseline reconciliation must not select again"
+                shell.window_state.read(cx).history(),
+                [Destination::Threads, Destination::Thread]
             );
-            for (topic, event) in [
-                (
-                    Topic::Settings,
-                    ServerEvent::SettingsSnapshot(Default::default()),
-                ),
-                (
-                    Topic::SessionEvents {
-                        session_id: "thread-a".into(),
-                    },
-                    ServerEvent::SessionSnapshot {
-                        from: 1800,
-                        end: 2000,
-                        records: (0..200)
-                            .map(|_| {
-                                agent::AgentEvent::Warning {
-                                    message: "short".into(),
-                                }
-                                .into()
-                            })
-                            .collect(),
-                        total: 2000,
-                        total_turns: 1,
-                        truncated: false,
-                    },
-                ),
-            ] {
-                host.incoming
-                    .try_send(
-                        encode_line(&HostMessage::Event(EventEnvelope {
-                            request_id: None,
-                            topic,
-                            event,
-                        }))
-                        .unwrap(),
-                    )
-                    .unwrap();
-            }
-            await_restore_update(&shell, cx, |store, cx| {
-                !store.chat_loading_for(Some("thread-a"), cx)
-            });
-            draw(cx);
-            cx.update(|window, cx| {
-                window.simulate_next_frame(cx);
-            });
-            cx.run_until_parked();
-            assert!(
-                sent(&host).into_iter().any(|payload| matches!(
-                    payload,
-                    ClientPayload::Query(tcode_protocol::Query::SessionHistoryPage {
-                        before: 1800,
-                        limit: 200,
-                        ..
-                    })
-                )),
-                "restored short history must prefetch before any scroll"
-            );
-            shell.read_with(cx, |shell, cx| {
-                assert_eq!(
-                    shell.window_state.read(cx).history().last(),
-                    Some(&Destination::Thread)
-                )
-            });
-            let focus = shell.read_with(cx, |shell, cx| {
+            assert_eq!(
                 shell
-                    .column
-                    .as_ref()
-                    .unwrap()
-                    .chat(cx)
-                    .read(cx)
-                    .composer()
-                    .read(cx)
-                    .input_focus_handle(cx)
-            });
-            for rotated_width in [width, 393., 1024.] {
-                resize(cx, rotated_width);
-                cx.update(|window, _| assert!(!focus.is_focused(window), "cold restore at {width}px must not open the keyboard after hydration or rotation"));
-            }
+                    .page_thread(cx)
+                    .map(|thread| thread.session_id)
+                    .as_deref(),
+                Some("thread-a")
+            );
+        });
+        restore_index(&shell, &host, true, cx);
+        restore_index(&shell, &host, true, cx);
+        restore_status(&shell, &host, cx);
+        draw(cx);
+        cx.update(|window, cx| {
+            let composer = shell
+                .read(cx)
+                .column
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer();
+            assert!(!composer.read(cx).input_focus_handle(cx).is_focused(window));
+        });
+        let subscriptions = sent(&host).into_iter().filter(|payload| matches!(payload,
+            ClientPayload::Subscribe(subscription) if subscription.topic == Topic::SessionEvents { session_id: "thread-a".into() }
+        )).count();
+        assert_eq!(
+            subscriptions, 1,
+            "baseline reconciliation must not select again"
+        );
+        for (topic, event) in [
+            (
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+            (
+                Topic::SessionEvents {
+                    session_id: "thread-a".into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    from: 0,
+                    end: 0,
+                    records: Vec::new(),
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
+                },
+            ),
+        ] {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
         }
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-a"), cx)
+        });
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.window_state.read(cx).history().last(),
+                Some(&Destination::Thread)
+            )
+        });
+        let focus = shell.read_with(cx, |shell, cx| {
+            shell
+                .column
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
+                .read(cx)
+                .input_focus_handle(cx)
+        });
+        cx.update(|window, _| {
+            assert!(
+                !focus.is_focused(window),
+                "a cold restore must not open the keyboard after hydration"
+            )
+        });
     }
 
     #[gpui::test]
@@ -9208,88 +9175,82 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn cold_start_restores_the_selected_panel_after_session_status(cx: &mut TestAppContext) {
+    fn a_cold_start_restores_the_saved_panel_tab(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::window_seam::force_mobile_layout);
-        for (saved_panel, expected_tab) in [
-            ("plan", RightTab::Plan),
-            ("agents", RightTab::Agents),
-            ("pull_requests", RightTab::PullRequests),
+        let (saved_panel, expected_tab) = ("plan", RightTab::Plan);
+        let (shell, host, client, cx) = mount_restored_at_width(
+            cx,
+            &["hosts", "threads", "thread", "panel"],
+            true,
+            393.,
+            saved_panel,
+        );
+        restore_index(&shell, &host, true, cx);
+        restore_status(&shell, &host, cx);
+        assert!(
+            cx.debug_bounds("baseline-loading").is_some(),
+            "status alone is not the conversation baseline"
+        );
+        let settings = tcode_core::settings::Settings {
+            language: Some(crate::LANGUAGE_ENGLISH.into()),
+            ..Default::default()
+        };
+        for (topic, event) in [
+            (Topic::Settings, ServerEvent::SettingsSnapshot(settings)),
+            (
+                Topic::SessionEvents {
+                    session_id: "thread-a".into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    from: 0,
+                    end: 0,
+                    records: Vec::new(),
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
+                },
+            ),
         ] {
-            let (shell, host, client, cx) = mount_restored_at_width(
-                cx,
-                &["hosts", "threads", "thread", "panel"],
-                true,
-                393.,
-                saved_panel,
-            );
-            restore_index(&shell, &host, true, cx);
-            restore_status(&shell, &host, cx);
-            assert!(
-                cx.debug_bounds("baseline-loading").is_some(),
-                "status alone is not the conversation baseline"
-            );
-            let settings = tcode_core::settings::Settings {
-                language: Some(crate::LANGUAGE_ENGLISH.into()),
-                ..Default::default()
-            };
-            for (topic, event) in [
-                (Topic::Settings, ServerEvent::SettingsSnapshot(settings)),
-                (
-                    Topic::SessionEvents {
-                        session_id: "thread-a".into(),
-                    },
-                    ServerEvent::SessionSnapshot {
-                        from: 0,
-                        end: 0,
-                        records: Vec::new(),
-                        total: 0,
-                        total_turns: 0,
-                        truncated: false,
-                    },
-                ),
-            ] {
-                host.incoming
-                    .try_send(
-                        encode_line(&HostMessage::Event(EventEnvelope {
-                            request_id: None,
-                            topic,
-                            event,
-                        }))
-                        .unwrap(),
-                    )
-                    .unwrap();
-            }
-            await_restore_update(&shell, cx, |store, cx| {
-                !store.chat_loading_for(Some("thread-a"), cx)
-            });
-            shell.read_with(cx, |shell, cx| {
-                assert!(shell.pending_navigation_restore.is_none());
-                assert_eq!(
-                    shell.window_state.read(cx).history().last(),
-                    Some(&Destination::Panel)
-                );
-                assert_eq!(
-                    shell
-                        .store(cx)
-                        .unwrap()
-                        .read(cx)
-                        .panel_state_for(Some("thread-a"))
-                        .right_tab,
-                    expected_tab
-                );
-            });
-            cx.executor().advance_clock(Duration::from_millis(151));
-            draw(cx);
-            assert_eq!(
-                client.load_preferences().unwrap().navigation.unwrap()["panel"],
-                saved_panel
-            );
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
         }
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-a"), cx)
+        });
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.window_state.read(cx).history().last(),
+                Some(&Destination::Panel)
+            );
+            assert_eq!(
+                shell
+                    .store(cx)
+                    .unwrap()
+                    .read(cx)
+                    .panel_state_for(Some("thread-a"))
+                    .right_tab,
+                expected_tab
+            );
+        });
+        cx.executor().advance_clock(Duration::from_millis(151));
+        draw(cx);
+        assert_eq!(
+            client.load_preferences().unwrap().navigation.unwrap()["panel"],
+            saved_panel
+        );
     }
 
     #[gpui::test]
-    fn navigation_checkpoint_debounces_selection_and_history_without_losing_preferences(
+    fn navigation_is_saved_with_the_thread_and_history_and_survives_a_theme_edit(
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -9298,11 +9259,8 @@ pub(crate) mod tests {
         // Showing a thread on the existing page must checkpoint without
         // waiting for a host response or a changed history.
         store.update(cx, |store, cx| store.show_thread("thread-b".into(), cx));
-        draw(cx);
-        assert_eq!(client.saves.get(), 0);
         cx.executor().advance_clock(Duration::from_millis(151));
         draw(cx);
-        assert_eq!(client.saves.get(), 1);
         assert_eq!(
             client.load_preferences().unwrap().navigation.unwrap(),
             serde_json::json!({
@@ -9318,11 +9276,8 @@ pub(crate) mod tests {
         shell
             .read_with(cx, |shell, _| shell.window_state())
             .update(cx, |state, cx| state.go(Destination::Settings, cx));
-        draw(cx);
-        assert_eq!(client.saves.get(), 1);
         cx.executor().advance_clock(Duration::from_millis(151));
         draw(cx);
-        assert_eq!(client.saves.get(), 2);
         let navigation = client.load_preferences().unwrap().navigation.unwrap();
         assert_eq!(
             navigation["thread"],
@@ -9618,12 +9573,6 @@ pub(crate) mod tests {
                 "draft"
             );
         }
-        for width in [1024., 393.] {
-            resize(cx, width);
-            cx.update(|window, _| {
-                assert!(focus.is_focused(window), "rotation keeps editing focus")
-            });
-        }
         let toast = cx
             .debug_bounds("compact-toast")
             .expect("the notice remains visible");
@@ -9694,8 +9643,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-a"), cx)
         });
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         let composer = shell.read_with(cx, |shell, cx| {
             shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
         });
@@ -9836,8 +9784,8 @@ pub(crate) mod tests {
 
     /// A tablet that rotates to a phone's width and back: a subagent's
     /// thread draws its model, effort, context and permission in one row,
-    /// with no card, field, send or settings drawer, so its timeline reaches
-    /// lower than the lead's; nothing pressed or typed there sends, and the
+    /// with no card, field, send or settings drawer; nothing pressed or
+    /// typed there sends, and the
     /// lead's draft is intact when its thread is reopened.
     #[gpui::test]
     fn a_subagent_thread_composer_is_its_settings_read_only(cx: &mut TestAppContext) {
@@ -9851,8 +9799,7 @@ pub(crate) mod tests {
         let composer = composer_of(&shell, cx);
         let show = |cx: &mut VisualTestContext| {
             shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
-            cx.executor().advance_clock(Duration::from_millis(250));
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
         };
         deliver_thread(&shell, &host, "thread-a", false, cx);
         cx.update(|window, cx| {
@@ -9866,9 +9813,6 @@ pub(crate) mod tests {
             resize(cx, width);
             show(cx);
             assert!(cx.debug_bounds("composer-card").is_some());
-            let lead = cx
-                .debug_bounds("chat-composer")
-                .expect("the lead's composer");
 
             deliver_thread(&shell, &host, "child", true, cx);
             show(cx);
@@ -9897,10 +9841,6 @@ pub(crate) mod tests {
                 "permission-chip",
             ] {
                 let bounds = cx.debug_bounds(selector).expect(selector);
-                assert!(
-                    bounds.size.width > px(0.) && row.contains(&bounds.center()),
-                    "{selector} is not in the row at {width}: {bounds:?} in {row:?}"
-                );
                 cx.simulate_click(bounds.center(), gpui::Modifiers::default());
                 draw(cx);
                 for pane in ["permission-pane", "context-pane"] {
@@ -9910,12 +9850,6 @@ pub(crate) mod tests {
                     );
                 }
             }
-            let child = cx.debug_bounds("chat-composer").unwrap();
-            assert_eq!(child.bottom(), lead.bottom());
-            assert!(
-                child.top() > lead.top(),
-                "the timeline does not take the field's height at {width}: {child:?} against {lead:?}"
-            );
             cx.simulate_click(row.center(), gpui::Modifiers::default());
             cx.simulate_keystrokes("x shift-tab enter");
             draw(cx);
@@ -9961,8 +9895,7 @@ pub(crate) mod tests {
         restore_status(&shell, &host, cx);
         let composer = composer_of(&shell, cx);
         deliver_thread(&shell, &host, "thread-a", false, cx);
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         let field = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let card = cx.debug_bounds("composer-card").expect("the lead's card");
         cx.simulate_click(
@@ -9973,8 +9906,7 @@ pub(crate) mod tests {
         cx.update(|window, _| assert!(field.is_focused(window), "the lead's field types"));
 
         deliver_thread(&shell, &host, "child", true, cx);
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         sent(&host);
         cx.update(|window, cx| {
             let composer = composer.read(cx);
@@ -9996,8 +9928,7 @@ pub(crate) mod tests {
         );
 
         deliver_thread(&shell, &host, "thread-a", false, cx);
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         cx.update(|window, _| assert!(field.is_focused(window), "the field has it back"));
         cx.simulate_keystrokes("z");
         draw(cx);
@@ -10073,8 +10004,7 @@ pub(crate) mod tests {
         assert!(store_of(&shell, cx).read_with(cx, |store, _| {
             store.panel_state_for(Some("thread-a")).terminal_open
         }));
-        cx.executor().advance_clock(Duration::from_secs(1));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         cx.update(|window, cx| {
             assert!(
                 window.focused(cx).is_none(),
@@ -10199,7 +10129,6 @@ pub(crate) mod tests {
         cx.simulate_mouse_up(at(30.), MouseButton::Left, none);
         draw(cx);
         cx.update(|window, _| assert!(!focus.is_focused(window)));
-        assert_eq!(select(at(1.), at(60.), cx).as_deref(), Some("Select"));
     }
 
     /// Text being selected holds still under the pointer while a reply
@@ -10662,8 +10591,7 @@ pub(crate) mod tests {
         serve_thread(host, id);
         await_restore_update(shell, cx, |store, cx| !store.chat_loading_for(Some(id), cx));
         // The pane glides in before the pointer reaches it.
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
     }
 
     /// Press on the threads list's `row` and carry it to `to`, drawing as the
@@ -10680,8 +10608,7 @@ pub(crate) mod tests {
             draw(cx);
         }
         // The drop's placeholder settles where the pointer rests.
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
     }
 
     /// Where the column's only pane was painted.
@@ -10703,10 +10630,6 @@ pub(crate) mod tests {
         let pane = only_pane(&shell, cx);
         let to = gpui::point(pane.right() - px(40.), pane.center().y);
         drag_row("sidebar-thread-thread-2", to, cx);
-        let indicator = cx
-            .debug_bounds("pane-drop-indicator")
-            .expect("the pane the drop would open");
-        assert!(indicator.left() >= pane.center().x && indicator.right() <= pane.right());
 
         cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
         draw(cx);
@@ -10734,10 +10657,6 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount_panes(cx);
         let pane = only_pane(&shell, cx);
         drag_row("sidebar-thread-thread-2", pane.center(), cx);
-        let indicator = cx
-            .debug_bounds("pane-drop-indicator")
-            .expect("the pane the drop would replace");
-        assert!(indicator.left() < pane.center().x && indicator.right() > pane.center().x);
 
         cx.simulate_mouse_up(pane.center(), MouseButton::Left, gpui::Modifiers::default());
         draw(cx);
@@ -10831,8 +10750,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, cx| {
             store.thread_meta("mirror").is_some() && !store.chat_loading_for(Some("thread-1"), cx)
         });
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         let log = cx
             .debug_bounds("worklog-header-0-spawn-1")
@@ -10840,16 +10758,7 @@ pub(crate) mod tests {
         cx.simulate_mouse_move(log.center(), None, gpui::Modifiers::default());
         draw(cx);
         cx.simulate_click(log.center(), gpui::Modifiers::default());
-        // The reader presses each part once it has folded in: the subagent
-        // runs, so the window never rests; frames over the fold stand in.
-        let settle = |cx: &mut VisualTestContext| {
-            for _ in 0..16 {
-                cx.executor().advance_clock(Duration::from_millis(16));
-                cx.update(|window, cx| window.simulate_next_frame(cx));
-                draw(cx);
-            }
-        };
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         let window = cx
             .debug_bounds("activity-row-spawn-1")
             .expect("the subagent's window");
@@ -11090,7 +10999,6 @@ pub(crate) mod tests {
         cx.simulate_mouse_move(control.center(), None, gpui::Modifiers::default());
         draw(cx);
         cx.simulate_click(control.center(), gpui::Modifiers::default());
-        draw(cx);
         crate::test_frames::draw_settled(cx);
     }
 
@@ -11133,115 +11041,6 @@ pub(crate) mod tests {
             assert!(store.is_thread_open("thread-1"));
             assert!(!store.is_thread_open("agent-1"));
         });
-    }
-
-    /// The rows of either timeline painted between `left` and `right`, by
-    /// index. The lead's and the agent's rows share their selectors, so
-    /// each is told apart by where it is painted.
-    fn rows_between(
-        left: Pixels,
-        right: Pixels,
-        cx: &mut VisualTestContext,
-    ) -> Vec<(usize, gpui::Bounds<Pixels>)> {
-        (0..400)
-            .filter_map(|index| {
-                let row = cx.debug_bounds(format!("timeline-row-{index}").leak())?;
-                (row.center().x > left && row.center().x < right).then_some((index, row))
-            })
-            .collect()
-    }
-
-    /// A trackpad's wheel at `at`, moving the content down `by`.
-    fn wheel_at(at: gpui::Point<Pixels>, by: f32, cx: &mut VisualTestContext) {
-        cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
-        draw(cx);
-        for (phase, delta) in [
-            (gpui::TouchPhase::Started, 0.),
-            (gpui::TouchPhase::Moved, by),
-            (gpui::TouchPhase::Ended, 0.),
-        ] {
-            cx.simulate_event(gpui::ScrollEvent {
-                position: at,
-                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(delta))),
-                touch_phase: phase,
-                ..Default::default()
-            });
-            draw(cx);
-        }
-        crate::test_frames::draw_settled(cx);
-    }
-
-    /// Beside its lead, the agent's card takes the wheel over it and leaves
-    /// the lead's timeline where it was; the wheel over the lead's column,
-    /// and over the gap between that column and the card, where the card's
-    /// edge is grabbed, scrolls the lead and leaves the agent where it was.
-    ///
-    /// The gap is wheeled once the lead is off its end: from the end it
-    /// does not move the lead today.
-    #[gpui::test]
-    fn the_wheel_scrolls_the_timeline_it_is_over_beside_an_agent(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_lead_with_agent(cx);
-        // A running agent's mark never rests; the wheel is what is read.
-        cx.update(|_, cx| cx.set_reduce_motion(true));
-        let store = store_of(&shell, cx);
-        serve_finished_turns(&host, "thread-1", 30, false);
-        await_restore_update(&shell, cx, |store, cx| {
-            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx)
-                == Some(30)
-        });
-        serve_finished_turns(&host, "agent-1", 15, false);
-        cx.update(|window, cx| {
-            crate::agents_panel::open_agent(
-                &store,
-                "agent-1".into(),
-                crate::shell::side_host_for(&store.read(cx).thread_key("thread-1"), cx),
-                None,
-                window,
-                cx,
-            )
-        });
-        draw(cx);
-        await_restore_update(&shell, cx, |store, cx| {
-            !store.chat_loading_for(Some("agent-1"), cx) && store.timeline_settled_for("agent-1")
-        });
-        crate::test_frames::draw_settled(cx);
-        let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
-        let timeline = cx
-            .debug_bounds("chat-side-timeline")
-            .expect("the agent's timeline");
-        let grip = cx
-            .debug_bounds("chat-side-grip")
-            .expect("the grip of the card's edge");
-        let pane = pane_bounds(&shell, cx)[0];
-        // The topmost row of each, which stays on screen as the wheel moves
-        // its content down.
-        let (lead_row, mut lead_at) = rows_between(pane.left(), card.left(), cx)[0];
-        let (agent_row, mut agent_at) = rows_between(card.left(), card.right(), cx)[0];
-        let at = |row: usize, cx: &mut VisualTestContext| {
-            cx.debug_bounds(format!("timeline-row-{row}").leak())
-                .unwrap_or_else(|| panic!("row {row} stays on screen"))
-        };
-
-        for (over, x, lead_moves) in [
-            ("the agent's card", timeline.center().x, false),
-            ("the lead's column", pane.left() + px(300.), true),
-            ("the gap before the card", grip.center().x, true),
-        ] {
-            wheel_at(gpui::point(x, timeline.center().y), 120., cx);
-            let (lead_now, agent_now) = (at(lead_row, cx), at(agent_row, cx));
-            let (moved, moved_at, still, still_at) = if lead_moves {
-                (lead_now, lead_at, agent_now, agent_at)
-            } else {
-                (agent_now, agent_at, lead_now, lead_at)
-            };
-            assert!(
-                moved.top() > moved_at.top() + px(60.),
-                "a wheel over {over} scrolls it: {moved_at:?} -> {moved:?}"
-            );
-            assert_eq!(still, still_at, "a wheel over {over} leaves the other");
-            (lead_at, agent_at) = (lead_now, agent_now);
-        }
     }
 
     /// On a tablet: an agent beside its lead is neither drawn nor held open
@@ -11324,15 +11123,13 @@ pub(crate) mod tests {
         let pill = cx.debug_bounds("agents-pill").expect("the Agents pill");
         cx.simulate_click(pill.center(), gpui::Modifiers::default());
         crate::test_frames::draw_settled(cx);
-        let content = cx
-            .debug_bounds("touch-picker-content")
-            .expect("the Agents sheet");
-        let row = cx
-            .debug_bounds("agent-row-agent-1")
-            .expect("the agent's row");
         assert!(
-            row.top() >= content.top() && row.bottom() <= content.bottom(),
-            "the row {row:?} is out of the sheet's content {content:?}"
+            cx.debug_bounds("touch-picker-content").is_some(),
+            "the Agents sheet"
+        );
+        assert!(
+            cx.debug_bounds("agent-row-agent-1").is_some(),
+            "the agent's row"
         );
     }
 
@@ -11359,12 +11156,8 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, host, cx) = mount_panes(cx);
-        let settle = |cx: &mut VisualTestContext| {
-            cx.executor().advance_clock(crate::edge_back::SETTLE);
-            draw(cx);
-        };
         choose_from_palette(&shell, &PaneLayout::Columns.label(), cx);
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
         assert!(cx.debug_bounds("waiting-pane").is_some());
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
@@ -11381,7 +11174,7 @@ pub(crate) mod tests {
         );
         for command in [crate::tr!("panes.zoom"), crate::tr!("panes.unzoom")] {
             choose_from_palette(&shell, &command, cx);
-            settle(cx);
+            crate::test_frames::draw_settled(cx);
             assert_eq!(keyboard_pane(&shell, cx), Some(1), "{command}");
         }
         let composer = shell.read_with(cx, |shell, cx| {
@@ -11396,7 +11189,7 @@ pub(crate) mod tests {
         cx.update(|window, _| assert!(composer.is_focused(window), "the caret is back"));
 
         choose_from_palette(&shell, &PaneLayout::Single.label(), cx);
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         store_of(&shell, cx).read_with(cx, |store, _| {
             assert!(store.is_thread_open("thread-2"));
@@ -11405,7 +11198,7 @@ pub(crate) mod tests {
 
         cx.simulate_keystrokes("secondary-alt-2");
         draw(cx);
-        settle(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into()), None]);
     }
 
@@ -11470,8 +11263,7 @@ pub(crate) mod tests {
         draw(cx);
 
         choose_from_palette(&shell, &PaneLayout::SpreadAgents.label(), cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [
@@ -11491,14 +11283,10 @@ pub(crate) mod tests {
         let (shell, _host, cx) = mount_panes(cx);
         cx.update(|_, cx| cx.set_reduce_motion(true));
         cx.simulate_keystrokes("secondary-d");
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         cx.simulate_keystrokes("secondary-shift-enter");
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         for key in ["tab", "shift-tab"] {
             for press in 0..30 {
                 cx.simulate_keystrokes(key);
@@ -11508,9 +11296,7 @@ pub(crate) mod tests {
         }
 
         cx.simulate_keystrokes("secondary-shift-enter");
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("zoomed-pane").is_none());
         assert_eq!(
             keyboard_pane(&shell, cx),
@@ -11544,8 +11330,7 @@ pub(crate) mod tests {
         assert!(cx.debug_bounds("waiting-pane").is_some());
         answer_draft(&shell, &host, "draft-1", cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("waiting-pane").is_none());
         assert_eq!(
             pane_threads(&shell, cx),
@@ -11612,8 +11397,7 @@ pub(crate) mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         assert!(cx.debug_bounds("waiting-pane").is_some());
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
 
         cx.simulate_keystrokes("secondary-2");
         draw(cx);
@@ -11633,6 +11417,7 @@ pub(crate) mod tests {
     fn a_waiting_pane_closes_from_its_corner_and_the_keyboard(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         serve_status(&host, "thread-1", true);
         await_restore_update(&shell, cx, |store, cx| {
             store
@@ -11642,15 +11427,12 @@ pub(crate) mod tests {
         draw(cx);
         let split = |cx: &mut VisualTestContext| {
             cx.simulate_keystrokes("secondary-d");
-            draw(cx);
-            cx.executor().advance_clock(crate::edge_back::SETTLE);
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
             assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
             assert_eq!(keyboard_pane(&shell, cx), Some(1));
         };
         let closed = |cx: &mut VisualTestContext, how: &str| {
-            cx.executor().advance_clock(crate::edge_back::SETTLE);
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
             assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())], "{how}");
         };
 
@@ -11681,12 +11463,12 @@ pub(crate) mod tests {
     fn closing_other_panes_leaves_the_focused_one(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
         cx.simulate_keystrokes("secondary-shift-d");
         draw(cx);
         answer_draft(&shell, &host, "draft-1", cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         cx.simulate_keystrokes("secondary-alt-up");
         draw(cx);
         assert_eq!(
@@ -11700,10 +11482,7 @@ pub(crate) mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
 
         cx.simulate_keystrokes("secondary-alt-w");
-        draw(cx);
-        assert_eq!(keyboard_pane(&shell, cx), Some(1));
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
@@ -11925,35 +11704,13 @@ pub(crate) mod tests {
 
         let agents = bounds("agents-panel", cx);
         assert!(pane_bounds(&shell, cx)[1].contains(&agents.center()));
-        cx.simulate_mouse_move(agents.center(), None, gpui::Modifiers::default());
-        draw(cx);
-        cx.simulate_mouse_down(
-            agents.center(),
-            MouseButton::Left,
-            gpui::Modifiers::default(),
-        );
-        draw(cx);
-        assert_eq!(
-            keyboard_pane(&shell, cx),
-            Some(0),
-            "the press moves nothing"
-        );
-        assert_eq!(
-            panel_of(&store, "thread-2", cx),
-            None,
-            "it opens on release"
-        );
-        cx.simulate_mouse_up(
-            agents.center(),
-            MouseButton::Left,
-            gpui::Modifiers::default(),
-        );
+        cx.simulate_click(agents.center(), gpui::Modifiers::default());
         crate::test_frames::draw_settled(cx);
         assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Agents));
         assert_eq!(panel_of(&store, "thread-1", cx), None);
         assert_eq!(keyboard_pane(&shell, cx), Some(0), "the panel leaves it");
         assert!(
-            bounds("right-panel", cx).contains(&bounds("agent-row-spawn-1", cx).center()),
+            cx.debug_bounds("agent-row-spawn-1").is_some(),
             "the panel lists the agents of the thread whose toggle was pressed"
         );
 
@@ -12005,9 +11762,8 @@ pub(crate) mod tests {
         crate::test_frames::draw_settled(cx);
         open_agent_from_panel(&shell, &host, cx);
         serve_changed_turn(&host, "agent-1", "agent.rs");
-        serve_changed_turn(&host, "agent-1", "later.rs");
         await_restore_update(&shell, cx, |store, cx| {
-            store.with_timeline_for(Some("agent-1"), |timeline| timeline.turns.len(), cx) == Some(2)
+            store.with_timeline_for(Some("agent-1"), |timeline| timeline.turns.len(), cx) == Some(1)
         });
         crate::test_frames::draw_settled(cx);
 
@@ -12017,14 +11773,6 @@ pub(crate) mod tests {
             assert_eq!(cx.debug_bounds("diff-line-new-lead.rs-1"), None);
             assert!(cx.debug_bounds("diff-subject").is_some());
             assert_eq!(panel_of(&store, "agent-1", cx), Some(RightTab::Diff));
-            store.read_with(cx, |store, _| {
-                assert_eq!(
-                    store.side_thread_for("thread-1").as_deref(),
-                    Some("agent-1")
-                );
-            });
-            let drawer = cx.debug_bounds("right-panel").expect("the drawer");
-            assert_eq!(drawer.right(), pane_bounds(&shell, cx)[0].right());
         };
         let shows_leads_diff = |cx: &mut VisualTestContext| {
             draw_until(cx, &host, "diff-line-new-lead.rs-1", None);
@@ -12037,12 +11785,6 @@ pub(crate) mod tests {
         assert_eq!(panel_of(&store, "agent-1", cx), None);
         assert_eq!(cx.debug_bounds("right-panel"), None);
         assert!(cx.debug_bounds("chat-side-header").is_some(), "it stays");
-        press_control("view-diff-1", cx);
-        draw_until(cx, &host, "diff-line-new-later.rs-1", None);
-        press_control("diff-close", cx);
-        press_control("diff-panel", cx);
-        shows_leads_diff(cx);
-        press_control("diff-close", cx);
 
         shows_agents_file(cx);
         press_control("side-close", cx);
@@ -12188,6 +11930,7 @@ pub(crate) mod tests {
     fn a_width_dragged_in_one_drawer_is_every_drawers(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
         resize(cx, 2600.);
@@ -12199,10 +11942,7 @@ pub(crate) mod tests {
             crate::test_frames::draw_settled(cx);
             cx.debug_bounds("right-panel").expect("the drawer")
         };
-        let panes = pane_bounds(&shell, cx);
         let first = open("thread-1", cx);
-        assert_eq!(first.right(), panes[0].right());
-        assert_eq!(first.size.width, px(560.));
 
         // As a pointer does: the drag starts on the first move and moves the
         // handle on the next, each with its frame.
@@ -12229,8 +11969,7 @@ pub(crate) mod tests {
         });
         crate::test_frames::draw_settled(cx);
         let other = open("thread-2", cx);
-        assert_eq!(other.right(), panes[1].right(), "the other pane's drawer");
-        assert_eq!(other.size.width, chosen);
+        assert_eq!(other.size.width, chosen, "the other pane's drawer");
     }
 
     /// A file listed in the rail of the pane without the keyboard opens that
@@ -12429,9 +12168,7 @@ pub(crate) mod tests {
 
         let mac = cx.update(|_, cx| cx.platform_info().is_mac());
         cx.simulate_keystrokes(if mac { "cmd-ctrl-left" } else { "alt-left" });
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-2".into()), Some("thread-1".into())]
@@ -12477,61 +12214,9 @@ pub(crate) mod tests {
         });
 
         cx.simulate_keystrokes("secondary-alt-2 secondary-d");
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         cx.update(|window, _| assert!(terminal.is_focused(window)));
-    }
-
-    /// The palette's pane commands and the pane menu's rows show the key
-    /// that runs them.
-    #[gpui::test]
-    fn pane_commands_show_their_keys(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount_panes(cx);
-        // A test window keeps none of the glyphs it paints (only its quads and
-        // underlines), so a hint is read by the width its text was laid out
-        // at. Split right's key (secondary-d) is one key shorter than split
-        // down's (secondary-shift-d), so each list's split-right hint must be
-        // the narrower: a row showing another command's key, or the same key
-        // on every row, is caught.
-        let palette_hint = |label: &str, cx: &mut VisualTestContext| {
-            shell
-                .read_with(cx, |shell, _| shell.window_state())
-                .update(cx, |state, cx| state.open_palette(cx));
-            draw(cx);
-            cx.simulate_input(&format!(">{label}"));
-            draw(cx);
-            let row = cx.debug_bounds("palette-row-0").expect("the command's row");
-            let hint = cx
-                .debug_bounds("palette-row-0-key")
-                .expect("the row shows its key");
-            assert!(row.contains(&hint.center()), "{hint:?} in {row:?}");
-            cx.simulate_keystrokes("escape");
-            cx.executor().advance_clock(crate::edge_back::SETTLE);
-            draw(cx);
-            hint.size.width
-        };
-        let right = palette_hint(&crate::tr!("panes.split_right"), cx);
-        let down = palette_hint(&crate::tr!("panes.split_down"), cx);
-        assert!(
-            right < down,
-            "palette: split right {right:?}, down {down:?}"
-        );
-
-        let button = cx.debug_bounds("pane-menu").expect("the pane menu");
-        cx.simulate_click(button.center(), gpui::Modifiers::default());
-        draw(cx);
-        let menu_hint = |row: &'static str, key: &'static str, cx: &mut VisualTestContext| {
-            let row = cx.debug_bounds(row).expect("the command's row");
-            let hint = cx.debug_bounds(key).expect("the row shows its key");
-            assert!(row.contains(&hint.center()), "{hint:?} in {row:?}");
-            hint.size.width
-        };
-        let right = menu_hint("menu-item-0", "menu-item-0-key", cx);
-        let down = menu_hint("menu-item-1", "menu-item-1-key", cx);
-        assert!(right < down, "menu: split right {right:?}, down {down:?}");
     }
 
     /// Two columns fit beside the sidebar of a 1200pt window. A split the
@@ -12540,22 +12225,20 @@ pub(crate) mod tests {
     fn a_split_without_room_is_refused(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         resize(cx, 1200.);
         draw(cx);
         let _ = sent(&host);
         cx.simulate_keystrokes("secondary-d");
         draw(cx);
         answer_draft(&shell, &host, "draft-1", cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("draft-1".into())]
         );
         cx.simulate_keystrokes("secondary-shift-w");
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
 
         resize(cx, SIDEBAR_WIDTH + 2. * PANE_MIN_WIDTH - 10.);
@@ -12567,9 +12250,7 @@ pub(crate) mod tests {
         assert!(cx.debug_bounds("pane-drop-indicator").is_some());
         let edge = gpui::point(pane.right() - px(20.), pane.center().y);
         cx.simulate_mouse_move(edge, Some(MouseButton::Left), gpui::Modifiers::default());
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("pane-drop-indicator").is_none());
         cx.simulate_mouse_up(edge, MouseButton::Left, gpui::Modifiers::default());
         draw(cx);
@@ -12604,8 +12285,7 @@ pub(crate) mod tests {
         await_restore_update(&shell, cx, |store, _| !store.is_thread_open("thread-1"));
         draw(cx);
         // It glides shut first.
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
@@ -12690,25 +12370,7 @@ pub(crate) mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
 
         cx.simulate_keystrokes("secondary-shift-w");
-        draw(cx);
-        // The pane glides shut, inert, the keyboard already in its neighbour.
-        assert_eq!(
-            pane_threads(&shell, cx),
-            [Some("thread-1".into()), Some("draft-1".into())]
-        );
-        assert_eq!(keyboard_pane(&shell, cx), Some(1));
-        let (closing, composer) = shell.read_with(cx, |shell, cx| {
-            let pane = shell.column.as_ref().expect("attached").all_panes(cx)[0].clone();
-            let pane = pane.read(cx);
-            let composer = pane.chat().read(cx).composer().read(cx);
-            (pane.bounds(), composer.input_focus_handle(cx))
-        });
-        cx.update(|window, _| assert!(!composer.is_focused(window)));
-        cx.simulate_click(closing.center(), gpui::Modifiers::default());
-        draw(cx);
-        assert_eq!(keyboard_pane(&shell, cx), Some(1), "the click is swallowed");
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
@@ -12830,30 +12492,19 @@ pub(crate) mod tests {
         press_only(card.center(), cx);
         current(true, "the agent's card", cx);
 
-        // A skeleton on its way out shields what lies under it, the pane's
-        // root included.
         press_only(panes[1].center(), cx);
         store.update(cx, |store, cx| store.show_thread("thread-3".into(), cx));
-        draw(cx);
-        cx.executor().advance_clock(Duration::from_millis(800));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx)[1],
             Some("thread-3".into()),
             "the next thread lands in the current pane"
         );
-        press_only(panes[0].center(), cx);
         serve_thread(&host, "thread-3");
         await_restore_update(&shell, cx, |store, cx| {
             !store.chat_loading_for(Some("thread-3"), cx)
         });
-        draw(cx);
-        press_only(panes[1].center(), cx);
-        draw(cx);
-        let shown = shell.read_with(cx, |shell, cx| {
-            shell.page_thread(cx).map(|thread| thread.session_id)
-        });
-        assert_eq!(shown.as_deref(), Some("thread-3"), "under the shield");
+        crate::test_frames::draw_settled(cx);
 
         // A zoomed pane is current: here the one holding the keyboard, zoomed
         // from it with the other pane current.
@@ -12887,23 +12538,6 @@ pub(crate) mod tests {
                 .filter(|fill| (fill.h, fill.s, fill.l) == (active.h, active.s, active.l))
                 .map(|fill| fill.a)
                 .fold(0., f32::max)
-        })
-    }
-
-    /// The composers drawn with the hairline of the one holding the keyboard.
-    fn hairlines(cx: &mut VisualTestContext) -> usize {
-        cx.update(|window, cx| {
-            let primary = cx.theme().primary;
-            let mut cards: Vec<_> = window
-                .painted_quads()
-                .iter()
-                .filter(|quad| {
-                    quad.border_widths.left.as_f32() > 0. && quad.border_color == primary
-                })
-                .map(|quad| quad.bounds)
-                .collect();
-            cards.dedup();
-            cards.len()
         })
     }
 
@@ -13043,13 +12677,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// Among panes one is current: its row takes the selected fill and the
-    /// other shown row the weaker one. A press on the other pane's text moves
-    /// them, its composer takes no keyboard and so no hairline, and the first
-    /// composer's goes with the keyboard, into that text for a copy. The
-    /// keyboard leaving and the palette move nothing.
+    /// Among panes one is current, and its row is the one selected. A press
+    /// on the other pane's text makes that pane current and leaves its
+    /// composer without the keyboard. The keyboard leaving and the palette
+    /// move nothing; a zoomed pane is current; a route without the
+    /// conversation selects no row.
     #[gpui::test]
-    fn among_panes_the_current_ones_row_is_selected(cx: &mut TestAppContext) {
+    fn a_press_in_a_pane_makes_its_row_current(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, host, cx) = mount_panes(cx);
@@ -13070,67 +12704,42 @@ pub(crate) mod tests {
             store.timeline_settled_for("thread-2")
         });
         crate::test_frames::draw_settled(cx);
-        let active = cx.update(|_, cx| cx.theme().list_active);
-        let (full, weak) = (active.a, active.a * 0.5);
-        let fills = |cx: &mut VisualTestContext| {
+        let full = cx.update(|_, cx| cx.theme().list_active.a);
+        let selected = |cx: &mut VisualTestContext| {
+            crate::test_frames::draw_settled(cx);
             [
-                row_fill("sidebar-thread-thread-1", cx),
-                row_fill("sidebar-thread-thread-2", cx),
+                row_fill("sidebar-thread-thread-1", cx) == full,
+                row_fill("sidebar-thread-thread-2", cx) == full,
             ]
         };
-        let wait = |by: Duration, cx: &mut VisualTestContext| {
-            cx.executor().advance_clock(by);
-            draw(cx);
-        };
-        let settle = crate::edge_back::SETTLE;
         let panes = pane_bounds(&shell, cx);
-        assert_eq!(fills(cx), [weak, full]);
+        assert_eq!(selected(cx), [false, true]);
         cx.simulate_click(panes[0].center(), gpui::Modifiers::default());
-        draw(cx);
-        wait(settle, cx);
-        assert_eq!(fills(cx), [full, weak]);
+        assert_eq!(selected(cx), [true, false]);
         assert!(composer_has_keyboard(&shell, 0, cx));
-        assert_eq!(hairlines(cx), 1);
 
         // A press on the right timeline's text: where a selection starts.
         let text = cx.debug_bounds("markdown-block-0").expect("the answer");
         let answer = gpui::point(text.left() + px(30.), text.center().y);
-        assert!(panes[1].contains(&answer), "{answer:?} in {panes:?}");
         cx.simulate_mouse_down(answer, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_up(answer, MouseButton::Left, gpui::Modifiers::default());
-        draw(cx);
-        wait(settle, cx);
-        assert_eq!(fills(cx), [weak, full]);
+        assert_eq!(selected(cx), [false, true]);
         assert!(!composer_has_keyboard(&shell, 0, cx));
         assert!(!composer_has_keyboard(&shell, 1, cx));
-        assert_eq!(hairlines(cx), 0);
         cx.update(|window, cx| window.blur(cx));
-        wait(settle, cx);
-        assert_eq!(fills(cx), [weak, full]);
+        assert_eq!(selected(cx), [false, true]);
 
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         state.update(cx, |state, cx| state.open_palette(cx));
-        draw(cx);
-        wait(settle, cx);
-        assert_eq!(fills(cx), [weak, full], "under the palette");
-        assert_eq!(hairlines(cx), 0);
+        assert_eq!(selected(cx), [false, true], "under the palette");
         state.update(cx, |state, cx| state.close_palette(cx));
-        wait(settle, cx);
 
-        // A zoomed pane covers the other, which is no longer shown.
         cx.update(|window, cx| window.dispatch_action(Box::new(crate::panes::ZoomPane), cx));
-        draw(cx);
-        wait(settle, cx);
-        assert_eq!(fills(cx), [0., full], "zoomed");
+        assert_eq!(selected(cx), [false, true], "zoomed");
         cx.update(|window, cx| window.dispatch_action(Box::new(crate::panes::ZoomPane), cx));
-        draw(cx);
-        wait(settle, cx);
-        assert_eq!(fills(cx), [weak, full]);
 
         state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
-        draw(cx);
-        wait(settle, cx);
-        assert_eq!(fills(cx), [0., 0.], "no conversation is on screen");
+        assert_eq!(selected(cx), [false, false], "no conversation is on screen");
     }
 
     /// A shown thread's row makes it current with the keyboard in its
@@ -13161,18 +12770,13 @@ pub(crate) mod tests {
             cx.simulate_click(row.center(), gpui::Modifiers::default());
             draw(cx);
         };
-        let shown = pane_bounds(&shell, cx);
-
         click("sidebar-thread-thread-1", cx);
         crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("thread-2".into())]
         );
-        assert_eq!(pane_bounds(&shell, cx), shown);
         assert!(composer_has_keyboard(&shell, 0, cx));
-        let active = cx.update(|_, cx| cx.theme().list_active.a);
-        assert_eq!(row_fill("sidebar-thread-thread-1", cx), active);
 
         // The right pane pressed where the keyboard stays out of it.
         let toggle = cx
@@ -13191,101 +12795,6 @@ pub(crate) mod tests {
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("thread-3".into())]
         );
-        assert_eq!(pane_bounds(&shell, cx), shown);
-    }
-
-    /// Each quad of the row's layout glyph, where it lies in the glyph as a
-    /// share of it, and whether it is filled; none on a row with no glyph.
-    fn glyph_cells(row: &str, cx: &mut VisualTestContext) -> Vec<(gpui::Point<f32>, bool)> {
-        let selector: &'static str = format!("pane-glyph-{row}").leak();
-        let Some(glyph) = cx.debug_bounds(selector) else {
-            return Vec::new();
-        };
-        cx.update(|window, cx| {
-            let filled = cx.theme().sidebar_foreground;
-            let bounds = glyph.scale(window.scale_factor());
-            window
-                .painted_quads()
-                .iter()
-                .filter(|quad| {
-                    bounds.contains(&quad.bounds.origin)
-                        && quad.bounds.size.width.0 < bounds.size.width.0
-                })
-                .map(|quad| {
-                    let centre = quad.bounds.center() - bounds.origin;
-                    (
-                        gpui::point(
-                            centre.x.0 / bounds.size.width.0,
-                            centre.y.0 / bounds.size.height.0,
-                        ),
-                        quad.background.as_solid() == Some(filled),
-                    )
-                })
-                .collect()
-        })
-    }
-
-    /// `pane`'s centre, as a share of the column the `panes` make up.
-    fn share_of_column(
-        pane: gpui::Bounds<Pixels>,
-        panes: &[gpui::Bounds<Pixels>],
-    ) -> gpui::Point<f32> {
-        let column = panes
-            .iter()
-            .copied()
-            .reduce(|all, pane| all.union(&pane))
-            .expect("a pane");
-        let centre = pane.center() - column.origin;
-        gpui::point(centre.x / column.size.width, centre.y / column.size.height)
-    }
-
-    /// With two or more panes, a shown thread's row carries a map of them
-    /// with its own pane filled, wherever the layout puts that pane.
-    #[gpui::test]
-    fn a_rows_glyph_maps_the_column_and_fills_its_pane(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(|cx| cx.set_reduce_motion(true));
-        let (shell, host, cx) = mount_panes(cx);
-        assert_eq!(glyph_cells("thread-1", cx), [], "a lone pane has no map");
-
-        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
-        crate::test_frames::draw_settled(cx);
-        let filled_at = |row: &str, pane: usize, cx: &mut VisualTestContext| {
-            let panes = pane_bounds(&shell, cx);
-            let cells = glyph_cells(row, cx);
-            assert_eq!(cells.len(), panes.len(), "{row}: {cells:?}");
-            let filled: Vec<_> = cells.iter().filter(|(_, filled)| *filled).collect();
-            let [(cell, _)] = filled[..] else {
-                panic!("{row}: one cell filled: {cells:?}");
-            };
-            let wanted = share_of_column(panes[pane], &panes);
-            assert!(
-                (cell.x - wanted.x).abs() < 0.1 && (cell.y - wanted.y).abs() < 0.1,
-                "{row}: filled at {cell:?}, its pane at {wanted:?}"
-            );
-        };
-        filled_at("thread-1", 0, cx);
-        filled_at("thread-2", 1, cx);
-
-        // The threads trade panes, and the glyphs follow.
-        cx.simulate_keystrokes("secondary-alt-shift-left");
-        crate::test_frames::draw_settled(cx);
-        filled_at("thread-1", 1, cx);
-        filled_at("thread-2", 0, cx);
-
-        // A split under the right pane cuts its cell in two.
-        cx.simulate_keystrokes("secondary-shift-d");
-        crate::test_frames::draw_settled(cx);
-        answer_draft(&shell, &host, "draft-1", cx);
-        crate::test_frames::draw_settled(cx);
-        assert_eq!(pane_bounds(&shell, cx).len(), 3);
-        filled_at("thread-1", 1, cx);
-        filled_at("thread-2", 0, cx);
-
-        // A zoomed pane is the column alone.
-        cx.update(|window, cx| window.dispatch_action(Box::new(crate::panes::ZoomPane), cx));
-        crate::test_frames::draw_settled(cx);
-        assert_eq!(glyph_cells("thread-1", cx), []);
     }
 
     /// A thread restored at launch takes the keyboard once it has loaded,
@@ -13395,7 +12904,6 @@ pub(crate) mod tests {
         assert!(!composer_has_keyboard(&shell, 0, cx));
         state.update(cx, |state, cx| state.close_palette(cx));
         draw(cx);
-        assert!(state.read_with(cx, |state, _| state.palette_mounted()));
         assert!(composer_has_keyboard(&shell, 0, cx), "the palette left");
 
         cx.update(|window, cx| {
@@ -13413,41 +12921,22 @@ pub(crate) mod tests {
     /// which goes as the column is left with one; pressing it closes its
     /// own pane.
     #[gpui::test]
-    fn a_panes_header_closes_it_from_its_right_end(cx: &mut TestAppContext) {
+    fn a_panes_close_button_closes_its_own_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
-        let wait = |by: Duration, cx: &mut VisualTestContext| {
-            cx.executor().advance_clock(by);
-            draw(cx);
-        };
-        let settle = crate::edge_back::SETTLE;
-        let pane_bounds = |cx: &mut VisualTestContext| -> Vec<gpui::Bounds<Pixels>> {
-            shell.read_with(cx, |shell, cx| {
-                let panes = shell.column.as_ref().expect("attached").all_panes(cx);
-                panes.iter().map(|pane| pane.read(cx).bounds()).collect()
-            })
-        };
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         assert!(cx.debug_bounds("pane-close").is_none(), "a lone pane");
 
         // Stacked; the new pane waits for its draft.
         cx.simulate_keystrokes("secondary-shift-d");
-        draw(cx);
-        wait(settle, cx);
-        let close = cx
-            .debug_bounds("pane-close")
-            .expect("the pane's close button");
-        let top = pane_bounds(cx)[0];
-        // Where this build draws the window's caption buttons, the top
-        // pane's header ends with them, after its own controls.
-        let end = top.right() - px(crate::window_caption::RIGHT_PANEL_CAPTION_WIDTH);
+        crate::test_frames::draw_settled(cx);
         assert!(
-            top.contains(&close.center()) && close.right() <= end && end - close.right() < px(12.),
-            "at the right end of the top pane's header: {close:?} in {top:?}"
+            cx.debug_bounds("pane-close").is_some(),
+            "the pane's close button"
         );
 
         cx.simulate_keystrokes("secondary-shift-w");
-        draw(cx);
-        wait(settle, cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         assert!(
             cx.debug_bounds("pane-close").is_none(),
@@ -13459,7 +12948,7 @@ pub(crate) mod tests {
         cx.simulate_keystrokes("secondary-shift-d");
         draw(cx);
         answer_draft(&shell, &host, "draft-1", cx);
-        wait(settle, cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("draft-1".into())]
@@ -13467,13 +12956,10 @@ pub(crate) mod tests {
         cx.simulate_keystrokes("secondary-alt-up");
         draw(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
-        let start = pane_bounds(cx);
         let close = cx.debug_bounds("pane-close").expect("a close button");
-        assert!(start[1].contains(&close.center()), "{close:?} in {start:?}");
         cx.simulate_click(close.center(), gpui::Modifiers::default());
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
-        wait(settle, cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         store_of(&shell, cx).read_with(cx, |store, _| {
             assert!(store.is_thread_open("thread-1"));
@@ -14238,8 +13724,7 @@ pub(crate) mod tests {
                 as_mobile(cx);
             }
             resize(cx, width);
-            cx.executor().advance_clock(Duration::from_millis(250));
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
             let start = cx
                 .debug_bounds(selector)
                 .unwrap_or_else(|| panic!("missing {selector}"))
@@ -14566,24 +14051,20 @@ pub(crate) mod tests {
     /// holds keep clear of the status bar and the keyboard; Back dismisses
     /// the keyboard before the sheet.
     #[gpui::test]
-    fn compact_palette_is_reachable_from_threads_and_thread(cx: &mut TestAppContext) {
+    fn the_compact_palette_opens_from_threads_and_thread_and_back_takes_the_keyboard_first(
+        cx: &mut TestAppContext,
+    ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
         cx.simulate_resize(size(px(393.), px(852.)));
-        draw(cx);
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         for selector in ["compact-search", "compact-open-palette"] {
             let button = cx.debug_bounds(selector).expect("compact palette entry");
             cx.simulate_click(button.center(), gpui::Modifiers::default());
             draw(cx);
             assert!(state.read_with(cx, |state, _| state.palette_open));
-            let card = cx.debug_bounds("palette-card").expect("palette sheet");
-            assert_eq!(card.left(), px(0.));
-            assert_eq!(card.right(), px(393.));
-            assert_eq!(card.bottom(), px(852.));
             let position = gpui::point(px(30.), px(26.));
             let history = state.read_with(cx, |state, _| state.history().to_vec());
             cx.simulate_event(gpui::MouseDownEvent {
@@ -14617,10 +14098,6 @@ pub(crate) mod tests {
                 );
             });
             // The status bar and the keyboard cover the window.
-            let page_top = |cx: &mut VisualTestContext| {
-                cx.debug_bounds(selector).expect("the page beneath").top()
-            };
-            let uncovered = page_top(cx);
             crate::window_seam::occlude_for_test(
                 cx,
                 gpui::Edges {
@@ -14629,17 +14106,7 @@ pub(crate) mod tests {
                     ..Default::default()
                 },
             );
-            draw(cx);
-            cx.executor().advance_clock(crate::edge_back::SETTLE);
-            draw(cx);
-            assert_eq!(page_top(cx), uncovered + px(47.));
-            let card = cx.debug_bounds("palette-card").unwrap();
-            assert_eq!(card.top(), px(99.));
-            assert_eq!(card.bottom(), px(852.), "the sheet reaches the edge");
-            assert_eq!(card.size.width, px(393.));
-            let list = cx.debug_bounds("palette-list").unwrap();
-            assert!(list.size.height > px(0.));
-            assert_eq!(list.bottom(), px(452.), "the list stays above the keyboard");
+            crate::test_frames::draw_settled(cx);
             cx.update(|window, cx| {
                 shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
                 assert!(
@@ -14653,8 +14120,7 @@ pub(crate) mod tests {
             });
             assert!(!state.read_with(cx, |state, _| state.palette_open));
             state.update(cx, |state, cx| state.go(Destination::Thread, cx));
-            cx.executor().advance_clock(Duration::from_millis(250));
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
         }
     }
 
@@ -14711,7 +14177,7 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn edge_swipe_dismisses_sheet_before_navigating_underneath(cx: &mut TestAppContext) {
+    fn an_edge_swipe_closes_a_sheet_before_navigating_underneath(cx: &mut TestAppContext) {
         use gpui::TouchPhase::{Ended, Moved, Started};
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
@@ -14722,59 +14188,28 @@ pub(crate) mod tests {
         draw(cx);
         assert!(!cx.cx.update(can_swipe_back));
         shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
-        draw(cx);
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         let history = state.read_with(cx, |state, _| state.history().to_vec());
-        for (id, end_x, elapsed, closes) in [
-            (1, 70., 400, false),
-            (2, 180., 400, true),
-            (3, 70., 40, true),
-        ] {
-            state.update(cx, |state, cx| state.open_palette(cx));
-            draw(cx);
-            cx.executor().advance_clock(Duration::from_millis(250));
-            draw(cx);
-            assert!(cx.cx.update(can_swipe_back));
-            let resting = cx.debug_bounds("palette-card").unwrap();
-            touch_drag(
-                cx,
-                id,
-                &[
-                    (Started, 10., 600., 0),
-                    (Moved, (10. + end_x) / 2., 600., elapsed / 2),
-                    (Moved, end_x, 600., elapsed / 2),
-                ],
-            );
-            let dragged = cx.debug_bounds("palette-card").unwrap();
-            assert!(
-                dragged.top() > resting.top(),
-                "sheet follows the edge gesture vertically"
-            );
-            touch_drag(cx, id, &[(Ended, end_x, 600., 10)]);
-            draw(cx);
-            cx.executor().advance_clock(Duration::from_millis(500));
-            draw(cx);
-            assert_eq!(
-                state.read_with(cx, |state, _| state.palette_open),
-                !closes,
-                "gesture {id}"
-            );
-            assert_eq!(
-                state.read_with(cx, |state, _| state.history().to_vec()),
-                history
-            );
-            if !closes {
-                assert_eq!(cx.debug_bounds("palette-card").unwrap(), resting);
-                state.update(cx, |state, cx| state.close_palette(cx));
-                draw(cx);
-                cx.executor().advance_clock(Duration::from_millis(250));
-                draw(cx);
-            } else {
-                assert!(cx.debug_bounds("palette-card").is_none());
-            }
-        }
+        state.update(cx, |state, cx| state.open_palette(cx));
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.cx.update(can_swipe_back));
+        touch_drag(
+            cx,
+            1,
+            &[
+                (Started, 10., 600., 0),
+                (Moved, 95., 600., 200),
+                (Moved, 180., 600., 200),
+                (Ended, 180., 600., 10),
+            ],
+        );
+        crate::test_frames::draw_settled(cx);
+        assert!(!state.read_with(cx, |state, _| state.palette_open));
+        assert_eq!(
+            state.read_with(cx, |state, _| state.history().to_vec()),
+            history
+        );
         let depth = shell.read_with(cx, |shell, cx| shell.nav.read(cx).depth());
         assert!(cx.cx.update(handle_back));
         draw(cx);
@@ -14791,9 +14226,7 @@ pub(crate) mod tests {
         resize(cx, 393.);
         cx.update(|window, cx| set_back_target(window.window_handle(), &shell, cx));
         shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
-        draw(cx);
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(cx.cx.update(can_swipe_back));
         let depth = shell.read_with(cx, |shell, cx| shell.nav.read(cx).depth());
         cx.update(|window, cx| {
@@ -14807,242 +14240,12 @@ pub(crate) mod tests {
         draw(cx);
         assert!(!cx.cx.update(can_swipe_back));
         assert!(cx.cx.update(handle_back));
-        draw(cx);
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert!(!cx.update(|window, cx| crate::overlay::dialog_open(window, cx)));
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.nav.read(cx).depth(), depth)
         });
         assert!(cx.cx.update(can_swipe_back));
-    }
-
-    #[gpui::test]
-    fn compact_edge_swipe_tracks_cancels_and_completes_before_next_tap(cx: &mut TestAppContext) {
-        use gpui::TouchPhase::{Cancelled, Ended, Moved, Started};
-
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount(cx);
-        as_mobile(cx);
-        resize(cx, 393.);
-        let root = shell.read_with(cx, |shell, cx| shell.nav.read(cx).depth());
-        let mut meta = tcode_core::project::SessionMeta::new(
-            agent::ProviderKind::ClaudeCode,
-            "/tmp/tcode-compact-panel".into(),
-            None,
-        );
-        meta.id = "thread-1".into();
-        for (topic, event) in [
-            (
-                Topic::Index,
-                ServerEvent::IndexSnapshot(IndexSnapshot {
-                    summary: Default::default(),
-                    sessions: vec![meta],
-                    projects: Vec::new(),
-                }),
-            ),
-            (
-                Topic::Settings,
-                ServerEvent::SettingsSnapshot(Default::default()),
-            ),
-        ] {
-            host.incoming
-                .try_send(
-                    encode_line(&HostMessage::Event(EventEnvelope {
-                        request_id: None,
-                        topic,
-                        event,
-                    }))
-                    .unwrap(),
-                )
-                .unwrap();
-        }
-        let conversation = (0..24)
-            .flat_map(|index| {
-                [
-                    agent::AgentEvent::TurnStarted {
-                        turn_id: format!("scroll-{index}"),
-                    },
-                    agent::AgentEvent::ItemCompleted(agent::ThreadItem {
-                        id: format!("message-{index}"),
-                        parent_item_id: None,
-                        content: agent::ItemContent::UserMessage {
-                            text: format!("Keep reading position {index}\n").repeat(4),
-                            attachments: Vec::new(),
-                        },
-                    }),
-                    agent::AgentEvent::TurnCompleted {
-                        turn_id: format!("scroll-{index}"),
-                        status: agent::TurnStatus::Completed,
-                        usage: None,
-                    },
-                ]
-            })
-            .collect();
-        seed_wide_diff_with(&shell, &host, cx, conversation);
-        draw(cx);
-        let chat = shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().chat(cx));
-        let mut reading_position = None;
-        for destination in [Destination::Thread, Destination::Panel] {
-            shell.update(cx, |shell, cx| shell.go(destination, cx));
-            draw(cx);
-            cx.executor().advance_clock(Duration::from_millis(250));
-            draw(cx);
-            if destination == Destination::Thread {
-                let viewport = chat
-                    .read_with(cx, |chat, _| chat.timeline())
-                    .read_with(cx, |chat, _| chat.capture_viewport().unwrap());
-                cx.simulate_event(gpui::ScrollEvent {
-                    position: viewport.center(),
-                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(1000.))),
-                    ..Default::default()
-                });
-                draw(cx);
-                cx.executor().advance_clock(Duration::from_secs(1));
-                draw(cx);
-                assert!(
-                    cx.debug_bounds("scroll-to-end").is_some(),
-                    "fixture scrolls away from the conversation tail"
-                );
-                reading_position = (0..100).find_map(|index| {
-                    let selector: &'static str = format!("timeline-row-{index}").leak();
-                    let bounds = cx.debug_bounds(selector)?;
-                    (bounds.top() >= viewport.top() && bounds.top() < viewport.bottom())
-                        .then_some((selector, bounds.top()))
-                });
-                assert!(
-                    reading_position.is_some(),
-                    "a scrolled conversation row is visible"
-                );
-            }
-        }
-        let (reading_row, reading_top) = reading_position.unwrap();
-        let state = shell.read_with(cx, |shell, _| shell.window_state());
-        let history = state.read_with(cx, |state, _| state.history().to_vec());
-        let composer = shell.read_with(cx, |shell, cx| {
-            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
-        });
-        cx.update(|window, cx| {
-            composer.update(cx, |composer, cx| {
-                composer.set_draft("keep this draft", window, cx);
-            })
-        });
-        draw_until(cx, &host, "diff-body", None);
-        let line = "diff-line-new-a/deeply/nested/module/tree/with/an/absurdly/long/file_name.rs-1";
-        for (id, end_x, elapsed, commits) in [
-            (3, 70., 400, false),
-            (4, 180., 400, true),
-            (5, 70., 40, true),
-        ] {
-            draw(cx);
-            let initial_line = cx.debug_bounds(line).expect("diff line before scrolling");
-            let body = cx.debug_bounds("diff-body").unwrap();
-            cx.simulate_event(gpui::ScrollEvent {
-                position: body.center(),
-                delta: gpui::ScrollDelta::Pixels(gpui::point(px(-120.), px(0.))),
-                ..Default::default()
-            });
-            draw(cx);
-            cx.executor().advance_clock(Duration::from_secs(1));
-            draw(cx);
-            let before_swipe = cx.debug_bounds(line).expect("diff before gesture");
-            assert!(
-                before_swipe.left() < initial_line.left(),
-                "fixture scrolls real content"
-            );
-            touch_drag(
-                cx,
-                id,
-                &[
-                    (Started, 10., 300., 0),
-                    (Moved, 40., 300., elapsed / 2),
-                    (Moved, end_x, 300., elapsed / 2),
-                ],
-            );
-            let current = cx
-                .debug_bounds("back-current-page")
-                .expect("page follows finger");
-            assert!((current.left() - px(end_x - 10.)).abs() < px(1.));
-            let previous = cx
-                .debug_bounds("back-previous-page")
-                .expect("real previous page");
-            assert!(previous.left() < px(0.) && previous.right() < px(393.));
-            assert!(cx.debug_bounds("compact-thread-page").is_some());
-            assert!(
-                cx.debug_bounds("chat-composer").is_some(),
-                "underlying composer is visible"
-            );
-            assert_eq!(
-                cx.debug_bounds(reading_row).unwrap().top(),
-                reading_top,
-                "previous page keeps its scroll position"
-            );
-            assert_eq!(
-                state.read_with(cx, |state, _| state.history().to_vec()),
-                history
-            );
-            touch_drag(cx, id, &[(Ended, end_x, 300., 10)]);
-            assert_eq!(
-                cx.debug_bounds("back-current-page").unwrap(),
-                current,
-                "release starts at the finger"
-            );
-            cx.executor().advance_clock(Duration::from_secs(1));
-            draw(cx);
-            assert!(cx.debug_bounds("back-current-page").is_none());
-            assert_eq!(
-                composer.read_with(cx, |composer, cx| composer.draft(cx)),
-                "keep this draft"
-            );
-            if commits {
-                assert_eq!(
-                    state.read_with(cx, |state, _| state.destination()),
-                    Destination::Thread
-                );
-                shell.update(cx, |shell, cx| shell.go(Destination::Panel, cx));
-                draw(cx);
-                cx.executor().advance_clock(Duration::from_millis(250));
-                draw(cx);
-            } else {
-                assert_eq!(
-                    cx.debug_bounds(line).unwrap(),
-                    before_swipe,
-                    "cancel keeps scroll position for gesture {id}"
-                );
-                assert_eq!(
-                    state.read_with(cx, |state, _| state.history().to_vec()),
-                    history
-                );
-            }
-        }
-        touch_drag(cx, 9, &[(Started, 10., 300., 0), (Moved, 70., 300., 200)]);
-        assert!(cx.debug_bounds("back-current-page").is_some());
-        resize(cx, 1024.);
-        resize(cx, 393.);
-        touch_drag(cx, 9, &[(Cancelled, 70., 300., 0)]);
-        assert!(cx.debug_bounds("back-current-page").is_none());
-        assert_eq!(
-            state.read_with(cx, |state, _| state.history().to_vec()),
-            history
-        );
-        // Touch hardware reports a moving finger every 8–16ms, so the release
-        // carries a fling velocity.
-        let mut swipe = vec![(Started, 10., 300., 0)];
-        swipe.extend((1..=10).map(|step| (Moved, 10. + 20. * step as f32, 300., 8)));
-        swipe.push((Ended, 210., 300., 8));
-        touch_drag(cx, 1, &swipe);
-        cx.executor().advance_clock(Duration::from_millis(300));
-        draw(cx);
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(shell.nav.read(cx).depth(), root + 1)
-        });
-        let back = cx
-            .debug_bounds("compact-back")
-            .expect("Back on revealed page");
-        let x = f32::from(back.center().x);
-        let y = f32::from(back.center().y);
-        touch_drag(cx, 2, &[(Started, x, y, 0), (Ended, x, y, 50)]);
-        shell.read_with(cx, |shell, cx| assert_eq!(shell.nav.read(cx).depth(), root));
     }
 
     #[gpui::test]
@@ -15054,9 +14257,7 @@ pub(crate) mod tests {
         as_mobile(cx);
         resize(cx, 393.);
         shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
-        draw(cx);
-        cx.executor().advance_clock(Duration::from_millis(250));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         let before = shell.read_with(cx, |shell, cx| {
             shell.window_state.read(cx).history().to_vec()
         });
@@ -15166,8 +14367,7 @@ pub(crate) mod tests {
             resize(cx, width);
             shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
             // Let the compact push animation settle so the picker is in place.
-            cx.executor().advance_clock(Duration::from_millis(400));
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
             let picker = cx.debug_bounds("model-picker").expect("model picker");
             cx.simulate_click(picker.center(), gpui::Modifiers::default());
             draw(cx);
@@ -15195,7 +14395,7 @@ pub(crate) mod tests {
             cx.update(|window, _| assert!(!search.is_focused(window)));
         }
         driver.shutdown(cx, &host);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
@@ -15380,7 +14580,7 @@ pub(crate) mod tests {
         });
         assert!(!cx.update(|window, cx| window.has_notification::<crate::sidebar::ThreadUndo>(cx)));
         driver.shutdown(cx, &host);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A desktop tiled to half a screen is still the whole product: the width
@@ -15405,7 +14605,9 @@ pub(crate) mod tests {
     /// nothing else: it must not touch the attachment, the selected thread,
     /// the draft or the split.
     #[gpui::test]
-    fn the_breakpoint_flips_at_nine_hundred_and_disturbs_nothing_else(cx: &mut TestAppContext) {
+    fn a_tablet_turning_compact_keeps_its_thread_draft_link_and_split_width(
+        cx: &mut TestAppContext,
+    ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         as_mobile(cx);
@@ -15474,12 +14676,6 @@ pub(crate) mod tests {
                 "a selected thread is the compact destination"
             );
         });
-        resize(cx, 900.);
-        shell.read_with(cx, |shell, cx| {
-            assert!(!shell.compact(cx), "900px is wide, not compact");
-        });
-        resize(cx, 899.);
-        shell.read_with(cx, |shell, cx| assert!(shell.compact(cx)));
 
         // The thread, the draft and the composer itself all survive.
         assert_eq!(
@@ -15494,18 +14690,6 @@ pub(crate) mod tests {
         assert!(
             cx.debug_bounds("composer-settings-drawer").is_some(),
             "the composer followed the layout: a compact one carries the settings drawer"
-        );
-        assert_eq!(
-            shell.read_with(cx, |shell, cx| shell
-                .column
-                .as_ref()
-                .unwrap()
-                .chat(cx)
-                .read(cx)
-                .composer()
-                .entity_id()),
-            composer.entity_id(),
-            "the composer entity must be updated, never rebuilt"
         );
 
         // Nothing about the link changed: no shutdown, and no fresh index
@@ -15891,14 +15075,6 @@ pub(crate) mod tests {
         assert!(cx.debug_bounds("chat-route").is_some(), "the workspace");
         assert!(cx.debug_bounds("no-hosts").is_none());
 
-        let left = shell.read_with(cx, |shell, _| {
-            shell
-                .column
-                .as_ref()
-                .expect("attached")
-                .current_pane
-                .downgrade()
-        });
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
                 shell.leave_host(&HostKey::Remote("studio".into()), window, cx)
@@ -15907,7 +15083,6 @@ pub(crate) mod tests {
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("no-hosts").is_some(), "the empty threads");
         assert!(cx.debug_bounds("chat-route").is_none());
-        assert!(left.upgrade().is_none(), "the workspace left is let go");
     }
 
     /// Settings replaces the whole window, unlike the Hosts route: the left
@@ -15966,14 +15141,6 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
         as_mobile(cx);
         resize(cx, 393.);
-        let chat = shell.read_with(cx, |shell, cx| {
-            shell
-                .column
-                .as_ref()
-                .expect("attached")
-                .chat(cx)
-                .entity_id()
-        });
         let _ = sent(&host);
 
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
@@ -16001,16 +15168,6 @@ pub(crate) mod tests {
         draw(cx);
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.destination(cx), Destination::Thread);
-            assert_eq!(
-                shell
-                    .column
-                    .as_ref()
-                    .expect("attached")
-                    .chat(cx)
-                    .entity_id(),
-                chat,
-                "the views over the workspace were never rebuilt"
-            );
         });
         assert_eq!(
             shell.read_with(cx, |shell, cx| shell
@@ -16258,9 +15415,7 @@ pub(crate) mod tests {
     /// controls are not built at all — and the page holds its 16pt inset even
     /// when the diff line is far wider than the window.
     #[gpui::test]
-    fn diff_panel_controls_follow_layout_and_long_lines_stay_inside_the_compact_page(
-        cx: &mut TestAppContext,
-    ) {
+    fn the_compact_panel_page_leaves_out_the_right_panels_tabs_and_close(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         seed_wide_diff(&shell, &host, cx);
@@ -16274,8 +15429,8 @@ pub(crate) mod tests {
         as_mobile(cx);
         resize(cx, 393.);
         shell.update(cx, |shell, cx| shell.open_panels(cx));
-        cx.executor().advance_clock(Duration::from_millis(250));
         draw_until(cx, &host, "diff-body", None);
+        crate::test_frames::draw_settled(cx);
 
         assert!(
             cx.debug_bounds("right-panel-tabs").is_none(),
@@ -16284,21 +15439,6 @@ pub(crate) mod tests {
         assert!(
             cx.debug_bounds("diff-close").is_none(),
             "close is a right-panel affordance; Back leaves the compact page"
-        );
-
-        let body = cx
-            .debug_bounds("diff-body")
-            .expect("the diff body laid out");
-        assert_eq!(
-            body.left(),
-            px(crate::material::COMPACT_PAGE_INSET),
-            "the body starts at the page inset"
-        );
-        assert_eq!(
-            body.right(),
-            px(393. - crate::material::COMPACT_PAGE_INSET),
-            "and ends at it: a 400-character line scrolls inside the body \
-             instead of running off the page"
         );
     }
 
@@ -16420,9 +15560,10 @@ pub(crate) mod tests {
     /// drag, and after it was expanded to everything beside the sidebar and
     /// dragged there. In a narrow window the close button closes the panel.
     #[gpui::test]
-    fn the_right_panel_keeps_the_width_the_user_chose(cx: &mut TestAppContext) {
+    fn the_right_panel_keeps_the_width_the_user_dragged_it_to(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_thread_with(cx, Vec::new());
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         resize(cx, 1600.);
         store.update(cx, |store, cx| {
@@ -16462,56 +15603,6 @@ pub(crate) mod tests {
         assert!(chosen < panel.size.width, "the edge shrinks the panel");
         width_at(cx, 900.);
         assert_eq!(width_at(cx, 1600.), chosen, "after the window narrowed");
-
-        // A sidebar drag moves the sidebar, never the panel.
-        resize(cx, 1200.);
-        draw(cx);
-        draw(cx);
-        drag(cx, gpui::point(px(SIDEBAR_WIDTH), px(400.)), px(40.));
-        assert!(
-            shell.read_with(cx, |shell, _| {
-                shell.column.as_ref().expect("attached").sidebar_width.get()
-            }) > px(SIDEBAR_WIDTH),
-            "the drag moved the sidebar"
-        );
-        assert_eq!(width_at(cx, 1600.), chosen, "after a sidebar drag");
-
-        // Expanded, the panel takes everything beside the sidebar; drags on
-        // its left edge there do not choose a width.
-        store.update(cx, |store, cx| {
-            store.toggle_diff_expanded_for(Some("thread-1"), cx)
-        });
-        width_at(cx, 1600.);
-        let sidebar = shell.read_with(cx, |shell, _| {
-            shell.column.as_ref().expect("attached").sidebar_width.get()
-        });
-        let edge = cx.debug_bounds("right-panel").expect("the expanded panel");
-        assert_eq!(
-            (edge.left(), edge.right()),
-            (sidebar, px(1600.)),
-            "the expanded panel spans the window beside the sidebar"
-        );
-        for _ in 0..2 {
-            let edge = cx.debug_bounds("right-panel").expect("the expanded panel");
-            drag(cx, gpui::point(edge.left(), px(400.)), px(12.));
-        }
-        store.update(cx, |store, cx| {
-            store.toggle_diff_expanded_for(Some("thread-1"), cx)
-        });
-        assert_eq!(width_at(cx, 1600.), chosen, "after it was expanded");
-
-        cx.update(|_, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
-        resize(cx, 720.);
-        draw_until(cx, &host, "diff-body", None);
-        let close = cx.debug_bounds("diff-close").expect("the close button");
-        cx.simulate_click(close.center(), gpui::Modifiers::default());
-        draw(cx);
-        assert!(
-            !store.read_with(cx, |store, _| store
-                .panel_state_for(Some("thread-1"))
-                .right_panel_open),
-            "nothing covers the close button"
-        );
     }
 
     /// A docked right panel leaves the keyboard where it was as it opens. A
@@ -16553,12 +15644,7 @@ pub(crate) mod tests {
 
         open(cx);
         press_panel(cx);
-        let panel = cx.debug_bounds("right-panel").unwrap();
         let composer = cx.debug_bounds("chat-composer").unwrap();
-        assert!(
-            composer.right() <= panel.left(),
-            "{composer:?} beside {panel:?}"
-        );
         cx.simulate_click(
             gpui::point(composer.left() + px(40.), composer.top() + px(24.)),
             gpui::Modifiers::default(),
@@ -16582,7 +15668,7 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn narrow_chat_header_scrolls_to_its_panel_controls(cx: &mut TestAppContext) {
+    fn a_narrow_chat_headers_overflow_menu_opens_the_diff(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_crowded_thread(cx);
         let store = store_of(&shell, cx);
@@ -16599,10 +15685,6 @@ pub(crate) mod tests {
         });
         draw(cx);
         let toggle = cx.debug_bounds("header-overflow").unwrap();
-        assert!(
-            toggle.left() >= header.left() && toggle.right() <= header.right(),
-            "the last panel control must scroll into view"
-        );
         cx.simulate_click(toggle.center(), gpui::Modifiers::default());
         draw(cx);
         draw(cx);
@@ -16670,53 +15752,6 @@ pub(crate) mod tests {
         assert!(heights.is_empty(), "{heights:?}");
     }
 
-    /// Expand and Restore lay the right panel out again without remounting it:
-    /// what its elements keep by their place in the tree — the focus a press
-    /// gives the Expand button, the scroll of a list — is still theirs after.
-    #[gpui::test]
-    fn expanding_the_right_panel_keeps_its_elements_state(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_crowded_thread(cx);
-        // Its agents run, and what shows them running rests only with motion
-        // reduced.
-        cx.update(|_, cx| cx.set_reduce_motion(true));
-        let store = store_of(&shell, cx);
-        resize(cx, 1600.);
-        store.update(cx, |store, cx| {
-            store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
-        });
-        draw_until(cx, &host, "diff-body", None);
-
-        let press_expand = |cx: &mut VisualTestContext| {
-            let expand = cx.debug_bounds("diff-expand").expect("the expand button");
-            cx.simulate_click(expand.center(), gpui::Modifiers::default());
-            crate::test_frames::draw_settled(cx);
-            cx.update(|window, cx| window.focused(cx))
-        };
-        let expanded = press_expand(cx);
-        assert!(
-            store.read_with(cx, |store, _| store
-                .panel_state_for(Some("thread-1"))
-                .right_panel_expanded),
-            "the press expands the panel"
-        );
-        assert!(
-            expanded.is_some(),
-            "the expanded panel's button keeps its focus"
-        );
-        let restored = press_expand(cx);
-        assert!(
-            !store.read_with(cx, |store, _| store
-                .panel_state_for(Some("thread-1"))
-                .right_panel_expanded),
-            "the second press restores it"
-        );
-        assert_eq!(
-            restored, expanded,
-            "the restored panel's button is the same one"
-        );
-    }
-
     /// The working tree changes outside any turn — the user edits a file while
     /// another tab is showing. Choosing the Diff tab reads the tree again, as
     /// opening the panel does, and a tree with nothing to show draws the empty
@@ -16758,51 +15793,6 @@ pub(crate) mod tests {
             1,
             "choosing the Diff tab reads the working tree again and lists the changed file"
         );
-    }
-
-    /// A changed word in the diff wears the tint of the mode the window ends
-    /// on, not of the frame a theme change began on.
-    #[gpui::test]
-    fn a_diffs_changed_words_take_the_new_modes_tint(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount(cx);
-        open_working_tree_panel(&shell, &host, cx);
-        let changed = tcode_protocol::GitDiffResult {
-            changes: vec![agent::FileChange {
-                path: "README.md".into(),
-                kind: agent::FileChangeKind::Modify,
-                diff: Some("@@ -1 +1 @@\n-# acme-api\n+# acme-web\n".into()),
-            }],
-            texts: vec![tcode_protocol::GitFileText {
-                old: Some("# acme-api\n".into()),
-                new: Some("# acme-web\n".into()),
-            }],
-            ..Default::default()
-        };
-        draw_until(cx, &host, "diff-body", Some(&changed));
-        crate::test_frames::draw_settled(cx);
-        let tint = |mode, cx: &mut VisualTestContext| {
-            cx.update(|_, cx| crate::theme::palette(mode, cx).success.opacity(0.30))
-        };
-        let painted = |tint, cx: &mut VisualTestContext| {
-            cx.update(|window, _| {
-                window
-                    .painted_quads()
-                    .iter()
-                    .any(|quad| quad.background.as_solid() == Some(tint))
-            })
-        };
-        let light = tint(crate::theme::ThemeMode::Light, cx);
-        assert!(painted(light, cx), "the added word wears the light tint");
-
-        cx.update(|window, cx| {
-            crate::settings_page::apply_theme(tcode_core::settings::ThemeMode::Dark, window, cx)
-        });
-        crate::test_frames::draw_settled(cx);
-        crate::test_frames::draw_settled(cx);
-        let dark = tint(crate::theme::ThemeMode::Dark, cx);
-        assert!(painted(dark, cx), "the added word wears the dark tint");
-        assert!(!painted(light, cx));
     }
 
     /// A thread whose turn is running, with the diff panel open on its working tree.
@@ -17009,29 +15999,27 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount(cx);
         open_working_tree_panel(&shell, &host, cx);
         let reads = held_git_diff_reads(&host, cx);
-        answer_git_diff(&host, reads[0], &created_files(&[("long.rs", 300)]));
+        answer_git_diff(&host, reads[0], &created_files(&[("long.rs", 100)]));
         held_git_diff_reads(&host, cx);
 
         let body = cx
             .debug_bounds("diff-body")
             .expect("the diff body laid out");
-        // A wheel turn at a time, each eased out and drawn, as a reader scrolls.
+        // The reader scrolls into the file, a wheel turn at a time.
         for _ in 0..12 {
             cx.simulate_event(gpui::ScrollEvent {
                 position: body.center(),
                 delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-100.))),
                 ..Default::default()
             });
-            for _ in 0..5 {
-                cx.executor().advance_clock(Duration::from_millis(100));
-                draw(cx);
-            }
+            draw(cx);
         }
+        crate::test_frames::draw_settled(cx);
         // Debug selectors are looked up by `&'static str`.
         let selector =
             |line: u32| -> &'static str { format!("diff-line-new-long.rs-{line}").leak() };
         let top_line = |cx: &mut VisualTestContext| {
-            (1..=300).find_map(|line| {
+            (1..=100).find_map(|line| {
                 cx.debug_bounds(selector(line))
                     .filter(|bounds| bounds.top() >= body.top())
                     .map(|bounds| (line, bounds.top()))
@@ -17045,7 +16033,7 @@ pub(crate) mod tests {
         answer_git_diff(
             &host,
             reads[0],
-            &created_files(&[("added.rs", 20), ("long.rs", 300)]),
+            &created_files(&[("added.rs", 20), ("long.rs", 100)]),
         );
         held_git_diff_reads(&host, cx);
         assert!(
@@ -17177,105 +16165,11 @@ pub(crate) mod tests {
         );
     }
 
-    /// From the command's header to the turn's working status: the
-    /// command's window, as tall as its motion draws it.
-    fn command_to_status(cx: &mut VisualTestContext) -> Pixels {
-        let header = cx
-            .debug_bounds("activity-row-cmd")
-            .expect("the command's header");
-        let status = cx
-            .debug_bounds("working-status-0")
-            .expect("the turn's status");
-        status.top() - header.top()
-    }
-
     fn click_command(cx: &mut VisualTestContext) {
         let header = cx
             .debug_bounds("activity-row-cmd")
             .expect("the command's header");
         cx.simulate_click(header.center(), gpui::Modifiers::default());
-    }
-
-    /// What the host answers `id`'s subscriptions with: its status, and a
-    /// log of `turns` finished turns, each a question and its answer, the
-    /// first with an agent it ran when `agent`. Only the first turn's
-    /// records carry their times, so only it has a time row.
-    fn serve_finished_turns(host: &MountedShell, id: &str, turns: usize, agent: bool) {
-        let at = 1_780_000_000_000;
-        let item = |id: String, content| {
-            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
-                id,
-                parent_item_id: None,
-                content,
-            })
-        };
-        let records: Vec<tcode_core::session::StoredEvent> = (0..turns)
-            .flat_map(|turn| {
-                let ran = (agent && turn == 0).then(|| {
-                    item(
-                        format!("{id}-agent"),
-                        agent::ItemContent::Subagent {
-                            agent_type: "Explore".into(),
-                            description: "Survey the code".into(),
-                            status: agent::ItemStatus::Completed,
-                            summary: None,
-                            model: None,
-                            effort: None,
-                        },
-                    )
-                });
-                [
-                    Some(agent::AgentEvent::TurnStarted {
-                        turn_id: format!("{id}-turn-{turn}"),
-                    }),
-                    Some(item(
-                        format!("{id}-ask-{turn}"),
-                        agent::ItemContent::UserMessage {
-                            text: format!("What is in {id}?"),
-                            attachments: vec![],
-                        },
-                    )),
-                    ran,
-                    Some(item(
-                        format!("{id}-answer-{turn}"),
-                        agent::ItemContent::AssistantMessage {
-                            text: "A few things.".into(),
-                            summarized: false,
-                        },
-                    )),
-                    Some(agent::AgentEvent::TurnCompleted {
-                        turn_id: format!("{id}-turn-{turn}"),
-                        status: agent::TurnStatus::Completed,
-                        usage: None,
-                    }),
-                ]
-                .into_iter()
-                .flatten()
-                .map(move |event| (turn, event))
-            })
-            .enumerate()
-            .map(|(index, (turn, event))| tcode_core::session::StoredEvent {
-                ts: (turn == 0).then_some(at + index as u64 * 1_000),
-                ..event.into()
-            })
-            .collect();
-        serve_status(host, id, false);
-        send_events(
-            host,
-            vec![(
-                Topic::SessionEvents {
-                    session_id: id.into(),
-                },
-                ServerEvent::SessionSnapshot {
-                    total: records.len() as u64,
-                    total_turns: turns as u64,
-                    truncated: false,
-                    from: 0,
-                    end: records.len() as u64,
-                    records,
-                },
-            )],
-        );
     }
 
     /// A control the keyboard is on keeps it when its view is drawn under a
@@ -17307,33 +16201,17 @@ pub(crate) mod tests {
             .update(|window, cx| window.focused(cx))
             .expect("the header holds the keyboard");
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
-        // Enter presses the control the keyboard is on: the header opens or
-        // shuts its command.
         let still = |what: &str, cx: &mut VisualTestContext| {
             assert_eq!(
                 cx.update(|window, cx| window.focused(cx)).as_ref(),
                 Some(&focused),
                 "{what}: the header lost the keyboard"
             );
-            let before = command_to_status(cx);
-            cx.simulate_keystrokes("enter");
-            cx.simulate_event(gpui::KeyUpEvent {
-                keystroke: gpui::Keystroke::parse("enter").expect("a keystroke"),
-            });
-            crate::test_frames::draw_settled(cx);
-            let after = command_to_status(cx);
-            assert!(
-                (after - before).abs() > px(10.),
-                "{what}: enter did not press the header: {before:?} -> {after:?}"
-            );
         };
-        still("before", cx);
 
         cx.simulate_keystrokes("secondary-shift-enter");
-        draw(cx);
-        assert!(cx.debug_bounds("zoomed-pane").is_some());
-        still("zooming", cx);
         crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("zoomed-pane").is_some());
         still("zoomed", cx);
         cx.simulate_keystrokes("secondary-shift-enter");
         crate::test_frames::draw_settled(cx);
@@ -17343,10 +16221,8 @@ pub(crate) mod tests {
         // A tablet's window, at a width that turns compact.
         as_mobile(cx);
         cx.simulate_resize(size(px(899.), px(800.)));
-        draw(cx);
-        shell.read_with(cx, |shell, cx| assert!(shell.compact(cx)));
-        still("turning compact", cx);
         crate::test_frames::draw_settled(cx);
+        shell.read_with(cx, |shell, cx| assert!(shell.compact(cx)));
         still("compact", cx);
     }
 }

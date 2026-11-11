@@ -45,27 +45,3 @@ pub(crate) fn draw_settled(cx: &mut VisualTestContext) {
         cx.executor().advance_clock(FRAME);
     }
 }
-
-/// Every quad the last frame drew, as the renderer draws them. gpui-fast's
-/// `Window::painted_quads` lists only the frame's top scene, but a rounded
-/// container that clips its content (`overflow_hidden` with corner radii)
-/// has that content moved into a scene of its own as the frame finishes
-/// (`rounded_clip_scene::compile`), so none of it is listed there.
-pub(crate) fn painted_quads(window: &gpui::Window) -> Vec<gpui::Quad> {
-    fn collect(scene: &gpui::Scene, quads: &mut Vec<gpui::Quad>) {
-        quads.extend_from_slice(&scene.quads);
-        for frame in scene
-            .layers
-            .frames
-            .iter()
-            .filter(|frame| frame.tile_size == 0)
-        {
-            if let Some(group) = frame.content.scene() {
-                collect(group, quads);
-            }
-        }
-    }
-    let mut quads = Vec::new();
-    collect(window.painted_scene(), &mut quads);
-    quads
-}

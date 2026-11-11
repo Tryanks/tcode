@@ -1169,6 +1169,9 @@ impl AppState {
     }
 
     pub fn update_settings(&mut self, settings: Settings, cx: &mut HostCx) {
+        if self.settings_change_refused(cx) {
+            return;
+        }
         let settlement_changed = self.settings.auto_settle_after_days
             != settings.auto_settle_after_days
             || self.settings.auto_settle_on_merge != settings.auto_settle_on_merge

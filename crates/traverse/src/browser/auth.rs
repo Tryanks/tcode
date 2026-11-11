@@ -340,7 +340,7 @@ mod tests {
         assert_eq!(auth.devices[0].created_unix, record.created_unix - 60);
         assert_eq!(auth.devices[0].name, "Xiaomi 15");
         assert_eq!(auth.devices[0].platform.as_deref(), Some("Android 16"));
-        fs::remove_dir_all(root).unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -366,7 +366,7 @@ mod tests {
         assert_eq!(reopened.devices[0].name, "Phone");
         assert_eq!(reopened.devices[0].platform.as_deref(), Some("Android 16"));
         assert_eq!(reopened.devices[0].client_id.as_deref(), Some("phone-id"));
-        fs::remove_dir_all(root).unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -393,7 +393,7 @@ mod tests {
             AuthStore::open(&root, "host").unwrap().devices[0].name,
             "Renamed"
         );
-        fs::remove_dir_all(root).unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -423,7 +423,7 @@ mod tests {
         auth.issue_token("new-id".into(), phone("new phone"))
             .unwrap();
         assert_eq!(auth.devices.len(), 2);
-        fs::remove_dir_all(root).unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -441,7 +441,7 @@ mod tests {
         assert!(!bytes.contains("test password"));
         let mut auth = AuthStore::open(&root, "host").unwrap();
         assert!(auth.verify_password("test password"));
-        fs::remove_dir_all(root).unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     /// A store whose hash was written with a single iteration: verification
@@ -474,6 +474,6 @@ mod tests {
             assert!(!auth.verify_password("wrong password"));
         }
         assert!(!auth.verify_password("correct password"));
-        fs::remove_dir_all(root).unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 }

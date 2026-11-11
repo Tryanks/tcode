@@ -1,15 +1,12 @@
-# test-audit
+# slot-audit
 
-Adapted from OpenClaw's
+One skill from two. Its bar for tests began as OpenClaw's
 [`test-audit` skill](https://github.com/openclaw/openclaw/tree/main/.agents/skills/test-audit)
 at commit
-[`80930af`](https://github.com/openclaw/openclaw/tree/80930af448ebabc84174146b56bc106d37fab3b4/.agents/skills/test-audit).
-The workflow and value bar are upstream's. The Tcode version defers to
-CONTRIBUTING.md's **Tests earn their maintenance**, and replaces the
-Vitest/TypeScript tooling, OpenClaw paths and skills, and Telegram campaign
-examples with Cargo, this workspace's crates, and PR #487. To pull in upstream
-changes, diff upstream between the commit above and its current `main`, apply
-what fits, and bump the commit.
+[`80930af`](https://github.com/openclaw/openclaw/tree/80930af448ebabc84174146b56bc106d37fab3b4/.agents/skills/test-audit),
+adapted to Cargo and this workspace; the license below is that skill's. The
+rest, and what the test bar has since become, comes from the audits of this
+repository recorded in [PATTERNS.md](PATTERNS.md).
 
 Skills live in `.agents/skills/`; `.claude/skills` is a symlink to it so Claude
 Code loads the same files as the other agents.
