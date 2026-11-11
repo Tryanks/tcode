@@ -405,6 +405,14 @@ impl PageEvents {
         }
     }
 
+    /// Why a call has no document to run in: the navigation's own error
+    /// when the last load failed, `otherwise` when none did.
+    fn no_document(&self, otherwise: &str) -> String {
+        self.load_error
+            .as_ref()
+            .map_or_else(|| otherwise.to_owned(), LoadError::describe)
+    }
+
     /// Send what waited for the page to settle.
     fn flush(&mut self, outcome: &mut Outcome, now: Instant) {
         if self.navigating {
@@ -425,7 +433,7 @@ impl PageEvents {
     fn send(&mut self, id: u64, outcome: &mut Outcome, now: Instant) {
         let Some(doc) = self.doc.clone() else {
             if let Some(call) = self.calls.remove(&id) {
-                let _ = call.answer.try_send(Err(NO_AGENT.into()));
+                let _ = call.answer.try_send(Err(self.no_document(NO_AGENT)));
             }
             return;
         };
@@ -464,7 +472,7 @@ impl PageEvents {
         let id = self.next_call;
         let mut outcome = Outcome::default();
         if self.doc.is_none() && !self.navigating {
-            let _ = answer.try_send(Err(NO_PAGE.into()));
+            let _ = answer.try_send(Err(self.no_document(NO_PAGE)));
             return (id, outcome);
         }
         self.calls.insert(
