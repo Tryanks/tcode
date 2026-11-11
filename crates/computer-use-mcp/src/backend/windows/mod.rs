@@ -370,8 +370,15 @@ pub fn list_roots(filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> 
         )
     })?;
 
+    let (windows, _, error) = raw_children(&walker, &desktop, usize::MAX);
+    if let Some(error) = error {
+        return Err(backend_error(
+            BackendErrorCode::ObservationFailed,
+            format!("uiautomation could not list the desktop's windows: {error}"),
+        ));
+    }
     let mut roots = Vec::new();
-    for element in walker.get_children(&desktop).unwrap_or_default() {
+    for element in windows {
         if element.is_offscreen().unwrap_or(true) {
             continue;
         }
@@ -456,7 +463,7 @@ fn open_root(
             format!("{operation}: uiautomation get_control_view_walker failed: {error}"),
         )
     })?;
-    let element = locate_root_element(&automation, &walker, root, code)?;
+    let element = locate_root_element(&automation, root)?;
     Ok(AutomationRoot {
         automation,
         walker,
@@ -489,69 +496,38 @@ fn create_automation(
     })
 }
 
+/// The root's own window, by its HWND. When that window has closed, the
+/// call fails rather than reading another window of the same process under
+/// the closed one's identity.
 fn locate_root_element(
     automation: &UIAutomation,
-    walker: &UITreeWalker,
     root: &RootInfo,
-    code: BackendErrorCode,
 ) -> Result<UIElement, BackendError> {
-    if let Ok(raw_handle) = isize::try_from(root.window_id) {
-        let handle = Handle::from(raw_handle);
-        if !handle.is_invalid()
-            && let Ok(element) = automation.element_from_handle(handle)
-            && element.get_process_id().ok() == Some(root.pid)
-        {
-            return Ok(element);
-        }
-    }
-
-    let desktop = automation.get_root_element().map_err(|error| {
+    let gone = |reason: String| {
         backend_error(
-            code,
+            BackendErrorCode::RootNotFound,
             format!(
-                "uiautomation could not reopen root {}: {error}",
+                "the window of root {} is no longer open ({reason}); call find_roots again",
                 root.ref_id
             ),
         )
-    })?;
-    walker
-        .get_children(&desktop)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|element| element.get_process_id().ok() == Some(root.pid))
-        .max_by(|left, right| {
-            root_match_score(left, root).total_cmp(&root_match_score(right, root))
-        })
-        .ok_or_else(|| {
-            backend_error(
-                BackendErrorCode::RootNotFound,
-                format!(
-                    "no top-level UIAutomation element matched root {}",
-                    root.ref_id
-                ),
-            )
-        })
-}
-
-fn root_match_score(element: &UIElement, root: &RootInfo) -> f64 {
-    let title = element.get_name().unwrap_or_default();
-    let frame = element_frame(element);
-    let title_score = if !root.title.is_empty() && title == root.title {
-        1_000_000.0
-    } else if !root.title.is_empty()
-        && title
-            .to_ascii_lowercase()
-            .contains(&root.title.to_ascii_lowercase())
-    {
-        100_000.0
-    } else {
-        0.0
     };
-    let frame_distance = (frame.x - root.frame.x).abs()
-        + (frame.y - root.frame.y).abs()
-        + (frame.w - root.frame.w).abs()
-        + (frame.h - root.frame.h).abs();
-    title_score - frame_distance
+    let handle = isize::try_from(root.window_id)
+        .map(Handle::from)
+        .ok()
+        .filter(|handle| !handle.is_invalid())
+        .ok_or_else(|| gone(format!("window id {} is not a window handle", root.window_id)))?;
+    let element = automation
+        .element_from_handle(handle)
+        .map_err(|error| gone(uia_error_text(&error)))?;
+    match element.get_process_id() {
+        Ok(pid) if pid == root.pid => Ok(element),
+        Ok(pid) => Err(gone(format!(
+            "its handle now belongs to process {pid}, not {}",
+            root.pid
+        ))),
+        Err(error) => Err(gone(uia_error_text(&error))),
+    }
 }
 
 struct ElementNode {
