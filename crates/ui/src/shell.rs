@@ -6680,7 +6680,6 @@ pub(crate) mod tests {
 
     mod compact_agent;
     mod docked_panel;
-    mod resize;
     mod scenes;
 
     /// One shell over a transport the test holds both ends of, so what the
