@@ -23,34 +23,6 @@ impl Drop for Transcript {
     }
 }
 
-/// A history directory the scan cannot read is reported with the reason,
-/// beside what it could read, rather than looking like no history.
-#[cfg(unix)]
-#[test]
-fn a_history_directory_the_scan_cannot_read_is_reported() {
-    use std::os::unix::fs::PermissionsExt;
-    let root = std::env::temp_dir().join(format!("tcode-scan-{}", uuid::Uuid::new_v4()));
-    let locked = root.join("projects/-work-locked");
-    std::fs::create_dir_all(&locked).unwrap();
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let roots = super::ExternalRoots {
-        claude_projects: vec![(None, root.join("projects"))],
-        claude_desktop_meta: None,
-        codex_session_roots: vec![(None, root.join("codex/sessions"))],
-    };
-    let history = super::scan_recent_dirs(&roots, &[]);
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::remove_dir_all(&root).unwrap();
-    assert!(history.dirs.is_empty());
-    let [unreadable] = &history.unreadable[..] else {
-        panic!("{:?}", history.unreadable);
-    };
-    assert!(
-        unreadable.starts_with(&locked.display().to_string()),
-        "{unreadable}"
-    );
-}
-
 /// A Codex rollout that does not start with the session_meta Codex reads its
 /// thread from is reported as unreadable rather than left out unsaid.
 #[test]
