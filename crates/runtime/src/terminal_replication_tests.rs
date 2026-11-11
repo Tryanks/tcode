@@ -75,13 +75,17 @@ impl Replica {
     }
 
     /// Wait for the next event the host delivers, and apply it. A frame the
-    /// host holds for its frame boundary comes due as the clock reaches it.
+    /// host holds for its frame boundary comes due as the clock reaches it;
+    /// the host's minute-long sweeps do not, as they would not while a
+    /// running host waits on its shell.
     fn next(&mut self) {
         loop {
             let delivered = smol::block_on(smol::future::or(
                 async { Some(self.events.recv().await) },
                 async {
-                    self.clock.advance_to_next_timer().await;
+                    self.clock
+                        .advance_to_timer_within(crate::terminal::FRAME_INTERVAL)
+                        .await;
                     None
                 },
             ));

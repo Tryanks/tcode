@@ -159,4 +159,29 @@ impl ManualClock {
         let now = self.state().now;
         self.advance(at.saturating_duration_since(now));
     }
+
+    /// Advance to the earliest timer due within `within`, once something arms
+    /// one, firing it. Timers further off stay armed, as a running host's
+    /// minute-long sweeps do while a terminal's frames come and go.
+    pub async fn advance_to_timer_within(&self, within: Duration) {
+        loop {
+            {
+                let mut state = self.state();
+                state.timers.retain(|(_, fire)| !fire.is_closed());
+                let (now, limit) = (state.now, state.now + within);
+                let due = state
+                    .timers
+                    .iter()
+                    .map(|(at, _)| *at)
+                    .filter(|at| *at <= limit)
+                    .min();
+                if let Some(at) = due {
+                    drop(state);
+                    self.advance(at.saturating_duration_since(now));
+                    return;
+                }
+            }
+            let _ = self.armed.1.recv().await;
+        }
+    }
 }
