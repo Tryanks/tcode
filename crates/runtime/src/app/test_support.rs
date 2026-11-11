@@ -532,3 +532,34 @@ pub(crate) fn next_command_blocking(
 fn answer_usage_read(reply: smol::channel::Sender<Result<serde_json::Value, String>>) {
     let _ = reply.try_send(Err("the scripted provider has no account".into()));
 }
+
+impl AppState {
+    /// Record an event in a thread's log as the host records what reaches
+    /// it.
+    pub(crate) fn record_event_for_replica_test(
+        &mut self,
+        session_id: &str,
+        ts: u64,
+        event: &AgentEvent,
+        cx: &mut HostCx,
+    ) {
+        self.record_event_at(session_id, ts, event, Vec::new(), cx);
+    }
+
+    /// Deliver an event as a session's provider would.
+    pub(crate) fn provider_event_for_test(
+        &mut self,
+        session_id: &str,
+        event: AgentEvent,
+        cx: &mut HostCx,
+    ) {
+        if let Some(session) = self.resident_mut(session_id)
+            && matches!(session.runtime, Runtime::Idle)
+        {
+            let (commands, receiver) = smol::channel::unbounded();
+            smol::spawn(async move { while receiver.recv().await.is_ok() {} }).detach();
+            session.runtime = Runtime::Live(commands);
+        }
+        self.on_event(session_id, event, cx);
+    }
+}

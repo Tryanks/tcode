@@ -754,35 +754,6 @@ impl AppState {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn record_event_for_replica_test(
-        &mut self,
-        session_id: &str,
-        ts: u64,
-        event: &AgentEvent,
-        cx: &mut HostCx,
-    ) {
-        self.record_event_at(session_id, ts, event, Vec::new(), cx);
-    }
-
-    /// Deliver an event as a session's provider would.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn provider_event_for_test(
-        &mut self,
-        session_id: &str,
-        event: AgentEvent,
-        cx: &mut HostCx,
-    ) {
-        if let Some(session) = self.resident_mut(session_id)
-            && matches!(session.runtime, Runtime::Idle)
-        {
-            let (commands, receiver) = smol::channel::unbounded();
-            smol::spawn(async move { while receiver.recv().await.is_ok() {} }).detach();
-            session.runtime = Runtime::Live(commands);
-        }
-        self.on_event(session_id, event, cx);
-    }
-
     /// Give a new session an immediate first-message fallback, then ask a fresh
     /// background provider session for a concise title. The hidden request has
     /// no resume cursor or MCP servers, so it never enters the conversation or
