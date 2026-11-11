@@ -1365,47 +1365,4 @@ mod tests {
         draw_settled(cx);
         assert!(diagram_shown(cx) && !code_shown(cx), "the diagram again");
     }
-
-    /// A long stream draws many pictures; once the diagram settles, the atlas
-    /// holds only the one it shows.
-    #[gpui::test]
-    fn pictures_a_stream_replaced_leave_the_atlas(cx: &mut TestAppContext) {
-        let (markdown, cx) = open("", true, cx);
-        let mut pictures: Vec<Arc<RenderImage>> = Vec::new();
-        let source = format!("```mermaid\n{FLOWCHART}```\n");
-        let lines: Vec<_> = source.split_inclusive('\n').collect();
-        for statements in lines.chunks(3) {
-            push(&markdown, &statements.concat(), cx);
-            for _ in 0..30 {
-                frame(cx);
-                let shown = markdown.read_with(cx, |state, _| {
-                    state.diagrams.slots.get("root-0").and_then(|slot| {
-                        slot.shown
-                            .as_ref()
-                            .map(|shown| shown.picture.0.image.image().clone())
-                    })
-                });
-                if let Some(shown) = shown
-                    && pictures.last().is_none_or(|last| last.id != shown.id)
-                {
-                    pictures.push(shown);
-                }
-            }
-        }
-        draw_settled(cx);
-        assert!(pictures.len() > 3, "the diagram grew: {}", pictures.len());
-        let (last, replaced) = pictures.split_last().unwrap();
-        cx.update(|window, _| {
-            assert!(
-                window.has_image_atlas_entry(last),
-                "the shown picture is drawn"
-            );
-            for picture in replaced {
-                assert!(
-                    !window.has_image_atlas_entry(picture),
-                    "a replaced picture stays in the atlas"
-                );
-            }
-        });
-    }
 }

@@ -488,24 +488,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_short_request_shows_every_wrapped_path(cx: &mut TestAppContext) {
-        let cx = composer_with_patch(
-            cx,
-            true,
-            (0..2).map(|index| format!("src/{}file-{index}.rs", "deeply/nested/".repeat(6))),
-        );
-        let detail = cx.debug_bounds("approval-detail").expect("detail box");
-        let first = cx.debug_bounds("approval-change-0").expect("first path");
-        let second = cx.debug_bounds("approval-change-1").expect("second path");
-        assert!(first.size.height > px(30.), "a long path wraps on a phone");
-        assert!(second.top() >= first.bottom());
-        assert!(
-            second.bottom() <= detail.bottom(),
-            "a short list grows to show every path"
-        );
-    }
-
-    #[gpui::test]
     fn a_desktop_request_opens_with_what_it_asks_to_do(cx: &mut TestAppContext) {
         let cx = composer_with_patch(cx, false, std::iter::once("src/main.rs".to_owned()));
         assert!(

@@ -949,7 +949,6 @@ fn render_model_pane(
     });
     let list = div()
         .id("model-picker-list")
-        .debug_selector(|| "model-picker-list".into())
         .role(Role::ListBox)
         .aria_label(crate::tr!("composer.model_results"))
         .flex()

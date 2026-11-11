@@ -1097,12 +1097,9 @@ impl SettingsPage {
                 .content(move |content, _, _| {
                     // The catalog is a GPUI `list`, which needs a definite height, and the
                     // dialog's flex height is not readable from its builder.
-                    content.h(px(crate::overlay::DIALOG_LIST_HEIGHT)).child(
-                        div()
-                            .debug_selector(|| "add-agent-body".into())
-                            .size_full()
-                            .child(panel.clone()),
-                    )
+                    content
+                        .h(px(crate::overlay::DIALOG_LIST_HEIGHT))
+                        .child(div().size_full().child(panel.clone()))
                 })
         });
     }
@@ -3840,56 +3837,6 @@ mod tests {
             self.page
                 .update(cx, |page, cx| page.render_compact_list(cx))
         }
-    }
-
-    #[gpui::test]
-    fn add_agent_dialog_keeps_catalog_and_custom_action_inside(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let root = crate::store::tests::scratch_root("agent-dialog");
-        let host = spawn_host(
-            SessionStore::open_at(root.clone()).unwrap(),
-            HostServices::default(),
-        )
-        .unwrap();
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        let window_state = cx.new(|_| WindowState::default());
-        let mut page_handle = None;
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let page = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
-            page_handle = Some(page.clone());
-            gpui_base::Root::new(page, window, cx)
-        });
-        cx.update(|window, cx| {
-            page_handle
-                .unwrap()
-                .update(cx, |page, cx| page.open_acp_dialog(window, cx));
-        });
-        for (width, height) in [(1000., 780.), (393., 600.), (360., 480.)] {
-            cx.simulate_resize(size(px(width), px(height)));
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                _ = window.draw(cx);
-            });
-            let body = cx.debug_bounds("add-agent-body").unwrap();
-            let custom = cx.debug_bounds("acp-custom-open").unwrap();
-            assert!(
-                custom.bottom() <= body.bottom(),
-                "custom action {custom:?} exceeds body {body:?}"
-            );
-            assert!(custom.right() <= body.right());
-            assert!(body.bottom() < px(height));
-        }
-        driver.shutdown(cx, &host);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]

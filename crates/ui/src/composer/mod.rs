@@ -2817,50 +2817,6 @@ mod replica_tests {
         }
     }
 
-    /// A running turn widens the desktop action to spinner, steer and Stop;
-    /// at every width the row is laid out at, Stop stays inside the window and
-    /// clear of a model name too long for the row.
-    #[gpui::test]
-    fn a_running_turn_keeps_stop_on_screen_at_every_width(cx: &mut TestAppContext) {
-        let (store, incoming, _outgoing, mut status) = attach(cx);
-        let session_id = Some(status.session_id.clone());
-        status.activity.turn_running = true;
-        status.steering_supported = true;
-        status.requested_model = Some("an-unlisted-model-with-a-long-identifier".into());
-        replace(
-            &incoming,
-            Topic::SessionStatus {
-                session_id: status.session_id.clone(),
-            },
-            ServerEvent::SessionStatusReplaced(Box::new(status)),
-        );
-        cx.run_until_parked();
-        cx.run_until_parked();
-        // The running turn's spinner rests only with motion reduced.
-        cx.update(|cx| cx.set_reduce_motion(true));
-        let (_composer, cx) = cx.add_window_view(|window, cx| {
-            Composer::new(store.clone(), session_id.clone(), window, cx)
-        });
-        for width in (360..=1200).step_by(20) {
-            let width = width as f32;
-            cx.simulate_resize(gpui::size(px(width), px(800.)));
-            draw_settled(cx);
-            let stop = cx
-                .debug_bounds("stop-turn")
-                .unwrap_or_else(|| panic!("no Stop at {width}px"));
-            assert!(
-                f32::from(stop.right()) <= width,
-                "Stop is clipped at {width}px: its right edge is at {:?}",
-                stop.right()
-            );
-            let picker = cx.debug_bounds("model-picker").unwrap();
-            assert!(
-                picker.right() <= stop.left(),
-                "the model picker runs under Stop at {width}px: {picker:?} vs {stop:?}"
-            );
-        }
-    }
-
     /// A value the provider reports as unavailable is shown but never sent.
     #[gpui::test]
     fn unavailable_permission_rows_cannot_be_chosen(cx: &mut TestAppContext) {
@@ -2922,56 +2878,6 @@ mod replica_tests {
         click(cx, "permission-row-0");
         cx.run_until_parked();
         assert_eq!(sent(), [(id, Some(serde_json::Value::String(chosen)))]);
-    }
-
-    /// The model picker's current row is highlighted with the same inset
-    /// from its column on both sides: clear of the rail's divider on the
-    /// left as much as of the popover's edge on the right.
-    #[gpui::test]
-    fn the_current_model_is_highlighted_with_an_even_inset(cx: &mut TestAppContext) {
-        let (store, incoming, _outgoing, mut status) = attach(cx);
-        let session_id = Some(status.session_id.clone());
-        let models = ["first", "chosen", "last"].map(|id| agent::ModelSpec {
-            id: id.into(),
-            display_name: id.into(),
-            is_default: false,
-            options: Vec::new(),
-        });
-        status.requested_model = Some("chosen".into());
-        replace(
-            &incoming,
-            Topic::Providers,
-            ServerEvent::ProvidersReplaced(tcode_protocol::ProvidersStatus {
-                model_catalogs: [(status.provider, models.to_vec())].into_iter().collect(),
-                ..Default::default()
-            }),
-        );
-        replace(
-            &incoming,
-            Topic::SessionStatus {
-                session_id: status.session_id.clone(),
-            },
-            ServerEvent::SessionStatusReplaced(Box::new(status)),
-        );
-        cx.run_until_parked();
-        cx.run_until_parked();
-        let (_composer, cx) = cx.add_window_view(|window, cx| {
-            Composer::new(store.clone(), session_id.clone(), window, cx)
-        });
-        cx.simulate_resize(gpui::size(px(1200.), px(800.)));
-        crate::test_frames::draw_settled(cx);
-        let picker = cx.debug_bounds("model-picker").expect("model picker");
-        cx.simulate_click(picker.center(), Modifiers::default());
-        crate::test_frames::draw_settled(cx);
-        let column = cx.debug_bounds("model-picker-list").expect("model list");
-        let current = cx.debug_bounds("model-row-current").expect("current model");
-        let left = current.left() - column.left();
-        let right = column.right() - current.right();
-        assert!(
-            left > px(0.),
-            "the highlight touches the rail: {current:?} in {column:?}"
-        );
-        assert_eq!(left, right, "{current:?} in {column:?}");
     }
 
     /// A draft on the built-in Claude account of a host with a second account

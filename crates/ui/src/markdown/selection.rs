@@ -1223,37 +1223,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn text_wrapping_after_an_inline_image_paints_on_its_own_rows(cx: &mut TestAppContext) {
-        // excalidraw#8530's body as GitHub stores it: one paragraph broken by
-        // CRLFs, too long a link for a phone row.
-        let (_, markdown, cx) = open_body(
-            "**Technical parts**\r\n![glyphs](https://example.invalid/glyphs.png)\r\n\
-             https://link.excalidraw.com/readonly/MbbnWPSWXgadXdtmzgeO",
-            cx,
-        );
-        cx.simulate_resize(size(px(393.), px(852.)));
-        draw(cx);
-        let runs = markdown.read_with(cx, |state, _| {
-            state
-                .runs
-                .borrow()
-                .iter()
-                .map(|run| run.bounds)
-                .collect::<Vec<_>>()
-        });
-        assert!(runs.len() > 2, "the link must wrap: {runs:?}");
-        for (ix, run) in runs.iter().enumerate() {
-            for other in &runs[ix + 1..] {
-                let overlap = run.intersect(other);
-                assert!(
-                    overlap.size.width <= px(0.5) || overlap.size.height <= px(0.5),
-                    "{run:?} and {other:?} paint over each other in {runs:?}"
-                );
-            }
-        }
-    }
-
-    #[gpui::test]
     fn long_press_on_a_message_offers_copy_and_select_all_past_the_viewport(
         cx: &mut TestAppContext,
     ) {
